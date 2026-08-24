@@ -19,6 +19,14 @@
 use super::*;
 use super::{sanitize_reviewer_block, sanitize_reviewer_line, ReviewError};
 
+/// Sort + dedup a name list so every report derived from it renders identically across runs.
+fn sorted_dedup(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = names.into_iter().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn read_kernel_state<'a, T>(
     lock: &'a std::sync::RwLock<T>,
     state: &'static str,
@@ -604,6 +612,78 @@ impl LibreFangKernel {
         PendingSkillMcpDeclarations {
             skills: self.pending_skill_declarations(&entry.manifest),
             mcp_servers: self.unconnected_mcp_declarations(&entry.manifest).await,
+        }
+    }
+
+    /// Classify a workflow step's `required_skills` against `agent_id` for the [`StepSkillGate`] (#7721).
+    ///
+    /// The registry lookup is unconditional — it does not sit behind an allowlist-mode branch — because "does this instance have the skill at all" and "does this agent admit it" are independent questions, and answering only the second is what let a step requiring a nonexistent skill validate cleanly against the default `skills = []` agent.
+    ///
+    /// Allowlist semantics follow `SkillRegistry::tool_definitions_for_skills`, the code that decides which skill tools actually reach the prompt: an empty `skills` list grants every loaded skill, and a non-empty one is an exact-name allowlist.
+    /// `"*"` is deliberately *not* treated as a wildcard here — unlike `mcp_servers`, the skill path has no wildcard, so an agent configured with `skills = ["*"]` receives no skill tools at all, and reporting its requirements as satisfied would be a lie the step only discovers mid-run.
+    ///
+    /// Lists come back sorted and deduplicated so the rendered error is byte-stable across runs.
+    pub fn classify_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> crate::workflow::RequiredSkillReport {
+        use crate::workflow::RequiredSkillReport;
+
+        let Some(entry) = self.agents.registry.get(agent_id) else {
+            // The caller resolved this agent moments ago, so this only happens
+            // if it was deleted in between. Report every requirement rather
+            // than silently passing the step.
+            return RequiredSkillReport {
+                unknown: sorted_dedup(required.iter().cloned()),
+                ..Default::default()
+            };
+        };
+        let manifest = &entry.manifest;
+
+        if manifest.skills_disabled {
+            return RequiredSkillReport {
+                skills_disabled: true,
+                undeclared: sorted_dedup(required.iter().cloned()),
+                ..Default::default()
+            };
+        }
+
+        // `BTreeSet` rather than the registry's `Vec`: the membership test runs
+        // once per required name, and an ordered set keeps the lookup
+        // order-independent as well as cheap (#3298's habit applied to a
+        // non-prompt boundary — it costs nothing and removes a class of bug).
+        let loaded: std::collections::BTreeSet<String> = {
+            let registry = read_kernel_state(&self.skills.skill_registry, "skill_registry");
+            registry.skill_names().into_iter().collect()
+        };
+        let declared: std::collections::BTreeSet<&str> =
+            manifest.skills.iter().map(String::as_str).collect();
+        // Empty allowlist == every loaded skill (`AgentManifest::skills` doc).
+        let unrestricted = manifest.skills.is_empty();
+
+        let mut undeclared = Vec::new();
+        let mut unavailable = Vec::new();
+        let mut unknown = Vec::new();
+        for name in required {
+            let is_loaded = loaded.contains(name);
+            let explicitly_declared = declared.contains(name.as_str());
+            match (is_loaded, explicitly_declared || unrestricted) {
+                (true, true) => {}
+                (true, false) => undeclared.push(name.clone()),
+                // Declared by name but absent from the registry — the
+                // "pending declaration" gap #7713 surfaces on the agents API.
+                (false, _) if explicitly_declared => unavailable.push(name.clone()),
+                // Nothing on this instance provides it, and the agent never
+                // named it either: almost always a typo in the workflow.
+                (false, _) => unknown.push(name.clone()),
+            }
+        }
+        RequiredSkillReport {
+            skills_disabled: false,
+            undeclared: sorted_dedup(undeclared),
+            unavailable: sorted_dedup(unavailable),
+            unknown: sorted_dedup(unknown),
         }
     }
 
@@ -2359,6 +2439,171 @@ input_schema = {{ type = "object" }}
             taint_scanning: true,
             taint_policy: None,
         }
+    }
+
+    // ── required_skills classification (#7721) ───────────────────────────
+
+    /// Spawn an agent whose manifest has skills switched off entirely.
+    fn spawn_skills_disabled_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
+        kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: name.to_string(),
+                    description: "skills-off fixture".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    skills_disabled: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn")
+    }
+
+    /// The regression the whole feature turns on: `skills = ["*"]` must not
+    /// satisfy a requirement for a skill nothing on this instance provides.
+    /// The pre-fix implementation short-circuited on allowlist mode and then
+    /// asked `pending_skill_and_mcp_declarations`, which returns nothing in
+    /// wildcard mode by design — so the gate passed and the step blew up
+    /// mid-run instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_skill_missing_from_the_registry_fails_a_wildcard_agent() {
+        let (kernel, _dir) = boot_pending_kernel(Vec::new());
+        let agent_id = spawn_pending_agent(&kernel, "wildcard-agent", &["*"], &[]);
+
+        let report = kernel.classify_required_skills(agent_id, &["ghost-skill".to_string()]);
+        assert!(
+            !report.is_satisfied(),
+            "a wildcard allowlist must not satisfy a requirement for a skill that is not loaded"
+        );
+        assert_eq!(report.unknown, vec!["ghost-skill".to_string()]);
+        assert!(report.unavailable.is_empty());
+        assert!(report.undeclared.is_empty());
+    }
+
+    /// Same regression for the *default* configuration: `skills = []` means
+    /// "every loaded skill", which is not the same as "every name you can
+    /// type". An empty allowlist is the default, so before the fix the
+    /// feature validated nothing for most agents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_skill_missing_from_the_registry_fails_an_unrestricted_agent() {
+        let (kernel, _dir) = boot_pending_kernel(Vec::new());
+        let agent_id = spawn_pending_agent(&kernel, "unrestricted-agent", &[], &[]);
+
+        let report = kernel.classify_required_skills(agent_id, &["ghost-skill".to_string()]);
+        assert!(
+            !report.is_satisfied(),
+            "an empty allowlist grants loaded skills only, not nonexistent ones"
+        );
+        assert_eq!(report.unknown, vec!["ghost-skill".to_string()]);
+    }
+
+    /// "Declared but not installed" is a different operator fix from "never
+    /// declared" and from "no such skill", so it lands in its own bucket —
+    /// the same gap `pending_skill_and_mcp_declarations` (#7713) reports.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_but_unloaded_required_skill_is_unavailable_not_unknown() {
+        let (kernel, _dir) = boot_pending_kernel(Vec::new());
+        let agent_id = spawn_pending_agent(&kernel, "declaring-agent", &["ghost-skill"], &[]);
+
+        let report = kernel.classify_required_skills(agent_id, &["ghost-skill".to_string()]);
+        assert!(!report.is_satisfied());
+        assert_eq!(
+            report.unavailable,
+            vec!["ghost-skill".to_string()],
+            "a declared-but-uninstalled skill must be reported as unavailable"
+        );
+        assert!(
+            report.unknown.is_empty(),
+            "and must NOT be reported as an unknown name — the operator's fix is to install it"
+        );
+        // Cross-check against the surface this class is derived from.
+        let pending = kernel.pending_skill_and_mcp_declarations(agent_id).await;
+        assert_eq!(pending.skills, report.unavailable);
+    }
+
+    /// A loaded skill the agent does not name is "undeclared": the fix is an
+    /// allowlist edit, not an install.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loaded_but_undeclared_required_skill_is_undeclared() {
+        let (kernel, dir) = boot_pending_kernel(Vec::new());
+        install_tool_skill(dir.path(), "real-skill");
+        kernel.reload_skills();
+        let agent_id = spawn_pending_agent(&kernel, "narrow-agent", &["other-skill"], &[]);
+
+        let report = kernel.classify_required_skills(agent_id, &["real-skill".to_string()]);
+        assert!(!report.is_satisfied());
+        assert_eq!(report.undeclared, vec!["real-skill".to_string()]);
+        assert!(report.unavailable.is_empty());
+        assert!(report.unknown.is_empty());
+    }
+
+    /// The satisfied path: loaded and declared, so the step proceeds. Also
+    /// covers the unrestricted variant, since `skills = []` is the default an
+    /// operator is most likely to hit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn loaded_and_declared_required_skill_is_satisfied() {
+        let (kernel, dir) = boot_pending_kernel(Vec::new());
+        install_tool_skill(dir.path(), "real-skill");
+        kernel.reload_skills();
+
+        let declaring = spawn_pending_agent(&kernel, "declares-it", &["real-skill"], &[]);
+        assert!(
+            kernel
+                .classify_required_skills(declaring, &["real-skill".to_string()])
+                .is_satisfied(),
+            "an explicitly declared, loaded skill must satisfy the requirement"
+        );
+
+        let unrestricted = spawn_pending_agent(&kernel, "grants-all", &[], &[]);
+        assert!(
+            kernel
+                .classify_required_skills(unrestricted, &["real-skill".to_string()])
+                .is_satisfied(),
+            "an empty allowlist grants every loaded skill, so the requirement is met"
+        );
+
+        assert!(
+            kernel
+                .classify_required_skills(declaring, &[])
+                .is_satisfied(),
+            "a step with no requirement is trivially satisfied"
+        );
+    }
+
+    /// `skills_disabled` is checked before the registry: no install and no
+    /// allowlist edit can help while it is set, and the report says so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skills_disabled_agent_satisfies_no_requirement() {
+        let (kernel, dir) = boot_pending_kernel(Vec::new());
+        install_tool_skill(dir.path(), "real-skill");
+        kernel.reload_skills();
+        let agent_id = spawn_skills_disabled_agent(&kernel, "skills-off-agent");
+
+        let report = kernel.classify_required_skills(agent_id, &["real-skill".to_string()]);
+        assert!(!report.is_satisfied());
+        assert!(report.skills_disabled);
+        assert_eq!(report.undeclared, vec!["real-skill".to_string()]);
+    }
+
+    /// Report lists are sorted and deduplicated so the rendered error text is
+    /// identical run to run regardless of the order the workflow author typed
+    /// the names in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn required_skill_report_is_sorted_and_deduplicated() {
+        let (kernel, _dir) = boot_pending_kernel(Vec::new());
+        let agent_id = spawn_pending_agent(&kernel, "sorting-agent", &[], &[]);
+
+        let report = kernel.classify_required_skills(
+            agent_id,
+            &["zeta".to_string(), "alpha".to_string(), "zeta".to_string()],
+        );
+        assert_eq!(
+            report.unknown,
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
     }
 
     /// A declared-but-uninstalled skill stays in the manifest, reads as pending, contributes no

@@ -7406,6 +7406,7 @@ fn depth_probe_workflow() -> crate::workflow::Workflow {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,

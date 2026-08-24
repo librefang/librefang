@@ -289,6 +289,15 @@ pub struct WorkflowStep {
     /// (those modules don't use the session abstraction).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<librefang_types::agent::SessionMode>,
+    /// Skills this step's agent must actually be able to use (#7721).
+    ///
+    /// Checked against the resolved agent right after agent resolution and before the step is dispatched, so a workflow that needs `browser-automation` fails with a named, actionable error instead of failing deep inside the agent loop with a generic tool error.
+    /// Empty (the default) means the step imposes no skill requirement — the pre-#7721 behaviour.
+    ///
+    /// Enforcement lives behind [`StepSkillGate`], which the kernel installs post-boot; each required name is resolved against the loaded skill registry *independently* of the agent's allowlist mode, so `skills = []` and `skills = ["*"]` do not silently satisfy a requirement for a skill that is not installed.
+    /// See [`RequiredSkillReport`] for the three failure classes the error text distinguishes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_skills: Vec<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -601,6 +610,111 @@ pub struct OperatorPause {
     /// Actions the workflow author authorised at this step. The resolve
     /// path rejects any action not present here.
     pub actions: Vec<OperatorAction>,
+}
+
+/// Why one required skill on a workflow step is not usable by the resolved agent (#7721).
+///
+/// The three classes are deliberately separate because each one has a different fix, and an operator reading a failed run needs to know which fix applies without going spelunking.
+/// Classification is registry-first: whether the skill exists on this instance is established before the agent's allowlist is consulted, so an unrestricted agent (`skills = []`, which grants every *loaded* skill) cannot mask a requirement for a skill that is not installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequiredSkillReport {
+    /// The agent has `skills_disabled = true`, so no requirement can be met regardless of the registry.
+    /// When set, `undeclared` holds every required name and the other two lists are empty — the fix is to re-enable skills, and further classification would just bury it.
+    pub skills_disabled: bool,
+    /// Loaded in the skill registry, but the agent's `skills` allowlist does not admit it.
+    /// Fix: widen the agent's allowlist.
+    pub undeclared: Vec<String>,
+    /// The agent declares it, but the registry has no skill by that name — installed nowhere, or it failed to load.
+    /// Fix: install the skill and reload the registry. This is the same gap `pending_skill_and_mcp_declarations` (#7713) surfaces on the agents API.
+    pub unavailable: Vec<String>,
+    /// No skill by that name is loaded and the agent does not declare it either — most often a typo in the workflow.
+    /// Fix: correct the name, or install and declare the skill.
+    pub unknown: Vec<String>,
+}
+
+impl RequiredSkillReport {
+    /// Whether every required skill is usable by the agent.
+    pub fn is_satisfied(&self) -> bool {
+        !self.skills_disabled
+            && self.undeclared.is_empty()
+            && self.unavailable.is_empty()
+            && self.unknown.is_empty()
+    }
+}
+
+/// Kernel-side gate that answers "can this agent actually use these skills right now?" for [`WorkflowStep::required_skills`].
+///
+/// Defined here and implemented on the concrete kernel so `WorkflowEngine` stays decoupled from the agent registry and the skill registry — the same trait-injection shape as [`OperatorNotifier`] and [`OperatorResumeDriver`].
+/// The gate answers only about the agent; the step name and the human-readable error text are the engine's job ([`format_required_skill_error`]), which keeps the failure message identical across the sequential, DAG and dry-run paths.
+#[async_trait::async_trait]
+pub trait StepSkillGate: Send + Sync {
+    /// Classify each name in `required` against the loaded skill registry and `agent_id`'s manifest.
+    ///
+    /// Returns a report whose lists are sorted and deduplicated so the resulting error text is stable across runs.
+    /// An `agent_id` that is not registered yields every required name as `unknown` — the caller has already resolved the agent, so this only happens if it was deleted in between.
+    async fn check_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> RequiredSkillReport;
+}
+
+/// Render `report` as the operator-facing failure for a workflow step, naming the step, the agent, and every skill in each failure class along with the fix for that class (#7721).
+///
+/// The precision is the deliverable: "step 'summarize' requires a skill" told an operator nothing about which of "declare it", "install it" or "you typoed it" they were looking at.
+fn format_required_skill_error(
+    step_name: &str,
+    agent_name: &str,
+    agent_id: AgentId,
+    report: &RequiredSkillReport,
+) -> String {
+    let agent_label = if agent_name.is_empty() {
+        format!("{agent_id}")
+    } else {
+        format!("'{agent_name}' ({agent_id})")
+    };
+
+    if report.skills_disabled {
+        return format!(
+            "Workflow step '{step_name}' requires skills {}, but agent {agent_label} has skills disabled \
+             (`skills_disabled = true` in its agent.toml) — no skill requirement can be met until that is turned off",
+            quote_list(&report.undeclared),
+        );
+    }
+
+    let mut clauses: Vec<String> = Vec::new();
+    if !report.undeclared.is_empty() {
+        clauses.push(format!(
+            "not declared by the agent: {} (add them to `skills` in the agent's agent.toml, or empty that list — `skills = []` grants every loaded skill; `[\"*\"]` is NOT a wildcard for skills and grants none)",
+            quote_list(&report.undeclared),
+        ));
+    }
+    if !report.unavailable.is_empty() {
+        clauses.push(format!(
+            "declared by the agent but not loaded: {} (install the skill, then reload the registry via POST /api/skills/reload)",
+            quote_list(&report.unavailable),
+        ));
+    }
+    if !report.unknown.is_empty() {
+        clauses.push(format!(
+            "no skill by that name is loaded on this instance: {} (check the spelling — `librefang skill list` shows the loaded names)",
+            quote_list(&report.unknown),
+        ));
+    }
+
+    format!(
+        "Workflow step '{step_name}' requires skills that agent {agent_label} cannot use: {}",
+        clauses.join("; ")
+    )
+}
+
+/// `["a", "b"]` → `` `a`, `b` ``. Used only by [`format_required_skill_error`].
+fn quote_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Channel-bridge sink for delivering operator-step notifications. Defined
@@ -1206,6 +1320,12 @@ pub struct DryRunStep {
     pub skipped: bool,
     /// Human-readable reason for skipping, if applicable.
     pub skip_reason: Option<String>,
+    /// The rendered [`WorkflowStep::required_skills`] mismatch for this step (#7721), when the resolved agent cannot use every skill the step requires.
+    ///
+    /// `None` for steps that declare no requirement, for steps whose requirements are satisfied, and for operator nodes (which never dispatch to an agent).
+    /// A dry run is the point at which an operator can still fix the workflow cheaply, so the same text a real run would fail with is surfaced here instead of only after the run has burned its earlier steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_error: Option<String>,
 }
 
 /// The workflow engine — manages definitions and executes pipeline runs.
@@ -1267,6 +1387,10 @@ pub struct WorkflowEngine {
     /// operator response cancels the watchdog before it applies
     /// `timeout_action`. `Arc` so the engine stays `Clone`.
     operator_resume_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
+    /// Kernel-side gate for [`WorkflowStep::required_skills`] (#7721), installed post-boot via [`Self::set_step_skill_gate`].
+    /// Empty in tests and until the kernel installs it — steps that declare no `required_skills` are unaffected either way, and a step that does declare them while the gate is absent logs a `warn!` and proceeds rather than failing a run on a wiring gap the workflow author cannot fix.
+    /// Same `Arc<OnceLock<_>>` reasoning as `operator_notifier`: the engine is already behind `Arc<Kernel>` when the kernel installs it, so a `&mut` setter is impossible.
+    step_skill_gate: Arc<std::sync::OnceLock<Arc<dyn StepSkillGate>>>,
 }
 
 fn lock_workflow_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
@@ -1543,6 +1667,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1562,6 +1687,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1583,6 +1709,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1604,6 +1731,68 @@ impl WorkflowEngine {
     ) {
         let _ = self.operator_notifier.set(notifier);
         let _ = self.operator_resume_driver.set(resume_driver);
+    }
+
+    /// Install the kernel-backed gate that enforces [`WorkflowStep::required_skills`] (#7721).
+    ///
+    /// Called once by the kernel alongside [`Self::set_operator_hooks`], for the same reason and with the same `OnceLock` no-op-on-second-call semantics.
+    pub fn set_step_skill_gate(&self, gate: Arc<dyn StepSkillGate>) {
+        let _ = self.step_skill_gate.set(gate);
+    }
+
+    /// Classify `step.required_skills` against the resolved agent, returning the rendered operator error when any requirement is unmet (#7721).
+    ///
+    /// `None` means the step may proceed: it declared no requirement, or every requirement is satisfied, or no gate is installed.
+    /// Kept separate from the `Err`-returning wrapper so `dry_run` can report the same text as a preview annotation instead of failing.
+    async fn classify_required_skills(
+        &self,
+        step: &WorkflowStep,
+        agent_id: AgentId,
+        agent_name: &str,
+    ) -> Option<String> {
+        if step.required_skills.is_empty() {
+            return None;
+        }
+        let Some(gate) = self.step_skill_gate.get() else {
+            warn!(
+                step = %step.name,
+                required = ?step.required_skills,
+                "Workflow step declares required_skills but no skill gate is installed — skipping the check"
+            );
+            return None;
+        };
+        let report = gate
+            .check_required_skills(agent_id, &step.required_skills)
+            .await;
+        if report.is_satisfied() {
+            return None;
+        }
+        Some(format_required_skill_error(
+            &step.name, agent_name, agent_id, &report,
+        ))
+    }
+
+    /// Fail the run when `step`'s required skills are not usable by the resolved agent (#7721).
+    ///
+    /// Called from every agent-dispatching path immediately after agent resolution and before the prompt is built, so the failure lands before any LLM call is billed.
+    /// Marks the run `Failed` with the same message it returns, mirroring how `format_missing_agent_error` is handled one line above each call site.
+    async fn enforce_required_skills(
+        &self,
+        run_id: &WorkflowRunId,
+        step: &WorkflowStep,
+        agent_id: AgentId,
+        agent_name: &str,
+    ) -> Result<(), String> {
+        match self
+            .classify_required_skills(step, agent_id, agent_name)
+            .await
+        {
+            None => Ok(()),
+            Some(e) => {
+                mark_run_failed(&self.runs, run_id, &e);
+                Err(e)
+            }
+        }
     }
 
     // -- Token hashing --------------------------------------------------------
@@ -3966,6 +4155,13 @@ impl WorkflowEngine {
                         }
                     };
 
+                    // #7721: the step's declared skill requirements are a
+                    // property of the resolved agent, so they can only be
+                    // checked here — after resolution, before any prompt is
+                    // built or billed.
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
+
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
 
@@ -4081,6 +4277,8 @@ impl WorkflowEngine {
                                     return Err(e);
                                 }
                             };
+                        self.enforce_required_skills(&run_id, fan_step, agent_id, &agent_name)
+                            .await?;
                         let raw_prompt = Self::expand_variables(
                             &fan_step.prompt_template,
                             &current_input,
@@ -4238,6 +4436,8 @@ impl WorkflowEngine {
                             return Err(e);
                         }
                     };
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -4316,6 +4516,8 @@ impl WorkflowEngine {
                             return Err(e);
                         }
                     };
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
 
                     let until_lower = until.to_lowercase();
 
@@ -5294,6 +5496,8 @@ impl WorkflowEngine {
                         return Err(e);
                     }
                 };
+                self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                    .await?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
@@ -5381,6 +5585,13 @@ impl WorkflowEngine {
                             }
                         }
                     };
+                    // Same short-circuit as the resolution above: a step whose
+                    // dependency already failed never dispatches, so its skill
+                    // requirements are moot and must not hard-error the DAG.
+                    if !dep_failed {
+                        self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                            .await?;
+                    }
 
                     step_metas.push((
                         step_idx,
@@ -5569,15 +5780,27 @@ impl WorkflowEngine {
                 StepMode::Conditional { condition } => {
                     let prev_lower = current_input.to_lowercase();
                     let condition_met = evaluate_condition(&prev_lower, condition);
-                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                    let (agent_id, agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((id, name, _)) => (Some(id), Some(name), true),
+                        None => (None, None, false),
+                    };
+                    let skill_error = match agent_id {
+                        Some(id) => {
+                            self.classify_required_skills(
+                                step,
+                                id,
+                                agent_name.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                        }
+                        None => None,
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name,
                         agent_found,
                         resolved_prompt: raw_prompt,
+                        skill_error,
                         skipped: !condition_met,
                         skip_reason: if !condition_met {
                             Some(format!(
@@ -5618,6 +5841,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Gate { .. } => {
@@ -5634,6 +5858,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Approval { .. } => {
@@ -5646,6 +5871,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Transform { code } => {
@@ -5668,6 +5894,7 @@ impl WorkflowEngine {
                         resolved_prompt: format!("transform: {code}"),
                         skipped,
                         skip_reason,
+                        skill_error: None,
                     });
                     // Advance `current_input` with the rendered output
                     // so downstream steps' `{{input}}` previews reflect
@@ -5723,6 +5950,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Operator { .. } => {
@@ -5740,12 +5968,24 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 _ => {
-                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                    let (agent_id, agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((id, name, _)) => (Some(id), Some(name), true),
+                        None => (None, None, false),
+                    };
+                    let skill_error = match agent_id {
+                        Some(id) => {
+                            self.classify_required_skills(
+                                step,
+                                id,
+                                agent_name.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                        }
+                        None => None,
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
@@ -5754,6 +5994,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt.clone(),
                         skipped: false,
                         skip_reason: None,
+                        skill_error,
                     });
                     // Advance with a placeholder so later steps can expand {{input}}
                     if let Some(ref var) = step.output_var {
@@ -6152,6 +6393,18 @@ impl Workflow {
     pub fn validate(&self) -> Vec<(String, String)> {
         let mut errs = Vec::new();
         for step in &self.steps {
+            // #7721: a blank or whitespace-only entry can never match a
+            // loaded skill, so it would fail every run of the workflow with
+            // a confusing "no skill by that name" message. Reject it where
+            // the operator can still see which step they typed it into.
+            // TOML- and JSON-authored workflows both land here, so this also
+            // covers the file-based authoring path the HTTP parser cannot.
+            if step.required_skills.iter().any(|s| s.trim().is_empty()) {
+                errs.push((
+                    step.name.clone(),
+                    "`required_skills` contains an empty skill name".to_string(),
+                ));
+            }
             // Fail-closed: operator-node variants don't have DAG
             // semantics today. `execute_run_dag` calls `agent_resolver`
             // for every step in every layer, so an operator node in a
@@ -6524,6 +6777,7 @@ impl WorkflowTemplateRegistry {
                     inherit_context: None,
                     depends_on: ts.depends_on.clone(),
                     session_mode: None,
+                    required_skills: Vec::new(),
                 }
             })
             .collect();
@@ -6767,6 +7021,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -6781,6 +7036,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -6788,6 +7044,302 @@ mod tests {
             total_timeout_secs: None,
             input_schema: None,
         }
+    }
+
+    // ── required_skills (#7721) ──────────────────────────────────────────
+
+    /// A `StepSkillGate` that hands back a canned report, so the engine-side
+    /// wiring (enforcement point, run state, error text) is testable without
+    /// booting a kernel and a skill registry. The kernel-side classification
+    /// this stands in for is covered by
+    /// `kernel::tools_and_skills::tests::required_skill_*`.
+    struct StubSkillGate(RequiredSkillReport);
+
+    #[async_trait::async_trait]
+    impl StepSkillGate for StubSkillGate {
+        async fn check_required_skills(
+            &self,
+            _agent_id: AgentId,
+            _required: &[String],
+        ) -> RequiredSkillReport {
+            self.0.clone()
+        }
+    }
+
+    fn skill_step(name: &str, required: &[&str]) -> WorkflowStep {
+        WorkflowStep {
+            name: name.to_string(),
+            agent: StepAgent::ByName {
+                name: "researcher".to_string(),
+            },
+            prompt_template: "go".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+            required_skills: required.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn skill_workflow(step: WorkflowStep) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: "needs-skills".to_string(),
+            description: String::new(),
+            steps: vec![step],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+        }
+    }
+
+    /// The whole point of the gate: an unmet requirement fails the run at the
+    /// step, before the agent is ever sent a prompt.
+    #[tokio::test]
+    async fn unmet_required_skill_fails_the_run_before_dispatch() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport {
+            unknown: vec!["reserch-notes".to_string()],
+            ..Default::default()
+        })));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["reserch-notes"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&dispatched);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((msg, 0u64, 0u64))
+            }
+        };
+
+        let err = engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect_err("an unmet skill requirement must fail the run");
+        assert!(
+            err.contains("summarize") && err.contains("reserch-notes"),
+            "the error must name the step and the skill; got: {err}"
+        );
+        assert_eq!(
+            dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the step must fail before any agent dispatch is billed"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Failed),
+            "run must be Failed, not stuck Running: {:?}",
+            run.state
+        );
+        assert_eq!(run.error.as_deref(), Some(err.as_str()));
+    }
+
+    /// A satisfied requirement is invisible: the step runs exactly as it would
+    /// with no `required_skills` at all.
+    #[tokio::test]
+    async fn satisfied_required_skill_lets_the_step_run() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport::default())));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("a satisfied requirement must not block the step");
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(matches!(run.state, WorkflowRunState::Completed));
+    }
+
+    /// The dry run is where an operator can still fix the workflow cheaply, so
+    /// it reports the same text a real run would fail with.
+    #[tokio::test]
+    async fn dry_run_reports_the_required_skill_mismatch() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport {
+            unavailable: vec!["pdf-extract".to_string()],
+            ..Default::default()
+        })));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+
+        let preview = engine.dry_run(wf_id, "input", mock_resolver).await.unwrap();
+        let err = preview[0]
+            .skill_error
+            .as_deref()
+            .expect("dry run must surface the mismatch");
+        assert!(
+            err.contains("summarize") && err.contains("pdf-extract"),
+            "{err}"
+        );
+    }
+
+    /// Each failure class gets its own clause and its own fix, and the three
+    /// coexist in one message when a step trips all of them at once. This is
+    /// the deliverable of #7721 — an operator must be able to read the error
+    /// and know which of "declare it", "install it" or "you typoed it" applies.
+    #[test]
+    fn required_skill_error_names_step_agent_and_the_fix_for_each_class() {
+        let report = RequiredSkillReport {
+            skills_disabled: false,
+            undeclared: vec!["browser-automation".to_string()],
+            unavailable: vec!["pdf-extract".to_string()],
+            unknown: vec!["reserch-notes".to_string()],
+        };
+        let agent = AgentId::new();
+        let msg = format_required_skill_error("summarize", "researcher", agent, &report);
+
+        assert!(msg.contains("'summarize'"), "must name the step: {msg}");
+        assert!(msg.contains("'researcher'"), "must name the agent: {msg}");
+        assert!(
+            msg.contains(&agent.to_string()),
+            "must name the agent id: {msg}"
+        );
+
+        assert!(
+            msg.contains("not declared by the agent: `browser-automation`"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("declared by the agent but not loaded: `pdf-extract`"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("no skill by that name is loaded on this instance: `reserch-notes`"),
+            "{msg}"
+        );
+
+        // Each class carries the fix that class needs, and they are different.
+        assert!(
+            msg.contains("agent.toml"),
+            "undeclared needs the allowlist fix: {msg}"
+        );
+        assert!(
+            msg.contains("POST /api/skills/reload"),
+            "unavailable needs the install+reload fix: {msg}"
+        );
+        assert!(
+            msg.contains("librefang skill list"),
+            "unknown needs the spelling fix: {msg}"
+        );
+    }
+
+    /// `skills_disabled` short-circuits everything else: no allowlist edit and
+    /// no install will help until it is turned off, so the message says that
+    /// instead of listing three fixes that cannot work.
+    #[test]
+    fn skills_disabled_error_leads_with_the_only_fix_that_works() {
+        let report = RequiredSkillReport {
+            skills_disabled: true,
+            undeclared: vec!["browser-automation".to_string()],
+            ..Default::default()
+        };
+        let msg = format_required_skill_error("summarize", "researcher", AgentId::new(), &report);
+        assert!(msg.contains("skills_disabled = true"), "{msg}");
+        assert!(msg.contains("`browser-automation`"), "{msg}");
+        assert!(
+            !msg.contains("POST /api/skills/reload"),
+            "must not offer fixes that cannot apply while skills are off: {msg}"
+        );
+    }
+
+    /// `skills = ["*"]` is not a wildcard on the skill path, so the undeclared
+    /// clause must not tell an operator to write it — that advice would leave
+    /// the agent with zero skill tools and the same failure next run.
+    #[test]
+    fn undeclared_clause_does_not_recommend_a_star_allowlist() {
+        let report = RequiredSkillReport {
+            undeclared: vec!["browser-automation".to_string()],
+            ..Default::default()
+        };
+        let msg = format_required_skill_error("summarize", "researcher", AgentId::new(), &report);
+        assert!(
+            msg.contains("`skills = []` grants every loaded skill"),
+            "{msg}"
+        );
+        assert!(msg.contains("is NOT a wildcard for skills"), "{msg}");
+    }
+
+    /// A step with no gate installed (tests, pre-boot) must not fail: the
+    /// workflow author cannot fix a wiring gap, and failing here would break
+    /// every existing `execute_run` call site that never installs one.
+    #[tokio::test]
+    async fn no_gate_installed_leaves_the_step_running() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("an uninstalled gate must not fail runs");
+    }
+
+    /// `required_skills` survives the TOML authoring path and stays off the
+    /// wire when empty, so pre-#7721 workflow JSON round-trips byte-identically.
+    #[test]
+    fn required_skills_round_trips_through_toml_and_omits_the_empty_case() {
+        let toml_src = r#"
+name = "needs-skills"
+description = ""
+
+[[steps]]
+name = "summarize"
+agent = "researcher"
+prompt_template = "go"
+required_skills = ["pdf-extract", "browser-automation"]
+
+[[steps]]
+name = "plain"
+agent = "researcher"
+prompt_template = "go"
+"#;
+        let wf: Workflow = toml::from_str(toml_src).expect("workflow TOML must parse");
+        assert_eq!(
+            wf.steps[0].required_skills,
+            vec!["pdf-extract".to_string(), "browser-automation".to_string()]
+        );
+        assert!(wf.steps[1].required_skills.is_empty());
+
+        let json = serde_json::to_value(&wf.steps[1]).unwrap();
+        assert!(
+            json.get("required_skills").is_none(),
+            "a step with no requirement must not gain a field on the wire: {json}"
+        );
+    }
+
+    /// A blank entry can never match a loaded skill, so it is rejected where
+    /// the operator can still see which step they typed it into.
+    #[test]
+    fn validate_rejects_a_blank_required_skill_name() {
+        let mut wf = skill_workflow(skill_step("summarize", &["  "]));
+        wf.name = "blank-skill".to_string();
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(step, reason)| step == "summarize" && reason.contains("empty skill name")),
+            "expected a blank-name error naming the step; got {errs:?}"
+        );
     }
 
     fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
@@ -6835,6 +7387,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7011,6 +7564,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7090,6 +7644,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -7106,6 +7661,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -7152,6 +7708,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -7168,6 +7725,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -7214,6 +7772,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7266,6 +7825,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7307,6 +7867,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -7321,6 +7882,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -7378,6 +7940,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7428,6 +7991,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -7442,6 +8006,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -7457,6 +8022,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -7510,6 +8076,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -7524,6 +8091,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -7538,6 +8106,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -7694,6 +8263,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7785,6 +8355,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -7801,6 +8372,7 @@ mod tests {
                     // the DAG executor.
                     depends_on: vec!["first".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -8118,6 +8690,7 @@ mod tests {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         });
         let errs = wf.validate();
         assert_eq!(errs.len(), 1);
@@ -8145,6 +8718,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -8310,6 +8884,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             );
             wf.steps[1].depends_on = vec!["producer".to_string()];
@@ -8329,6 +8904,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             });
 
             let errs = wf.validate();
@@ -8926,6 +9502,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -8940,6 +9517,7 @@ prompt_template = "do {{x}}"
                     inherit_context: Some(false),
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -8992,6 +9570,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9006,6 +9585,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -9020,6 +9600,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ];
 
@@ -9052,6 +9633,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9066,6 +9648,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -9081,6 +9664,7 @@ prompt_template = "do {{x}}"
                     inherit_context: Some(false),
                     depends_on: vec!["A".to_string(), "B".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -9125,6 +9709,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
@@ -9146,6 +9731,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -9187,6 +9773,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -9246,6 +9833,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9260,6 +9848,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -9274,6 +9863,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string(), "B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ])
         .unwrap();
@@ -9299,6 +9889,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9313,6 +9904,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ];
 
@@ -9341,6 +9933,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9355,6 +9948,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -9369,6 +9963,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["A".to_string(), "B".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -9409,6 +10004,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9423,6 +10019,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["A".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -10202,6 +10799,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "b".into(),
@@ -10214,6 +10812,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["a".into()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -10640,6 +11239,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "step2".to_string(),
@@ -10654,6 +11254,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "step3".to_string(),
@@ -10668,6 +11269,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -10780,6 +11382,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -10937,6 +11540,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -11024,6 +11628,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -11077,6 +11682,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -11499,6 +12105,7 @@ name = "topic"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         );
         wf.steps[1].depends_on = vec!["producer".to_string()];
@@ -11631,6 +12238,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "review".to_string(),
@@ -11650,6 +12258,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "consume".to_string(),
@@ -11664,6 +12273,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
@@ -12131,6 +12741,7 @@ name = "topic"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -12471,6 +13082,7 @@ name = "topic"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let agent_id = AgentId::default();
         let run_id = WorkflowRunId::new();
@@ -12526,6 +13138,7 @@ name = "topic"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let agent_id = AgentId::default();
         let run_id = WorkflowRunId::new();
@@ -12580,6 +13193,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "evaluator".to_string(),
@@ -12596,6 +13210,7 @@ name = "topic"
                     // Non-empty depends_on routes the workflow into the DAG executor.
                     depends_on: vec!["ideate".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),

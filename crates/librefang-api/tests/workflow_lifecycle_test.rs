@@ -764,6 +764,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
