@@ -114,66 +114,9 @@ pub async fn get_profile(
 // Template endpoints
 // ---------------------------------------------------------------------------
 
-/// Validate a template name supplied via URL path before joining it onto the
-/// templates directory. Only permits `[A-Za-z0-9_-]` to guarantee the result
-/// cannot escape the base directory through `..`, absolute paths, or platform
-/// separators (`/`, `\`). Rejects empty names and anything longer than 64
-/// chars to cap log noise.
-fn validate_template_name(name: &str) -> Result<(), &'static str> {
-    if name.is_empty() || name.len() > 64 {
-        return Err("invalid template name");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err("invalid template name");
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod template_name_validation_tests {
-    use super::validate_template_name;
-
-    #[test]
-    fn accepts_simple_names() {
-        assert!(validate_template_name("assistant").is_ok());
-        assert!(validate_template_name("customer-support").is_ok());
-        assert!(validate_template_name("coder_v2").is_ok());
-        assert!(validate_template_name("a1").is_ok());
-    }
-
-    #[test]
-    fn rejects_path_traversal() {
-        assert!(validate_template_name("..").is_err());
-        assert!(validate_template_name("../../etc").is_err());
-        assert!(validate_template_name("foo/../bar").is_err());
-        assert!(validate_template_name("..\\..\\tmp").is_err());
-    }
-
-    #[test]
-    fn rejects_separators_and_absolute_paths() {
-        assert!(validate_template_name("foo/bar").is_err());
-        assert!(validate_template_name("foo\\bar").is_err());
-        assert!(validate_template_name("/etc/passwd").is_err());
-        assert!(validate_template_name("C:\\Windows").is_err());
-    }
-
-    #[test]
-    fn rejects_empty_and_oversized() {
-        assert!(validate_template_name("").is_err());
-        assert!(validate_template_name(&"a".repeat(65)).is_err());
-    }
-
-    #[test]
-    fn rejects_null_and_special_chars() {
-        assert!(validate_template_name("foo\0bar").is_err());
-        assert!(validate_template_name("foo bar").is_err());
-        assert!(validate_template_name("foo.bar").is_err());
-        assert!(validate_template_name("foo%2fbar").is_err());
-    }
-}
+// The agent-type name rule, shared with the `agent_type_create` tool through `librefang_types::agent_type_store`.
+// It lives there rather than here because the tool joins a model-supplied name onto the same directory these routes do, and a traversal guard that only one of the two callers runs is not a guard.
+use librefang_types::agent_type_store::validate_agent_type_name as validate_template_name;
 
 /// Render the three template error strings every read handler might need, and drop the translator.
 ///
@@ -218,27 +161,9 @@ impl TemplateSource {
     }
 }
 
-/// Operator-authored agent types, one flat `{name}.toml` per type.
-///
-/// Flat rather than a directory per type on purpose: the whole document is a single manifest, so a create or an edit is exactly one atomic rename with nothing to leave half-built if the process dies between two writes.
-fn agent_types_dir() -> std::path::PathBuf {
-    super::system::librefang_home().join("agent-types")
-}
-
-fn agent_type_path(name: &str) -> std::path::PathBuf {
-    agent_types_dir().join(format!("{name}.toml"))
-}
-
-/// Live agent workspaces — the second, read-only source of the catalog.
-fn workspace_agents_dir() -> std::path::PathBuf {
-    super::system::librefang_home()
-        .join("workspaces")
-        .join("agents")
-}
-
-fn workspace_agent_manifest_path(name: &str) -> std::path::PathBuf {
-    workspace_agents_dir().join(name).join("agent.toml")
-}
+use librefang_types::agent_type_store::{
+    agent_type_path, agent_types_dir, workspace_agent_manifest_path, workspace_agents_dir,
+};
 
 /// Read one agent type by name from whichever source holds it.
 ///
@@ -587,59 +512,11 @@ pub async fn get_agent_template_toml(
 // Write endpoints (#7740)
 // ---------------------------------------------------------------------------
 
-/// Serialize a manifest and land it on disk in one atomic rename.
-///
-/// `std::fs::write` truncates in place, so a failure partway through leaves a truncated `agent.toml` where a valid one used to be — the worst possible failure mode for a file the daemon parses at spawn.
-fn persist_agent_type(name: &str, manifest: &AgentManifest) -> Result<String, String> {
-    let rendered = toml::to_string_pretty(manifest)
-        .map_err(|e| format!("failed to render agent type '{name}': {e}"))?;
-    let dir = agent_types_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-    crate::atomic_write(&agent_type_path(name), rendered.as_bytes())
-        .map_err(|e| format!("failed to write agent type '{name}': {e}"))?;
-    Ok(rendered)
-}
-
-/// Outcome of a create that is allowed to lose a race for the name.
-enum CreateOutcome {
-    Created(String),
-    NameTaken,
-    Failed(String),
-}
-
-/// Write a new agent type, refusing to overwrite one that already exists.
-///
-/// `Path::exists()` followed by a write is check-then-act: two concurrent creates of the same name both observe "absent" and the second silently replaces the first, which is exactly the 409 this endpoint promises not to do.
-/// Claiming the path with `File::create_new` — an atomic create-if-absent at the OS level — lets exactly one of them through.
-/// The claim is then filled by the same atomic rename every other write here uses, and removed again if that fails, so a failed create leaves no empty file behind for the catalog to trip over.
-fn create_agent_type_file(name: &str, manifest: &AgentManifest) -> CreateOutcome {
-    let rendered = match toml::to_string_pretty(manifest) {
-        Ok(rendered) => rendered,
-        Err(e) => {
-            return CreateOutcome::Failed(format!("failed to render agent type '{name}': {e}"))
-        }
-    };
-    let dir = agent_types_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return CreateOutcome::Failed(format!("failed to create {}: {e}", dir.display()));
-    }
-
-    let path = agent_type_path(name);
-    match std::fs::File::create_new(&path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return CreateOutcome::NameTaken,
-        Err(e) => {
-            return CreateOutcome::Failed(format!("failed to claim agent type '{name}': {e}"))
-        }
-    }
-
-    if let Err(e) = crate::atomic_write(&path, rendered.as_bytes()) {
-        let _ = std::fs::remove_file(&path);
-        return CreateOutcome::Failed(format!("failed to write agent type '{name}': {e}"));
-    }
-    CreateOutcome::Created(rendered)
-}
+// Serializing a manifest over an existing agent type, and creating a new one, both live in `librefang_types::agent_type_store`.
+// The `agent_type_create` tool (#7722) writes into the same directory, so the atomic rename, the `File::create_new` claim and the live-agent shadow check are shared rather than reimplemented per surface — which is the divergence that made the pre-#7740 design lose data on one path while the other was correct.
+use librefang_types::agent_type_store::{
+    create_agent_type as store_create, persist_agent_type, CreateAgentTypeError,
+};
 
 /// POST /api/templates — Create an operator-authored agent type.
 ///
@@ -650,6 +527,7 @@ pub async fn create_agent_type(
     Json(spec): Json<librefang_types::agent_type::AgentTypeSpec>,
 ) -> impl IntoResponse {
     let lang = super::resolve_lang(lang.as_ref());
+    // `name` is required here because there is no URL segment to take it from; an absent one falls through to the store's name rule and comes back as `InvalidName`.
     let name = spec.name.clone().unwrap_or_default();
     let (invalid_name, exists, shadow) = {
         let t = ErrorTranslator::new(lang);
@@ -660,34 +538,27 @@ pub async fn create_agent_type(
         )
     };
 
-    if validate_template_name(&name).is_err() {
-        return ApiErrorResponse::bad_request(invalid_name)
-            .with_code("template_invalid_name")
-            .into_json_tuple();
-    }
-    // A type that shadows a live agent's name would win every subsequent `GET /templates/{name}`
-    // and make the agent unreachable through this catalog, so the collision is refused up front.
-    if workspace_agent_manifest_path(&name).exists() {
-        return ApiErrorResponse::conflict(shadow)
-            .with_code("template_name_taken")
-            .into_json_tuple();
-    }
-
-    let manifest = spec.into_new_manifest(name.clone());
-    match create_agent_type_file(&name, &manifest) {
-        CreateOutcome::Created(rendered) => (
+    match store_create(&name, spec) {
+        Ok(created) => (
             StatusCode::CREATED,
             Json(agent_type_detail(
-                &name,
+                &created.name,
                 TemplateSource::AgentType,
-                &manifest,
-                &rendered,
+                &created.manifest,
+                &created.manifest_toml,
             )),
         ),
-        CreateOutcome::NameTaken => ApiErrorResponse::conflict(exists)
+        Err(CreateAgentTypeError::InvalidName) => ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple(),
+        // A type that shadows a live agent's name would win every subsequent `GET /templates/{name}` and make the agent unreachable through this catalog.
+        Err(CreateAgentTypeError::ShadowsLiveAgent) => ApiErrorResponse::conflict(shadow)
+            .with_code("template_name_taken")
+            .into_json_tuple(),
+        Err(CreateAgentTypeError::NameTaken) => ApiErrorResponse::conflict(exists)
             .with_code("template_exists")
             .into_json_tuple(),
-        CreateOutcome::Failed(e) => {
+        Err(CreateAgentTypeError::Io(e)) => {
             tracing::error!("{e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }

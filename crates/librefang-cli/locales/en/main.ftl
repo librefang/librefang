@@ -1709,7 +1709,7 @@ tui-security-feat-prompt-name = Prompt Injection Scanner
 tui-security-feat-prompt-desc = Detects override attempts and data exfiltration
 
 # templates.rs
-tui-templates-title = Templates
+tui-templates-title = Agent Types
 tui-templates-cat-all = All
 tui-templates-cat-general = General
 tui-templates-cat-development = Development
@@ -1717,12 +1717,12 @@ tui-templates-cat-research = Research
 tui-templates-cat-writing = Writing
 tui-templates-cat-business = Business
 tui-templates-cat-custom = Custom
-tui-templates-header-template = Template
+tui-templates-header-template = Agent type
 tui-templates-header-category = Category
 tui-templates-header-provider-model = Provider/Model
 tui-templates-header-description = Description
-tui-templates-loading = Loading templates…
-tui-templates-empty = No templates available.
+tui-templates-loading = Loading agent types…
+tui-templates-empty = No agent types available.
 tui-templates-detail-provider =   Provider: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] Navigate  [Enter] Spawn Agent  [f] Filter Category  [r] Refresh
 tui-templates-provider-not-configured = Provider '{ $provider }' not configured. Set API key in Settings first.

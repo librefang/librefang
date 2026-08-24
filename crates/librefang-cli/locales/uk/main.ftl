@@ -1728,7 +1728,7 @@ tui-security-feat-prompt-name = Сканер ін'єкцій у промптах
 tui-security-feat-prompt-desc = Виявляє спроби обходу інструкцій та витоку даних
 
 # templates.rs
-tui-templates-title = Темплейти
+tui-templates-title = Типи Агентів
 tui-templates-cat-all = Всі
 tui-templates-cat-general = Загальні
 tui-templates-cat-development = Розробка
@@ -1736,12 +1736,12 @@ tui-templates-cat-research = Дослідження
 tui-templates-cat-writing = Письмо
 tui-templates-cat-business = Бізнес
 tui-templates-cat-custom = Власні
-tui-templates-header-template = Темплейт
+tui-templates-header-template = Тип агента
 tui-templates-header-category = Категорія
 tui-templates-header-provider-model = Провайдер/Модель
 tui-templates-header-description = Опис
-tui-templates-loading = Завантаження темплейтів…
-tui-templates-empty = Немає доступних темплейтів.
+tui-templates-loading = Завантаження типів агентів…
+tui-templates-empty = Немає доступних типів агентів.
 tui-templates-detail-provider =   Провайдер: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] Навігація  [Enter] Запустити Агента  [f] Фільтр категорій  [r] Оновити
 tui-templates-provider-not-configured = Провайдер '{ $provider }' не налаштований. Спочатку встановіть API-ключ у Налаштуваннях.

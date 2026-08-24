@@ -775,7 +775,7 @@ tui-security-feat-prompt-name = 提示词注入扫描器
 tui-security-feat-prompt-desc = 检测覆盖尝试和数据外泄
 
 # templates.rs
-tui-templates-title = 模板
+tui-templates-title = 智能体类型
 tui-templates-cat-all = 全部
 tui-templates-cat-general = 通用
 tui-templates-cat-development = 开发
@@ -783,12 +783,12 @@ tui-templates-cat-research = 研究
 tui-templates-cat-writing = 写作
 tui-templates-cat-business = 商务
 tui-templates-cat-custom = 自定义
-tui-templates-header-template = 模板
+tui-templates-header-template = 智能体类型
 tui-templates-header-category = 分类
 tui-templates-header-provider-model = 提供商/模型
 tui-templates-header-description = 描述
-tui-templates-loading = 正在加载模板…
-tui-templates-empty = 无可用模板。
+tui-templates-loading = 正在加载智能体类型…
+tui-templates-empty = 无可用智能体类型。
 tui-templates-detail-provider =   提供商: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] 导航  [Enter] 生成智能体  [f] 过滤分类  [r] 刷新
 tui-templates-provider-not-configured = 提供商 '{ $provider }' 未配置。请先在“设置”中设置 API 密钥。

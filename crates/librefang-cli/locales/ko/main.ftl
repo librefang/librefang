@@ -1709,7 +1709,7 @@ tui-security-feat-prompt-name = 프롬프트 인젝션 스캐너
 tui-security-feat-prompt-desc = 재정의 시도 및 데이터 유출을 탐지
 
 # templates.rs
-tui-templates-title = 템플릿
+tui-templates-title = 에이전트 타입
 tui-templates-cat-all = 전체
 tui-templates-cat-general = 일반
 tui-templates-cat-development = 개발
@@ -1717,12 +1717,12 @@ tui-templates-cat-research = 리서치
 tui-templates-cat-writing = 작문
 tui-templates-cat-business = 비즈니스
 tui-templates-cat-custom = 사용자 정의
-tui-templates-header-template = 템플릿
+tui-templates-header-template = 에이전트 타입
 tui-templates-header-category = 카테고리
 tui-templates-header-provider-model = 프로바이더/모델
 tui-templates-header-description = 설명
-tui-templates-loading = 템플릿 로드 중…
-tui-templates-empty = 사용 가능한 템플릿이 없습니다.
+tui-templates-loading = 에이전트 타입 로드 중…
+tui-templates-empty = 사용 가능한 에이전트 타입이 없습니다.
 tui-templates-detail-provider =   프로바이더: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] 탐색  [Enter] 에이전트 생성  [f] 카테고리 필터  [r] 새로고침
 tui-templates-provider-not-configured = 프로바이더 '{ $provider }'이(가) 구성되지 않았습니다. 먼저 설정에서 API 키를 설정하십시오.

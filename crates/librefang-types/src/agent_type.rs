@@ -17,6 +17,8 @@
 //!
 //! `into_new_manifest` writes an **exhaustive** struct literal with no `..Default::default()` rest.
 //! That is the structural guard against this bug class returning: adding field 59 to `AgentManifest` fails to compile here until someone decides whether a newly-created agent type should carry it, instead of silently widening the set of fields a save can reset.
+//!
+//! Where the resulting manifest lands — the store directory, the name rule, the race-free claim and the atomic rename — is [`crate::agent_type_store`], which every writing surface goes through so none of them can acquire a rule the others lack.
 
 use crate::agent::{AgentManifest, ManifestCapabilities, ModelConfig};
 use serde::{Deserialize, Serialize};

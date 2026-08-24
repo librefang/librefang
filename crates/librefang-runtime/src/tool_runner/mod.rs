@@ -46,6 +46,7 @@ mod workflow;
 use self::a2a::{tool_a2a_discover, tool_a2a_send};
 use self::agent::{
     tool_agent_find, tool_agent_kill, tool_agent_list, tool_agent_send, tool_agent_spawn,
+    tool_agent_type_create,
 };
 use self::artifact::tool_read_artifact;
 pub use self::canvas::sanitize_canvas_html;
