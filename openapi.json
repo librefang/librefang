@@ -14970,7 +14970,7 @@
               "boolean",
               "null"
             ],
-            "description": "`agent.toml: tools_disabled` — the master switch that removes every tool\nfrom the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already\nreturns. Until #7742 the GET returned it and no request could write it,\nand every successful write forced it back to `false` — so an operator\nediting a blocklist re-enabled every tool without asking."
+            "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
           },
           "tool_allowlist": {
             "type": [
