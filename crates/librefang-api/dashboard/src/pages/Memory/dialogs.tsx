@@ -526,9 +526,17 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                       state that is hard to debug: extraction runs after every
                       reply, so a slow model inherited here delays every answer
                       — and until now nothing on this screen said which model
-                      that was. Name it. */}
+                      that was. Name it.
+
+                      Guarded on the resolved model being present: it is null
+                      when no model runs at all (the extraction driver failed
+                      to build and extraction fell back to substring matching),
+                      and a hint reading "inherited from: undefined" would be
+                      worse than no hint. */}
                   {configQuery.data?.proactive_memory
                     ?.extraction_model_source === "inherited_default" &&
+                    !!configQuery.data?.proactive_memory
+                      ?.effective_extraction_model &&
                     !form.pm_extraction_model && (
                       <p className="text-[11px] text-text-dim mt-1.5">
                         {t("memory.extraction_model_inherited", {

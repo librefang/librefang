@@ -2999,11 +2999,36 @@ export interface MemoryConfigResponse {
      *  below. */
     extraction_model?: string;
     /** The model extraction actually runs on, whether or not anyone chose
-     *  it. Always populated. */
-    effective_extraction_model?: string;
+     *  it — split out of any `provider/model` spec and with the prefix
+     *  stripped, as the daemon resolved it at boot.
+     *
+     *  `null` whenever no model runs at all: extraction switched off, an
+     *  `extractor_sidecar` doing the work, or the driver having failed to
+     *  build so extraction fell back to substring matching. Check
+     *  `extraction_llm_active` before presenting this as what is running. */
+    effective_extraction_model?: string | null;
+    /** Provider the model above is called on. `null` under the same
+     *  conditions. */
+    effective_extraction_provider?: string | null;
     /** `"configured"` when `extraction_model` is set, `"inherited_default"`
      *  when it fell through to `[default_model]`. */
-    extraction_model_source?: "configured" | "inherited_default";
+    extraction_model_source?: "configured" | "inherited_default" | null;
+    /** What actually extracts memories, as resolved at boot. */
+    extraction_status?:
+      | "llm"
+      | "sidecar"
+      | "degraded_substring"
+      | "inactive"
+      | "unknown";
+    /** Whether an LLM performs extraction at all. `false` for the substring
+     *  fallback after a failed driver build — memory quality is degraded and
+     *  no model is involved. */
+    extraction_llm_active?: boolean | null;
+    /** Why extraction has no LLM, naming the provider and model that failed
+     *  to build. */
+    extraction_degraded_reason?: string | null;
+    /** The out-of-process extractor command, when one is what runs. */
+    extraction_sidecar_command?: string | null;
     max_retrieve?: number;
   };
   /**

@@ -1667,17 +1667,18 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
     // which model was actually doing the work. That gap cost a live deployment
     // hours — an agent conversing on a fast model had its memory extraction
     // silently inheriting a slow reasoning model, and no surface could show
-    // it. So report the resolved model alongside the raw setting, plus where
-    // it came from, the same provenance shape the context-window field uses.
-    let configured_extraction_model = config
-        .proactive_memory
-        .extraction_model
-        .as_deref()
-        .filter(|s| !s.is_empty());
-    let (effective_extraction_model, extraction_model_source) = match configured_extraction_model {
-        Some(m) => (m.to_string(), "configured"),
-        None => (config.default_model.model.clone(), "inherited_default"),
-    };
+    // it.
+    //
+    // The answer is read from the resolution boot recorded, never re-derived
+    // from `config` here. Re-deriving reintroduces the same bug one level up:
+    // it hands back the configured (or inherited) spec unsplit, and it reports
+    // that model as effective even when no LLM extracts anything at all —
+    // extraction switched off, an `extractor_sidecar` taking over, or the
+    // driver failing to build so extraction silently fell back to substring
+    // matching. Two derivations of "which model extracts memories" can
+    // disagree, and the one an operator reads is then the one that is wrong.
+    let resolution = state.kernel.extraction_model_resolution();
+    let effective = resolution.and_then(|r| r.effective_target());
 
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
@@ -1688,14 +1689,49 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
             "enabled": config.proactive_memory.enabled,
             "auto_memorize": config.proactive_memory.auto_memorize,
             "auto_retrieve": config.proactive_memory.auto_retrieve,
+            // The raw setting, read live. It can legitimately differ from the
+            // resolved fields below: `POST /api/config/reload` swaps the
+            // `[proactive_memory]` table onto the running store but does not
+            // rebuild the extraction driver, so after such an edit this is what
+            // the file says and `effective_extraction_model` is what is running.
             "extraction_model": &config.proactive_memory.extraction_model,
-            // The model extraction will actually run on, whether or not
-            // anyone chose it.
-            "effective_extraction_model": effective_extraction_model,
-            // "configured" when `extraction_model` is set, otherwise
+            // Provider and model as boot resolved them — already split, so a
+            // `provider/model` spec answers "which provider" and names the
+            // model in the form the upstream API receives.
+            //
+            // `null` whenever no model runs: extraction inactive, a sidecar
+            // doing the work, or the driver having failed to build so
+            // extraction fell back to substring matching. Naming a model as
+            // *effective* in that last case is the misreport this whole field
+            // exists to prevent — what was attempted is named in
+            // `extraction_degraded_reason`.
+            "effective_extraction_model": effective.map(|t| t.model.as_str()),
+            "effective_extraction_provider": effective.map(|t| t.provider.as_str()),
+            // "configured" when `extraction_model` was set at boot, otherwise
             // "inherited_default" — the operator never picked this, it came
-            // from `[default_model]`.
-            "extraction_model_source": extraction_model_source,
+            // from `[default_model]`. Still answerable after a failed driver
+            // build, so it reads the resolved target rather than the effective
+            // one.
+            "extraction_model_source": resolution
+                .and_then(|r| r.resolved_target())
+                .map(|t| t.source()),
+            // What actually extracts: "llm", "sidecar", "degraded_substring"
+            // (the driver failed to build — no model at all), "inactive"
+            // (nothing extracts), or "unknown" if boot never got that far.
+            "extraction_status": resolution.map_or("unknown", |r| r.status()),
+            // The single question a model name alone cannot answer. `null` only
+            // for "unknown", where claiming either answer would be a guess.
+            "extraction_llm_active": resolution.map(|r| r.llm_active()),
+            // Why extraction lost its LLM, when it did.
+            "extraction_degraded_reason": resolution.and_then(|r| r.degraded_reason()),
+            // The out-of-process extractor's command, when one is what runs.
+            // Naming it is the sidecar's equivalent of naming the model.
+            "extraction_sidecar_command": match resolution {
+                Some(librefang_kernel::MemoryExtractionResolution::Sidecar { command }) => {
+                    Some(command.as_str())
+                }
+                _ => None,
+            },
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))

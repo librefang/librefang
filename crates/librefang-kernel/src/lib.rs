@@ -66,9 +66,9 @@ pub use kernel_api::KernelApi;
 // migration can move callers off `LibreFangKernel` inherent forwards.
 pub use kernel::subsystems::{
     AgentSubsystemApi, CredentialPoolSummary, EventSubsystemApi, GovernanceSubsystemApi,
-    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi,
-    MeteringSubsystemApi, ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi,
-    WorkflowSubsystemApi,
+    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemoryExtractionResolution,
+    MemoryExtractionTarget, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
+    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 // ---------------------------------------------------------------------------
