@@ -475,42 +475,25 @@ where
 
 /// The channel name a plain HTTP `POST /api/agents/{id}/message` runs under.
 ///
-/// Also the identity namespace an under-privileged caller is pinned into by
-/// [`request_sender_context`], so the default and the pin cannot drift apart.
+/// Also the identity namespace an under-privileged caller is pinned into by [`request_sender_context`], so the default and the pin cannot drift apart.
 const API_SENDER_CHANNEL: &str = "api";
 
-/// Build the [`SenderContext`] for an inbound message request, letting the authenticated caller's
-/// identity override a sender identity the body asserts but cannot prove.
+/// Build the [`SenderContext`] for an inbound message request, letting the authenticated caller's identity override a sender identity the body asserts but cannot prove.
 ///
-/// SECURITY (#7744): `SenderContext.{channel, user_id}` is not decoration — it is the
-/// `(channel_type, platform_id)` tuple `AuthManager::identify` keys on (`kernel/messaging.rs`,
-/// `kernel/agent_execution.rs`), the tuple `AuthManager::resolve_user` keys the memory ACL on
-/// (`kernel/handles/memory_access.rs: memory_acl_for_sender`), and the value stamped into
-/// `manifest.metadata["sender_user_id"]` for per-sender tool authorization and `peer:{user_id}:KEY`
-/// memory scoping.
-/// `user_role_allows_request` in `middleware.rs` admits any `User`-role bearer to this route, so
-/// copying that tuple out of the body let a `User` name themselves as any user the operator had
-/// bound in `[[users]] channel_bindings` and inherit that user's role, policy and peer memory — the
-/// same binding `authorize_channel_user` (`channel_bridge.rs`) exists to establish for inbound
-/// channel traffic, reached over HTTP without passing through it.
+/// SECURITY (#7744): `SenderContext.{channel, user_id}` is not decoration — it is the `(channel_type, platform_id)` tuple `AuthManager::identify` keys on (`kernel/messaging.rs`, `kernel/agent_execution.rs`), the tuple `AuthManager::resolve_user` keys the memory ACL on (`kernel/handles/memory_access.rs: memory_acl_for_sender`), and the value stamped into `manifest.metadata["sender_user_id"]` for per-sender tool authorization and `peer:{user_id}:KEY` memory scoping.
+/// `user_role_allows_request` in `middleware.rs` admits any `User`-role bearer to this route, so copying that tuple out of the body let a `User` name themselves as any user the operator had bound in `[[users]] channel_bindings` and inherit that user's role, policy and peer memory — the same binding `authorize_channel_user` (`channel_bridge.rs`) exists to establish for inbound channel traffic, reached over HTTP without passing through it.
 ///
 /// The precedence rule:
 ///
-/// - No authenticated caller (loopback, `allow_no_auth`) — there is no identity to prefer, so the
-///   body's assertion stands and behaviour is unchanged.
-/// - `Admin` or above — may assert any sender identity, because an operator impersonating a user
-///   for support, or a channel gateway relaying real platform users, is legitimate.
-/// - Below `Admin`, asserting an identity that `identify` resolves back to the *caller themselves*
-///   — the body is stating its own true binding, which is not an attack. It stands, so the
-///   documented `[[users]] channel_bindings` recipe for a REST operator keeps working.
-/// - Anything else — the authenticated identity wins, silently and without erroring. A rejection
-///   would leak the role check back to the caller and break clients that assert a harmless id.
+/// - No authenticated caller (loopback, `allow_no_auth`) — there is no identity to prefer, so the body's assertion stands and behaviour is unchanged.
+/// - `Admin` or above — may assert any sender identity, because an operator impersonating a user for support, or a channel gateway relaying real platform users, is legitimate.
+/// - Below `Admin`, asserting an identity that `identify` resolves back to the *caller themselves* — the body is stating its own true binding, which is not an attack.
+///   It stands, so the documented `[[users]] channel_bindings` recipe for a REST operator keeps working.
+/// - Anything else — the authenticated identity wins, silently and without erroring.
+///   A rejection would leak the role check back to the caller and break clients that assert a harmless id.
 ///
-/// The channel and the user id are pinned together, never one without the other. `identify` keys on
-/// the pair, so pinning only the id still lets the caller choose the namespace their own name is
-/// looked up in: with `[[users]] name = "alice", channel_bindings = { slack = "bob" }` alongside a
-/// separate `[[users]] name = "bob"`, a `User`-role bob asserting `channel_type = "slack"` would
-/// resolve through `slack:bob` to alice.
+/// The channel and the user id are pinned together, never one without the other.
+/// `identify` keys on the pair, so pinning only the id still lets the caller choose the namespace their own name is looked up in: with `[[users]] name = "alice", channel_bindings = { slack = "bob" }` alongside a separate `[[users]] name = "bob"`, a `User`-role bob asserting `channel_type = "slack"` would resolve through `slack:bob` to alice.
 fn request_sender_context(
     req: &MessageRequest,
     api_user: Option<&crate::middleware::AuthenticatedApiUser>,
@@ -576,8 +559,7 @@ fn request_sender_context(
 /// test, not just a sibling unit that happens to call `request_sender_context`
 /// the same way.
 ///
-/// `api_user` is forwarded so the streaming route applies the same sender-identity precedence as
-/// its non-streaming sibling; see [`request_sender_context`].
+/// `api_user` is forwarded so the streaming route applies the same sender-identity precedence as its non-streaming sibling; see [`request_sender_context`].
 fn build_streaming_kernel_args(
     req: &MessageRequest,
     api_user: Option<&crate::middleware::AuthenticatedApiUser>,
@@ -1284,9 +1266,8 @@ mod tests {
 
     /// #7744: a caller below `Admin` gets their own identity, never the one the body names.
     ///
-    /// Both halves of the tuple are pinned. `AuthManager::identify` keys on
-    /// `(channel, user_id)`, so leaving the channel caller-chosen would still let the caller pick
-    /// which `[[users]] channel_bindings` namespace their own name is looked up in.
+    /// Both halves of the tuple are pinned.
+    /// `AuthManager::identify` keys on `(channel, user_id)`, so leaving the channel caller-chosen would still let the caller pick which `[[users]] channel_bindings` namespace their own name is looked up in.
     #[test]
     fn request_sender_context_pins_sub_admin_caller_to_their_own_identity() {
         let req = impersonating_request();
@@ -1317,8 +1298,7 @@ mod tests {
         assert_eq!(sender.channel, "api");
     }
 
-    /// #7744: `Admin` and above may assert a sender identity — an operator impersonating a user
-    /// for support, or a channel gateway relaying real platform users, is legitimate.
+    /// #7744: `Admin` and above may assert a sender identity — an operator impersonating a user for support, or a channel gateway relaying real platform users, is legitimate.
     #[test]
     fn request_sender_context_lets_admin_and_owner_assert_a_sender_identity() {
         let req = impersonating_request();
@@ -1339,8 +1319,7 @@ mod tests {
         }
     }
 
-    /// #7744: loopback / `allow_no_auth` deployments carry no authenticated identity to prefer,
-    /// so the body's assertion stands and behaviour is unchanged.
+    /// #7744: loopback / `allow_no_auth` deployments carry no authenticated identity to prefer, so the body's assertion stands and behaviour is unchanged.
     #[test]
     fn request_sender_context_is_unchanged_without_an_authenticated_caller() {
         let req = impersonating_request();
@@ -1352,13 +1331,10 @@ mod tests {
         assert_eq!(sender.channel, "telegram");
     }
 
-    /// #7744: a sub-Admin caller asserting an id that resolves back to *themselves* is stating a
-    /// true fact about their own binding, not attacking. It stands.
+    /// #7744: a sub-Admin caller asserting an id that resolves back to *themselves* is stating a true fact about their own binding, not attacking.
+    /// It stands.
     ///
-    /// This is what keeps the documented REST-operator recipe working — `[[users]]` with
-    /// `channel_bindings.api = "<some sender id>"`, described in
-    /// `docs/src/app/security/approvals/page.mdx` — rather than silently demoting that operator to
-    /// the guest gate.
+    /// This is what keeps the documented REST-operator recipe working — `[[users]]` with `channel_bindings.api = "<some sender id>"`, described in `docs/src/app/security/approvals/page.mdx` — rather than silently demoting that operator to the guest gate.
     #[test]
     fn request_sender_context_lets_a_caller_assert_their_own_declared_binding() {
         let mut bindings = std::collections::HashMap::new();
@@ -1384,8 +1360,7 @@ mod tests {
         assert_eq!(sender.channel, "api");
     }
 
-    /// The self-assertion escape hatch is scoped to the caller: a binding that resolves to somebody
-    /// *else* is still pinned away, even though `identify` succeeds.
+    /// The self-assertion escape hatch is scoped to the caller: a binding that resolves to somebody *else* is still pinned away, even though `identify` succeeds.
     #[test]
     fn request_sender_context_pins_a_binding_that_resolves_to_another_user() {
         let mut bindings = std::collections::HashMap::new();
@@ -1411,8 +1386,7 @@ mod tests {
         assert_eq!(sender.channel, "api");
     }
 
-    /// The pin never *creates* a sender context: a caller who asserts nothing still gets `None`,
-    /// so the kernel's canonical-session path is untouched for the dashboard and plain `curl`.
+    /// The pin never *creates* a sender context: a caller who asserts nothing still gets `None`, so the kernel's canonical-session path is untouched for the dashboard and plain `curl`.
     #[test]
     fn request_sender_context_stays_none_when_the_body_asserts_nothing() {
         let mut req = impersonating_request();
@@ -1423,8 +1397,7 @@ mod tests {
     }
 
     /// The streaming route must apply the same precedence as its non-streaming sibling.
-    /// Before #7744 the two handlers read the authenticated identity and the asserted one without
-    /// ever joining them, and the streaming path is the one with no `owner` consumer at all.
+    /// Before #7744 the two handlers read the authenticated identity and the asserted one without ever joining them, and the streaming path is the one with no `owner` consumer at all.
     #[test]
     fn build_streaming_kernel_args_applies_the_same_sender_identity_precedence() {
         let req = impersonating_request();
