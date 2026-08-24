@@ -105,9 +105,7 @@ fn ready_full_and_minimal_both_parse() {
             vec!["typing", "reaction", "interactive", "thread", "streaming"]
         );
         assert_eq!(params.account_id.as_deref(), Some("bot-1"));
-        // Compared against the constant, not a literal: the corpus number and
-        // the daemon's number are the same contract, and
-        // `tests/sidecar_version_contract.rs` pins the rest of the mirrors.
+        // Compared against the constant, not a literal: the corpus number and the daemon's number are the same contract, and `tests/sidecar_version_contract.rs` pins the rest of the mirrors.
         assert_eq!(params.protocol_version, Some(SIDECAR_PROTOCOL_VERSION));
         assert_eq!(
             classify_protocol_version(params.protocol_version),
@@ -122,9 +120,7 @@ fn ready_full_and_minimal_both_parse() {
         SidecarEvent::Ready { params } => {
             assert!(params.capabilities.is_empty());
             assert!(params.protocol_version.is_none());
-            // Accepting the bare frame is not the same as treating it as
-            // current: an adapter that declares nothing is `Unspecified`, and
-            // the supervisor warns rather than assuming it speaks v1.
+            // Accepting the bare frame is not the same as treating it as current: an adapter that declares nothing is `Unspecified`, and the supervisor warns rather than assuming it speaks v1.
             assert_eq!(
                 classify_protocol_version(params.protocol_version),
                 ProtocolSkew::Unspecified
@@ -136,12 +132,8 @@ fn ready_full_and_minimal_both_parse() {
 
 /// Consumer side for the frame a Telegram slash command travels in.
 ///
-/// `Content::Command` was the only frozen-core content shape with no corpus
-/// fixture, so the supervisor's ability to read a slash command off the wire
-/// was never pinned — the exact path #7140 reported as inert. `content`
-/// deserializes as a whole: an adapter emitting a shape this `ChannelContent`
-/// cannot model fails `SidecarMessageParams` outright and the supervisor drops
-/// the entire `message` event, command and all.
+/// `Content::Command` was the only frozen-core content shape with no corpus fixture, so the supervisor's ability to read a slash command off the wire was never pinned — the exact path #7140 reported as inert.
+/// `content` deserializes as a whole: an adapter emitting a shape this `ChannelContent` cannot model fails `SidecarMessageParams` outright and the supervisor drops the entire `message` event, command and all.
 #[test]
 fn message_command_deserializes_into_channel_content_command() {
     let v = read_corpus("events/message_command.json");
@@ -156,8 +148,7 @@ fn message_command_deserializes_into_channel_content_command() {
         }
         other => panic!("expected ChannelContent::Command, got {other:?}"),
     }
-    // No `text` mirror: only plain-text content has a lossless flattening, so
-    // a supervisor that reads `text` and ignores `content` sees nothing here.
+    // No `text` mirror: only plain-text content has a lossless flattening, so a supervisor that reads `text` and ignores `content` sees nothing here.
     // That is the whole reason the command path depends on `content` parsing.
     assert_eq!(params.text, None);
     assert_eq!(params.message_id.as_deref(), Some("8891"));

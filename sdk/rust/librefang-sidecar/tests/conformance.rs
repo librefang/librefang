@@ -108,8 +108,7 @@ impl SidecarAdapter for CorpusAdapter {
 
 /// The trait default must declare a version, not leave it unset.
 ///
-/// Asserted separately from the corpus comparison so a regression names the
-/// cause instead of printing a whole-frame diff.
+/// Asserted separately from the corpus comparison so a regression names the cause instead of printing a whole-frame diff.
 #[test]
 fn adapter_default_declares_the_protocol_version() {
     assert_eq!(
@@ -121,21 +120,15 @@ fn adapter_default_declares_the_protocol_version() {
 
 fn build_event(name: &str) -> Value {
     match name {
-        // Built through `ready_event()` rather than by calling `events::ready`
-        // with the version passed by hand: the literal made this assertion
-        // blind to `SidecarAdapter::protocol_version` defaulting to `None`,
-        // so the corpus said 1 while every real `ready` frame carried `null`
-        // and the suite stayed green (#7140).
+        // Built through `ready_event()` rather than by calling `events::ready` with the version passed by hand: the literal made this assertion blind to `SidecarAdapter::protocol_version` defaulting to `None`, so the corpus said 1 while every real `ready` frame carried `null` and the suite stayed green (#7140).
         "ready_full.json" => CorpusAdapter.ready_event(),
         "message_text.json" => librefang_sidecar::MessageBuilder::new("42", "Alice")
             .content(Content::text("hello"))
             .channel_id("-100123")
             .platform("telegram")
             .build(),
-        // The frame a Telegram slash command travels in. `Content::command`
-        // was the one frozen-core content shape with no fixture at all, which
-        // is why nothing failed when the adapter and the daemon disagreed
-        // about it.
+        // The frame a Telegram slash command travels in.
+        // `Content::command` was the one frozen-core content shape with no fixture at all, which is why nothing failed when the adapter and the daemon disagreed about it.
         "message_command.json" => librefang_sidecar::MessageBuilder::new("42", "Alice")
             .content(Content::command("agent", vec!["researcher".to_string()]))
             .message_id("8891")

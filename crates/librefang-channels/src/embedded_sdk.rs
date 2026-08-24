@@ -16,9 +16,8 @@
 //!
 //! ## Precedence
 //!
-//! The embedded copy is a **fallback**, not a hijack. On every spawn
-//! we run a one-shot `<command> -c "import librefang, librefang.sidecar;
-//! print(librefang.__version__)"` (cached per command path) and:
+//! The embedded copy is a **fallback**, not a hijack.
+//! On every spawn we run a one-shot `<command> -c "import librefang, librefang.sidecar; print(librefang.__version__)"` (cached per command path) and:
 //!
 //! - If the interpreter already imports `librefang.sidecar`
 //!   successfully (the developer case — editable / pip / venv), we do
@@ -34,12 +33,8 @@
 //! never gets a chance to shadow a freshly-edited
 //! `sdk/python/librefang/sidecar/adapters/telegram.py`.
 //!
-//! The probe reads the installed `__version__` rather than only asking
-//! whether the import succeeds, because precedence without visibility is
-//! what #7140 was: a `librefang-sdk` four months older than the daemon
-//! imports perfectly well, wins this contest, and leaves no trace above
-//! `debug`. The installed copy still wins; a version that differs from
-//! [`embedded_sdk_version`] now says so at `WARN`.
+//! The probe reads the installed `__version__` rather than only asking whether the import succeeds, because precedence without visibility is what #7140 was: a `librefang-sdk` four months older than the daemon imports perfectly well, wins this contest, and leaves no trace above `debug`.
+//! The installed copy still wins; a version that differs from [`embedded_sdk_version`] now says so at `WARN`.
 //!
 //! ## Filesystem layout
 //!
@@ -303,12 +298,8 @@ fn command_is_python_interpreter(command: &str) -> bool {
 
 /// The version of the SDK tree compiled into this binary.
 ///
-/// Read from `sdk/python/pyproject.toml` at compile time — the extracted
-/// copy cannot report its own version, because
-/// `librefang.__init__._package_version()` resolves it from a sibling
-/// `pyproject.toml` (absent in the extracted tree) or from installed package
-/// metadata (absent for a PYTHONPATH-only tree), and would answer
-/// `0+unknown`. The daemon therefore has to carry the number itself.
+/// Read from `sdk/python/pyproject.toml` at compile time — the extracted copy cannot report its own version, because `librefang.__init__._package_version()` resolves it from a sibling `pyproject.toml` (absent in the extracted tree) or from installed package metadata (absent for a PYTHONPATH-only tree), and would answer `0+unknown`.
+/// The daemon therefore has to carry the number itself.
 pub fn embedded_sdk_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| {
@@ -321,10 +312,7 @@ pub fn embedded_sdk_version() -> &'static str {
 
 /// First `version = "…"` at the start of a line in a `pyproject.toml`.
 ///
-/// Deliberately not a TOML parse: this crate has no TOML dependency, the
-/// input is a file in this repository rather than user data, and
-/// `tests/sidecar_version_contract.rs` fails the build if the extraction ever
-/// stops matching what the packaging metadata says.
+/// Deliberately not a TOML parse: this crate has no TOML dependency, the input is a file in this repository rather than user data, and `tests/sidecar_version_contract.rs` fails the build if the extraction ever stops matching what the packaging metadata says.
 fn parse_pyproject_version(pyproject: &str) -> Option<&str> {
     pyproject.lines().find_map(|line| {
         let rest = line.strip_prefix("version")?.trim_start();
@@ -342,11 +330,7 @@ fn parse_pyproject_version(pyproject: &str) -> Option<&str> {
 /// under a running daemon, and the cache keeps the spawn-time pre-check
 /// at one subprocess per unique command path.
 ///
-/// Reading the version rather than only probing importability is what makes
-/// the #7140 failure visible: a pip install four months older than the daemon
-/// still imports, so an importability-only probe reported exactly the same
-/// thing for a matching install and for a stale one that silently shadows the
-/// embedded tree.
+/// Reading the version rather than only probing importability is what makes the #7140 failure visible: a pip install four months older than the daemon still imports, so an importability-only probe reported exactly the same thing for a matching install and for a stale one that silently shadows the embedded tree.
 fn installed_sdk_version(command: &str) -> Option<String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -364,9 +348,7 @@ fn installed_sdk_version(command: &str) -> Option<String> {
         if !out.status.success() {
             return None;
         }
-        // Importable but version-less is still importable: the interpreter
-        // wins the precedence contest either way, so fall back to a marker
-        // rather than reporting "not installed" and shadowing their copy.
+        // Importable but version-less is still importable: the interpreter wins the precedence contest either way, so fall back to a marker rather than reporting "not installed" and shadowing their copy.
         let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Some(if reported.is_empty() {
             "0+unknown".to_string()

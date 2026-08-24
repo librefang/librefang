@@ -255,12 +255,8 @@ pub struct SidecarReadyParams {
     /// auth is only emitted for URLs whose host matches exactly.
     #[serde(default)]
     pub header_rules: Vec<(String, Vec<(String, String)>)>,
-    /// Wire-protocol version the adapter implements, compared against
-    /// [`SIDECAR_PROTOCOL_VERSION`] on arrival.
-    /// Still never *enforced* — a mismatch downgrades the adapter to a
-    /// `WARN`, it does not refuse the connection — but it is no longer
-    /// merely logged: [`classify_protocol_version`] turns the value into an
-    /// operator-visible diagnostic, which is the whole point of carrying it.
+    /// Wire-protocol version the adapter implements, compared against [`SIDECAR_PROTOCOL_VERSION`] on arrival.
+    /// Still never *enforced* — a mismatch downgrades the adapter to a `WARN`, it does not refuse the connection — but it is no longer merely logged: [`classify_protocol_version`] turns the value into an operator-visible diagnostic, which is the whole point of carrying it.
     /// `None` means the adapter declared nothing, not "version 0".
     #[serde(default)]
     pub protocol_version: Option<u32>,
@@ -269,33 +265,21 @@ pub struct SidecarReadyParams {
 /// The sidecar wire-protocol version this daemon implements.
 ///
 /// This constant is the source of truth for the number.
-/// Four other places encode the same value and every one of them is pinned to
-/// this constant by `crates/librefang-channels/tests/sidecar_version_contract.rs`:
-/// `docs/architecture/sidecar-protocol.md`, the shared corpus fixture
-/// `conformance/sidecar/corpus/events/ready_full.json`, the Python SDK's
-/// `librefang.sidecar.protocol.PROTOCOL_VERSION`, and the Rust SDK's
-/// `librefang_sidecar::protocol::PROTOCOL_VERSION`.
+/// Four other places encode the same value and every one of them is pinned to this constant by `crates/librefang-channels/tests/sidecar_version_contract.rs`: `docs/architecture/sidecar-protocol.md`, the shared corpus fixture `conformance/sidecar/corpus/events/ready_full.json`, the Python SDK's `librefang.sidecar.protocol.PROTOCOL_VERSION`, and the Rust SDK's `librefang_sidecar::protocol::PROTOCOL_VERSION`.
 ///
-/// Bump it only when a frozen-core frame changes in a non-additive way (a
-/// removed or renamed field, a changed type, a new required field); adding an
-/// optional field, a capability string, or a whole new frame method is
-/// additive and does not move this number.
+/// Bump it only when a frozen-core frame changes in a non-additive way (a removed or renamed field, a changed type, a new required field); adding an optional field, a capability string, or a whole new frame method is additive and does not move this number.
 pub const SIDECAR_PROTOCOL_VERSION: u32 = 1;
 
 /// How an adapter's declared `ready.params.protocol_version` compares to
 /// [`SIDECAR_PROTOCOL_VERSION`].
 ///
-/// Split out from the reader loop so the decision is unit-testable without
-/// spawning a subprocess — the reason the field sat unexamined for so long is
-/// that checking it used to mean writing a process-level test.
+/// Split out from the reader loop so the decision is unit-testable without spawning a subprocess — the reason the field sat unexamined for so long is that checking it used to mean writing a process-level test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolSkew {
     /// The adapter declared exactly the version this daemon speaks.
     Match,
     /// The adapter declared nothing.
-    /// Every SDK-built adapter has declared a version since #7140, so this now
-    /// means either a hand-rolled adapter or an SDK install old enough to
-    /// predate the default — which is the case the reporter hit.
+    /// Every SDK-built adapter has declared a version since #7140, so this now means either a hand-rolled adapter or an SDK install old enough to predate the default — which is the case the reporter hit.
     Unspecified,
     /// The adapter speaks an older protocol than this daemon.
     Older(u32),

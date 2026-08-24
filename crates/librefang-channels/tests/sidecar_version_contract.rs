@@ -1,24 +1,13 @@
 //! Drift guard for the two version numbers the sidecar boundary carries.
 //!
-//! The sidecar protocol version and the bundled SDK version are each written
-//! down in several places that a compiler cannot relate to one another: Rust
-//! constants, Python source, a JSON corpus fixture, prose in an architecture
-//! doc, and packaging metadata. #7140 is what that costs when nothing checks
-//! them — `docs/architecture/sidecar-protocol.md` said "current value: 1",
-//! `conformance/sidecar/corpus/events/ready_full.json` pinned `1`, both
-//! conformance suites passed `1` by hand, and every `ready` frame any real
-//! adapter emitted carried `null`, for months, with no test able to notice.
+//! The sidecar protocol version and the bundled SDK version are each written down in several places that a compiler cannot relate to one another: Rust constants, Python source, a JSON corpus fixture, prose in an architecture doc, and packaging metadata.
+//! #7140 is what that costs when nothing checks them — `docs/architecture/sidecar-protocol.md` said "current value: 1", `conformance/sidecar/corpus/events/ready_full.json` pinned `1`, both conformance suites passed `1` by hand, and every `ready` frame any real adapter emitted carried `null`, for months, with no test able to notice.
 //!
-//! Each assertion below names the file it reads, so a failure says which copy
-//! moved instead of only that two numbers differ. These are *mirrors* of
-//! `librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION`; when the protocol
-//! version legitimately changes, update the constant and then every file this
-//! test names.
+//! Each assertion below names the file it reads, so a failure says which copy moved instead of only that two numbers differ.
+//! These are *mirrors* of `librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION`; when the protocol version legitimately changes, update the constant and then every file this test names.
 //!
-//! Reading source text is deliberate. The Python SDK and the Rust adapter SDK
-//! are separate build units (the latter is its own cargo workspace, kept off
-//! this crate's dependency graph on purpose), so there is no import that would
-//! let the daemon assert against their real constants.
+//! Reading source text is deliberate.
+//! The Python SDK and the Rust adapter SDK are separate build units (the latter is its own cargo workspace, kept off this crate's dependency graph on purpose), so there is no import that would let the daemon assert against their real constants.
 
 use librefang_channels::embedded_sdk::embedded_sdk_version;
 use librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION;
@@ -120,9 +109,7 @@ fn embedded_sdk_version_mirrors_the_python_packaging_metadata() {
 
 /// Prose in the doc must not describe the field as inert any more.
 ///
-/// The daemon now classifies and warns on skew; a doc that still says the
-/// value is only logged tells adapter authors the field does not matter,
-/// which is how it came to be left unset everywhere in the first place.
+/// The daemon now classifies and warns on skew; a doc that still says the value is only logged tells adapter authors the field does not matter, which is how it came to be left unset everywhere in the first place.
 #[test]
 fn protocol_doc_describes_the_version_as_checked() {
     let rel = "docs/architecture/sidecar-protocol.md";

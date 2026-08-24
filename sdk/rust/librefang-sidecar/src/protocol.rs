@@ -22,10 +22,7 @@ use serde_json::{json, Value};
 /// Wire-protocol version this SDK implements, carried on every `ready` frame
 /// by [`SidecarAdapter::protocol_version`](crate::runtime::SidecarAdapter::protocol_version).
 ///
-/// The daemon's `librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION` is the
-/// source of truth for the number; this constant mirrors it and
-/// `crates/librefang-channels/tests/sidecar_version_contract.rs` fails the
-/// build if the two ever disagree.
+/// The daemon's `librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION` is the source of truth for the number; this constant mirrors it and `crates/librefang-channels/tests/sidecar_version_contract.rs` fails the build if the two ever disagree.
 ///
 /// Bump only for a non-additive change to a frozen-core frame — see
 /// `docs/architecture/sidecar-protocol.md`.
@@ -715,10 +712,7 @@ pub struct Schema {
     pub fields: Vec<Field>,
     /// This SDK's own package version, reported on `--describe`.
     ///
-    /// Filled in by [`Schema::new`] rather than declared per adapter, and
-    /// mirrors the Python SDK's `sdk_version` key: the daemon caches the
-    /// describe output at boot, so this is the one place an adapter's SDK
-    /// version can reach an operator without reading sidecar logs.
+    /// Filled in by [`Schema::new`] rather than declared per adapter, and mirrors the Python SDK's `sdk_version` key: the daemon caches the describe output at boot, so this is the one place an adapter's SDK version can reach an operator without reading sidecar logs.
     pub sdk_version: String,
 }
 

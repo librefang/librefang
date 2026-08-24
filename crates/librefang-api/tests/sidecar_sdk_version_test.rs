@@ -1,17 +1,9 @@
-//! `GET /api/channels` must publish the SDK version each sidecar adapter
-//! reported on `--describe` (#7140).
+//! `GET /api/channels` must publish the SDK version each sidecar adapter reported on `--describe` (#7140).
 //!
-//! The reported incident was a Telegram sidecar running `librefang-sdk`
-//! 2026.3.2201 against a 2026.7.31 daemon, and the only way anyone could
-//! establish that was by shelling into the host: the version existed in the
-//! adapter's own package metadata, and there was no path — no wire frame, no
-//! API field — by which it could reach an operator. `--describe` runs the same
-//! interpreter, with the same PYTHONPATH resolution, as the eventual spawn, so
-//! the version it reports is the version that will actually serve traffic.
+//! The reported incident was a Telegram sidecar running `librefang-sdk` 2026.3.2201 against a 2026.7.31 daemon, and the only way anyone could establish that was by shelling into the host: the version existed in the adapter's own package metadata, and there was no path — no wire frame, no API field — by which it could reach an operator.
+//! `--describe` runs the same interpreter, with the same PYTHONPATH resolution, as the eventual spawn, so the version it reports is the version that will actually serve traffic.
 //!
-//! The route is asserted rather than only `sidecar_discovery_rows`, because
-//! the defect class here is a value that exists in the daemon but never
-//! reaches the payload — exactly what a handler-level unit test cannot see.
+//! The route is asserted rather than only `sidecar_discovery_rows`, because the defect class here is a value that exists in the daemon but never reaches the payload — exactly what a handler-level unit test cannot see.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -36,16 +28,14 @@ struct RouterHarness {
 
 impl Drop for RouterHarness {
     fn drop(&mut self) {
-        // Leave the process-wide describe caches empty so a seeded fixture
-        // cannot leak into another integration test's discovery rows.
+        // Leave the process-wide describe caches empty so a seeded fixture cannot leak into another integration test's discovery rows.
         __test_seed_sidecar_schema_cache(&[]);
         __test_seed_sidecar_schema_error_cache(&[]);
         self.state.kernel.shutdown();
     }
 }
 
-/// Boot the router with no `[[sidecar_channels]]` configured, so every catalog
-/// adapter appears as an unconfigured discovery row.
+/// Boot the router with no `[[sidecar_channels]]` configured, so every catalog adapter appears as an unconfigured discovery row.
 async fn boot_router() -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
@@ -116,9 +106,7 @@ async fn telegram_row(h: &RouterHarness) -> serde_json::Value {
         .clone()
 }
 
-/// Both halves in one test: the describe caches are process-wide and the
-/// seeders clear-then-set, so splitting them into parallel tests would race on
-/// the shared maps.
+/// Both halves in one test: the describe caches are process-wide and the seeders clear-then-set, so splitting them into parallel tests would race on the shared maps.
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_payload_carries_the_adapter_reported_sdk_version() {
     let h = boot_router().await;
@@ -133,9 +121,7 @@ async fn channels_payload_carries_the_adapter_reported_sdk_version() {
     );
 
     // --- adapter reported nothing: the key is absent, not null ---
-    // An SDK too old to carry `sdk_version` is exactly the deployment this
-    // field exists to diagnose, so the payload must distinguish "did not
-    // report" from "reported nothing" rather than inventing a value.
+    // An SDK too old to carry `sdk_version` is exactly the deployment this field exists to diagnose, so the payload must distinguish "did not report" from "reported nothing" rather than inventing a value.
     __test_seed_sidecar_schema_cache(&[("telegram", schema_reporting(None))]);
     let row = telegram_row(&h).await;
     assert!(

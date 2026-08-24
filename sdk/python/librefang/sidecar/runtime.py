@@ -108,12 +108,7 @@ class SidecarAdapter:
     header_rules: List[Any] = []
     #: Wire-protocol version announced on ``ready``.
     #:
-    #: Defaults to :data:`librefang.sidecar.protocol.PROTOCOL_VERSION` so
-    #: every adapter declares it without a per-adapter line — the shape of
-    #: #7140, where the field existed on both sides of the wire, was
-    #: documented as "current value: 1", and was pinned at 1 in the shared
-    #: conformance corpus, yet no adapter ever set it and every real ``ready``
-    #: frame carried ``null``.
+    #: Defaults to :data:`librefang.sidecar.protocol.PROTOCOL_VERSION` so every adapter declares it without a per-adapter line — the shape of #7140, where the field existed on both sides of the wire, was documented as "current value: 1", and was pinned at 1 in the shared conformance corpus, yet no adapter ever set it and every real ``ready`` frame carried ``null``.
     #: Override only when an adapter deliberately speaks an older protocol.
     protocol_version: Optional[int] = protocol.PROTOCOL_VERSION
 
