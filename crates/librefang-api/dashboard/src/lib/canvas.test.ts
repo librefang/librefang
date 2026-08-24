@@ -278,6 +278,33 @@ describe("stepAgentPayload", () => {
     expect(stepAgentPayload({ label: "unbound" })).toBeNull();
   });
 
+  it("lets an explicit source outrank the specificity fallback", () => {
+    // The fallback binds the most specific field present; a recorded source
+    // (#7724) is the operator's actual choice and wins over it, which is what
+    // makes leaving an id or a type binding possible at all.
+    expect(stepAgentPayload({ agentSource: "name", agentId: "abc", agentName: "researcher" })).toEqual({
+      agent_name: "researcher",
+    });
+    expect(stepAgentPayload({ agentSource: "type", agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+    expect(stepAgentPayload({ agentSource: "instance", agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("falls back to specificity when the recorded source has no value", () => {
+    // A half-authored node must not silently drop the binding its card is
+    // still showing — that is how a workflow round-trips as zero steps.
+    expect(stepAgentPayload({ agentSource: "name", agentName: "  ", agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+  });
+
+  it("treats a blank binding field as no binding", () => {
+    expect(stepAgentPayload({ agentId: " ", agentName: "\t", agentType: "" })).toBeNull();
+  });
+
   it("never returns more than one routing key", () => {
     const payload = stepAgentPayload({
       agentId: "abc",

@@ -14,6 +14,21 @@ export const autoDreamKeys = {
   status: () => [...autoDreamKeys.all, "status"] as const,
 };
 
+/**
+ * Operator-authored agent types (`/api/templates`).
+ *
+ * Kept separate from `agentKeys.templates()` deliberately: that key backs the
+ * read-only picker on the spawn form, while these back the editor, whose
+ * mutations must invalidate the detail as well as the list.
+ */
+export const agentTypeKeys = {
+  all: ["agentTypes"] as const,
+  lists: () => [...agentTypeKeys.all, "list"] as const,
+  list: () => [...agentTypeKeys.lists()] as const,
+  details: () => [...agentTypeKeys.all, "detail"] as const,
+  detail: (name: string) => [...agentTypeKeys.details(), name] as const,
+};
+
 export const agentKeys = {
   all: ["agents"] as const,
   lists: () => [...agentKeys.all, "list"] as const,

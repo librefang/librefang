@@ -848,7 +848,9 @@ fn is_likely_i18n_key_literal(
     literal: &str,
     known_prefixes: &std::collections::BTreeSet<String>,
 ) -> bool {
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload"];
+    // Not i18n keys: literals whose leading segment collides with a real key prefix.
+    // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;

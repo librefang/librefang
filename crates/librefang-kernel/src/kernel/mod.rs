@@ -102,6 +102,7 @@ mod llm_drivers;
 mod mcp_setup;
 mod mcp_summary;
 mod messaging;
+pub mod mission_workspace;
 mod pooled_driver;
 mod prompt_context;
 mod provider_probe;

@@ -79,6 +79,7 @@ pub(crate) mod tool_name {
     pub const CRON_CANCEL: &str = "cron_cancel";
     pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
+    pub const CHANNEL_MEMBERS: &str = "channel_members";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
     pub const HAND_STATUS: &str = "hand_status";
@@ -100,6 +101,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_STATUS: &str = "workflow_status";
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
+    pub const WORKFLOW_CREATE: &str = "workflow_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -1010,6 +1012,17 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                 }),
             },
             ToolDefinition {
+                name: tool_name::CHANNEL_MEMBERS.to_string(),
+                description: "List the known members of a group conversation on a channel: the platform user_id, display_name, and username of everyone the daemon has seen speak there. Use it to answer \"who is in this channel?\", to attribute a request to the person who made it when handing work to an external system, and to obtain the platform user id needed to address one member individually. Both arguments default to the conversation the current message arrived on, so during message handling this can be called with no arguments; a direct message has no roster. Read-only.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": { "type": "string", "description": "Channel type to read the roster of (e.g. 'slack', 'telegram', 'discord', 'whatsapp'). Omit while handling an inbound message to use the channel it arrived on." },
+                        "chat_id": { "type": "string", "description": "Platform conversation id (Slack channel id, Telegram chat_id, WhatsApp group JID). Omit while handling an inbound message to use the current conversation — naming a different conversation on that same channel is refused." }
+                    }
+                }),
+            },
+            ToolDefinition {
                 name: tool_name::HAND_LIST.to_string(),
                 description: "List available Hands (curated autonomous packages) and their activation status.".to_string(),
                 input_schema: serde_json::json!({
@@ -1267,6 +1280,53 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "run_id": { "type": "string", "description": "The workflow run UUID to cancel" }
                     },
                     "required": ["run_id"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::WORKFLOW_CREATE.to_string(),
+                description: "Define and register a new multi-step workflow so it can be run later with workflow_run / workflow_start. Use this when the same multi-agent sequence is worth repeating; for a one-off, send the agents messages directly instead. The workflow becomes available immediately and outlives the conversation. Names are unique across the daemon: a name already in use is rejected rather than overwritten, so call workflow_list first if you are unsure. Returns {id, name, description, step_count, has_input_schema}.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Unique name, 1-64 characters of letters, digits, '_' and '-'. This is how the workflow is addressed afterwards (e.g. 'nightly-report')." },
+                        "description": { "type": "string", "description": "What the workflow does, for whoever reads workflow_list later" },
+                        "steps": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 50,
+                            "description": "The steps, in execution order. Sequential by default; declare depends_on to run them as a DAG instead.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Step name, unique within the workflow. Other steps reference it in depends_on." },
+                                    "agent": { "type": "string", "description": "Name of the agent that runs this step (agent_list shows what exists). An object {\"id\": \"<uuid>\"} addresses one by UUID instead." },
+                                    "prompt_template": { "type": "string", "description": "Prompt for this step. {{input}} interpolates the previous step's output; {{var}} interpolates a workflow input parameter or an earlier step's output_var." },
+                                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Names of steps that must finish first. Any step may be named, including one declared later. Omit for straight-line execution." },
+                                    "output_var": { "type": "string", "description": "Store this step's output under this name so later steps can reference it as {{name}}" },
+                                    "mode": { "description": "Sequencing for this step: the string \"sequential\" (default), \"fan_out\" to run in parallel with the following fan_out steps, or \"collect\" to gather them. Richer nodes take a tagged object, e.g. {\"conditional\": {\"condition\": \"APPROVED\"}}." },
+                                    "error_mode": { "description": "What to do when this step fails: \"fail\" (default, abort the run), \"skip\" (continue without it), or {\"retry\": {\"max_retries\": 3}}." },
+                                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Wall-clock limit for this step (default 120, ceiling 3600)" }
+                                },
+                                "required": ["name", "agent", "prompt_template"]
+                            }
+                        },
+                        "input_schema": {
+                            "type": "array",
+                            "description": "Parameters callers pass to workflow_run. Each becomes a {{name}} placeholder available to every step's prompt_template.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Parameter name, as referenced by {{name}} in a prompt_template" },
+                                    "param_type": { "type": "string", "enum": ["string", "number", "boolean", "file", "image", "agent_id"], "description": "Value type (default 'string'). Note the key is param_type, not type — this is the same spelling workflow_describe reports back." },
+                                    "required": { "type": "boolean", "description": "Whether callers must supply it (default true)" },
+                                    "description": { "type": "string", "description": "What the parameter means, shown by workflow_describe" }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        "total_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 86400, "description": "Wall-clock limit for the whole run (ceiling 86400 = 24h). Omit to use the daemon default." }
+                    },
+                    "required": ["name", "steps"]
                 }),
             },
             ToolDefinition {

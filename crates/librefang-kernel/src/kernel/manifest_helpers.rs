@@ -31,10 +31,11 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
             if manifest.capabilities.agent_spawn {
                 merged.agent_spawn = true;
             }
-            if !manifest.capabilities.memory_read.is_empty() {
+            // A declared list wins over the profile's implied one, including when it is empty: `memory_read = []` is the operator saying "grant nothing", which #7605 made expressible and load-bearing for the automatic memorize / retrieve paths.
+            if manifest.capabilities.memory_read.is_some() {
                 merged.memory_read = manifest.capabilities.memory_read.clone();
             }
-            if !manifest.capabilities.memory_write.is_empty() {
+            if manifest.capabilities.memory_write.is_some() {
                 merged.memory_write = manifest.capabilities.memory_write.clone();
             }
             if manifest.capabilities.ofp_discover {
@@ -57,10 +58,10 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
     for tool in &effective_caps.tools {
         caps.push(Capability::ToolInvoke(tool.clone()));
     }
-    for scope in &effective_caps.memory_read {
+    for scope in effective_caps.memory_read.iter().flatten() {
         caps.push(Capability::MemoryRead(scope.clone()));
     }
-    for scope in &effective_caps.memory_write {
+    for scope in effective_caps.memory_write.iter().flatten() {
         caps.push(Capability::MemoryWrite(scope.clone()));
     }
     if effective_caps.agent_spawn {

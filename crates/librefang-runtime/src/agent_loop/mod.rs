@@ -54,8 +54,8 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
     finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, EndTurnRetry,
-    EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
+    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
+    EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
 use self::history::resolve_max_history;
 use self::message::{
@@ -643,6 +643,11 @@ async fn run_agent_loop_inner(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // #7605: the session this turn belongs to, when session-scoped memory recall is in effect for this agent.
+    // Resolved once here so the recall (before the turn) and the memorize (after it) agree on the scope even if the manifest were hot-reloaded in between.
+    let session_scope: Option<String> =
+        session_recall_scope(manifest, session, proactive_memory.as_ref());
+
     let RecallSetup {
         memories,
         memories_used,
@@ -656,6 +661,7 @@ async fn run_agent_loop_inner(
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
         sender_chat_scope: sender_chat_scope.as_deref(),
+        session_scope: session_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
@@ -1545,6 +1551,7 @@ async fn run_agent_loop_inner(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_chat_scope: sender_chat_scope.as_deref(),
+                        session_scope: session_scope.as_deref(),
                         streaming: false,
                         opts,
                     },

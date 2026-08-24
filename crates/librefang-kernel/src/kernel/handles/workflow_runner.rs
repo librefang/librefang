@@ -36,6 +36,173 @@ fn placeholder_regex() -> &'static regex::Regex {
     })
 }
 
+/// Upper bound on the number of steps an agent may put in one workflow.
+///
+/// `workflow_create` takes LLM-authored input, so every ceiling here is enforced rather than merely advertised — a JSON-schema `maxItems` is advice the calling model is free to ignore.
+/// The tool schema publishes the same numbers so a model is never told one ceiling and rejected at another.
+pub(crate) const MAX_CREATED_WORKFLOW_STEPS: usize = 50;
+
+/// Upper bound on a single step's `timeout_secs` in an agent-created workflow (1 hour).
+pub(crate) const MAX_CREATED_STEP_TIMEOUT_SECS: u64 = 3_600;
+
+/// Upper bound on an agent-created workflow's `total_timeout_secs` (24 hours).
+pub(crate) const MAX_CREATED_TOTAL_TIMEOUT_SECS: u64 = 86_400;
+
+/// Upper bound on the length of an agent-supplied workflow name.
+pub(crate) const MAX_CREATED_WORKFLOW_NAME_LEN: usize = 64;
+
+/// Does this workflow advertise input parameters an agent can discover?
+///
+/// True when an explicit `[[input_schema]]` block was authored **or** any step's `prompt_template` carries a `{{var}}` placeholder — the auto-detect fallback, which mirrors `Workflow::to_template()` so the discovery surface reads the same for both authoring styles (#4982 — gap 2).
+fn has_discoverable_input_schema(workflow: &crate::workflow::Workflow) -> bool {
+    let has_explicit = workflow
+        .input_schema
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    has_explicit
+        || workflow
+            .steps
+            .iter()
+            .any(|s| s.prompt_template.contains("{{") && s.prompt_template.contains("}}"))
+}
+
+/// Build the `WorkflowSummary` the trait boundary hands back for a workflow.
+fn summarize_workflow(workflow: &crate::workflow::Workflow) -> kernel_handle::WorkflowSummary {
+    kernel_handle::WorkflowSummary::new(
+        workflow.id.0.to_string(),
+        workflow.name.clone(),
+        workflow.description.clone(),
+        workflow.steps.len(),
+        has_discoverable_input_schema(workflow),
+    )
+}
+
+/// The agent-authored payload `workflow_create` accepts.
+///
+/// Deliberately a `Deserialize` over the canonical [`crate::workflow::WorkflowStep`] / [`crate::workflow::WorkflowInputParam`] types rather than a hand-written `Value` walk: the tool's accepted shape is then the struct the engine executes, by construction, and cannot drift from it the way the `POST /api/workflows` parser has.
+/// It also means an input parameter's `param_type` is the key the struct actually reads — the same spelling `workflow_describe` reports back — so a described workflow round-trips.
+#[derive(serde::Deserialize)]
+struct WorkflowCreateSpec {
+    name: String,
+    #[serde(default)]
+    description: String,
+    steps: Vec<crate::workflow::WorkflowStep>,
+    #[serde(default)]
+    total_timeout_secs: Option<u64>,
+    #[serde(default)]
+    input_schema: Option<Vec<crate::workflow::WorkflowInputParam>>,
+}
+
+/// Validate an agent-supplied workflow name.
+///
+/// `[A-Za-z0-9_-]`, 1–[`MAX_CREATED_WORKFLOW_NAME_LEN`] chars.
+/// The name never reaches the filesystem — persistence is keyed by id (`<uuid>.workflow.json`) — so this is not a traversal guard.
+/// It exists because the name is how agents address the workflow afterwards and it lands verbatim in prompt text: control characters, newlines and leading/trailing whitespace all produce a workflow that is awkward or impossible to name back.
+fn validate_created_workflow_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().count() > MAX_CREATED_WORKFLOW_NAME_LEN {
+        return Err(format!(
+            "workflow name must be 1-{MAX_CREATED_WORKFLOW_NAME_LEN} characters, got {}",
+            name.chars().count()
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "workflow name '{name}' must use only letters, digits, '_' and '-'"
+        ));
+    }
+    Ok(())
+}
+
+/// Turn an agent-authored spec into a registrable [`crate::workflow::Workflow`], or explain why it cannot be one.
+///
+/// Pulled out of the trait method as a free function so every rejection branch is unit-testable without booting a kernel — the branches are the whole security surface of an always-available, LLM-driven creation tool.
+///
+/// The returned `Err` is relayed to the model verbatim, so each one names the offending field and the limit it broke; a model that cannot see which ceiling it hit retries the same payload.
+fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::Workflow, String> {
+    use crate::workflow::{Workflow, WorkflowId};
+
+    let spec: WorkflowCreateSpec = serde_json::from_value(spec.clone())
+        .map_err(|e| format!("not a valid workflow definition: {e}"))?;
+
+    validate_created_workflow_name(&spec.name)?;
+
+    if spec.steps.is_empty() {
+        return Err("a workflow needs at least one step".to_string());
+    }
+    if spec.steps.len() > MAX_CREATED_WORKFLOW_STEPS {
+        return Err(format!(
+            "a workflow may declare at most {MAX_CREATED_WORKFLOW_STEPS} steps, got {}",
+            spec.steps.len()
+        ));
+    }
+
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for step in &spec.steps {
+        if step.name.is_empty() {
+            return Err("every step needs a non-empty 'name'".to_string());
+        }
+        if !seen.insert(step.name.as_str()) {
+            return Err(format!(
+                "step name '{}' is used twice — step names address dependencies, so they must be unique",
+                step.name
+            ));
+        }
+        if step.timeout_secs > MAX_CREATED_STEP_TIMEOUT_SECS {
+            return Err(format!(
+                "step '{}' timeout_secs={} exceeds the {MAX_CREATED_STEP_TIMEOUT_SECS}s per-step ceiling",
+                step.name, step.timeout_secs
+            ));
+        }
+    }
+    // Dependencies are checked in a second pass so a step may depend on one declared after it — DAG execution is topological, not positional, and rejecting a forward reference would forbid a legal workflow.
+    for step in &spec.steps {
+        for dep in &step.depends_on {
+            if !seen.contains(dep.as_str()) {
+                return Err(format!(
+                    "step '{}' depends on '{dep}', which is not a step in this workflow",
+                    step.name
+                ));
+            }
+        }
+    }
+
+    if let Some(total) = spec.total_timeout_secs {
+        if total > MAX_CREATED_TOTAL_TIMEOUT_SECS {
+            return Err(format!(
+                "total_timeout_secs={total} exceeds the {MAX_CREATED_TOTAL_TIMEOUT_SECS}s per-workflow ceiling"
+            ));
+        }
+    }
+
+    let workflow = Workflow {
+        id: WorkflowId::new(),
+        name: spec.name,
+        description: spec.description,
+        steps: spec.steps,
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: spec.total_timeout_secs,
+        input_schema: spec.input_schema,
+    };
+
+    // The same semantic pass `POST /api/workflows` and the canvas run: empty Transform code, unparseable Tera templates, zero / over-cap Wait durations, operator nodes wired into a DAG.
+    let errs = workflow.validate();
+    if !errs.is_empty() {
+        let detail = errs
+            .iter()
+            .map(|(step, reason)| format!("step '{step}': {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(detail);
+    }
+
+    Ok(workflow)
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::WorkflowRunner for LibreFangKernel {
     async fn run_workflow(
@@ -85,31 +252,7 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .list_workflows()
             .await
             .into_iter()
-            .map(|w| {
-                // `has_input_schema` is true when either an explicit
-                // `[[input_schema]]` block was authored on the workflow
-                // OR any step's prompt_template references at least one
-                // `{{var}}` placeholder (auto-detect path). The fallback
-                // mirrors `Workflow::to_template()` so the discovery
-                // surface stays consistent across both authoring styles
-                // (#4982 — gap 2).
-                let has_explicit = w
-                    .input_schema
-                    .as_ref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false);
-                let has_auto = !has_explicit
-                    && w.steps.iter().any(|s| {
-                        s.prompt_template.contains("{{") && s.prompt_template.contains("}}")
-                    });
-                kernel_handle::WorkflowSummary::new(
-                    w.id.0.to_string(),
-                    w.name,
-                    w.description,
-                    w.steps.len(),
-                    has_explicit || has_auto,
-                )
-            })
+            .map(|w| summarize_workflow(&w))
             .collect();
         // Sort by name for deterministic prompt output (#3298).
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -472,6 +615,39 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         Ok(run_id.0.to_string())
     }
 
+    async fn create_workflow(
+        &self,
+        spec: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+    ) -> Result<kernel_handle::WorkflowSummary, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+
+        let workflow = build_created_workflow(spec).map_err(KernelOpError::InvalidInput)?;
+        // Built before the move into the engine; the engine returns only the id.
+        let summary = summarize_workflow(&workflow);
+        let name = workflow.name.clone();
+
+        // `register_unique_name`, not `list_workflows()`-then-`register()`: the name check and the insert have to be one operation or two agents creating the same name concurrently both win, and name-based lookup then resolves to whichever duplicate the registry iterator reaches first (#6934).
+        let id = self
+            .workflows
+            .engine
+            .register_unique_name(workflow)
+            .await
+            .map_err(|taken| KernelOpError::Conflict(taken.to_string()))?;
+
+        // Provenance trace, not an authorization gate: workflows have no ownership model, and an agent-authored one is executable by any agent the moment it is registered.
+        // Logging who asked for it is what makes that reviewable after the fact.
+        tracing::info!(
+            workflow_id = %id,
+            workflow_name = %name,
+            caller_agent_id = caller_agent_id.unwrap_or("<unattributed>"),
+            step_count = summary.step_count,
+            "Agent created a workflow"
+        );
+
+        Ok(summary)
+    }
+
     async fn cancel_workflow_run(&self, run_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         use crate::workflow::{CancelRunError, WorkflowRunId};
         use kernel_handle::KernelOpError;
@@ -498,12 +674,213 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
 mod tests {
     use super::*;
 
-    /// Pins the operator-facing timeout text format. Operators scrape
-    /// for `"workflow run timed out after"` and pull the seconds field;
-    /// any drift in this string is a breaking change to the contract
-    /// the PR explicitly locks in. If you need to change the format,
-    /// announce it in the changelog under a breaking-change bullet and
-    /// update this assertion.
+    /// A minimal spec that `build_created_workflow` accepts, as JSON, so each test below can mutate exactly the field it is about.
+    fn spec(steps: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "name": "nightly-report",
+            "description": "summarise the day",
+            "steps": steps,
+        })
+    }
+
+    fn one_step() -> serde_json::Value {
+        serde_json::json!([{
+            "name": "write",
+            "agent": "writer",
+            "prompt_template": "Summarise {{input}}",
+        }])
+    }
+
+    #[test]
+    fn build_created_workflow_accepts_a_minimal_spec() {
+        let wf = build_created_workflow(&spec(one_step())).expect("minimal spec is valid");
+        assert_eq!(wf.name, "nightly-report");
+        assert_eq!(wf.steps.len(), 1);
+        // Bare-string `agent` is the documented shorthand for by-name routing.
+        assert!(matches!(
+            &wf.steps[0].agent,
+            crate::workflow::StepAgent::ByName { name } if name == "writer"
+        ));
+        // Serde defaults fill the fields the model left out, rather than a hand-written parser inventing its own.
+        assert_eq!(wf.steps[0].timeout_secs, 120);
+        assert!(matches!(
+            wf.steps[0].mode,
+            crate::workflow::StepMode::Sequential
+        ));
+    }
+
+    /// The input-parameter key is `param_type` — the spelling `WorkflowInputParam` deserializes and `workflow_describe` reports — so a described workflow round-trips back through creation with its declared types intact.
+    #[test]
+    fn build_created_workflow_preserves_declared_param_types() {
+        let mut s = spec(one_step());
+        s["input_schema"] = serde_json::json!([
+            { "name": "cover", "param_type": "image", "required": false },
+            { "name": "topic" },
+        ]);
+        let wf = build_created_workflow(&s).expect("input schema is valid");
+        let schema = wf.input_schema.expect("input_schema survives");
+        assert_eq!(schema[0].param_type, "image");
+        assert!(!schema[0].required);
+        // Defaults apply to the parameter the model under-specified.
+        assert_eq!(schema[1].param_type, "string");
+        assert!(schema[1].required);
+    }
+
+    #[test]
+    fn build_created_workflow_rejects_a_spec_without_steps() {
+        let err = build_created_workflow(&spec(serde_json::json!([])))
+            .expect_err("a stepless workflow can never run");
+        assert!(err.contains("at least one step"), "{err}");
+    }
+
+    #[test]
+    fn build_created_workflow_rejects_a_step_without_an_agent() {
+        let s = spec(serde_json::json!([{ "name": "write", "prompt_template": "go" }]));
+        let err = build_created_workflow(&s).expect_err("a step needs an agent");
+        assert!(err.contains("not a valid workflow definition"), "{err}");
+    }
+
+    /// The ceiling is inclusive: exactly `MAX_CREATED_WORKFLOW_STEPS` steps is a legal workflow, one more is not.
+    /// Pinned in one test so a future edit cannot quietly move the boundary by one.
+    #[test]
+    fn build_created_workflow_caps_the_step_count() {
+        let steps = |n: usize| {
+            serde_json::Value::Array(
+                (0..n)
+                    .map(|i| {
+                        serde_json::json!({
+                            "name": format!("step-{i}"),
+                            "agent": "writer",
+                            "prompt_template": "go",
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        assert!(build_created_workflow(&spec(steps(MAX_CREATED_WORKFLOW_STEPS))).is_ok());
+        let err = build_created_workflow(&spec(steps(MAX_CREATED_WORKFLOW_STEPS + 1)))
+            .expect_err("one step over the ceiling must be rejected");
+        assert!(
+            err.contains(&MAX_CREATED_WORKFLOW_STEPS.to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_created_workflow_caps_both_timeouts() {
+        let mut s = spec(serde_json::json!([{
+            "name": "write",
+            "agent": "writer",
+            "prompt_template": "go",
+            "timeout_secs": MAX_CREATED_STEP_TIMEOUT_SECS + 1,
+        }]));
+        let err = build_created_workflow(&s).expect_err("step timeout over the ceiling");
+        assert!(err.contains("per-step ceiling"), "{err}");
+
+        s = spec(one_step());
+        s["total_timeout_secs"] = serde_json::json!(MAX_CREATED_TOTAL_TIMEOUT_SECS + 1);
+        let err = build_created_workflow(&s).expect_err("total timeout over the ceiling");
+        assert!(err.contains("per-workflow ceiling"), "{err}");
+    }
+
+    /// Step names address dependencies, so a duplicate makes `depends_on` ambiguous and an unknown target makes it unsatisfiable — both produce a workflow that cannot run, and both are cheap to catch at creation.
+    #[test]
+    fn build_created_workflow_rejects_broken_step_dependencies() {
+        let dup = spec(serde_json::json!([
+            { "name": "write", "agent": "writer", "prompt_template": "a" },
+            { "name": "write", "agent": "writer", "prompt_template": "b" },
+        ]));
+        let err = build_created_workflow(&dup).expect_err("duplicate step names");
+        assert!(err.contains("used twice"), "{err}");
+
+        let dangling = spec(serde_json::json!([{
+            "name": "write",
+            "agent": "writer",
+            "prompt_template": "a",
+            "depends_on": ["research"],
+        }]));
+        let err = build_created_workflow(&dangling).expect_err("unknown dependency");
+        assert!(err.contains("not a step in this workflow"), "{err}");
+    }
+
+    /// A dependency on a step declared later is legal — DAG execution is topological, not positional.
+    #[test]
+    fn build_created_workflow_allows_a_forward_dependency() {
+        let s = spec(serde_json::json!([
+            { "name": "publish", "agent": "writer", "prompt_template": "a", "depends_on": ["research"] },
+            { "name": "research", "agent": "analyst", "prompt_template": "b" },
+        ]));
+        assert!(build_created_workflow(&s).is_ok());
+    }
+
+    #[test]
+    fn created_workflow_names_are_constrained() {
+        assert!(validate_created_workflow_name("nightly-report").is_ok());
+        assert!(validate_created_workflow_name("report_v2").is_ok());
+        assert!(validate_created_workflow_name("").is_err());
+        assert!(validate_created_workflow_name("../../etc/passwd").is_err());
+        assert!(validate_created_workflow_name("has space").is_err());
+        assert!(validate_created_workflow_name("line\nbreak").is_err());
+        assert!(validate_created_workflow_name(&"a".repeat(MAX_CREATED_WORKFLOW_NAME_LEN)).is_ok());
+        assert!(
+            validate_created_workflow_name(&"a".repeat(MAX_CREATED_WORKFLOW_NAME_LEN + 1)).is_err()
+        );
+    }
+
+    /// The semantic pass `POST /api/workflows` runs must run here too — an agent-authored operator node is exactly as unrunnable as a hand-written one.
+    #[test]
+    fn build_created_workflow_runs_the_shared_semantic_validation() {
+        let s = spec(serde_json::json!([{
+            "name": "pause",
+            "agent": "writer",
+            "prompt_template": "",
+            "mode": { "wait": { "duration_secs": 0 } },
+        }]));
+        let err = build_created_workflow(&s).expect_err("a zero-second wait is rejected");
+        assert!(err.contains("wait.duration_secs"), "{err}");
+    }
+
+    /// The ceilings the tool schema advertises must be the ceilings this module enforces.
+    ///
+    /// They live in two crates — the schema in `librefang-runtime`, the limits here — so nothing but a test keeps them in step, and a model told one number and rejected at another burns a turn discovering the difference.
+    /// The kernel is the only place both are visible.
+    #[test]
+    fn the_tool_schema_advertises_the_ceilings_this_module_enforces() {
+        let defs = librefang_runtime::tool_runner::builtin_tool_definitions();
+        let schema = &defs
+            .iter()
+            .find(|d| d.name == "workflow_create")
+            .expect("workflow_create must be a builtin tool")
+            .input_schema;
+
+        assert_eq!(
+            schema["properties"]["steps"]["maxItems"].as_u64(),
+            Some(MAX_CREATED_WORKFLOW_STEPS as u64),
+            "advertised step ceiling must match the enforced one"
+        );
+        assert_eq!(
+            schema["properties"]["steps"]["items"]["properties"]["timeout_secs"]["maximum"]
+                .as_u64(),
+            Some(MAX_CREATED_STEP_TIMEOUT_SECS),
+            "advertised per-step timeout ceiling must match the enforced one"
+        );
+        assert_eq!(
+            schema["properties"]["total_timeout_secs"]["maximum"].as_u64(),
+            Some(MAX_CREATED_TOTAL_TIMEOUT_SECS),
+            "advertised total timeout ceiling must match the enforced one"
+        );
+        let name_doc = schema["properties"]["name"]["description"]
+            .as_str()
+            .expect("the name property must be documented");
+        assert!(
+            name_doc.contains(&format!("1-{MAX_CREATED_WORKFLOW_NAME_LEN}")),
+            "the name length rule must be advertised as enforced, got: {name_doc}"
+        );
+    }
+
+    /// Pins the operator-facing timeout text format.
+    /// Operators scrape for `"workflow run timed out after"` and pull the seconds field; any drift in this string is a breaking change to the contract the PR explicitly locks in.
+    /// If you need to change the format, announce it in the changelog under a breaking-change bullet and update this assertion.
     #[test]
     fn workflow_timeout_text_format_is_stable() {
         assert_eq!(

@@ -1732,6 +1732,9 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
                 }
                 _ => None,
             },
+            // Whether a memory is recallable only from the conversation that produced it (#7605).
+            // It governs whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn, so an operator who cannot read it here cannot audit their own isolation posture without opening `config.toml` on the host.
+            "session_scoped_recall": config.proactive_memory.session_scoped_recall,
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))
@@ -1840,6 +1843,9 @@ pub async fn memory_config_patch(
                 "extraction_model".into(),
                 toml::Value::String(v.to_string()),
             );
+        }
+        if let Some(v) = pm.get("session_scoped_recall").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("session_scoped_recall".into(), toml::Value::Boolean(v));
         }
         if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
             pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
@@ -1968,6 +1974,8 @@ pub async fn memory_config_patch(
                 .unwrap_or(live.proactive_memory.auto_retrieve),
             "extraction_model": toml_str(proactive_section, "extraction_model")
                 .or_else(|| live.proactive_memory.extraction_model.clone()),
+            "session_scoped_recall": toml_bool(proactive_section, "session_scoped_recall")
+                .unwrap_or(live.proactive_memory.session_scoped_recall),
             "max_retrieve": toml_u64(proactive_section, "max_retrieve")
                 .unwrap_or(live.proactive_memory.max_retrieve as u64),
         },

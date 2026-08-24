@@ -338,6 +338,75 @@ async fn workflow_create_parses_per_step_session_mode() {
     );
 }
 
+/// `GET /api/workflows/{id}` must name a step's agent binding with the same
+/// field names the create/update parser reads — `agent_id` / `agent_name`,
+/// not `id` / `name`.
+///
+/// Nothing pinned this before, and the dashboard canvas had drifted onto the
+/// wrong shape: it hydrated nodes from `step.agent.id` / `step.agent.name`,
+/// which are always absent, so loading a workflow that has no saved layout
+/// produced nodes with no agent and the canvas rebuilt it as zero steps
+/// (refs #7724). A symmetric read/write vocabulary is the contract every
+/// editing surface round-trips through, so it belongs in a test.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_get_names_the_step_agent_binding_the_way_create_reads_it() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "binding-vocabulary",
+            "steps": [
+                {"name": "by_id", "agent_id": agent_id, "prompt": "{{input}}"},
+                {"name": "by_name", "agent_name": "writer", "prompt": "{{input}}", "session_mode": "new"},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps array");
+    assert_eq!(steps.len(), 2);
+
+    assert_eq!(
+        steps[0]["agent"]["agent_id"], agent_id,
+        "an id binding must come back under `agent_id`"
+    );
+    assert!(
+        steps[0]["agent"]["agent_name"].is_null(),
+        "an id binding must not also claim a name the caller never sent"
+    );
+
+    assert_eq!(
+        steps[1]["agent"]["agent_name"], "writer",
+        "a name binding must come back under `agent_name`"
+    );
+    assert!(
+        steps[1]["agent"]["agent_id"].is_null(),
+        "a name binding must not invent an id"
+    );
+    assert_eq!(
+        steps[1]["session_mode"], "new",
+        "the per-step session override must ride along with a name binding too"
+    );
+
+    // The keys an editing surface must NOT look for. Asserting their absence
+    // is the half that catches a reader drifting back onto `{id, name}`.
+    assert!(
+        steps[0]["agent"]["id"].is_null() && steps[1]["agent"]["name"].is_null(),
+        "the payload must not carry a second, differently-named spelling of the binding"
+    );
+}
+
 /// POST /api/workflows with a well-formed `input_schema` array must
 /// accept it and GET /api/workflows/{id} must round-trip every declared
 /// row verbatim (#4982 — gap 2 parameter discovery). Pins the route
@@ -492,6 +561,142 @@ async fn workflow_create_skips_malformed_input_schema_rows() {
     let names: Vec<&str> = schema.iter().map(|p| p["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"topic"));
     assert!(names.contains(&"cover"));
+}
+
+/// The step parser must carry `required_skills` through POST, GET and PUT
+/// (#7721). Regression shape: a field the kernel struct has but the HTTP
+/// parser hardcodes to its default is exactly how `session_mode` was
+/// silently dropped at this same boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_round_trips_step_required_skills() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "needs-skills",
+            "steps": [
+                {
+                    "name": "extract",
+                    "agent_id": agent_id,
+                    "prompt": "go",
+                    // Deliberately unsorted with a duplicate: the parser
+                    // normalizes so the persisted workflow — and every error
+                    // rendered from it — is stable.
+                    "required_skills": ["pdf-extract", "browser-automation", "pdf-extract"]
+                },
+                {"name": "plain", "agent_id": agent_id, "prompt": "go"}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps");
+    assert_eq!(
+        steps[0]["required_skills"],
+        serde_json::json!(["browser-automation", "pdf-extract"]),
+        "required_skills must survive the round trip, sorted and deduplicated: {body:?}"
+    );
+    assert_eq!(
+        steps[1]["required_skills"],
+        serde_json::json!([]),
+        "a step with no requirement reads back as an empty list: {body:?}"
+    );
+
+    // PUT replaces the list rather than dropping it.
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({
+            "steps": [
+                {"name": "extract", "agent_id": agent_id, "prompt": "go", "required_skills": ["ocr"]}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["steps"][0]["required_skills"],
+        serde_json::json!(["ocr"]),
+        "{body:?}"
+    );
+}
+
+/// A malformed `required_skills` array is a 400, not a silent filter.
+/// `session_mode` and `input_schema` may degrade leniently because their
+/// fallback is merely less specific; dropping a `required_skills` entry
+/// turns off a gate the author asked for and hands back a workflow that
+/// looks validated and is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_malformed_required_skills() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    for (label, value) in [
+        ("non-array", serde_json::json!("pdf-extract")),
+        ("non-string entry", serde_json::json!(["pdf-extract", 7])),
+        ("blank entry", serde_json::json!(["pdf-extract", "   "])),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            "/api/workflows",
+            Some(serde_json::json!({
+                "name": "bad-skills",
+                "steps": [
+                    {"name": "extract", "agent_id": agent_id, "prompt": "go", "required_skills": value}
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{label} must be rejected, got {body:?}"
+        );
+        let msg = body["error"]
+            .as_str()
+            .or_else(|| body["error"]["message"].as_str())
+            .unwrap_or("");
+        assert!(
+            msg.contains("required_skills") && msg.contains("extract"),
+            "{label}: the error must name the field and the step; got {body:?}"
+        );
+    }
+}
+
+/// An explicit `null` and an absent key both mean "no requirement", so
+/// pre-#7721 payloads keep working unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_accepts_null_required_skills() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "null-skills",
+            "steps": [
+                {"name": "extract", "agent_id": agent_id, "prompt": "go", "required_skills": null}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

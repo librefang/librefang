@@ -441,6 +441,7 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     "registry/",
     "data/",
     "backups/",
+    "transient/",
     "*.db",
     "*.db-shm",
     "*.db-wal",

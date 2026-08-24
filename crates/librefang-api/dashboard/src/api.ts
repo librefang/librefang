@@ -597,6 +597,9 @@ export interface WorkflowStep {
   timeout_secs?: number;
   inherit_context?: boolean;
   depends_on?: string[];
+  /** Per-step `SessionMode` override. `null` / absent defers to the target
+   *  agent's manifest, which is how the API serializes an unset value. */
+  session_mode?: "persistent" | "new" | null;
 }
 
 export interface WorkflowLastRunSummary {
@@ -1650,9 +1653,50 @@ export async function listAgents(
   return data.items ?? [];
 }
 
+/**
+ * Where a catalog row comes from, and therefore whether this API can write it.
+ *
+ * `"agent-type"` is an operator-authored document under `agent-types/` that the
+ * write verbs own. `"agent"` is a live agent's own `agent.toml`, which is listed
+ * here because it is spawnable-from but is edited through `/api/agents` — the
+ * server refuses a `PUT`/`DELETE` aimed at one, so the editor must not offer the
+ * control in the first place (#7731).
+ */
+export type AgentTypeSource = "agent-type" | "agent";
+
 export interface AgentTemplate {
   name: string;
   description: string;
+  provider: string;
+  model: string;
+  source: AgentTypeSource;
+  editable: boolean;
+}
+
+/**
+ * The flat agent-type shape, as a **patch** (#7740).
+ *
+ * Every field is optional and the server treats absent and empty as different
+ * instructions: an omitted key keeps whatever is on disk, an empty string or
+ * empty array clears it. So a partial object is a legitimate save — send only
+ * what the form actually edits and everything else on the manifest survives.
+ */
+export interface AgentTypeSpec {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  provider?: string;
+  model?: string;
+  tools?: string[];
+  skills?: string[];
+}
+
+export interface AgentTypeDetail {
+  name: string;
+  source: AgentTypeSource;
+  editable: boolean;
+  spec: AgentTypeSpec;
+  manifest_toml: string;
 }
 
 export async function listAgentTemplates(): Promise<AgentTemplate[]> {
@@ -1662,6 +1706,25 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
   return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
+}
+
+export async function getAgentType(name: string): Promise<AgentTypeDetail> {
+  return get<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+export async function createAgentType(spec: AgentTypeSpec): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>("/api/templates", spec);
+}
+
+export async function updateAgentType(
+  name: string,
+  spec: AgentTypeSpec,
+): Promise<AgentTypeDetail> {
+  return put<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`, spec);
+}
+
+export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
@@ -3066,6 +3129,9 @@ export interface MemoryConfigResponse {
     extraction_degraded_reason?: string | null;
     /** The out-of-process extractor command, when one is what runs. */
     extraction_sidecar_command?: string | null;
+    /** Whether an auto-memorized memory is recallable only from the session that produced it (#7605).
+     *  `false` restores the agent-wide pool, where one visitor's turn on a shared agent can be retrieved into another visitor's turn. */
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
   /**
@@ -3091,6 +3157,7 @@ export async function updateMemoryConfig(payload: {
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
     extraction_model?: string;
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
 }): Promise<MemoryConfigResponse> {

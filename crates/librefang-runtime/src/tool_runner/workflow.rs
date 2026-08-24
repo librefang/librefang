@@ -324,6 +324,67 @@ pub(super) async fn tool_workflow_cancel(
 }
 
 // ---------------------------------------------------------------------------
+// workflow_create — define a new workflow from a conversation (#6934)
+// ---------------------------------------------------------------------------
+
+/// Register a new workflow from an agent-authored definition.
+///
+/// This handler stays deliberately thin.
+/// It checks only the two things it can name a parameter for — a payload missing `name` or `steps` — and forwards the spec to the kernel, which owns every real check: name legality, the resource ceilings, `Workflow::validate()`, and the atomic name reservation.
+/// Splitting those across the two layers is how the tool schema and the enforced rule drift apart, and the kernel is the only side that can make the uniqueness check atomic with the insert.
+///
+/// The whole `input` object is forwarded rather than a rebuilt subset, so a field added to the kernel-side spec is reachable from the tool the moment it exists.
+pub(super) async fn tool_workflow_create(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> ToolResult {
+    if !input["name"].is_string() {
+        return Err(ToolError::MissingParameter("name"));
+    }
+    let steps = input
+        .get("steps")
+        .ok_or(ToolError::MissingParameter("steps"))?;
+    if !steps.is_array() {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "must be an array of step objects".to_string(),
+        });
+    }
+
+    let kh = require_kernel_typed(kernel)?;
+    // `InvalidInput` (a spec that cannot become a workflow) and `Conflict` (the name is taken) both describe something the model can fix on its next turn, so the kernel's message is relayed as the reason rather than being flattened into an opaque upstream failure.
+    let summary = kh
+        .create_workflow(input, caller_agent_id)
+        .await
+        .map_err(|e| match e {
+            // The kernel's reason already names the offending field, so it is relayed whole rather than pinned to one schema parameter that may not be the one at fault.
+            librefang_types::error::LibreFangError::InvalidInput(reason) => {
+                ToolError::InvalidParameter {
+                    name: "workflow",
+                    reason,
+                }
+            }
+            librefang_types::error::LibreFangError::Conflict(reason) => {
+                ToolError::InvalidParameter {
+                    name: "name",
+                    reason,
+                }
+            }
+            other => ToolError::upstream(other),
+        })?;
+
+    Ok(serde_json::json!({
+        "id": summary.id,
+        "name": summary.name,
+        "description": summary.description,
+        "step_count": summary.step_count,
+        "has_input_schema": summary.has_input_schema,
+    })
+    .to_string())
+}
+
+// ---------------------------------------------------------------------------
 // workflow_describe — discover a workflow's input shape (#4982 — gap 2)
 // ---------------------------------------------------------------------------
 

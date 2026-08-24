@@ -260,6 +260,17 @@ pub struct ProactiveMemoryConfig {
     /// purely-text similarity score might miss.
     #[serde(default = "default_update_threshold_cross_category")]
     pub update_threshold_cross_category: f32,
+    /// Whether `auto_memorize` stamps each extracted memory with the session it came from, and `auto_retrieve` refuses to surface a memory stamped for a *different* session (#7605).
+    ///
+    /// The proactive store is per **agent**, not per conversation, so before this switch existed one visitor's turn on a public agent could be auto-retrieved into another visitor's turn purely through memory — even when the two turns were addressed to different `session_id`s and their message histories never touched.
+    /// Default `true`: a memory belongs to the conversation that produced it unless an operator says otherwise.
+    ///
+    /// Setting `false` restores the pre-#7605 behaviour (every memory of an agent is a candidate for every one of that agent's turns).
+    /// That is the right choice for a single-user assistant whose `session_mode = "new"` sub-agents are expected to inherit what earlier runs learned; it is the wrong choice for anything serving more than one person.
+    ///
+    /// Memories written before this shipped carry no session tag and stay recallable from every session, so turning it on does not hide an existing store.
+    #[serde(default = "default_true")]
+    pub session_scoped_recall: bool,
     /// Out-of-process memory extractor. When set, extraction is delegated to
     /// the configured subprocess (which may use its own LLM, a local model,
     /// embeddings, etc.) instead of the built-in LLM/rule-based extractor; the
@@ -361,6 +372,7 @@ impl Default for ProactiveMemoryConfig {
             format_context_max_chars: default_format_context_max_chars(),
             update_threshold_same_category: default_update_threshold_same_category(),
             update_threshold_cross_category: default_update_threshold_cross_category(),
+            session_scoped_recall: true,
             extractor_sidecar: None,
         }
     }
@@ -471,6 +483,13 @@ pub struct ProactiveMemoryOverrides {
     /// follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_model: Option<String>,
+    /// Override [`ProactiveMemoryConfig::session_scoped_recall`] (#7605).
+    ///
+    /// `Some(false)` lets one agent recall its own memories across every session while the deployment-wide default keeps sessions isolated — the escape hatch for a single-user agent whose `session_mode = "new"` runs are meant to build on each other.
+    /// `Some(true)` opts one agent into isolation when the global default was turned off.
+    /// `None` (the default) inherits the kernel-global value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_scoped_recall: Option<bool>,
 }
 
 impl ProactiveMemoryOverrides {
@@ -520,6 +539,14 @@ impl ProactiveMemoryOverrides {
             .cloned()
     }
 
+    /// Resolve the effective `session_scoped_recall` for this agent given the kernel-global `[proactive_memory]` defaults (#7605).
+    ///
+    /// Unlike [`Self::resolve_auto_retrieve`] this deliberately ignores the master `enabled` switch: `enabled = false` already means the agent performs no automatic recall at all, so there is nothing left for a scoping policy to decide, and folding it in here would make a disabled agent report "not session-scoped" — the more permissive of the two answers, which is the wrong way for a fail-safe to lean.
+    pub fn resolve_session_scoped_recall(&self, global: &ProactiveMemoryConfig) -> bool {
+        self.session_scoped_recall
+            .unwrap_or(global.session_scoped_recall)
+    }
+
     /// True when *no* field is set — equivalent to `Default::default()`.
     /// Used by call sites that want to skip the resolve dance entirely
     /// for the common "no override" case.
@@ -528,6 +555,7 @@ impl ProactiveMemoryOverrides {
             && self.auto_memorize.is_none()
             && self.auto_retrieve.is_none()
             && self.extraction_model.is_none()
+            && self.session_scoped_recall.is_none()
     }
 }
 
@@ -1645,6 +1673,38 @@ pub fn memory_scope_allows_recall(
     }
 }
 
+/// Metadata key under which `auto_memorize` records the session a memory was extracted from (#7605).
+///
+/// The value is the turn's `SessionId` rendered as a UUID string — the same identity `POST /api/agents/{id}/message` accepts as `session_id` and `librefang message --session-id` passes, resolved by the ladder in `docs/architecture/session-mode-resolution.md`.
+/// There is no second notion of a session here: whatever session the turn's history was read from and written back to is what gets stamped.
+///
+/// Distinct from [`CHAT_SCOPE_METADATA_KEY`], which answers "which chat on which channel" and is `None` for every non-channel caller (dashboard, REST, CLI) — precisely the callers a multi-user deployment uses.
+pub const SESSION_SCOPE_METADATA_KEY: &str = "session_scope";
+
+/// Decide whether a memory may surface in a recall running under session `current` (#7605).
+///
+/// Two classes pass:
+///
+/// 1. Memories with no [`SESSION_SCOPE_METADATA_KEY`] tag — every row written before this shipped, plus anything stored by hand through the memory tools or the dashboard. Hiding them would blank out existing stores on upgrade, so they stay session-agnostic.
+/// 2. Memories stamped with `current`.
+///
+/// Everything else is filtered out.
+///
+/// Unlike [`memory_scope_allows_recall`] there is **no `MemoryLevel::User` exemption**.
+/// The cross-chat filter can afford one because the chats it separates belong to the same person; the sessions this separates routinely belong to different people, and "user-level" is exactly where an extractor files the personal details that must not cross ("my customer code is PINE-77").
+/// A level-based exemption here would leave the reported leak open on the highest-value rows.
+pub fn memory_session_scope_allows_recall(
+    metadata: &HashMap<String, serde_json::Value>,
+    current: &str,
+) -> bool {
+    match metadata.get(SESSION_SCOPE_METADATA_KEY) {
+        Some(serde_json::Value::String(s)) => s == current,
+        // No tag (or a non-string sentinel written by an older/foreign
+        // producer) → session-agnostic.
+        _ => true,
+    }
+}
+
 /// Trait for proactive memory hooks (auto_memorize, auto_retrieve).
 ///
 /// This provides hooks for automatic memory extraction and retrieval:
@@ -1659,12 +1719,16 @@ pub trait ProactiveMemoryHooks: Send + Sync {
     /// **different** chat (same peer) will not surface it (#5227). Pass `None`
     /// when the caller has no channel context (e.g. direct API, dashboard) —
     /// memories then remain chat-agnostic.
+    ///
+    /// When `session_scope` is `Some`, the session that produced the turn is stamped under [`SESSION_SCOPE_METADATA_KEY`] and a later recall running under a *different* session will not surface the memory (#7605).
+    /// Pass `None` to store session-agnostic memories — that is what a caller does when the operator has turned [`ProactiveMemoryConfig::session_scoped_recall`] off, and it is the pre-#7605 behaviour.
     async fn auto_memorize(
         &self,
         user_id: &str,
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
     /// Proactively retrieve relevant context before agent execution.
@@ -1673,12 +1737,16 @@ pub trait ProactiveMemoryHooks: Send + Sync {
     /// chat scope are filtered out post-recall — chat-agnostic memories
     /// (no scope tag, or stamped with the current scope) still surface.
     /// This is the read side of the #5227 cross-chat isolation guard.
+    ///
+    /// When `session_scope` is `Some`, memories stamped for a **different** session are dropped post-recall; untagged memories still surface.
+    /// This is the read side of the #7605 cross-session isolation guard, and it composes with the chat filter rather than replacing it — a memory has to clear both.
     async fn auto_retrieve(
         &self,
         user_id: &str,
         query: &str,
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 }
 
@@ -1857,6 +1925,7 @@ mod tests {
             auto_memorize: Some(true), // Set but should be ignored.
             auto_retrieve: Some(true),
             extraction_model: None,
+            session_scoped_recall: None,
         };
         assert!(
             !overrides.resolve_auto_memorize(&global),
@@ -1932,6 +2001,7 @@ mod tests {
             auto_memorize: Some(false),
             auto_retrieve: None,
             extraction_model: Some("openai/gpt-4o-mini".to_string()),
+            session_scoped_recall: None,
         };
         let toml = toml::to_string(&overrides).expect("serialize");
         // Only the set fields are emitted (skip_serializing_if on None).
@@ -1948,6 +2018,135 @@ mod tests {
             parsed.extraction_model,
             Some("openai/gpt-4o-mini".to_string())
         );
+    }
+
+    #[test]
+    fn session_scope_filter_hides_other_sessions_and_keeps_untagged_rows() {
+        let tagged = |scope: &str| {
+            let mut m = HashMap::new();
+            m.insert(
+                SESSION_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(scope.to_string()),
+            );
+            m
+        };
+        let a = "11111111-1111-4111-8111-111111111111";
+        let b = "22222222-2222-4222-8222-222222222222";
+
+        assert!(
+            memory_session_scope_allows_recall(&tagged(a), a),
+            "a memory must surface in the session that produced it"
+        );
+        assert!(
+            !memory_session_scope_allows_recall(&tagged(a), b),
+            "regression #7605: a memory written in session A must not surface in session B"
+        );
+        assert!(
+            memory_session_scope_allows_recall(&HashMap::new(), a),
+            "rows written before #7605 carry no tag and must stay recallable"
+        );
+    }
+
+    /// The chat filter exempts `MemoryLevel::User`; the session filter must
+    /// not. Personal details are exactly what an extractor files as
+    /// user-level, and on a public agent two sessions are two people.
+    #[test]
+    fn session_scope_filter_has_no_user_level_exemption() {
+        let mut meta = HashMap::new();
+        meta.insert(
+            SESSION_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String("session-a".to_string()),
+        );
+        meta.insert(
+            CHAT_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String("whatsapp:group".to_string()),
+        );
+
+        assert!(
+            memory_scope_allows_recall(MemoryLevel::User.scope_str(), &meta, "whatsapp:dm"),
+            "precondition: the chat filter exempts user-level memories"
+        );
+        assert!(
+            !memory_session_scope_allows_recall(&meta, "session-b"),
+            "a user-level memory from session A must still be blocked in session B"
+        );
+    }
+
+    #[test]
+    fn session_scoped_recall_defaults_on_and_is_overridable_per_agent() {
+        let global = ProactiveMemoryConfig::default();
+        assert!(
+            global.session_scoped_recall,
+            "sessions are isolated by default — a public agent must not leak one visitor's memories into another's turn without the operator opting into that"
+        );
+
+        let inherit = ProactiveMemoryOverrides::default();
+        assert!(
+            inherit.resolve_session_scoped_recall(&global),
+            "an agent that sets nothing inherits the global policy"
+        );
+        assert!(inherit.is_empty());
+
+        let opt_out = ProactiveMemoryOverrides {
+            session_scoped_recall: Some(false),
+            ..Default::default()
+        };
+        assert!(
+            !opt_out.resolve_session_scoped_recall(&global),
+            "a single-user agent must be able to keep the pre-#7605 agent-wide memory pool"
+        );
+        assert!(
+            !opt_out.is_empty(),
+            "is_empty gates the fast path in the runtime; a set override must not look empty"
+        );
+
+        let global_off = ProactiveMemoryConfig {
+            session_scoped_recall: false,
+            ..Default::default()
+        };
+        assert!(
+            !ProactiveMemoryOverrides::default().resolve_session_scoped_recall(&global_off),
+            "the global off switch reaches agents that set nothing"
+        );
+        let opt_in = ProactiveMemoryOverrides {
+            session_scoped_recall: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            opt_in.resolve_session_scoped_recall(&global_off),
+            "one agent must be able to isolate itself when the deployment default is off"
+        );
+    }
+
+    /// `enabled = false` means the agent does no automatic recall at all, so
+    /// the scoping question is moot — but it must not resolve to the
+    /// *permissive* answer, or a later refactor that consults this before the
+    /// enabled check would silently un-scope the agent.
+    #[test]
+    fn session_scoped_recall_ignores_the_master_switch() {
+        let global = ProactiveMemoryConfig::default();
+        let disabled = ProactiveMemoryOverrides {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(disabled.resolve_session_scoped_recall(&global));
+    }
+
+    #[test]
+    fn session_scoped_recall_survives_a_config_roundtrip() {
+        let cfg = ProactiveMemoryConfig {
+            session_scoped_recall: false,
+            ..Default::default()
+        };
+        let toml = toml::to_string(&cfg).expect("serialize");
+        let parsed: ProactiveMemoryConfig = toml::from_str(&toml).expect("deserialize");
+        assert!(!parsed.session_scoped_recall);
+
+        // An operator's config.toml predating this field must keep the
+        // isolating default rather than deserializing to `false`.
+        let legacy: ProactiveMemoryConfig =
+            toml::from_str("auto_memorize = true\n").expect("deserialize legacy");
+        assert!(legacy.session_scoped_recall);
     }
 
     #[test]
