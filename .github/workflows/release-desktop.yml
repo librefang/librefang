@@ -46,7 +46,7 @@ jobs:
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
-    timeout-minutes: 300
+    timeout-minutes: 345
     environment: release-desktop
     strategy:
       fail-fast: false

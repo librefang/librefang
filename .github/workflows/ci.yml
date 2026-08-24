@@ -534,6 +534,29 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/check-changelog-attribution.py
 
+  # ── Workflow job timeout coverage ─────────────────────────────────────────────
+  # A job with no `timeout-minutes` inherits GitHub's 360-minute default, which is
+  # long enough for a wedged job to hold one of the repository's few concurrent
+  # execution slots for six hours. That is not hypothetical: two `main` CI runs hung
+  # `in_progress` and starved more than eighty queued runs behind them. On `main` the
+  # concurrency group is per-sha with `cancel-in-progress: false` by design, so nothing
+  # supersedes a hung run and only the timeout can end it.
+  # Coverage regresses silently — every new job inherits the default unless its author
+  # remembers the key — so it is guarded rather than left to review.
+  workflow-timeouts:
+    name: Workflow Job Timeouts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+      - name: Every workflow job declares timeout-minutes
+        run: python3 scripts/check-workflow-timeouts.py
+
   # ── CHANGELOG attribution release gate (#3307) ────────────────────────────────
   # Complements the per-PR diff check above by scanning the ENTIRE [Unreleased]
   # block — not just what this diff adds. Catches entries that slipped past
@@ -1205,6 +1228,7 @@ jobs:
       - install-smoke
       - live-integration-smoke
       - agents-claude-pair
+      - workflow-timeouts
       - test-unit
       - test-ubuntu
       - test-aarch64-build

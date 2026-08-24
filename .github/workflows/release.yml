@@ -1659,7 +1659,7 @@ jobs:
             rust_target: aarch64-pc-windows-msvc
 
     runs-on: ${{ matrix.platform.os }}
-    timeout-minutes: 300
+    timeout-minutes: 345
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
