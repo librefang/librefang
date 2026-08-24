@@ -44,6 +44,7 @@ export {
   // config & registry
   getFullConfig,
   getConfigSchema,
+  getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
   // goals

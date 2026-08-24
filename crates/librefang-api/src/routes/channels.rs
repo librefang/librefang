@@ -1172,6 +1172,7 @@ fn write_sidecar_configuration(
         (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
         (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
         (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; declare the sidecar in the manifest instead.", body = crate::types::JsonObject),
         (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
     )
 )]
@@ -1180,6 +1181,13 @@ pub async fn configure_sidecar_channel(
     Path(name): Path<String>,
     Json(body): Json<ConfigureSidecarBody>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // 0. Managed mode (#6695) — refused in full, before the catalog lookup and before either file is opened.
+    //    The scope matches `set_provider_key` rather than the narrow config-only guards: this handler writes `secrets.env` and `config.toml` inside one `spawn_blocking` call (`write_sidecar_configuration`), so a guard placed at the config write would already have persisted the secrets half and mutated the process environment before refusing.
+    //    Refusing up front keeps the request atomic and states the contract plainly: in a managed deployment a sidecar channel is declared as `[[sidecar_channels]]` in the manifest, with its secrets supplied from the pod environment.
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return Err(locked);
+    }
+
     // 1. Catalog lookup — only first-party adapters listed in
     //    SIDECAR_CATALOG can be configured through this endpoint.
     let entry = SIDECAR_CATALOG
@@ -1320,13 +1328,20 @@ pub async fn configure_sidecar_channel(
     ),
     responses(
         (status = 200, description = "Removed; reload plan returned. Body fields: `status` (\"removed\"), `hot_actions_applied` ([String]), `restart_required` (bool).", body = crate::types::JsonObject),
-        (status = 404, description = "No configured sidecar channel with that name", body = crate::types::JsonObject)
+        (status = 404, description = "No configured sidecar channel with that name", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; remove the entry from the manifest instead.", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_sidecar_channel(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // Managed mode (#6695) — refused before the rewrite, so the `[[sidecar_channels]]` block a manifest declared cannot be deleted out from under it.
+    // The guard precedes the 404 branch on purpose: whether the entry exists is a fact about the managed file, and answering `404` first would tell a caller which manifest entries are present through a route that is not allowed to act on any of them.
+    if let Some(locked) = crate::routes::guard_config_write() {
+        return Err(locked);
+    }
+
     let config_path = state.kernel.home_dir().join("config.toml");
 
     // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
