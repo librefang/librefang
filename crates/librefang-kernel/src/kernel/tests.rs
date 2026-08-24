@@ -15230,8 +15230,8 @@ fn semantic_memory_tools_available_with_wildcard_memory_scopes() {
             "gate-wildcard-agent",
             ManifestCapabilities {
                 tools: vec!["memory_*".to_string()],
-                memory_read: vec!["*".to_string()],
-                memory_write: vec!["*".to_string()],
+                memory_read: Some(vec!["*".to_string()]),
+                memory_write: Some(vec!["*".to_string()]),
                 ..Default::default()
             },
         ),
@@ -15258,8 +15258,8 @@ fn semantic_memory_tools_are_withheld_when_scopes_cover_only_kv() {
             "gate-kv-only-agent",
             ManifestCapabilities {
                 tools: vec!["memory_*".to_string()],
-                memory_read: vec!["kv:*".to_string()],
-                memory_write: vec!["kv:*".to_string()],
+                memory_read: Some(vec!["kv:*".to_string()]),
+                memory_write: Some(vec!["kv:*".to_string()]),
                 ..Default::default()
             },
         ),
@@ -15295,8 +15295,8 @@ fn semantic_memory_read_and_write_halves_are_gated_independently() {
             "gate-read-only-agent",
             ManifestCapabilities {
                 tools: vec!["memory_*".to_string()],
-                memory_read: vec!["proactive".to_string()],
-                memory_write: vec!["kv:*".to_string()],
+                memory_read: Some(vec!["proactive".to_string()]),
+                memory_write: Some(vec!["kv:*".to_string()]),
                 ..Default::default()
             },
         ),
@@ -15329,8 +15329,8 @@ fn explicitly_named_semantic_tool_overrides_the_scope_gate() {
             "gate-explicit-agent",
             ManifestCapabilities {
                 tools: vec!["memory_semantic_search".to_string()],
-                memory_read: vec!["kv:*".to_string()],
-                memory_write: vec!["kv:*".to_string()],
+                memory_read: Some(vec!["kv:*".to_string()]),
+                memory_write: Some(vec!["kv:*".to_string()]),
                 ..Default::default()
             },
         ),

@@ -127,6 +127,11 @@ Claude must not execute it — prepare the commands from `docs/development/build
   See `docs/architecture/trigger-dispatch-concurrency.md`.
 - **Config hot-reload classification** — which `KernelConfig` fields hot-reload, which need a restart, which are read-live/noop — is decided by `build_reload_plan` in `crates/librefang-kernel/src/config_reload.rs`.
   Consult the drift-guarded table at `docs/operations/config-reload.md` before assuming a config edit takes effect on `POST /api/config/reload`.
+- **Automatic memory is scoped three ways** (#7605): `capabilities.memory_read` / `memory_write` in `agent.toml` gate the auto paths, the #5227 `chat_scope` stamp separates chats, and the `session_scope` stamp separates sessions.
+  The two capability lists are **tri-state** — an absent key means "unrestricted" as everywhere else in a manifest, but `memory_read = []` is a declared-empty list that denies, which is why they are `Option<Vec<String>>` and must be read through `ManifestCapabilities::allows_own_memory_read` / `allows_own_memory_write`.
+  Session scoping is on by default (`config.toml: [proactive_memory] session_scoped_recall`, per-agent override in `agent.toml`); it uses the session the turn already belongs to, never a second notion of one.
+  The one behaviour it changes for an agent that configures nothing is `session_mode = "new"`, whose fresh-per-invocation sessions no longer recall each other's memories.
+  See `docs/architecture/proactive-memory-scoping.md`.
 - **Skill workshop** (#3328) passively captures teaching signals from successful turns into draft skills under `~/.librefang/skills/pending/<agent>/<uuid>.toml`.
   **Default-OFF — opt in per agent** with `[skill_workshop] enabled = true` in `agent.toml` (or the matching `[agents.<name>]` section of a `HAND.toml`); source of truth is `SkillWorkshopConfig::default()` in `crates/librefang-types/src/agent.rs`.
   Approval routes through `evolution::create_skill`, so the prompt-injection scan runs at both `save_candidate` and `approve_candidate` — every artefact the agent can see has crossed the same security boundary as a marketplace skill.

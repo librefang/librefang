@@ -1552,18 +1552,14 @@ impl LibreFangKernel {
     /// Whether one declared `memory_read` / `memory_write` scope covers the
     /// agent's own semantic memory.
     ///
-    /// Three accepting forms, each for a concrete reason:
-    ///   * `*` — the unrestricted grant.
-    ///   * `self.*` — what every non-memory [`ToolProfile`] implies for
-    ///     `memory_write`. Those profiles mean "this agent may write its own
-    ///     memory", not "this agent may not use the semantic store", so
-    ///     matching it literally against `proactive` would strip the write
-    ///     tools from every profile-based agent.
-    ///   * anything glob-matching `proactive`, the namespace string the
-    ///     per-user ACL and the REST layer already use for this store — so an
-    ///     operator can name it explicitly.
+    /// Thin re-export of
+    /// [`librefang_types::capability::scope_covers_own_memory`], which moved
+    /// to the types crate in #7605 so the automatic memorize / retrieve gate
+    /// in `librefang-runtime` answers this question identically to the tool
+    /// gate here. Kept as an associated function because the `tool_allowlist`
+    /// diagnostic and the tests call it by that name.
     pub fn scope_covers_own_memory(scope: &str) -> bool {
-        scope == "*" || scope == "self.*" || glob_matches(scope, "proactive")
+        librefang_types::capability::scope_covers_own_memory(scope)
     }
 
     pub fn is_evolve_tool(name: &str) -> bool {

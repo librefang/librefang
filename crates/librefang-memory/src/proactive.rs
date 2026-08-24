@@ -31,11 +31,12 @@ use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    memory_scope_allows_recall, text_similarity, DefaultMemoryExtractor, Entity, EntityType,
-    ExtractionResult, GraphPattern, MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor,
-    MemoryFilter, MemoryFragment, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
-    ProactiveMemoryConfig, ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
-    CHAT_SCOPE_METADATA_KEY,
+    memory_scope_allows_recall, memory_session_scope_allows_recall, text_similarity,
+    DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern, MemoryAction,
+    MemoryAddResult, MemoryConflict, MemoryExtractor, MemoryFilter, MemoryFragment, MemoryId,
+    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
+    ProactiveMemoryHooks, Relation, RelationTriple, RelationType, CHAT_SCOPE_METADATA_KEY,
+    SESSION_SCOPE_METADATA_KEY,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -738,6 +739,7 @@ impl ProactiveMemoryStore {
         item: &MemoryItem,
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
         // Generate embedding for the new memory (if driver available)
         let query_embedding = if let Some(ref emb) = self.embedding {
@@ -860,6 +862,20 @@ impl ProactiveMemoryStore {
         if chat_scope_active && item.level != MemoryLevel::User {
             let want = chat_scope.unwrap();
             existing.retain(|frag| memory_scope_allows_recall(&frag.scope, &frag.metadata, want));
+        }
+        // Same treatment for the session scope (#7605), and for the same
+        // reason: a candidate belonging to ANOTHER session must not be
+        // reachable by the ADD/UPDATE/NOOP decision, or one visitor's turn
+        // would either NOOP against a stranger's memory (losing the fact) or
+        // UPDATE it in place (overwriting a stranger's memory with, and
+        // exposing it to, this turn's content).
+        //
+        // No `MemoryLevel::User` exemption here, unlike the chat filter
+        // above: two sessions of a public agent are two different people, so
+        // "this is a stable user fact" is a reason to keep the rows apart,
+        // not to merge them.
+        if let Some(want) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+            existing.retain(|frag| memory_session_scope_allows_recall(&frag.metadata, want));
         }
         // Truncate back to the extractor's expected window so we don't
         // hand it 20 candidates when it was tuned for 5.
@@ -2109,7 +2125,9 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Step 2-4: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
-            let result = self.add_with_decision(agent_id, item, None, None).await?;
+            let result = self
+                .add_with_decision(agent_id, item, None, None, None)
+                .await?;
             if let Some(r) = result {
                 results.push(r.item);
             }
@@ -2580,6 +2598,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<ExtractionResult> {
         let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_memorize || conversation.is_empty() {
@@ -2657,9 +2676,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                     );
                 }
             }
+            // #7605: stamp the session the turn belongs to, so a memory
+            // extracted while serving one visitor cannot be recalled into
+            // another visitor's turn on the same agent. Every level is
+            // stamped, including `MemoryLevel::User` — see
+            // `memory_session_scope_allows_recall` for why that one has no
+            // exemption. A caller that wants the pre-#7605 agent-wide pool
+            // passes `None`.
+            if let Some(scope) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+                enriched.metadata.insert(
+                    SESSION_SCOPE_METADATA_KEY.to_string(),
+                    serde_json::Value::String(scope.to_string()),
+                );
+            }
 
             match self
-                .add_with_decision(agent_id, &enriched, peer_id, chat_scope)
+                .add_with_decision(agent_id, &enriched, peer_id, chat_scope, session_scope)
                 .await
             {
                 Ok(Some(result)) => {
@@ -2773,6 +2805,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         query: &str,
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<Vec<MemoryItem>> {
         let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_retrieve {
@@ -2801,7 +2834,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // bug reproducer (DM and group turns interleaving within minutes
         // for the same agent+peer).
         let chat_scope_active = chat_scope.map(str::trim).is_some_and(|s| !s.is_empty());
-        let fetch_limit = if chat_scope_active {
+        // #7605 widens the same window for the same reason: the session
+        // post-filter below also throws candidates away, and on a public
+        // agent it throws away far more of them than the chat filter does
+        // (every other visitor's rows), so the two share one inflated fetch.
+        let active_session_scope = session_scope.map(str::trim).filter(|s| !s.is_empty());
+        let fetch_limit = if chat_scope_active || active_session_scope.is_some() {
             (cfg.max_retrieve * 4).max(50)
         } else {
             cfg.max_retrieve
@@ -2831,16 +2869,23 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         //      chat-agnostic to avoid silently hiding existing data.
         //   3. Memories whose `chat_scope` equals the active scope —
         //      same chat, same context, safe to surface.
-        let filtered: Vec<MemoryItem> = if chat_scope_active {
-            let want = chat_scope.unwrap();
-            items
-                .into_iter()
-                .filter(|m| memory_chat_scope_allows(m, want))
-                .take(cfg.max_retrieve)
-                .collect()
-        } else {
-            items.into_iter().take(cfg.max_retrieve).collect()
-        };
+        //
+        // The #7605 session filter composes with it: a memory has to clear
+        // both, and it is applied to every level (no `MemoryLevel::User`
+        // exemption) because distinct sessions of a public agent are
+        // distinct people.
+        let filtered: Vec<MemoryItem> = items
+            .into_iter()
+            .filter(|m| match chat_scope.filter(|_| chat_scope_active) {
+                Some(want) => memory_chat_scope_allows(m, want),
+                None => true,
+            })
+            .filter(|m| match active_session_scope {
+                Some(want) => memory_session_scope_allows_recall(&m.metadata, want),
+                None => true,
+            })
+            .take(cfg.max_retrieve)
+            .collect();
 
         Ok(filtered)
     }
@@ -2964,6 +3009,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2991,6 +3037,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3015,7 +3062,7 @@ mod tests {
 
         // Retrieve - should find content from this agent
         let results = store
-            .auto_retrieve(&agent_id, "dark mode", None, None)
+            .auto_retrieve(&agent_id, "dark mode", None, None, None)
             .await
             .unwrap();
         assert!(!results.is_empty());
@@ -3099,7 +3146,13 @@ mod tests {
 
         // DM-scoped recall must NOT see the group-scoped Atlas memory.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(dm_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(dm_scope),
+                None,
+            )
             .await
             .unwrap();
         for c in dm_hits.iter().map(|m| m.content.as_str()) {
@@ -3117,6 +3170,7 @@ mod tests {
                 "project Atlas",
                 Some(peer),
                 Some(group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3128,7 +3182,7 @@ mod tests {
 
         // Legacy unscoped memory crosses chats — both recalls hit it.
         let legacy_in_dm = store
-            .auto_retrieve(&agent_id_str, "dark mode", Some(peer), Some(dm_scope))
+            .auto_retrieve(&agent_id_str, "dark mode", Some(peer), Some(dm_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3139,7 +3193,7 @@ mod tests {
         // User-level memory crosses chats too — its stamped scope is
         // ignored because of the level-User exemption.
         let user_in_group = store
-            .auto_retrieve(&agent_id_str, "John", Some(peer), Some(group_scope))
+            .auto_retrieve(&agent_id_str, "John", Some(peer), Some(group_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3150,7 +3204,7 @@ mod tests {
         // When chat_scope is None (no channel context — e.g. dashboard,
         // direct API), the filter is a no-op and everything is visible.
         let unscoped = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), None)
+            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), None, None)
             .await
             .unwrap();
         assert!(
@@ -3165,6 +3219,177 @@ mod tests {
     /// `MemoryLevel::User` memory; that's fine — the assertion is only
     /// about the metadata key being present and equal to the scope
     /// supplied by the caller. (Level-User exemption is verified
+    /// #7605 — the reported privacy leak, end to end through the store.
+    ///
+    /// A public agent serves every website visitor from one per-agent memory
+    /// store. Before this fix, a fact auto-memorized while serving visitor A
+    /// was auto-retrieved into visitor B's turn even though the two turns were
+    /// addressed to different `session_id`s and their message histories never
+    /// touched — which is why the reporter was calling
+    /// `DELETE /api/memory/agents/{id}` before every turn.
+    #[tokio::test]
+    async fn auto_memorize_then_retrieve_does_not_cross_sessions_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let stored = store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer dark mode and my customer code is PINE-77"
+                })],
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        assert!(stored.has_content, "extractor must produce a memory");
+
+        let in_b = store
+            .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session_b))
+            .await
+            .unwrap();
+        assert!(
+            in_b.is_empty(),
+            "regression #7605: session A's memories reached session B's turn: {:?}",
+            in_b.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+
+        let in_a = store
+            .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session_a))
+            .await
+            .unwrap();
+        assert!(
+            !in_a.is_empty(),
+            "the session that produced the memory must still recall it — the filter must not over-prune"
+        );
+    }
+
+    /// The isolation must not blank out an existing store on upgrade: rows
+    /// written before #7605 carry no session tag and stay recallable from
+    /// every session. And a caller that passes no session scope (the operator
+    /// turned `session_scoped_recall` off) gets the old agent-wide pool back.
+    #[tokio::test]
+    async fn untagged_memories_and_unscoped_callers_keep_pre_7605_recall() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        // Legacy row: written with no session scope at all.
+        store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer dark mode in every editor"
+                })],
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        for session in [session_a, session_b] {
+            let hits = store
+                .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session))
+                .await
+                .unwrap();
+            assert!(
+                !hits.is_empty(),
+                "untagged legacy memory must stay recallable from session {session}"
+            );
+        }
+
+        // Now a session-A row, recalled by a caller that opted out of scoping.
+        store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer tabs over spaces, customer code PINE-77"
+                })],
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        let unscoped = store
+            .auto_retrieve(&agent_id_str, "tabs over spaces", None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            unscoped
+                .iter()
+                .any(|m| m.content.contains("tabs over spaces")),
+            "with session scoping off the whole agent pool is a candidate again; got {:?}",
+            unscoped.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// The dedup decision runs over a candidate set fetched from the whole
+    /// agent's store. Without the same session filter there, session B's turn
+    /// could NOOP against a stranger's row (losing the fact) or UPDATE it in
+    /// place — overwriting one visitor's memory with another's content.
+    #[tokio::test]
+    async fn dedup_candidates_do_not_cross_sessions_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let make = |content: &str, session: &str| {
+            let mut item = MemoryItem::new(content.to_string(), MemoryLevel::Session);
+            item.metadata.insert(
+                SESSION_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(session.to_string()),
+            );
+            item
+        };
+
+        let first = store
+            .add_with_decision(
+                agent_id,
+                &make("Customer code is PINE-77", session_a),
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        assert!(first.is_some(), "the first write must land");
+
+        let second = store
+            .add_with_decision(
+                agent_id,
+                &make("Customer code is PINE-77", session_b),
+                None,
+                None,
+                Some(session_b),
+            )
+            .await
+            .unwrap();
+        let second = second.expect(
+            "an identical fact from a DIFFERENT session must ADD its own row, not dedupe against the other session's",
+        );
+        assert_ne!(
+            second.item.id,
+            first.unwrap().item.id,
+            "regression #7605: session B's write was folded into session A's memory"
+        );
+    }
+
     /// separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
     #[tokio::test]
     async fn test_auto_memorize_stamps_chat_scope_5227() {
@@ -3187,6 +3412,7 @@ mod tests {
                 })],
                 Some(peer),
                 Some(group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3342,7 +3568,13 @@ mod tests {
 
         // DM-scope recall must NOT see the group memory.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(&dm_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(&dm_scope),
+                None,
+            )
             .await
             .unwrap();
         for content in dm_hits.iter().map(|m| m.content.as_str()) {
@@ -3361,6 +3593,7 @@ mod tests {
                 "project Atlas",
                 Some(peer),
                 Some(&group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3422,7 +3655,7 @@ mod tests {
         // 1) First chat (DM): write the fact. Empty substrate → ADD.
         let dm_item = make_item("My deadline is Friday", &dm_scope);
         let dm_result = store
-            .add_with_decision(agent_id, &dm_item, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &dm_item, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(dm_result.is_some(), "first write must ADD");
@@ -3433,7 +3666,7 @@ mod tests {
         //    and the extractor picks ADD again.
         let group_item = make_item("My deadline is Friday", &group_scope);
         let group_result = store
-            .add_with_decision(agent_id, &group_item, Some(peer), Some(&group_scope))
+            .add_with_decision(agent_id, &group_item, Some(peer), Some(&group_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3445,7 +3678,7 @@ mod tests {
         // 3) Both scope-matching recalls must surface the fact for their
         //    chat.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&dm_scope))
+            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3454,7 +3687,13 @@ mod tests {
             dm_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
         );
         let group_hits = store
-            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&group_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "deadline",
+                Some(peer),
+                Some(&group_scope),
+                None,
+            )
             .await
             .unwrap();
         assert!(
@@ -3470,7 +3709,7 @@ mod tests {
         //    inside one chat.
         let same_chat_dupe = make_item("My deadline is Friday", &dm_scope);
         let dupe_result = store
-            .add_with_decision(agent_id, &same_chat_dupe, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &same_chat_dupe, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         // The DefaultMemoryExtractor decides NOOP for an exact-content
@@ -3516,7 +3755,7 @@ mod tests {
         // First write: ADD.
         let first = make_user_item("User's name is John Doe", &dm_scope);
         let r1 = store
-            .add_with_decision(agent_id, &first, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &first, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(r1.is_some(), "first user-level write must ADD");
@@ -3526,7 +3765,7 @@ mod tests {
         // a second physical row.
         let second = make_user_item("User's name is John Doe", &group_scope);
         let r2 = store
-            .add_with_decision(agent_id, &second, Some(peer), Some(&group_scope))
+            .add_with_decision(agent_id, &second, Some(peer), Some(&group_scope), None)
             .await
             .unwrap();
         if let Some(r) = &r2 {
@@ -4245,6 +4484,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -4268,6 +4508,7 @@ mod tests {
                     "role": "user",
                     "content": "I use vim for editing"
                 })],
+                None,
                 None,
                 None,
             )

@@ -2350,6 +2350,7 @@ session_ttl_hours = 24
 duplicate_threshold = 0.5
 confidence_decay_rate = 0.01
 max_memories_per_agent = 1000
+session_scoped_recall = true
 ```
 
 | Field | Type | Default | Description |
@@ -2365,10 +2366,11 @@ max_memories_per_agent = 1000
 | `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
 | `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
 | `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, oldest/lowest-confidence entries are evicted. `0` = no cap. |
+| `session_scoped_recall` | bool | `true` | (#7605) Stamp each auto-memorized memory with the session that produced it, and refuse to auto-retrieve a memory stamped for a different session. Keeps one visitor's content out of another visitor's turn on an agent that serves several people. Memories written before this shipped carry no stamp and stay recallable everywhere. Set `false` for a single agent-wide pool — the pre-#7605 behaviour, and what an agent with `session_mode = "new"` wants if its runs are meant to build on each other. |
 
 #### Per-agent overrides
 
-Each agent's `agent.toml` may carry a `[proactive_memory]` block that overrides selected fields of the kernel-global config above for that agent only. Unset fields inherit the global. All four override fields are optional:
+Each agent's `agent.toml` may carry a `[proactive_memory]` block that overrides selected fields of the kernel-global config above for that agent only. Unset fields inherit the global. All five override fields are optional:
 
 ```toml
 # agent.toml
@@ -2377,6 +2379,7 @@ Each agent's `agent.toml` may carry a `[proactive_memory]` block that overrides 
 # auto_memorize = false                 # skip the after-turn extraction call
 # auto_retrieve = false                 # skip the before-turn retrieval injection
 # extraction_model = "openai/gpt-4o-mini"   # use a different extractor model for this agent
+# session_scoped_recall = false         # let this agent recall its memories across all of its sessions
 ```
 
 | Field | Notes |
@@ -2384,6 +2387,7 @@ Each agent's `agent.toml` may carry a `[proactive_memory]` block that overrides 
 | `enabled` | `Some(false)` disables proactive memory for this agent regardless of the global. `Some(true)` is documented but not load-bearing — the global `enabled = false` short-circuits store construction at boot. |
 | `auto_memorize` | `Some(false)` skips the after-turn extraction. Useful for cron sub-agents whose tool-only turns produce extraction noise. |
 | `auto_retrieve` | `Some(false)` skips the before-turn memory injection. Useful when an agent's prompt is already memory-heavy. |
+| `session_scoped_recall` | (#7605) `Some(false)` gives this agent one memory pool across all of its sessions; `Some(true)` isolates it when the deployment default is off. Unrelated to `enabled` — a disabled agent does no automatic recall at all, so there is nothing left to scope. |
 | `extraction_model` | (#5475) Per-agent extraction model. Same shape as the global `extraction_model` (`provider/model`, `provider:model`, or bare). Lets multi-provider deployments give each agent the extractor its provider supports natively. Driver is reused from the kernel-global extraction driver — full per-agent driver switching is a follow-up. |
 
 ---
