@@ -643,10 +643,8 @@ async fn run_agent_loop_inner(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
-    // #7605: the session this turn belongs to, when session-scoped memory
-    // recall is in effect for this agent. Resolved once here so the recall
-    // (before the turn) and the memorize (after it) agree on the scope even
-    // if the manifest were hot-reloaded in between.
+    // #7605: the session this turn belongs to, when session-scoped memory recall is in effect for this agent.
+    // Resolved once here so the recall (before the turn) and the memorize (after it) agree on the scope even if the manifest were hot-reloaded in between.
     let session_scope: Option<String> =
         session_recall_scope(manifest, session, proactive_memory.as_ref());
 

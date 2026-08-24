@@ -204,16 +204,10 @@ pub(super) struct RecallSetupContext<'a> {
     /// (dashboard, direct API, CLI) — the filter then degrades to a
     /// no-op, preserving legacy recall behaviour.
     pub(super) sender_chat_scope: Option<&'a str>,
-    /// Identity of the session this turn belongs to, rendered as a UUID
-    /// string, used for the #7605 cross-session memory filter.
+    /// Identity of the session this turn belongs to, rendered as a UUID string, used for the #7605 cross-session memory filter.
     ///
-    /// `Some` whenever session-scoped recall is in effect for this agent
-    /// (`[proactive_memory] session_scoped_recall`, overridable per agent);
-    /// `None` restores the pre-#7605 behaviour where every memory of an agent
-    /// is a candidate for every one of that agent's turns. Resolved by
-    /// `session_recall_scope` in `end_turn.rs` from the session the loop is
-    /// actually reading and writing — there is no separate notion of a session
-    /// here.
+    /// `Some` whenever session-scoped recall is in effect for this agent (`[proactive_memory] session_scoped_recall`, overridable per agent); `None` restores the pre-#7605 behaviour where every memory of an agent is a candidate for every one of that agent's turns.
+    /// Resolved by `session_recall_scope` in `end_turn.rs` from the session the loop is actually reading and writing — there is no separate notion of a session here.
     pub(super) session_scope: Option<&'a str>,
     /// Optional kernel handle used to resolve the per-user memory ACL
     /// (RBAC M3, #3054). When `None` the auto-retrieve path runs without
@@ -513,10 +507,8 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             librefang_types::memory::memory_scope_allows_recall(&frag.scope, &frag.metadata, want)
         });
     }
-    // #7605: the same treatment for the session that owns this turn. This
-    // path is the substrate/context-engine recall, which is a second way
-    // memories reach the prompt — gating only `auto_retrieve` below would
-    // leave one visitor's rows arriving here instead.
+    // #7605: the same treatment for the session that owns this turn.
+    // This path is the substrate/context-engine recall, which is a second way memories reach the prompt — gating only `auto_retrieve` below would leave one visitor's rows arriving here instead.
     if let Some(want) = ctx.session_scope {
         memories.retain(|frag| {
             librefang_types::memory::memory_session_scope_allows_recall(&frag.metadata, want)
@@ -944,11 +936,8 @@ mod tests {
         }
     }
 
-    /// #7605 — the substrate/context-engine recall path is a second way
-    /// memories reach a prompt, alongside `auto_retrieve`. Gating only the
-    /// latter would leave one visitor's rows arriving here instead, so this
-    /// asserts the session filter applies to fragments recalled from the
-    /// substrate too.
+    /// #7605 — the substrate/context-engine recall path is a second way memories reach a prompt, alongside `auto_retrieve`.
+    /// Gating only the latter would leave one visitor's rows arriving here instead, so this asserts the session filter applies to fragments recalled from the substrate too.
     #[tokio::test]
     async fn recall_setup_drops_other_sessions_memories_7605() {
         use librefang_types::memory::SESSION_SCOPE_METADATA_KEY;

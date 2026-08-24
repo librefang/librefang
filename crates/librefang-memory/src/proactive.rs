@@ -3213,20 +3213,10 @@ mod tests {
         );
     }
 
-    /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto
-    /// stored memories so the recall filter has something to act on.
-    /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a
-    /// `MemoryLevel::User` memory; that's fine — the assertion is only
-    /// about the metadata key being present and equal to the scope
-    /// supplied by the caller. (Level-User exemption is verified
     /// #7605 — the reported privacy leak, end to end through the store.
     ///
-    /// A public agent serves every website visitor from one per-agent memory
-    /// store. Before this fix, a fact auto-memorized while serving visitor A
-    /// was auto-retrieved into visitor B's turn even though the two turns were
-    /// addressed to different `session_id`s and their message histories never
-    /// touched — which is why the reporter was calling
-    /// `DELETE /api/memory/agents/{id}` before every turn.
+    /// A public agent serves every website visitor from one per-agent memory store.
+    /// Before this fix, a fact auto-memorized while serving visitor A was auto-retrieved into visitor B's turn even though the two turns were addressed to different `session_id`s and their message histories never touched — which is why the reporter was calling `DELETE /api/memory/agents/{id}` before every turn.
     #[tokio::test]
     async fn auto_memorize_then_retrieve_does_not_cross_sessions_7605() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
@@ -3390,7 +3380,9 @@ mod tests {
         );
     }
 
-    /// separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
+    /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto stored memories so the recall filter has something to act on.
+    /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a `MemoryLevel::User` memory; that's fine — the assertion is only about the metadata key being present and equal to the scope supplied by the caller.
+    /// (Level-User exemption is verified separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
     #[tokio::test]
     async fn test_auto_memorize_stamps_chat_scope_5227() {
         use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;

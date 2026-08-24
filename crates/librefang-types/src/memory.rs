@@ -1690,7 +1690,9 @@ pub const SESSION_SCOPE_METADATA_KEY: &str = "session_scope";
 ///
 /// Everything else is filtered out.
 ///
-/// Unlike [`memory_scope_allows_recall`] there is **no `MemoryLevel::User` exemption**. The cross-chat filter can afford one because the chats it separates belong to the same person; the sessions this separates routinely belong to different people, and "user-level" is exactly where an extractor files the personal details that must not cross ("my customer code is PINE-77"). A level-based exemption here would leave the reported leak open on the highest-value rows.
+/// Unlike [`memory_scope_allows_recall`] there is **no `MemoryLevel::User` exemption**.
+/// The cross-chat filter can afford one because the chats it separates belong to the same person; the sessions this separates routinely belong to different people, and "user-level" is exactly where an extractor files the personal details that must not cross ("my customer code is PINE-77").
+/// A level-based exemption here would leave the reported leak open on the highest-value rows.
 pub fn memory_session_scope_allows_recall(
     metadata: &HashMap<String, serde_json::Value>,
     current: &str,
@@ -1718,13 +1720,8 @@ pub trait ProactiveMemoryHooks: Send + Sync {
     /// when the caller has no channel context (e.g. direct API, dashboard) —
     /// memories then remain chat-agnostic.
     ///
-    /// When `session_scope` is `Some`, the session that produced the turn is
-    /// stamped under [`SESSION_SCOPE_METADATA_KEY`] and a later recall running
-    /// under a *different* session will not surface the memory (#7605). Pass
-    /// `None` to store session-agnostic memories — that is what a caller does
-    /// when the operator has turned
-    /// [`ProactiveMemoryConfig::session_scoped_recall`] off, and it is the
-    /// pre-#7605 behaviour.
+    /// When `session_scope` is `Some`, the session that produced the turn is stamped under [`SESSION_SCOPE_METADATA_KEY`] and a later recall running under a *different* session will not surface the memory (#7605).
+    /// Pass `None` to store session-agnostic memories — that is what a caller does when the operator has turned [`ProactiveMemoryConfig::session_scoped_recall`] off, and it is the pre-#7605 behaviour.
     async fn auto_memorize(
         &self,
         user_id: &str,
@@ -1741,11 +1738,8 @@ pub trait ProactiveMemoryHooks: Send + Sync {
     /// (no scope tag, or stamped with the current scope) still surface.
     /// This is the read side of the #5227 cross-chat isolation guard.
     ///
-    /// When `session_scope` is `Some`, memories stamped for a **different**
-    /// session are dropped post-recall; untagged memories still surface. This
-    /// is the read side of the #7605 cross-session isolation guard, and it
-    /// composes with the chat filter rather than replacing it — a memory has
-    /// to clear both.
+    /// When `session_scope` is `Some`, memories stamped for a **different** session are dropped post-recall; untagged memories still surface.
+    /// This is the read side of the #7605 cross-session isolation guard, and it composes with the chat filter rather than replacing it — a memory has to clear both.
     async fn auto_retrieve(
         &self,
         user_id: &str,
