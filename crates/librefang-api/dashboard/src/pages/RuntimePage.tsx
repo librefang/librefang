@@ -47,6 +47,22 @@ import { StaggerList } from "../components/ui/StaggerList";
 
 const OK_STATUSES = new Set(["ok", "pass", "healthy"]);
 
+// Mirrors `BACKUP_LAYOUT` in `routes/backup.rs`. The list has to be restated
+// here because nothing publishes it to the browser, but it is no longer a
+// silent-failure risk: `POST /api/restore` validates every name against its own
+// table and answers `400` with the valid set, so a stale entry here surfaces as
+// an error the operator can read rather than a restore of nothing.
+const BACKUP_COMPONENTS = [
+  "config",
+  "cron_jobs",
+  "hand_state",
+  "custom_models",
+  "agents",
+  "skills",
+  "workflows",
+  "data",
+];
+
 type BackupConfirmState = {
   type: "restore" | "delete";
   filename: string;
@@ -106,10 +122,11 @@ export function RuntimePage() {
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
 
-  // Which components a restore is allowed to touch. Empty = restore all.
+  // Which components a restore is allowed to touch. Nothing ticked means
+  // "restore everything": `restoreBackup` omits the field rather than sending
+  // an empty list, which the API rejects.
   const [restoreKeepConfig, setRestoreKeepConfig] = useState(false);
   const [restoreComponents, setRestoreComponents] = useState<string[]>([]);
-  const BACKUP_COMPONENTS = ["config", "cron_jobs", "hand_state", "custom_models", "agents", "skills", "workflows", "data"];
   const [reloadResult, setReloadResult] = useState<ReloadConfigResult | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 

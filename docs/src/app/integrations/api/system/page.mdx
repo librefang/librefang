@@ -430,9 +430,19 @@ Restore daemon state from a backup file.
 
 ```json
 {
-  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "keep_config": true,
+  "components": ["cron_jobs", "data"]
 }
 ```
+
+`keep_config` (boolean, default `false`) skips `config.toml`, so the target keeps its own API key, bind port and paths — this is what makes an archive usable for cloning a setup onto a second machine.
+
+`components` (array of strings) limits the restore to the named components: `config`, `cron_jobs`, `hand_state`, `custom_models`, `agents`, `skills`, `workflows`, `data`.
+**Omit the field to restore every component.**
+An empty array is rejected with `400`, because "restore nothing" and "restore everything" are too far apart to guess between; an unrecognised name is rejected with `400` naming the valid set, so a typo cannot become a restore that quietly writes nothing.
+Archive entries that belong to no component are restored regardless of the selection.
+`data` covers every entry under `data/`, including the `cron_jobs`, `hand_state` and `custom_models` files that also have components of their own.
 
 ---
 

@@ -3166,6 +3166,10 @@ export async function createBackup(): Promise<{ filename?: string; path?: string
   return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
 }
 
+// An empty component checklist means "restore everything", which the API spells
+// as an absent `components` field — it rejects `[]` rather than guess between
+// "everything" and "nothing". Dropping the field here is what keeps the
+// checklist's default state a full restore instead of a 400.
 export async function restoreBackup(
   filename: string,
   options?: { keepConfig?: boolean; components?: string[] },
@@ -3173,7 +3177,7 @@ export async function restoreBackup(
   return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", {
     filename,
     keep_config: options?.keepConfig,
-    components: options?.components,
+    components: options?.components?.length ? options.components : undefined,
   });
 }
 
