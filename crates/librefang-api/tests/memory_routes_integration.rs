@@ -386,6 +386,7 @@ async fn get_memory_config_returns_documented_shape() {
         "extraction_llm_active",
         "extraction_degraded_reason",
         "extraction_sidecar_command",
+        "session_scoped_recall",
         "max_retrieve",
     ] {
         assert!(
@@ -676,6 +677,106 @@ async fn patch_memory_config_hot_reloads_and_reports_applied() {
     // from the freshly-written TOML, so a client doing
     // `setQueryData(body)` sees the new value without an extra GET.
     assert_eq!(body["proactive_memory"]["auto_memorize"], false);
+}
+
+/// `session_scoped_recall` is the switch that decides whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn (#7605).
+/// It shipped as a `[proactive_memory]` key with a per-agent override, but no HTTP surface read or wrote it, so the only way to see or change it was to open `config.toml` on the host — the one thing an operator running the daemon behind the API cannot do.
+///
+/// This pins the whole loop: GET names it, PATCH persists it, and the value comes back on both the PATCH response and the next GET.
+/// The disk assertion is the load-bearing one — the PATCH response echoes the freshly-written TOML, and a handler that returned the right JSON without inserting the key would still leave the operator's change to evaporate on the next boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_round_trips_session_scoped_recall() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "api_key = \"{TEST_KEY}\"\n\
+             \n\
+             [default_model]\n\
+             provider = \"ollama\"\n\
+             model = \"test-model\"\n\
+             api_key_env = \"OLLAMA_API_KEY\"\n\
+             \n\
+             [memory]\n\
+             \n\
+             [proactive_memory]\n\
+             auto_memorize = true\n"
+        ),
+    )
+    .expect("seed config.toml");
+
+    // GET reports the default before anything is written. `true` is the shipped
+    // default: a memory belongs to the conversation that produced it.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(
+        body["proactive_memory"]["session_scoped_recall"],
+        serde_json::Value::Bool(true),
+        "GET must report the live session_scoped_recall; body: {body}"
+    );
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({
+                "proactive_memory": {
+                    "session_scoped_recall": false,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let patched = read_json(resp).await;
+    assert_eq!(
+        patched["proactive_memory"]["session_scoped_recall"],
+        serde_json::Value::Bool(false),
+        "PATCH must echo the new session_scoped_recall; body: {patched}"
+    );
+
+    // The operator's change has to survive a restart, so it must be in the file
+    // and not merely in the response.
+    let on_disk: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&config_path).expect("config.toml must still be readable"),
+    )
+    .expect("PATCH must leave config.toml parseable");
+    assert_eq!(
+        on_disk
+            .get("proactive_memory")
+            .and_then(|t| t.get("session_scoped_recall"))
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "PATCH must persist session_scoped_recall into config.toml; got {on_disk:?}"
+    );
+
+    // A successful hot-reload must also move the live value, which is what the
+    // next GET reads. `partial` means the seeded file failed live validation for
+    // an unrelated reason; the disk assertion above already covers that case.
+    if patched["status"].as_str() == Some("applied") {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(authed_get("/api/memory/config"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reread = read_json(resp).await;
+        assert_eq!(
+            reread["proactive_memory"]["session_scoped_recall"],
+            serde_json::Value::Bool(false),
+            "GET after an applied PATCH must report the new value; body: {reread}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

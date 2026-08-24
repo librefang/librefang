@@ -176,6 +176,7 @@ interface MemoryConfigForm {
   pm_enabled: boolean;
   pm_auto_memorize: boolean;
   pm_auto_retrieve: boolean;
+  pm_session_scoped_recall: boolean;
   pm_extraction_model: string;
   pm_max_retrieve: string;
 }
@@ -227,6 +228,8 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
       pm_enabled: configQuery.data.proactive_memory?.enabled ?? true,
       pm_auto_memorize: configQuery.data.proactive_memory?.auto_memorize ?? true,
       pm_auto_retrieve: configQuery.data.proactive_memory?.auto_retrieve ?? true,
+      pm_session_scoped_recall:
+        configQuery.data.proactive_memory?.session_scoped_recall ?? true,
       pm_extraction_model: configQuery.data.proactive_memory?.extraction_model || "",
       pm_max_retrieve: String(configQuery.data.proactive_memory?.max_retrieve ?? 10),
     });
@@ -255,6 +258,7 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
           enabled: form.pm_enabled,
           auto_memorize: form.pm_auto_memorize,
           auto_retrieve: form.pm_auto_retrieve,
+          session_scoped_recall: form.pm_session_scoped_recall,
           extraction_model: form.pm_extraction_model || undefined,
           max_retrieve: maxRetrieveParsed,
         },
@@ -437,6 +441,10 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
                   { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
                   { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
+                  {
+                    key: "pm_session_scoped_recall",
+                    label: t("memory.session_scoped_recall", { defaultValue: "Session-Scoped Recall" }),
+                  },
                 ].map((opt) => (
                   <label
                     key={opt.key}

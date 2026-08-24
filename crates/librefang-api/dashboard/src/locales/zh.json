@@ -1351,6 +1351,7 @@
     "proactive_enabled": "启用",
     "auto_memorize": "自动记忆",
     "auto_retrieve": "自动召回",
+    "session_scoped_recall": "会话内召回",
     "help": "Memory 是 agent 的长期存储——embedding 向量加结构化记录，agent 在召回时取出来跨会话保持上下文。本页可以浏览、搜索、编辑、播种记忆，并配置 embedding 与召回行为。\n\n使用步骤：\n\n1. 浏览 / 搜索。列表显示最近记忆，含访问次数和元数据。搜索走向量相似（配置了 embedding provider 时）或文本回退。\n\n2. 添加。\"Add memory\" 手动播种事实——选范围（global / per-agent）、填内容、保存。适合手工策划的知识。\n\n3. 编辑 / 删除。点击行查看、编辑或删除。编辑会自动重新 embedding。\n\n4. 配置。设置面板切换自动记忆（agent 边跑边写）、自动召回（自动注入到上下文）、选 embedding provider 与 API key。\n\n典型场景：\n\n  · 一次性写入 \"对用户 @evan 始终用中文回复\"，不再写进 system prompt 里反复贴。\n  · 检视 agent 实际记下了什么，把低价值的剪掉。\n  · 切换 embedding provider（成本 / 质量变化时）。\n\n注意事项：\n\n  · 存储是 ~/.librefang/ 下的 SQLite，备份也在那里。\n  · per-agent 记忆不会跨 agent 串；global 记忆所有 agent 都能看到。\n  · 关掉自动召回不会删记忆——只是不再注入上下文。仍可手动查询。",
     "access_count": "访问次数",
     "category": "分类",

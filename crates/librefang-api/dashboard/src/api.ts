@@ -3069,6 +3069,9 @@ export interface MemoryConfigResponse {
     extraction_degraded_reason?: string | null;
     /** The out-of-process extractor command, when one is what runs. */
     extraction_sidecar_command?: string | null;
+    /** Whether an auto-memorized memory is recallable only from the session that produced it (#7605).
+     *  `false` restores the agent-wide pool, where one visitor's turn on a shared agent can be retrieved into another visitor's turn. */
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
   /**
@@ -3094,6 +3097,7 @@ export async function updateMemoryConfig(payload: {
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
     extraction_model?: string;
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
 }): Promise<MemoryConfigResponse> {

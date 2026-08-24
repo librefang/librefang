@@ -67,3 +67,9 @@ That is the honest reading of "new" — an isolated turn — but an agent that w
 
 Memories written before this shipped carry no `session_scope` stamp and stay recallable from every session, so upgrading never blanks out an existing store.
 The isolation applies from the first turn after the upgrade onwards; an operator who wants the old rows separated too has to clear the store.
+
+### Where an operator sets it
+
+`GET /api/memory/config` reports the live value under `proactive_memory.session_scoped_recall`, and `PATCH /api/memory/config` writes it into the `[proactive_memory]` table of `config.toml` and hot-reloads it like every other key on that endpoint.
+The dashboard's memory settings drawer exposes it as a switch beside Auto Memorize and Auto Retrieve.
+Both surfaces move the deployment-wide default only; the per-agent override stays in `agent.toml`, because `KernelConfig` has no `agents` table and an `[agents.<name>]` block in `config.toml` would parse and then never reach a manifest (#5476).
