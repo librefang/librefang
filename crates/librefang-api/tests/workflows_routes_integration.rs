@@ -338,6 +338,75 @@ async fn workflow_create_parses_per_step_session_mode() {
     );
 }
 
+/// `GET /api/workflows/{id}` must name a step's agent binding with the same
+/// field names the create/update parser reads — `agent_id` / `agent_name`,
+/// not `id` / `name`.
+///
+/// Nothing pinned this before, and the dashboard canvas had drifted onto the
+/// wrong shape: it hydrated nodes from `step.agent.id` / `step.agent.name`,
+/// which are always absent, so loading a workflow that has no saved layout
+/// produced nodes with no agent and the canvas rebuilt it as zero steps
+/// (refs #7724). A symmetric read/write vocabulary is the contract every
+/// editing surface round-trips through, so it belongs in a test.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_get_names_the_step_agent_binding_the_way_create_reads_it() {
+    let h = boot().await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "binding-vocabulary",
+            "steps": [
+                {"name": "by_id", "agent_id": agent_id, "prompt": "{{input}}"},
+                {"name": "by_name", "agent_name": "writer", "prompt": "{{input}}", "session_mode": "new"},
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"]
+        .as_str()
+        .expect("workflow_id")
+        .to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps array");
+    assert_eq!(steps.len(), 2);
+
+    assert_eq!(
+        steps[0]["agent"]["agent_id"], agent_id,
+        "an id binding must come back under `agent_id`"
+    );
+    assert!(
+        steps[0]["agent"]["agent_name"].is_null(),
+        "an id binding must not also claim a name the caller never sent"
+    );
+
+    assert_eq!(
+        steps[1]["agent"]["agent_name"], "writer",
+        "a name binding must come back under `agent_name`"
+    );
+    assert!(
+        steps[1]["agent"]["agent_id"].is_null(),
+        "a name binding must not invent an id"
+    );
+    assert_eq!(
+        steps[1]["session_mode"], "new",
+        "the per-step session override must ride along with a name binding too"
+    );
+
+    // The keys an editing surface must NOT look for. Asserting their absence
+    // is the half that catches a reader drifting back onto `{id, name}`.
+    assert!(
+        steps[0]["agent"]["id"].is_null() && steps[1]["agent"]["name"].is_null(),
+        "the payload must not carry a second, differently-named spelling of the binding"
+    );
+}
+
 /// POST /api/workflows with a well-formed `input_schema` array must
 /// accept it and GET /api/workflows/{id} must round-trip every declared
 /// row verbatim (#4982 — gap 2 parameter discovery). Pins the route

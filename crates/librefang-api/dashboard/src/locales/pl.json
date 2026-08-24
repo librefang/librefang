@@ -1632,7 +1632,18 @@
     "workflow_load_error": "Nie udało się załadować przepływu pracy",
     "ctx_menu_label": "Menu kontekstowe",
     "output": "Wynik",
-    "prompt_sent": "Prompt wysłany"
+    "prompt_sent": "Prompt wysłany",
+    "agent_source_label": "Źródło agenta",
+    "agent_source_instance": "Działający agent",
+    "agent_source_name": "Po nazwie agenta",
+    "agent_name_label": "Nazwa agenta",
+    "agent_name_placeholder": "researcher",
+    "agent_name_hint": "Rozwiązywane po nazwie w chwili uruchomienia kroku, więc powiązanie przetrwa ponowne uruchomienie agenta z nowym identyfikatorem.",
+    "session_mode_label": "Sesja",
+    "session_mode_default": "Domyślnie jak agent",
+    "session_mode_persistent": "Użyj ponownie sesji agenta",
+    "session_mode_new": "Nowa sesja przy każdym uruchomieniu",
+    "session_mode_hint": "Nowa sesja izoluje ten krok od wszystkiego, co agent powiedział wcześniej."
   },
   "workflows": {
     "title": "Przepływy pracy",

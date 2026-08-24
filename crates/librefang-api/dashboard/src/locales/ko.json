@@ -1632,7 +1632,18 @@
     "workflow_load_error": "워크플로를 로드하지 못했습니다.",
     "ctx_menu_label": "상황에 맞는 메뉴",
     "output": "출력",
-    "prompt_sent": "메시지가 전송되었습니다."
+    "prompt_sent": "메시지가 전송되었습니다.",
+    "agent_source_label": "에이전트 소스",
+    "agent_source_instance": "실행 중인 에이전트",
+    "agent_source_name": "에이전트 이름으로",
+    "agent_name_label": "에이전트 이름",
+    "agent_name_placeholder": "researcher",
+    "agent_name_hint": "단계 실행 시점에 이름으로 해석되므로, 에이전트가 새 ID로 다시 생성되어도 연결이 유지됩니다.",
+    "session_mode_label": "세션",
+    "session_mode_default": "에이전트 기본값",
+    "session_mode_persistent": "에이전트의 세션 재사용",
+    "session_mode_new": "실행마다 새 세션",
+    "session_mode_hint": "새 세션은 이 단계를 에이전트의 이전 대화와 분리합니다."
   },
   "workflows": {
     "title": "워크플로",

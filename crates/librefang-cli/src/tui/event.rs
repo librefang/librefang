@@ -942,6 +942,55 @@ pub fn spawn_run_workflow(
     });
 }
 
+/// Why the workflow creator's raw `steps` field could not become a request body.
+///
+/// Kept separate from its rendered message so the parser stays a pure
+/// function the unit tests can exercise without initialising the locale
+/// bundles.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StepsJsonError {
+    /// The operator advanced past the steps field without typing anything.
+    Empty,
+    /// The text is not JSON at all; carries serde's position-bearing message.
+    NotJson(String),
+    /// Valid JSON, but a scalar or an object where the API wants an array.
+    NotArray,
+}
+
+impl StepsJsonError {
+    fn message(&self) -> String {
+        match self {
+            StepsJsonError::Empty => crate::i18n::t("tui-event-workflow-steps-empty"),
+            StepsJsonError::NotJson(detail) => {
+                crate::i18n::t_args("tui-event-workflow-steps-invalid", &[("error", detail)])
+            }
+            StepsJsonError::NotArray => crate::i18n::t("tui-event-workflow-steps-not-array"),
+        }
+    }
+}
+
+/// Turn the creator's free-text `steps` field into the array
+/// `POST /api/workflows` expects.
+///
+/// The wizard collects the steps as a raw JSON string, and that string used
+/// to be forwarded as a JSON *string*. `create_workflow` reads
+/// `req["steps"].as_array()`, so every submission was rejected with
+/// `Missing 'steps' array` and the TUI could not create a workflow at all.
+/// Parsing here also turns a typo into a message naming the position of the
+/// mistake instead of a bare HTTP failure.
+pub(crate) fn parse_workflow_steps_json(raw: &str) -> Result<serde_json::Value, StepsJsonError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(StepsJsonError::Empty);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| StepsJsonError::NotJson(e.to_string()))?;
+    if !value.is_array() {
+        return Err(StepsJsonError::NotArray);
+    }
+    Ok(value)
+}
+
 /// Create a workflow in background.
 pub fn spawn_create_workflow(
     backend: BackendRef,
@@ -952,6 +1001,13 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
+            let steps = match parse_workflow_steps_json(&steps_json) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(e.message()));
+                    return;
+                }
+            };
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
@@ -960,17 +1016,37 @@ pub fn spawn_create_workflow(
                 .json(&serde_json::json!({
                     "name": name,
                     "description": description,
-                    "steps": steps_json,
+                    "steps": steps,
                 }))
                 .send()
             {
-                Ok(resp) => {
+                Ok(resp) if resp.status().is_success() => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let id = body["id"].as_str().unwrap_or("created").to_string();
+                    // `create_workflow` answers with `workflow_id`; reading
+                    // `id` meant every success reported the placeholder.
+                    let id = body["workflow_id"]
+                        .as_str()
+                        .or_else(|| body["id"].as_str())
+                        .unwrap_or("created")
+                        .to_string();
                     let _ = tx.send(AppEvent::WorkflowCreated(id));
                 }
+                Ok(resp) => {
+                    // A 400 from the step parser used to be reported as a
+                    // successful creation, leaving the operator hunting for a
+                    // workflow that was never registered.
+                    let status = resp.status().to_string();
+                    let detail = resp.text().unwrap_or_default();
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-workflow-create-failed",
+                        &[("status", &status), ("detail", &detail)],
+                    )));
+                }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Create workflow: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-workflow-create-failed",
+                        &[("status", "-"), ("detail", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -3261,6 +3337,51 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// The workflow creator's raw `steps` field must reach the API as a JSON
+    /// array. It used to be forwarded as a JSON string, which
+    /// `create_workflow` rejects with `Missing 'steps' array` — the wizard
+    /// could not create anything.
+    #[test]
+    fn workflow_steps_json_parses_into_an_array() {
+        let steps = parse_workflow_steps_json(
+            r#"[{"name":"draft","agent_name":"writer","prompt":"{{input}}","session_mode":"new"}]"#,
+        )
+        .expect("a JSON array must parse");
+        let array = steps.as_array().expect("must stay an array");
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["agent_name"], "writer");
+        assert_eq!(
+            array[0]["session_mode"], "new",
+            "the per-step session override must survive the parse untouched"
+        );
+    }
+
+    #[test]
+    fn workflow_steps_json_tolerates_surrounding_whitespace() {
+        assert!(parse_workflow_steps_json("  [ ]  \n").is_ok());
+    }
+
+    #[test]
+    fn workflow_steps_json_rejects_the_shapes_the_api_would_reject() {
+        assert_eq!(
+            parse_workflow_steps_json("   "),
+            Err(StepsJsonError::Empty),
+            "an untouched field must be named as empty, not sent as a doomed request"
+        );
+        assert_eq!(
+            parse_workflow_steps_json(r#"{"name":"draft"}"#),
+            Err(StepsJsonError::NotArray),
+            "a bare step object is the likeliest typo and must be caught here"
+        );
+        assert!(
+            matches!(
+                parse_workflow_steps_json("[{name: draft}]"),
+                Err(StepsJsonError::NotJson(_))
+            ),
+            "malformed JSON must carry serde's message rather than a bare failure"
+        );
+    }
 
     /// The TUI's sweep loops must survive the call that spawned them.
     ///

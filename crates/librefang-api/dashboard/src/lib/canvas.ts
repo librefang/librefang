@@ -13,6 +13,14 @@ export type CanvasNodeData = {
   description?: string;
   agentId?: string;
   agentName?: string;
+  /** Which binding the operator chose for this step's agent: a specific
+   *  running instance (`agentId`) or a durable agent name (`agentName`).
+   *  Stored explicitly rather than inferred from which field happens to be
+   *  set, so switching between the two is reversible in both directions. */
+  agentSource?: "instance" | "name";
+  /** Per-step `session_mode` override sent to the API: `"persistent"`,
+   *  `"new"`, or absent to defer to the target agent's manifest. */
+  sessionMode?: "persistent" | "new";
   prompt?: string;
   timeoutSecs?: number;
   maxRetries?: number;
@@ -297,3 +305,13 @@ export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] 
   const nextEdges = edges.filter((edge) => edge.id !== edgeId);
   return nextEdges.length === edges.length ? edges : nextEdges;
 }
+
+/** Tailwind classes for the node config panel's controls.
+ *
+ * Exported so the panel and the step controls extracted out of it
+ * (`components/StepAgentBinding.tsx`) stay visually identical from one
+ * definition instead of two copies that drift.
+ */
+export const CANVAS_INPUT_CLASS =
+  "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
+export const CANVAS_LABEL_CLASS = "text-[10px] font-bold text-text-dim uppercase";

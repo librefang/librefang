@@ -1632,7 +1632,18 @@
     "workflow_load_error": "Failed to load workflow",
     "ctx_menu_label": "Context menu",
     "output": "Output",
-    "prompt_sent": "Prompt sent"
+    "prompt_sent": "Prompt sent",
+    "agent_source_label": "Agent source",
+    "agent_source_instance": "A running agent",
+    "agent_source_name": "By agent name",
+    "agent_name_label": "Agent name",
+    "agent_name_placeholder": "researcher",
+    "agent_name_hint": "Resolved by name when the step runs, so the binding survives a respawn that gives the agent a new id.",
+    "session_mode_label": "Session",
+    "session_mode_default": "Agent default",
+    "session_mode_persistent": "Reuse the agent's session",
+    "session_mode_new": "Fresh session each run",
+    "session_mode_hint": "A fresh session isolates this step from anything the agent said before."
   },
   "workflows": {
     "title": "Workflows",

@@ -597,6 +597,9 @@ export interface WorkflowStep {
   timeout_secs?: number;
   inherit_context?: boolean;
   depends_on?: string[];
+  /** Per-step `SessionMode` override. `null` / absent defers to the target
+   *  agent's manifest, which is how the API serializes an unset value. */
+  session_mode?: "persistent" | "new" | null;
 }
 
 export interface WorkflowLastRunSummary {

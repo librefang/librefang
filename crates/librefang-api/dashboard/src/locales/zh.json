@@ -1632,7 +1632,18 @@
     "workflow_load_error": "加载工作流失败",
     "ctx_menu_label": "上下文菜单",
     "output": "输出",
-    "prompt_sent": "已发送提示"
+    "prompt_sent": "已发送提示",
+    "agent_source_label": "智能体来源",
+    "agent_source_instance": "运行中的智能体",
+    "agent_source_name": "按智能体名称",
+    "agent_name_label": "智能体名称",
+    "agent_name_placeholder": "researcher",
+    "agent_name_hint": "在步骤运行时按名称解析，因此智能体以新 ID 重启后绑定依然有效。",
+    "session_mode_label": "会话",
+    "session_mode_default": "跟随智能体默认值",
+    "session_mode_persistent": "复用智能体的会话",
+    "session_mode_new": "每次运行使用新会话",
+    "session_mode_hint": "新会话会将该步骤与智能体之前说过的内容隔离。"
   },
   "workflows": {
     "title": "工作流",
