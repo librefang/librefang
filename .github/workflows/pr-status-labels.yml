@@ -33,6 +33,7 @@ jobs:
   conflicts:
     name: Conflict Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     if: github.event_name == 'pull_request_target' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Label conflicting PRs
@@ -123,6 +124,7 @@ jobs:
   ci-status:
     name: CI Status Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Label PRs with failed CI
@@ -256,6 +258,7 @@ jobs:
   size:
     name: PR Size
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Classify PR size
@@ -312,6 +315,7 @@ jobs:
   docs-only:
     name: Docs/CI Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Label docs/CI-only PRs
@@ -365,6 +369,7 @@ jobs:
   review-state:
     name: Review State
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.event_name == 'pull_request_target' && github.event.action == 'synchronize'
     steps:
       - name: Clear needs-changes after push if all reviews resolved

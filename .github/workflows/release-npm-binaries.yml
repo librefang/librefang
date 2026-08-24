@@ -39,6 +39,7 @@ jobs:
   cli_npm:
     name: CLI / npm (binary packages)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: release-npm
     permissions:
       id-token: write   # OIDC token for npm provenance attestations

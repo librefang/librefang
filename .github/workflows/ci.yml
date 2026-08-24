@@ -38,6 +38,7 @@ jobs:
   pubkey-lockstep:
     name: Registry Pubkey Lockstep
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Check registry public keys
@@ -57,6 +58,7 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.diff.outputs.rust }}
       docs: ${{ steps.diff.outputs.docs }}
@@ -241,6 +243,7 @@ jobs:
     name: No Build Artifacts
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -449,6 +452,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.sdk_python == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -469,6 +473,7 @@ jobs:
   githook-tests:
     name: Git Hook Corpus Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # Message text and author identity, rejected and accepted corpora.
@@ -495,6 +500,7 @@ jobs:
   image-vuln-gate:
     name: Image Vulnerability Gate Self-Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -514,6 +520,7 @@ jobs:
     name: CHANGELOG Attribution
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -540,6 +547,7 @@ jobs:
   changelog-attribution-full:
     name: CHANGELOG Attribution (full [Unreleased])
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -723,6 +731,7 @@ jobs:
   secrets:
     name: Secrets Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -744,6 +753,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.install == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Syntax-check shell installer
@@ -828,6 +838,7 @@ jobs:
   agents-claude-pair:
     name: AGENTS.md ↔ CLAUDE.md pair
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Verify sibling CLAUDE.md symlink
@@ -1200,6 +1211,7 @@ jobs:
       - test-windows
       - test-macos
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Fail if any lane failed or was cancelled
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
