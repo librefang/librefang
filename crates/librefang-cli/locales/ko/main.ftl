@@ -1409,10 +1409,13 @@ tui-event-agent-kill-failed = 에이전트 { $agent_id }을(를) 종료하지 �
 tui-event-agent-invalid-id = 잘못된 에이전트 ID: { $agent_id }
 tui-event-skills-fetch-failed = 스킬을 가져오지 못했습니다
 tui-event-mcp-fetch-failed = MCP 서버를 가져오지 못했습니다
+tui-event-channels-fetch-failed = 채널을 가져오지 못했습니다
 tui-event-skills-update-failed = 스킬을 업데이트하지 못했습니다
 tui-event-skills-update-error = 스킬 업데이트: { $error }
 tui-event-mcp-update-failed = MCP 서버를 업데이트하지 못했습니다
+tui-event-channels-update-failed = 채널을 업데이트하지 못했습니다
 tui-event-mcp-update-error = MCP 업데이트: { $error }
+tui-event-channels-update-error = 채널 업데이트: { $error }
 tui-event-session-delete-failed = 세션 { $session_id }을(를) 삭제하지 못했습니다
 tui-event-session-management-not-available-in-process = 인프로세스 모드에서는 세션 관리를 사용할 수 없습니다
 tui-event-kv-save-failed = KV 쌍을 저장하지 못했습니다
@@ -1505,6 +1508,7 @@ tui-mod-agent-killed-status = 에이전트 { $id } 종료됨.
 tui-mod-agent-kill-failed = 종료 실패: { $error }
 tui-mod-agent-skills-updated = 에이전트 { $id }의 스킬이 업데이트됨.
 tui-mod-agent-mcp-updated = 에이전트 { $id }의 MCP 서버가 업데이트되었습니다.
+tui-mod-agent-channels-updated = 에이전트 { $id }의 채널이 업데이트되었습니다.
 tui-mod-ready = 준비됨
 tui-mod-setup = 설정
 tui-mod-workflow-created = 워크플로가 생성되었습니다!
@@ -2004,6 +2008,7 @@ tui-agents-title-custom-prompt = 사용자 지정 — 시스템 프롬프트
 tui-agents-title-custom-tools = 사용자 지정 — 도구
 tui-agents-title-custom-skills = 사용자 지정 — 스킬
 tui-agents-title-custom-mcp = 사용자 지정 — MCP 서버
+tui-agents-title-edit-channels = 편집 — 채널
 tui-agents-title-spawning = 생성 중...
 tui-agents-title-screen = 에이전트
 tui-agents-title-detail = 에이전트 상세
@@ -2016,6 +2021,7 @@ tui-agents-prompt-tools =   도구 선택 (Space로 전환):
 tui-agents-prompt-skills =   스킬 선택 (선택 없음 = 모든 스킬):
 tui-agents-prompt-mcp =   MCP 서버 선택 (선택 없음 = 모든 서버):
 tui-agents-prompt-edit-skills =   Space로 전환, Enter로 저장 (선택 없음 = 전체):
+tui-agents-prompt-edit-channels =   Space로 전환, Enter로 저장 (선택 없음 = 모든 채널):
 tui-agents-prompt-spawning =   에이전트 생성 중...
 tui-agents-label-no-agent-selected = 선택된 에이전트 없음.
 tui-agents-label-none-available = (사용 가능 없음)
@@ -2033,7 +2039,7 @@ tui-agents-opt-create-new = 새 에이전트 생성
 
 tui-agents-hints-filter =   [입력] 필터  [Enter] 적용  [Esc] 검색 취소
 tui-agents-hints-list =   [↑↓] 탐색  [Enter] 상세  [/] 검색  [Esc] 뒤로
-tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [c] 채팅  [k] 종료  [Esc] 뒤로
+tui-agents-hints-detail =   [s] 스킬 편집  [m] MCP 편집  [n] 채널 편집  [c] 채팅  [k] 종료  [Esc] 뒤로
 tui-agents-hints-navigate =     [↑↓] 탐색  [Enter] 선택  [Esc] 뒤로
 tui-agents-hints-input =     [Enter] 다음  [Esc] 뒤로
 tui-agents-hints-tools =     [↑↓] 탐색  [Space] 전환  [Enter] 생성  [Esc] 뒤로
@@ -2059,8 +2065,10 @@ tui-agents-detail-parent =   상위:
 tui-agents-detail-children =   하위:      
 tui-agents-detail-skills =   스킬:      
 tui-agents-detail-mcp =   MCP:      
+tui-agents-detail-channels =   채널:      
 tui-agents-detail-all-skills = [모든 스킬]
 tui-agents-detail-all-servers = [모든 서버]
+tui-agents-detail-all-channels = [모든 채널]
 tui-agents-detail-none = [없음]
 tui-agents-default-desc = 사용자 지정 { $name } 에이전트
 tui-agents-default-prompt = 당신은 유용한 에이전트인 { $name }입니다.

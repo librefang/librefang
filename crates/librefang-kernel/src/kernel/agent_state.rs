@@ -101,8 +101,18 @@ impl LibreFangKernel {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
                 }
             }
+            // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
+            // `agent.toml` and overwrites the SQLite projection when the two differ, so a manifest
+            // that cannot be serialized freezes the file while the in-memory copy keeps accepting
+            // edits — and the next restart restores the frozen file over every one of them.
+            // Refs #7742.
             Err(error) => {
-                warn!(agent = %entry.name, "Failed to serialize manifest to TOML: {error}");
+                error!(
+                    agent = %entry.name,
+                    path = %toml_path.display(),
+                    "Failed to serialize manifest to TOML: {error}. \
+                     agent.toml is now stale; manifest edits will be lost on the next restart"
+                );
             }
         }
     }

@@ -223,6 +223,13 @@ pub enum AppEvent {
     AgentSkillsUpdated(String),
     /// Agent MCP servers updated.
     AgentMcpServersUpdated(String),
+    /// Agent channel allowlist loaded (for edit screen).
+    AgentChannelsLoaded {
+        assigned: Vec<String>,
+        available: Vec<String>,
+    },
+    /// Agent channel allowlist updated.
+    AgentChannelsUpdated(String),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -1421,6 +1428,123 @@ pub fn spawn_update_agent_mcp_servers(
                     Err(e) => {
                         let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
                             "tui-event-mcp-update-error",
+                            &[("error", &e.to_string())],
+                        )));
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Fetch the channel allowlist for an agent (#7742).
+///
+/// `GET /api/agents/{id}/channels` had no client anywhere in the tree — not here, not in the
+/// dashboard — so assigning a channel to a running agent meant hand-editing `agent.toml`.
+/// The in-process branch reads the same two sources the HTTP handler does: the manifest for
+/// `assigned`, and `sidecar_channels` for the catalogue of `channel_type` strings to offer.
+pub fn spawn_fetch_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let read = |key: &str| -> Vec<String> {
+                        body[key]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                        assigned: read("assigned"),
+                        available: read("available"),
+                    });
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-fetch-failed",
+            )));
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                let assigned = kernel
+                    .agent_registry_ref()
+                    .get(aid)
+                    .map(|e| e.manifest.channels.clone())
+                    .unwrap_or_default();
+                let mut available: Vec<String> = kernel
+                    .config_ref()
+                    .sidecar_channels
+                    .iter()
+                    .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+                    .collect();
+                // A channel already on the manifest but no longer configured must still be
+                // offered, or opening the editor and saving would silently drop it.
+                for name in &assigned {
+                    if !available.contains(name) {
+                        available.push(name.clone());
+                    }
+                }
+                let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                    assigned,
+                    available,
+                });
+            }
+        }
+    });
+}
+
+/// Update an agent's channel allowlist.
+///
+/// An empty list is a legitimate value, not a no-op: `AgentManifest::channels` treats empty as
+/// "every channel", so clearing the selection widens access rather than revoking it.
+pub fn spawn_update_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    channels: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .put(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .json(&serde_json::json!({"channels": channels}))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-channels-update-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                match kernel.set_agent_channels(aid, channels) {
+                    Ok(()) => {
+                        let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-channels-update-error",
                             &[("error", &e.to_string())],
                         )));
                     }
