@@ -1976,6 +1976,166 @@ async fn context_endpoint_rejects_cross_agent_session() {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session/context — where the reported window came from.
+//
+// Refs #7774 item 5. `max_context_tokens` used to be a bare integer, so an
+// operator could not tell a window they had configured from one the registry
+// declared from one the runtime had invented because nothing knew.
+// The reported incident is the last case: a gateway-served model reports no
+// limits, the runtime assumes 8192, and a conversation well inside the model's
+// real window is refused for an overflow that exists only in that assumption.
+// ---------------------------------------------------------------------------
+
+/// Spawn an agent pinned to one `(provider, model)`, optionally with an
+/// `agent.toml`-style per-agent window.
+fn spawn_on_model(
+    state: &Arc<AppState>,
+    name: &str,
+    provider: &str,
+    model: &str,
+    context_window: Option<u64>,
+) -> AgentId {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        model: librefang_types::agent::ModelConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            context_window,
+            ..Default::default()
+        },
+        ..AgentManifest::default()
+    };
+    state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent")
+}
+
+async fn context_source(app: axum::Router, id: AgentId) -> (u64, String, bool) {
+    let (status, body) = send(app, get(&format!("/api/agents/{}/session/context", id))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    (
+        body["max_context_tokens"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("max_context_tokens: {body:?}")),
+        body["max_context_tokens_source"]
+            .as_str()
+            .unwrap_or_else(|| panic!("max_context_tokens_source: {body:?}"))
+            .to_string(),
+        body["max_context_tokens_assumed"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("max_context_tokens_assumed: {body:?}")),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_names_the_layer_that_produced_the_window() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Layer 3 — the catalog. A custom entry is the only catalog value a
+    // hermetic test can state, and it reaches `resolve_context_window` through
+    // exactly the path a registry-declared or probe-discovered entry does.
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/models/custom",
+            serde_json::json!({
+                "id": "sensor-model-generic-high",
+                "provider": "ollama",
+                "context_window": 32_768,
+                "max_output_tokens": 4_096,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body:?}");
+
+    let catalog_agent = spawn_on_model(
+        &h.state,
+        "ctx-src-catalog",
+        "ollama",
+        "sensor-model-generic-high",
+        None,
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!((max, source.as_str(), assumed), (32_768, "catalog", false));
+
+    // Layer 1 — `agent.toml [model] context_window`, the most specific layer.
+    // Same model, so this also proves the per-agent value outranks the catalog
+    // in what the report says as well as in what it computes.
+    let agent_override = spawn_on_model(
+        &h.state,
+        "ctx-src-agent",
+        "ollama",
+        "sensor-model-generic-high",
+        Some(96_000),
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), agent_override).await;
+    assert_eq!(
+        (max, source.as_str(), assumed),
+        (96_000, "agent_override", false)
+    );
+
+    // Layer 4 — nothing knows this model, so the number is the runtime's own
+    // guess and has to say so. This is the case the issue was filed over.
+    let unknown_agent = spawn_on_model(
+        &h.state,
+        "ctx-src-fallback",
+        "litellm",
+        "not-in-any-catalog",
+        None,
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), unknown_agent).await;
+    assert_eq!(max, 8_192, "the conservative unknown-model fallback");
+    assert_eq!(source, "fallback");
+    assert!(
+        assumed,
+        "an assumed window must be flagged as assumed, or the operator reads a guess as a fact"
+    );
+
+    // Layer 2 — the per-model operator override, set through the route the
+    // dashboard and the TUI both use. It must displace the catalog value AND
+    // the label, for the agent that was already reporting `catalog`.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            "/api/models/overrides/ollama:sensor-model-generic-high",
+            serde_json::json!({ "context_window": 16_384 }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let (max, source, assumed) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!(
+        (max, source.as_str(), assumed),
+        (16_384, "model_override", false),
+        "the operator correction exists to beat the catalog, and the report must say it did"
+    );
+
+    // The per-agent value is still the most specific layer after the per-model
+    // override lands — a model-level correction is inherited by every agent, so
+    // an agent that states its own window keeps it.
+    let (max, source, _) = context_source(h.app.clone(), agent_override).await;
+    assert_eq!((max, source.as_str()), (96_000, "agent_override"));
+
+    // Deleting the override returns the catalog value and the catalog label.
+    let (status, _) = send(
+        h.app.clone(),
+        delete(
+            "/api/models/overrides/ollama:sensor-model-generic-high",
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (max, source, _) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!((max, source.as_str()), (32_768, "catalog"));
+}
+
+// ---------------------------------------------------------------------------
 // PATCH /api/agents/{id}/config — api_key_env / base_url are applied, not
 // silently dropped (the OpenAPI schema advertises both fields).
 // ---------------------------------------------------------------------------

@@ -2699,6 +2699,8 @@
     "generating": "Generating...",
     "clear_chat": "Clear Chat",
     "context_usage": "{{used}} / {{max}} tokens (~{{pct}}%)",
+    "context_usage_assumed": "Assumed window",
+    "context_usage_assumed_detail": "No source knows this model's context window, so {{max}} tokens is a guess. Set it on the Providers page (or the TUI Models screen) to stop the runtime compacting against a number nobody measured.",
     "context_usage_aria": "Context window usage: approximately {{pct}} percent",
     "session": "Session",
     "session_unpinned": "Unpinned",

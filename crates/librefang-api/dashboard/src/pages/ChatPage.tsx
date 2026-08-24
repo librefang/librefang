@@ -2290,7 +2290,13 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
     );
   }
 
-  const { used_tokens: used, max_context_tokens: max, pct, pressure } = query.data;
+  const {
+    used_tokens: used,
+    max_context_tokens: max,
+    max_context_tokens_assumed: assumed,
+    pct,
+    pressure,
+  } = query.data;
 
   // Theme-token fill color stepped by pressure. Neutral (brand) until the
   // context is genuinely tight, then amber, then red. Dark-mode aware via
@@ -2310,8 +2316,21 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
   });
   const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
 
+  // The denominator is only as trustworthy as its source. When nothing knows
+  // this model's window the server says so (`max_context_tokens_assumed`), and
+  // the bar has to say so too — a percentage measured against a guessed 8192 is
+  // what turns a conversation inside the model's real window into an overflow
+  // the operator cannot explain. Refs #7774.
+  const assumedLabel = assumed ? t("chat.context_usage_assumed") : "";
+  const assumedDetail = assumed
+    ? t("chat.context_usage_assumed_detail", { max: max.toLocaleString() })
+    : "";
+
   return (
-    <div className="hidden md:flex items-center gap-2 text-xs text-text-dim/70" title={label}>
+    <div
+      className="hidden md:flex items-center gap-2 text-xs text-text-dim/70"
+      title={assumed ? `${label} — ${assumedDetail}` : label}
+    >
       <div
         role="progressbar"
         aria-label={ariaLabel}
@@ -2326,6 +2345,14 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
         />
       </div>
       <span className="hidden lg:inline tabular-nums whitespace-nowrap">{label}</span>
+      {assumed && (
+        <span
+          className="hidden lg:inline whitespace-nowrap rounded px-1.5 py-0.5 bg-warning/15 text-warning"
+          title={assumedDetail}
+        >
+          {assumedLabel}
+        </span>
+      )}
     </div>
   );
 }

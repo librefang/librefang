@@ -482,6 +482,7 @@ impl LibreFangKernel {
             &entry.manifest.model,
             None,
         )
+        .map(|resolved| resolved.tokens)
         .unwrap_or(200_000);
         config.context_window_tokens = agent_ctx_window;
 
@@ -656,18 +657,27 @@ impl LibreFangKernel {
         // precedence chain the agent loop uses", but the three execution paths
         // read only the catalog, so an operator who set `context_window` saw it
         // honoured in this report and ignored on every real turn.
-        let context_window: usize = super::manifest_helpers::resolve_context_window(
+        //
+        // The resolved value carries the layer that produced it, and the report
+        // carries that through to every surface (#7774 item 5): a window nobody
+        // knows is a guess, and a percentage measured against a guess is what
+        // turned a 16K conversation into an imaginary overflow in the report.
+        let resolved = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &entry.manifest.model,
             Some(session.context_window_tokens),
         )
-        .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
+        .unwrap_or(librefang_types::model_catalog::ResolvedContextWindow {
+            tokens: librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW,
+            source: librefang_types::model_catalog::ContextWindowSource::Fallback,
+        });
 
         Ok(generate_context_report(
             &session.messages,
             Some(system_prompt),
             Some(&tools),
-            context_window,
+            resolved.tokens,
+            resolved.source,
         ))
     }
 
