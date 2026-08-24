@@ -1817,20 +1817,71 @@ fn is_safe_template_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn templates_dir() -> std::path::PathBuf {
+fn workspace_agents_dir() -> std::path::PathBuf {
     librefang_kernel::config::librefang_home()
         .join("workspaces")
         .join("agents")
 }
 
+/// Operator-authored agent types, one flat `{name}.toml` each — the same directory
+/// `POST`/`PUT /api/templates` writes (#7740).
+fn agent_types_dir() -> std::path::PathBuf {
+    librefang_kernel::config::librefang_home().join("agent-types")
+}
+
+/// Resolve one agent type's manifest path, agent-types first.
+///
+/// Mirrors the precedence `GET /api/templates/{name}` uses, so the in-process backend
+/// and the daemon backend spawn from the same document for the same row.
+fn local_agent_type_path(name: &str) -> Option<std::path::PathBuf> {
+    let own = agent_types_dir().join(format!("{name}.toml"));
+    if own.is_file() {
+        return Some(own);
+    }
+    let workspace = workspace_agents_dir().join(name).join("agent.toml");
+    workspace.is_file().then_some(workspace)
+}
+
 /// Read the agent types on disk.
 /// The in-process backend has no HTTP surface to ask, so it reads the same directory `GET /api/templates` serves.
 fn local_agent_templates() -> Vec<TemplateInfo> {
-    let dir = templates_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
+    // Same two sources, and the same precedence, as `GET /api/templates`.
     let mut out = Vec::new();
+    collect_agent_type_files(&agent_types_dir(), &mut out);
+    collect_workspace_agent_manifests(&workspace_agents_dir(), &mut out);
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// Read `agent-types/{name}.toml` — the documents the write verbs own.
+fn collect_agent_type_files(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_safe_template_name(name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        push_template_info(name.to_string(), &content, &path, out);
+    }
+}
+
+/// Read `workspaces/agents/{name}/agent.toml` — every live agent is spawnable-from too.
+fn collect_workspace_agent_manifests(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
             continue;
@@ -1843,24 +1894,31 @@ fn local_agent_templates() -> Vec<TemplateInfo> {
         let Ok(content) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
-        match toml::from_str::<librefang_types::agent::AgentManifest>(&content) {
-            Ok(manifest) => out.push(TemplateInfo {
-                name,
-                description: manifest.description,
-                category: templates::MANIFEST_CATEGORY.to_string(),
-                provider: manifest.model.provider,
-                model: manifest.model.model,
-                source: TemplateSource::Manifest,
-            }),
-            // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
-            Err(e) => tracing::warn!(
-                "skipping agent template {}: invalid manifest: {e}",
-                manifest_path.display()
-            ),
-        }
+        push_template_info(name, &content, &manifest_path, out);
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+}
+
+fn push_template_info(
+    name: String,
+    content: &str,
+    path: &std::path::Path,
+    out: &mut Vec<TemplateInfo>,
+) {
+    match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
+        Ok(manifest) => out.push(TemplateInfo {
+            name,
+            description: manifest.description,
+            category: templates::MANIFEST_CATEGORY.to_string(),
+            provider: manifest.model.provider,
+            model: manifest.model.model,
+            source: TemplateSource::Manifest,
+        }),
+        // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
+        Err(e) => tracing::warn!(
+            "skipping agent template {}: invalid manifest: {e}",
+            path.display()
+        ),
+    }
 }
 
 fn parse_api_templates(body: &serde_json::Value) -> Vec<TemplateInfo> {
@@ -1926,7 +1984,7 @@ pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Se
                         .and_then(|resp| resp.text().ok())
                 }
                 BackendRef::InProcess(_) => {
-                    std::fs::read_to_string(templates_dir().join(&name).join("agent.toml")).ok()
+                    local_agent_type_path(&name).and_then(|p| std::fs::read_to_string(p).ok())
                 }
             }
         };

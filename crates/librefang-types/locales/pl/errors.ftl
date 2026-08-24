@@ -32,6 +32,9 @@ api-error-template-parse-failed = Nie udało się przeanalizować szablonu: { $e
 api-error-template-required = Wymagane jest 'manifest_toml' lub 'template'
 api-error-template-invalid-manifest = Nieprawidłowy manifest szablonu
 api-error-template-read-failed = Nie udało się odczytać szablonu
+api-error-agent-type-exists = Typ agenta '{ $name }' już istnieje
+api-error-agent-type-name-taken = '{ $name }' to nazwa działającego agenta; wybierz inną nazwę dla typu agenta
+api-error-agent-type-not-editable = Typ agenta '{ $name }' pochodzi z obszaru roboczego działającego agenta i jest zarządzany przez /api/agents
 
 # Manifest errors
 api-error-manifest-too-large = Manifest jest za duży (maks. 1 MB)

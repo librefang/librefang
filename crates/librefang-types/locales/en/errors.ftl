@@ -32,6 +32,9 @@ api-error-template-parse-failed = Failed to parse template: { $error }
 api-error-template-required = Either 'manifest_toml' or 'template' is required
 api-error-template-invalid-manifest = Invalid template manifest
 api-error-template-read-failed = Failed to read template
+api-error-agent-type-exists = An agent type named '{ $name }' already exists
+api-error-agent-type-name-taken = '{ $name }' is the name of a live agent; pick another name for the agent type
+api-error-agent-type-not-editable = Agent type '{ $name }' comes from a live agent workspace and is managed through /api/agents
 
 # Manifest errors
 api-error-manifest-too-large = Manifest too large (max 1MB)
