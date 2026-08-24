@@ -237,6 +237,10 @@ api-error-backup-finalize-failed = Failed to finalize backup: { $error }
 api-error-backup-open-failed = Failed to open backup: { $error }
 api-error-backup-invalid-archive = Invalid backup archive: { $error }
 api-error-backup-delete-failed = Failed to delete backup: { $error }
+api-error-backup-invalid-keep-config = Invalid 'keep_config' — must be a boolean
+api-error-backup-invalid-components = Invalid 'components' — must be an array of component-name strings
+api-error-backup-empty-components = 'components' must not be empty — omit the field to restore every component
+api-error-backup-unknown-component = Unknown backup component '{ $component }'. Valid components: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = Schedule not found

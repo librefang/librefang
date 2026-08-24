@@ -12,6 +12,7 @@
 //! literal directly.
 
 use super::*;
+use crate::kernel::subsystems::memory::{MemoryExtractionResolution, MemoryExtractionTarget};
 use crate::MeteringSubsystemApi;
 use librefang_types::error::LibreFangError;
 
@@ -1998,40 +1999,6 @@ impl LibreFangKernel {
                 .clone()
                 .unwrap_or_else(|| cfg.default_model.model.clone());
 
-            // Say out loud which model ended up doing the extraction, and
-            // whether anyone chose it.
-            //
-            // The fallback to `default_model` used to be silent, and silence
-            // is what made it expensive: on a live deployment an agent was
-            // answering in 2 s on its own fast model while its memory
-            // extraction ran on the global default — a reasoning model that
-            // needs 30.5 s for the *smallest possible* extraction, against a
-            // 30 s ceiling it could therefore never meet. It failed on every
-            // single turn, retried four times, and held each finished reply
-            // for over two minutes. Nothing in the operator's config file
-            // mentioned that model in connection with memory at all, so there
-            // was nothing to read and no reason to suspect it.
-            //
-            // An inherited value is not a problem in itself — it is the
-            // documented default. What is a problem is not being able to find
-            // out. One line at boot is the whole fix.
-            if configured_extraction_model.is_some() {
-                debug!(
-                    extraction_model = %extraction_spec,
-                    "proactive memory: using the configured extraction model"
-                );
-            } else {
-                warn!(
-                    extraction_model = %extraction_spec,
-                    default_provider = %cfg.default_model.provider,
-                    "proactive memory: no [proactive_memory] extraction_model is set, so \
-                     extraction inherits the global default model. This runs on every turn \
-                     after the reply is ready, so a slow model here delays every answer. \
-                     Set [proactive_memory] extraction_model to a small, fast model to \
-                     decouple it from the model your agents converse with."
-                );
-            }
-
             let catalog = kernel.llm.model_catalog.load();
             let (extraction_provider, extraction_model_name) = resolve_extraction_model_target(
                 &extraction_spec,
@@ -2046,6 +2013,56 @@ impl LibreFangKernel {
                 &extraction_provider,
             );
 
+            // Say out loud which model ended up doing the extraction, and
+            // whether anyone chose it — *after* resolution, so the line names
+            // the provider and the model that will actually be called rather
+            // than the spec string that was fed in. An inherited
+            // `provider/model` spec logged before resolution answers neither
+            // "which provider" nor "what will the upstream API see", which is
+            // the whole question.
+            //
+            // The fallback to `default_model` used to be silent, and silence
+            // is what made it expensive: on a live deployment an agent was
+            // answering in 2 s on its own fast model while its memory
+            // extraction ran on the global default — a reasoning model that
+            // needs 30.5 s for the *smallest possible* extraction, against a
+            // 30 s ceiling it could therefore never meet. It failed on every
+            // single turn, retried four times, and held each finished reply
+            // for over two minutes. Nothing in the operator's config file
+            // mentioned that model in connection with memory at all, so there
+            // was nothing to read and no reason to suspect it.
+            //
+            // Inheriting the default is the documented behaviour of an unset
+            // field, so it is reported at INFO, not WARN: a warning that fires
+            // on every default install is a warning operators learn to skip,
+            // and the one path here that is genuinely surprising — the driver
+            // failing to build and extraction silently losing its LLM — needs
+            // that level to still mean something.
+            let extraction_target = MemoryExtractionTarget {
+                configured_spec: configured_extraction_model.clone(),
+                provider: extraction_provider.clone(),
+                model: extraction_model_name.clone(),
+            };
+            if configured_extraction_model.is_some() {
+                debug!(
+                    extraction_spec = %extraction_spec,
+                    extraction_provider = %extraction_provider,
+                    extraction_model = %extraction_model_name,
+                    "proactive memory: using the configured extraction model"
+                );
+            } else {
+                info!(
+                    extraction_spec = %extraction_spec,
+                    extraction_provider = %extraction_provider,
+                    extraction_model = %extraction_model_name,
+                    "proactive memory: no [proactive_memory] extraction_model is set, so \
+                     extraction inherits the global default model. This runs on every turn \
+                     after the reply is ready, so a slow model here delays every answer. \
+                     Set [proactive_memory] extraction_model to a small, fast model to \
+                     decouple it from the model your agents converse with."
+                );
+            }
+
             // Build the extraction driver: reuse the kernel's default driver
             // when extraction provider == default provider (no extra
             // driver_cache entry); otherwise build a fresh driver for the
@@ -2054,6 +2071,7 @@ impl LibreFangKernel {
             // — explicit visible degradation beats silently 404'ing the
             // operator's named provider on every turn (the original #4871
             // bug).
+            let mut extraction_driver_error: Option<String> = None;
             let llm: Option<(Arc<dyn librefang_runtime::llm_driver::LlmDriver>, String)> =
                 if extraction_provider == cfg.default_model.provider {
                     Some((
@@ -2065,14 +2083,16 @@ impl LibreFangKernel {
                         Ok(driver) => Some((driver, extraction_model_name)),
                         Err(e) => {
                             warn!(
-                                extraction_model = %extraction_spec,
+                                extraction_spec = %extraction_spec,
                                 extraction_provider = %extraction_provider,
+                                extraction_model = %extraction_model_name,
                                 error = %e,
                                 "Failed to build extraction LLM driver for the configured \
                                  [proactive_memory] extraction_model; falling back to substring \
                                  extraction. Check that the named provider has its API key + \
                                  base URL configured."
                             );
+                            extraction_driver_error = Some(e.to_string());
                             None
                         }
                     }
@@ -2091,6 +2111,16 @@ impl LibreFangKernel {
             // inherits caching from the agent's manifest metadata which
             // the kernel derives from this same flag.
             let prompt_caching = cfg.prompt_caching;
+            // A sidecar extractor takes precedence inside
+            // `init_proactive_memory_full_with_extractor` and bypasses the LLM
+            // path wholesale, so it is one of the ways a resolved model ends up
+            // not being the thing that writes memories. Read it before
+            // `pm_config` is moved.
+            let sidecar_command = pm_config
+                .extractor_sidecar
+                .as_ref()
+                .map(|s| s.command.trim().to_string())
+                .filter(|c| !c.is_empty());
             let result =
                 librefang_runtime::proactive_memory::init_proactive_memory_full_with_extractor(
                     Arc::clone(&kernel.memory.substrate),
@@ -2099,12 +2129,52 @@ impl LibreFangKernel {
                     embedding,
                     prompt_caching,
                 );
+
+            // Record the *outcome*, not the intent. Every reporting surface
+            // reads this snapshot instead of re-deriving "which model extracts
+            // memories" from `KernelConfig`, because a re-derivation cannot see
+            // any of the three ways the configured model stops being the answer
+            // — the store never being built, a sidecar taking over, or the
+            // driver failing to build and extraction quietly dropping to
+            // substring matching with no LLM at all.
+            let resolution = match &result {
+                // Both `auto_memorize` and `auto_retrieve` are off, so no store
+                // was built and nothing extracts.
+                None => MemoryExtractionResolution::Inactive,
+                Some((_, Some(_))) => MemoryExtractionResolution::Llm {
+                    target: extraction_target,
+                },
+                Some((_, None)) => match sidecar_command {
+                    Some(command) => MemoryExtractionResolution::Sidecar { command },
+                    None => MemoryExtractionResolution::DegradedToSubstring {
+                        reason: format!(
+                            "failed to build the {} driver for extraction model {}: {}",
+                            extraction_target.provider,
+                            extraction_target.model,
+                            extraction_driver_error
+                                .as_deref()
+                                .unwrap_or("no extraction LLM driver was built"),
+                        ),
+                        target: extraction_target,
+                    },
+                },
+            };
+            let _ = kernel.memory.extraction_resolution.set(resolution);
+
             if let Some((store, extractor)) = result {
                 let _ = kernel.memory.proactive_memory.set(store);
                 if let Some(ex) = extractor {
                     let _ = kernel.memory.proactive_memory_extractor.set(ex);
                 }
             }
+        } else {
+            // Record the inactive outcome too, so a reporting surface can tell
+            // "extraction is switched off" apart from "boot never got here" and
+            // never has to fall back to guessing from config.
+            let _ = kernel
+                .memory
+                .extraction_resolution
+                .set(MemoryExtractionResolution::Inactive);
         }
 
         // Initialize prompt store

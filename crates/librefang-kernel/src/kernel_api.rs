@@ -102,6 +102,19 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn metering_ref(&self) -> &Arc<MeteringEngine>;
     fn pairing_ref(&self) -> &PairingManager;
     fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>>;
+    /// What boot actually wired memory extraction to (#7828 follow-up).
+    ///
+    /// Reporting surfaces read this instead of re-deriving "which model
+    /// extracts memories" from `config_ref()`. A re-derivation names the
+    /// configured model even when no LLM is running at all — the store was
+    /// never built, a sidecar took over, or the driver failed to build and
+    /// extraction dropped to substring matching — which is precisely the class
+    /// of silent divergence the feature exists to surface.
+    ///
+    /// `None` only if boot never reached the proactive-memory step.
+    fn extraction_model_resolution(
+        &self,
+    ) -> Option<&crate::kernel::subsystems::memory::MemoryExtractionResolution>;
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager>;
     fn process_registry(&self) -> &Arc<librefang_runtime::process_registry::ProcessRegistry>;
     fn scheduler_ref(&self) -> &AgentScheduler;
@@ -850,6 +863,11 @@ impl KernelApi for LibreFangKernel {
     }
     fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
         <Self as crate::MemorySubsystemApi>::proactive_store(self)
+    }
+    fn extraction_model_resolution(
+        &self,
+    ) -> Option<&crate::kernel::subsystems::memory::MemoryExtractionResolution> {
+        <Self as crate::MemorySubsystemApi>::extraction_resolution(self)
     }
     fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
         <Self as crate::ProcessSubsystemApi>::process_manager_ref(self)

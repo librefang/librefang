@@ -10568,7 +10568,7 @@
           "system"
         ],
         "summary": "POST /api/restore — Restore kernel state from a backup archive.",
-        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
+        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\nTwo optional fields narrow what gets written:\n\n- `keep_config` (bool, default `false`) skips `config.toml`, so the target\n  keeps its own API key, bind port and paths (clone mode).\n- `components` (array of strings) limits the restore to the named\n  components — `config`, `cron_jobs`, `hand_state`, `custom_models`,\n  `agents`, `skills`, `workflows`, `data`. **Omit the field** to restore\n  everything; `[]` and any unrecognised name are rejected with `400` rather\n  than quietly restoring nothing. Archive entries no component owns are\n  restored regardless of the selection.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
         "operationId": "restore_backup",
         "requestBody": {
           "content": {

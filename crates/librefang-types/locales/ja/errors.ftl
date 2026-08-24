@@ -237,6 +237,10 @@ api-error-backup-finalize-failed = バックアップの完了に失敗しまし
 api-error-backup-open-failed = バックアップの開封に失敗しました: { $error }
 api-error-backup-invalid-archive = 無効なバックアップアーカイブ: { $error }
 api-error-backup-delete-failed = バックアップの削除に失敗しました: { $error }
+api-error-backup-invalid-keep-config = 'keep_config' が不正です — 真偽値である必要があります
+api-error-backup-invalid-components = 'components' が不正です — コンポーネント名の文字列配列である必要があります
+api-error-backup-empty-components = 'components' を空にはできません — すべてのコンポーネントを復元する場合はフィールドを省略してください
+api-error-backup-unknown-component = 不明なバックアップコンポーネント '{ $component }' です。有効なコンポーネント: { $valid }
 
 # スケジュールエラー
 api-error-schedule-not-found = スケジュールが見つかりません

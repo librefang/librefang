@@ -430,9 +430,19 @@ API 版本发现。返回所有可用的 API 版本及其稳定性状态。
 
 ```json
 {
-  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "keep_config": true,
+  "components": ["cron_jobs", "data"]
 }
 ```
+
+`keep_config`（布尔值，默认 `false`）会跳过 `config.toml`，使目标机器保留自己的 API 密钥、监听端口和路径——这正是把一套配置克隆到第二台机器时所需要的。
+
+`components`（字符串数组）把恢复范围限制为指定组件：`config`、`cron_jobs`、`hand_state`、`custom_models`、`agents`、`skills`、`workflows`、`data`。
+**省略该字段即恢复全部组件。**
+空数组会返回 `400`，因为“什么都不恢复”和“全部恢复”相差太远，不应由服务端猜测；无法识别的名称同样返回 `400` 并列出有效取值，这样拼写错误不会变成一次悄无声息什么都没写的恢复。
+不属于任何组件的归档条目无论如何都会被恢复。
+`data` 覆盖 `data/` 下的每个条目，包括同时拥有各自组件名的 `cron_jobs`、`hand_state` 和 `custom_models` 文件。
 
 ---
 

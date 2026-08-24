@@ -673,9 +673,22 @@ fn push_aged_entry(
         &entries[last_idx].prev_hash,
     );
     entries[last_idx].hash = new_hash.clone();
+    let seq = entries[last_idx].seq;
+    let new_timestamp = entries[last_idx].timestamp.clone();
     drop(entries);
     // Update the tip so the next record links to the right hash.
-    *log.tip.lock().unwrap() = new_hash;
+    *log.tip.lock().unwrap() = new_hash.clone();
+
+    // Back-date the persisted row too.
+    // Every append now derives its predecessor from the durable tail inside the write transaction (#7702), so a DB row still carrying the pre-back-dating timestamp and hash reads as a divergent chain on the very next `record()`: the append would chain onto the stored hash and reconcile the in-memory window back to what the table holds, silently undoing the ageing this helper exists to apply.
+    if let Some(pool) = log.db.as_ref() {
+        let conn = pool.get().unwrap();
+        conn.execute(
+            "UPDATE audit_entries SET timestamp = ?1, hash = ?2 WHERE seq = ?3",
+            rusqlite::params![&new_timestamp, &new_hash, seq as i64],
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -1850,6 +1863,256 @@ fn audit_chain_holds_under_concurrent_record() {
             next_prev, prev_hash,
             "chain break at seq {next_seq}: prev_hash does not match prior row's hash"
         );
+    }
+}
+
+/// Schema used by the multi-writer tests below, matching migration V8 /
+/// V22 (`seq INTEGER PRIMARY KEY` plus the later `user_id` / `channel` columns).
+const AUDIT_TABLE_DDL: &str = "CREATE TABLE audit_entries (
+    seq INTEGER PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    user_id TEXT,
+    channel TEXT,
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL
+)";
+
+/// A file-backed pool with the daemon's WAL pragmas, so `max_size > 1` actually buys multiple simultaneous connections (`:memory:` is per-connection) and a writer waiting on the RESERVED lock blocks instead of failing with `SQLITE_BUSY`.
+fn multi_writer_pool(db_path: &std::path::Path) -> Pool<SqliteConnectionManager> {
+    let manager = SqliteConnectionManager::file(db_path).with_init(|c| {
+        c.execute_batch(
+            "PRAGMA journal_mode=WAL;\
+             PRAGMA busy_timeout=10000;\
+             PRAGMA synchronous=NORMAL;",
+        )
+    });
+    let pool = Pool::builder().max_size(8).build(manager).unwrap();
+    pool.get().unwrap().execute_batch(AUDIT_TABLE_DDL).unwrap();
+    pool
+}
+
+/// Every persisted row, ordered by `seq`.
+fn all_rows(pool: &Pool<SqliteConnectionManager>) -> Vec<(u64, String, String)> {
+    let conn = pool.get().unwrap();
+    let mut stmt = conn
+        .prepare("SELECT seq, prev_hash, hash FROM audit_entries ORDER BY seq ASC")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)? as u64,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    rows
+}
+
+/// Prevention regression for #7702 — the deterministic half.
+///
+/// The reported symptom is `chain break at seq N` with everything below N verifying and everything above it verifying: two independently derived chains merged into one table.
+/// This reproduces that merge without threads or timing, by replaying the exact sequence the issue analysis identified.
+///
+/// Before the fix, `record_with_context` derived `seq` from `entries.last().seq + 1` and `prev_hash` from the in-memory `tip`, both read before `BEGIN IMMEDIATE` opened and never re-checked against the table.
+/// A second writer survived only because those two values came from the *same* stale snapshot, so its INSERT collided on `seq INTEGER PRIMARY KEY` and failed closed — an interlock that holds only while the row occupying that seq still exists.
+/// The default `audit.retention_days = 90` prune issues `DELETE FROM audit_entries WHERE seq < ?1` on a daily schedule and frees it with no operator involvement; the stale writer's next INSERT then succeeds carrying a `prev_hash` that names a row which is no longer its predecessor, and the chain forks.
+///
+/// With the tail read inside the write transaction, the stale writer chains onto the row that is actually last at INSERT time, so the fork is unreachable rather than merely unlikely.
+#[test]
+fn stale_snapshot_append_cannot_fork_the_chain_after_a_prune() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = multi_writer_pool(&tmp.path().join("audit.db"));
+
+    // Daemon A writes seq 0..=3.
+    let daemon_a = AuditLog::with_db(pool.clone());
+    for i in 0..4 {
+        daemon_a.record("agent-a", AuditAction::ToolInvoke, format!("a-{i}"), "ok");
+    }
+
+    // Daemon B opens the same database and snapshots the tail: its next
+    // append would be seq 4 chained onto the hash of seq 3.
+    let daemon_b = AuditLog::with_db(pool.clone());
+    assert_eq!(daemon_b.len(), 4, "B should load A's four rows");
+    let stale_prev = daemon_b.tip_hash();
+
+    // A keeps writing: seq 4..=7. B's snapshot is now stale, but seq 4 is
+    // occupied, so a stale INSERT would still fail closed on the primary key.
+    for i in 4..8 {
+        daemon_a.record("agent-a", AuditAction::ToolInvoke, format!("a-{i}"), "ok");
+    }
+
+    // The daily retention pruner frees the stale seq while higher rows
+    // survive. This is the statement `AuditLog::prune` issues verbatim.
+    let deleted = pool
+        .get()
+        .unwrap()
+        .execute(
+            "DELETE FROM audit_entries WHERE seq < ?1",
+            rusqlite::params![6i64],
+        )
+        .unwrap();
+    assert_eq!(deleted, 6, "prune should free seq 0..=5, leaving 6 and 7");
+
+    // B appends off its stale snapshot. Pre-fix this inserted seq=4 with
+    // `prev_hash` = hash(seq 3), merging a second chain into the table; the
+    // next boot then reported `chain break at seq 6`.
+    daemon_b.record("agent-b", AuditAction::ToolInvoke, "b-0", "ok");
+
+    let rows = all_rows(&pool);
+    assert_eq!(
+        rows.iter().map(|(seq, ..)| *seq).collect::<Vec<_>>(),
+        vec![6, 7, 8],
+        "the stale writer must extend the surviving tail, not refill a freed seq"
+    );
+    let b_row = rows.last().unwrap();
+    assert_eq!(
+        b_row.1, rows[1].2,
+        "B's entry must chain onto the row that is actually last at INSERT time"
+    );
+    assert_ne!(
+        b_row.1, stale_prev,
+        "B must not chain onto the predecessor from its pre-prune snapshot"
+    );
+
+    // The gate the daemon runs on every boot.
+    AuditLog::with_db(pool.clone())
+        .verify_integrity()
+        .expect("reloaded chain must verify after a stale-snapshot append");
+
+    // B's own view is reconciled rather than wedged: pre-fix `entries.last()`
+    // never advanced on a losing append, so the process retried one dead seq
+    // forever and silently discarded every later audit event for its lifetime.
+    daemon_b
+        .verify_integrity()
+        .expect("the reconciled writer's in-memory window must verify");
+    assert_eq!(daemon_b.len(), 3, "B's window is the surviving suffix");
+    assert_eq!(daemon_b.persisted_len(), 3);
+    assert_eq!(daemon_b.tip_hash(), b_row.2);
+
+    // And it keeps writing.
+    daemon_b.record("agent-b", AuditAction::ToolInvoke, "b-1", "ok");
+    let rows = all_rows(&pool);
+    assert_eq!(
+        rows.iter().map(|(seq, ..)| *seq).collect::<Vec<_>>(),
+        vec![6, 7, 8, 9],
+        "the reconciled writer must keep appending, not retry a dead seq"
+    );
+    AuditLog::with_db(pool)
+        .verify_integrity()
+        .expect("chain must still verify after the reconciled writer continues");
+}
+
+/// Prevention regression for #7702 — the concurrent half.
+///
+/// [`audit_chain_holds_under_concurrent_record`] shares one [`AuditLog`] across its threads, so every append there is already serialised by that instance's `entries` mutex and the SQLite-level interlock is never exercised.
+/// This one runs two independent [`AuditLog`] instances over the same database file — the two-daemon shape from the issue — so the only thing standing between them is the `BEGIN IMMEDIATE` transaction the append opens.
+///
+/// This test is timing-dependent by construction: it cannot force a particular interleaving, only make one likely.
+/// The deterministic guarantee lives in [`stale_snapshot_append_cannot_fork_the_chain_after_a_prune`]; this test bounds the flakiness rather than eliminating it, by giving both writers a 10 s `busy_timeout` so a writer that loses the RESERVED lock waits for it instead of dropping its entry and turning a scheduling hiccup into a failed assertion.
+#[test]
+fn chain_holds_under_two_writers_on_one_database() {
+    use std::sync::Arc;
+    use std::thread;
+
+    const WRITERS: usize = 2;
+    const THREADS_PER_WRITER: usize = 3;
+    const PER_THREAD: usize = 25;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = multi_writer_pool(&tmp.path().join("audit.db"));
+
+    // Two daemons, each with its own in-memory chain state, over one file.
+    let daemons: Vec<Arc<AuditLog>> = (0..WRITERS)
+        .map(|_| Arc::new(AuditLog::with_db(pool.clone())))
+        .collect();
+
+    let handles: Vec<_> = daemons
+        .iter()
+        .enumerate()
+        .flat_map(|(d, daemon)| {
+            (0..THREADS_PER_WRITER).map(move |t| {
+                let daemon = daemon.clone();
+                thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        daemon.record_with_context(
+                            format!("agent-{d}-{t}"),
+                            AuditAction::ToolInvoke,
+                            format!("op-{d}-{t}-{i}"),
+                            "ok",
+                            None,
+                            Some("test".to_string()),
+                        );
+                    }
+                })
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    let expected = WRITERS * THREADS_PER_WRITER * PER_THREAD;
+    let rows = all_rows(&pool);
+
+    // No writes lost. Pre-fix, a writer whose snapshot went stale lost the
+    // primary-key collision and then retried the same dead seq for the rest
+    // of its life, so this count fell far short.
+    assert_eq!(
+        rows.len(),
+        expected,
+        "expected {expected} persisted rows, got {}",
+        rows.len()
+    );
+
+    // Contiguous seq from a single genesis: two merged chains show up either
+    // as a gap or as a re-used seq.
+    let seqs: Vec<u64> = rows.iter().map(|(seq, ..)| *seq).collect();
+    assert_eq!(
+        seqs,
+        (0..expected as u64).collect::<Vec<_>>(),
+        "seq must be contiguous from 0 — a hole means two chains merged"
+    );
+
+    // No parent collisions — the direct fork detector.
+    let genesis = "0".repeat(64);
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    for (seq, prev_hash, _) in &rows {
+        assert!(
+            seen.insert(prev_hash.clone()),
+            "two rows share prev_hash={prev_hash} — chain forked at seq {seq}"
+        );
+    }
+    assert_eq!(
+        rows.iter().filter(|(_, p, _)| p == &genesis).count(),
+        1,
+        "expected exactly one genesis row"
+    );
+    for window in rows.windows(2) {
+        assert_eq!(
+            window[1].1, window[0].2,
+            "chain break at seq {}: prev_hash does not match the prior row's hash",
+            window[1].0
+        );
+    }
+
+    // The integrity gate the runtime actually relies on, over the whole log.
+    AuditLog::with_db(pool.clone())
+        .verify_integrity()
+        .expect("Merkle chain must verify after concurrent multi-writer appends");
+
+    // Both writers' own views must verify too, not just the reloaded one.
+    for (d, daemon) in daemons.iter().enumerate() {
+        daemon
+            .verify_integrity()
+            .unwrap_or_else(|e| panic!("daemon {d} in-memory chain must verify: {e}"));
     }
 }
 
