@@ -18,6 +18,7 @@ pub mod event;
 pub mod goal;
 pub mod i18n;
 pub mod integration;
+pub mod manifest_privacy;
 pub mod manifest_signing;
 pub mod mcp;
 pub mod media;

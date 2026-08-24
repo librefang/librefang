@@ -11928,7 +11928,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template details",
+            "description": "Template details, plus a read-only privacy pass over the manifest for registry promotion",
             "content": {
               "application/json": {
                 "schema": {

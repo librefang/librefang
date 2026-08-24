@@ -249,6 +249,25 @@ pub async fn execute_tool_raw(
             *sender_id,
             *channel,
         )),
+        // #7808: semantic (vector) memory. Dispatched here with the KV tools
+        // because they share the same soft-`Denied` contract — a per-user ACL
+        // refusal on the `proactive` namespace must not count toward the
+        // consecutive-hard-failure abort.
+        "memory_semantic_search" => Some(
+            tool_memory_semantic_search(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_add" => Some(
+            tool_memory_semantic_add(input, *kernel, *caller_agent_id, *sender_id, *channel).await,
+        ),
+        "memory_semantic_forget" => Some(
+            tool_memory_semantic_forget(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_stats" => Some(
+            tool_memory_semantic_stats(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
         "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
         "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
         "wiki_write" => Some(tool_wiki_write(

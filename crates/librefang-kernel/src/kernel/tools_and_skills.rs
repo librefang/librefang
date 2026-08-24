@@ -55,6 +55,19 @@ fn lock_kernel_state<'a, T>(
     })
 }
 
+/// Which half of the semantic-memory tool surface a tool name belongs to (#7808).
+///
+/// Read tools are gated on `capabilities.memory_read`, write tools on
+/// `capabilities.memory_write`. See the gate in
+/// [`LibreFangKernel::available_tools`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticMemoryAccess {
+    /// Reads the `memories` table (`memory_semantic_search`, `_stats`).
+    Read,
+    /// Mutates the `memories` table (`memory_semantic_add`, `_forget`).
+    Write,
+}
+
 /// Outcome of [`LibreFangKernel::reload_skills`], so callers can report an honest result instead of assuming the reload always fully succeeded (#6540).
 ///
 /// In Stable mode the registry is frozen: `frozen` is `true`, `refreshed` lists the already-loaded skills whose on-disk content was re-read (freeze-safe), and `skipped_new` lists brand-new skill directories that were found on disk but deliberately NOT loaded (they need an operator restart).
@@ -109,6 +122,22 @@ impl LibreFangKernel {
                 .collect()
         };
 
+        // Semantic memory is a whole subsystem behind one toggle: with
+        // `[proactive_memory] enabled = false` the `ProactiveMemoryStore` is
+        // never constructed at boot, so the `memory_semantic_*` tools can only
+        // ever answer `Unavailable`. Strip them rather than spend prompt tokens
+        // advertising four tools that cannot work, mirroring the browser gate
+        // above (#7808).
+        //
+        // This reads the live config snapshot while the store itself is created
+        // once at boot, so flipping the toggle on at runtime re-advertises the
+        // tools before a restart has actually built the store. That is the same
+        // restart requirement automatic recall already has, and it fails
+        // honestly — `Unavailable`, naming the config key.
+        if !cfg.proactive_memory.enabled {
+            all_builtins.retain(|t| !t.name.starts_with("memory_semantic_"));
+        }
+
         // Canvas / A2UI tool is opt-in (`[canvas] enabled`, default false).
         // When disabled, strip `canvas_present` so it is neither advertised to
         // the LLM nor dispatchable — mirroring the browser gate above.
@@ -149,10 +178,11 @@ impl LibreFangKernel {
 
         // Step 1: Filter builtin tools.
         // Priority: declared tools > ToolProfile > all builtins.
-        let has_tool_all = entry.as_ref().is_some_and(|_| {
-            let caps = self.agents.capabilities.list(agent_id);
-            caps.iter().any(|c| matches!(c, Capability::ToolAll))
-        });
+        let agent_caps = entry
+            .as_ref()
+            .map(|_| self.agents.capabilities.list(agent_id))
+            .unwrap_or_default();
+        let has_tool_all = agent_caps.iter().any(|c| matches!(c, Capability::ToolAll));
 
         // Skill self-evolution is a first-class capability: every agent
         // and hand gets `skill_evolve_*` + `skill_read_file` regardless
@@ -232,6 +262,51 @@ impl LibreFangKernel {
                     || declared_tools.iter().any(|d| glob_matches(d, &t.name))
             });
         }
+
+        // Semantic-memory gate (#7808).
+        //
+        // The `memory_semantic_*` tools read and write the embedding-backed
+        // `memories` table — cross-session, PII-bearing content that the three
+        // KV tools never touch. `capabilities.tools` alone is too coarse to
+        // express that: the common declaration `memory_*` glob-matches the new
+        // names, so an operator who granted KV memory would silently acquire
+        // the semantic store too.
+        //
+        // So the declared memory scopes decide as well: read tools need a read
+        // scope covering the agent's own memory, write tools a write scope.
+        // An empty scope list means "undeclared", which stays open — the same
+        // reading `capabilities.tools` already has (empty = unrestricted), and
+        // the reading that keeps the default manifest able to reach the feature
+        // at all. An explicit entry in `capabilities.tools` is a positive grant
+        // that overrides the gate, mirroring the evolve gate above.
+        let read_scopes: Vec<&str> = agent_caps
+            .iter()
+            .filter_map(|c| match c {
+                Capability::MemoryRead(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        let write_scopes: Vec<&str> = agent_caps
+            .iter()
+            .filter_map(|c| match c {
+                Capability::MemoryWrite(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        all_tools.retain(|t| match Self::semantic_memory_tool_access(&t.name) {
+            None => true,
+            Some(access) => {
+                let named_explicitly = declared_tools.iter().any(|d| d == &t.name);
+                let scopes = match access {
+                    SemanticMemoryAccess::Read => &read_scopes,
+                    SemanticMemoryAccess::Write => &write_scopes,
+                };
+                named_explicitly
+                    || has_tool_all
+                    || scopes.is_empty()
+                    || scopes.iter().any(|s| Self::scope_covers_own_memory(s))
+            }
+        });
 
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
         // then by declared tools). Skip entirely when skills are disabled.
@@ -1459,6 +1534,38 @@ impl LibreFangKernel {
     /// inline duplication of the tool-name list.
     ///
     /// Public because these tools bypass the `capabilities.tools` filter, which makes the predicate load-bearing outside the kernel too: the API layer's inert-`tool_allowlist`-entry diagnostic (#6609, `routes::agents::config`) must not flag an entry naming one of them as unable to match, since Step 1's post-filter injects them regardless of what `capabilities.tools` declares.
+    /// Which half of the semantic-memory surface a tool name belongs to, or
+    /// `None` when it is not a semantic-memory tool at all.
+    ///
+    /// Public for the same reason as [`Self::is_evolve_tool`]: the gate in
+    /// `available_tools` makes the classification load-bearing outside the
+    /// kernel (a `tool_allowlist` diagnostic must know these names can be
+    /// filtered by something other than `capabilities.tools`).
+    pub fn semantic_memory_tool_access(name: &str) -> Option<SemanticMemoryAccess> {
+        match name {
+            "memory_semantic_search" | "memory_semantic_stats" => Some(SemanticMemoryAccess::Read),
+            "memory_semantic_add" | "memory_semantic_forget" => Some(SemanticMemoryAccess::Write),
+            _ => None,
+        }
+    }
+
+    /// Whether one declared `memory_read` / `memory_write` scope covers the
+    /// agent's own semantic memory.
+    ///
+    /// Three accepting forms, each for a concrete reason:
+    ///   * `*` — the unrestricted grant.
+    ///   * `self.*` — what every non-memory [`ToolProfile`] implies for
+    ///     `memory_write`. Those profiles mean "this agent may write its own
+    ///     memory", not "this agent may not use the semantic store", so
+    ///     matching it literally against `proactive` would strip the write
+    ///     tools from every profile-based agent.
+    ///   * anything glob-matching `proactive`, the namespace string the
+    ///     per-user ACL and the REST layer already use for this store — so an
+    ///     operator can name it explicitly.
+    pub fn scope_covers_own_memory(scope: &str) -> bool {
+        scope == "*" || scope == "self.*" || glob_matches(scope, "proactive")
+    }
+
     pub fn is_evolve_tool(name: &str) -> bool {
         matches!(
             name,

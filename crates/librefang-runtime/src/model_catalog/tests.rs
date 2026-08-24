@@ -20,15 +20,8 @@ fn source(content: &str, is_custom: bool) -> CatalogSource {
 fn names_to_info(names: &[&str]) -> Vec<DiscoveredModelInfo> {
     names
         .iter()
-        .map(|n| DiscoveredModelInfo {
-            name: n.to_string(),
-            parameter_size: None,
-            quantization_level: None,
-            family: None,
-            families: None,
-            size: None,
-            capabilities: vec![],
-        })
+        .copied()
+        .map(DiscoveredModelInfo::bare)
         .collect()
 }
 
@@ -1186,6 +1179,8 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         },
         // Embedding model: name contains "embed"
         DiscoveredModelInfo {
@@ -1196,6 +1191,8 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         },
         // Thinking model: name contains "deepseek-r1"
         DiscoveredModelInfo {
@@ -1206,6 +1203,8 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         },
         // Plain chat model
         DiscoveredModelInfo {
@@ -1216,6 +1215,8 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         },
     ];
     catalog.merge_discovered_models("ollama", &models);
@@ -1245,6 +1246,113 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
     assert!(!llama.supports_thinking);
 }
 
+/// Regression #7780: a gateway that reports capacity must have it recorded, not overwritten by the literal this method used to hardcode.
+#[test]
+fn test_merge_records_capacity_reported_by_the_gateway() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            context_window: Some(8_192),
+            max_output_tokens: Some(2_048),
+            ..DiscoveredModelInfo::bare("llamacpp-behind-litellm")
+        }],
+    );
+
+    let entry = catalog
+        .find_model("llamacpp-behind-litellm")
+        .expect("discovered model must be added");
+    assert_eq!(
+        entry.context_window, 8_192,
+        "the gateway said 8192; pre-fix this was the hardcoded 131072"
+    );
+    assert_eq!(entry.max_output_tokens, 2_048);
+    assert!(
+        entry.limits_known,
+        "an endpoint-reported limit has a source and may be used as a ceiling"
+    );
+}
+
+/// Regression #7780, the case the issue was actually filed about: LiteLLM answering with the bare OpenAI shape, so no capacity is reported at all.
+///
+/// The old code produced `context_window: 131_072` here — a number no source had produced, which `manifest_helpers::resolve_context_window` then accepted because its only test is `> 0`, and which the agent loop turned into a 131K `ContextBudget`.
+/// Zero plus `limits_known: false` is the honest encoding: the existing `> 0` guards fall through to `UNKNOWN_MODEL_CONTEXT_WINDOW` and log a warning naming the `agent.toml` field that fixes it.
+#[test]
+fn test_merge_does_not_invent_capacity_when_the_gateway_reports_none() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models("litellm", &names_to_info(&["sensor-model-generic"]));
+
+    let entry = catalog
+        .find_model("sensor-model-generic")
+        .expect("discovered model must still be added");
+    assert_ne!(
+        entry.context_window, 131_072,
+        "131072 was the fabricated literal — it must not reappear by any route"
+    );
+    assert_eq!(
+        entry.context_window, 0,
+        "0 is the catalog's documented `unknown` encoding, which every budget \
+         guard already filters"
+    );
+    assert_eq!(entry.max_output_tokens, 0);
+    assert!(
+        !entry.limits_known,
+        "nothing sourced these numbers, so no surface may present them as fact"
+    );
+}
+
+/// A gateway that reports only half the pair still counts as a source for the half it reported; the other half stays at the `unknown` encoding.
+#[test]
+fn test_merge_accepts_a_partially_reported_capacity() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            context_window: Some(200_000),
+            ..DiscoveredModelInfo::bare("context-only")
+        }],
+    );
+    let entry = catalog.find_model("context-only").unwrap();
+    assert_eq!(entry.context_window, 200_000);
+    assert_eq!(entry.max_output_tokens, 0);
+    assert!(entry.limits_known);
+}
+
+/// Capacity upgrades follow the same never-downgrade rule as the capability flags: a later probe may fill in an unknown limit, and a probe that stops reporting one must not erase what an earlier probe learned.
+#[test]
+fn test_merge_upgrades_unknown_capacity_but_never_erases_a_known_one() {
+    let mut catalog = test_catalog();
+
+    // First probe: bare OpenAI shape, nothing reported.
+    catalog.merge_discovered_models("litellm", &names_to_info(&["late-reporter"]));
+    assert_eq!(
+        catalog.find_model("late-reporter").unwrap().context_window,
+        0
+    );
+
+    // Second probe: the operator switched the gateway to a build that reports `/model/info`, so the real window arrives.
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            context_window: Some(16_384),
+            ..DiscoveredModelInfo::bare("late-reporter")
+        }],
+    );
+    let upgraded = catalog.find_model("late-reporter").unwrap();
+    assert_eq!(upgraded.context_window, 16_384);
+    assert!(upgraded.limits_known);
+
+    // Third probe: an older proxy in front of the same gateway drops the keys again.
+    // The known value must survive.
+    catalog.merge_discovered_models("litellm", &names_to_info(&["late-reporter"]));
+    let survived = catalog.find_model("late-reporter").unwrap();
+    assert_eq!(
+        survived.context_window, 16_384,
+        "a silent re-probe must not reset a measured window to unknown"
+    );
+    assert!(survived.limits_known);
+}
+
 /// Regression #4034: explicit `thinking`/`vision` capabilities from Ollama ≥0.7 must propagate for HF-imported models with opaque names.
 #[test]
 fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
@@ -1262,6 +1370,8 @@ fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
             "thinking".to_string(),
             "tools".to_string(),
         ],
+        context_window: None,
+        max_output_tokens: None,
     }];
     catalog.merge_discovered_models("ollama", &models);
 
@@ -1295,6 +1405,8 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         }],
     );
     let pre = catalog
@@ -1318,6 +1430,8 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
                 "thinking".to_string(),
                 "tools".to_string(),
             ],
+            context_window: None,
+            max_output_tokens: None,
         }],
     );
     let post = catalog
@@ -1348,6 +1462,8 @@ fn test_merge_never_downgrades_capabilities() {
             quantization_level: None,
             size: None,
             capabilities: vec!["vision".to_string(), "thinking".to_string()],
+            context_window: None,
+            max_output_tokens: None,
         }],
     );
     // Re-probe with empty capabilities — must NOT clear the previously
@@ -1362,6 +1478,8 @@ fn test_merge_never_downgrades_capabilities() {
             quantization_level: None,
             size: None,
             capabilities: vec![],
+            context_window: None,
+            max_output_tokens: None,
         }],
     );
     let entry = catalog.find_model("vlm-model:latest").unwrap();
