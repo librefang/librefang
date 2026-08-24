@@ -2200,3 +2200,360 @@ async fn schedule_update_accepts_unchanged_peer_id_and_session_mode() {
     assert_eq!(detail["peer_id"], before["peer_id"]);
     assert_eq!(detail["session_mode"], before["session_mode"]);
 }
+
+// ---------------------------------------------------------------------------
+// Step agent routing keys — exactly one of agent_id / agent_name / agent_type
+// (#7712)
+//
+// A step carrying several routing keys used to be resolved by an `if/else`
+// chain that silently took the first one it matched. The workflow definition
+// and the agent that actually runs then disagree, and nothing in the response
+// or the run output says so — which is how a step binds to the wrong agent.
+// Each ambiguous combination gets its own case so a regression names the pair
+// that came back.
+// ---------------------------------------------------------------------------
+
+/// Assert that a create payload whose single step carries `keys` is rejected
+/// with a 400 naming every key supplied.
+async fn assert_create_rejects_ambiguous_step(keys: &[(&str, &str)]) {
+    let h = boot().await;
+    let mut step = serde_json::json!({"name": "s1", "prompt": "hi"});
+    for (k, v) in keys {
+        step[*k] = serde_json::json!(v);
+    }
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({"name": "ambiguous", "steps": [step]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{keys:?} -> {body:?}");
+    let message = error_message(&body);
+    assert!(message.contains("exactly one"), "{keys:?} -> {message}");
+    for (k, _) in keys {
+        assert!(message.contains(k), "{keys:?} -> {message} (missing {k})");
+    }
+
+    // And nothing was persisted: an ambiguous definition must not land at all.
+    let (status, list) = get(&h, "/api/workflows").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["total"].as_u64().unwrap(), 0, "{list:?}");
+}
+
+/// Assert that a PUT replacing the step list with an ambiguous step is
+/// rejected, and that the stored workflow is left untouched.
+async fn assert_update_rejects_ambiguous_step(keys: &[(&str, &str)]) {
+    let h = boot().await;
+    let seeded_agent = uuid::Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "to-update",
+            "steps": [{"name": "original", "agent_id": seeded_agent, "prompt": "go"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let mut step = serde_json::json!({"name": "replacement", "prompt": "hi"});
+    for (k, v) in keys {
+        step[*k] = serde_json::json!(v);
+    }
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({"steps": [step]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{keys:?} -> {body:?}");
+    let message = error_message(&body);
+    assert!(message.contains("exactly one"), "{keys:?} -> {message}");
+
+    // The rejected PUT must not have partially replaced the step list.
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["name"], "original", "{body:?}");
+}
+
+/// Pull the message out of either error envelope shape the API emits.
+fn error_message(body: &serde_json::Value) -> String {
+    body["error"]
+        .as_str()
+        .or_else(|| body["error"]["message"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_agent_id_with_agent_name() {
+    assert_create_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_name", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_agent_id_with_agent_type() {
+    assert_create_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_agent_name_with_agent_type() {
+    assert_create_rejects_ambiguous_step(&[
+        ("agent_name", "researcher"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_all_three_routing_keys() {
+    assert_create_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_name", "researcher"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_rejects_agent_id_with_agent_name() {
+    assert_update_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_name", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_rejects_agent_id_with_agent_type() {
+    assert_update_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_rejects_agent_name_with_agent_type() {
+    assert_update_rejects_ambiguous_step(&[
+        ("agent_name", "researcher"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_rejects_all_three_routing_keys() {
+    assert_update_rejects_ambiguous_step(&[
+        ("agent_id", "11111111-1111-1111-1111-111111111111"),
+        ("agent_name", "researcher"),
+        ("agent_type", "researcher"),
+    ])
+    .await;
+}
+
+/// A mistyped routing key is a rejection, not an absence.
+///
+/// Reading `agent_id: 7` as "unset" and falling through to `agent_name` is the
+/// same silent re-binding the exactly-one-of rule exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_a_non_string_routing_key() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "mistyped",
+            "steps": [{"name": "s1", "prompt": "hi", "agent_id": 7}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        error_message(&body).contains("must be a string"),
+        "{body:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_rejects_an_empty_routing_key() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "empty",
+            "steps": [{"name": "s1", "prompt": "hi", "agent_type": ""}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(
+        error_message(&body).contains("must not be empty"),
+        "{body:?}"
+    );
+}
+
+/// `agent_type` survives the create -> GET round trip as `agent_type`, not as
+/// a name: a saved workflow must keep the *type* reference so a later run
+/// resolves find-or-spawn again rather than pinning to one instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_create_accepts_agent_type_and_round_trips_it() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "typed",
+            "steps": [{"name": "s1", "agent_type": "researcher", "prompt": "hi {{input}}"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let steps = body["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["agent"]["agent_type"], "researcher", "{body:?}");
+    assert!(steps[0]["agent"]["agent_name"].is_null(), "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_update_accepts_agent_type() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "retype",
+            "steps": [{"name": "s1", "agent_name": "old", "prompt": "go"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/workflows/{wf_id}"),
+        Some(serde_json::json!({
+            "steps": [{"name": "s1", "agent_type": "researcher", "prompt": "go"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (status, body) = get(&h, &format!("/api/workflows/{wf_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["steps"][0]["agent"]["agent_type"], "researcher",
+        "{body:?}"
+    );
+}
+
+/// A dry run previews an `agent_type` step from its template without spawning
+/// the agent — `POST /api/workflows/{id}/dry-run` is documented as side-effect
+/// free, and a preview that mints an agent per invocation is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_dry_run_previews_agent_type_without_spawning() {
+    let h = boot().await;
+    let template_dir = h
+        ._test
+        .tmp_path()
+        .join("workspaces")
+        .join("agents")
+        .join("researcher");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(
+        template_dir.join("agent.toml"),
+        "name = \"researcher\"\ndescription = \"previewed, not spawned\"\n",
+    )
+    .unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "dry",
+            "steps": [{"name": "s1", "agent_type": "researcher", "prompt": "on {{input}}"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let agents_before = h._state.kernel.agent_registry().list().len();
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({"input": "quarks"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["valid"], true, "{body:?}");
+    assert_eq!(body["steps"][0]["agent_name"], "researcher", "{body:?}");
+    assert_eq!(body["steps"][0]["agent_found"], true, "{body:?}");
+    assert_eq!(
+        h._state.kernel.agent_registry().list().len(),
+        agents_before,
+        "a dry run must not spawn the template agent"
+    );
+    assert!(h
+        ._state
+        .kernel
+        .agent_registry()
+        .find_by_name("researcher")
+        .is_none());
+}
+
+/// An `agent_type` with no template on disk previews as unresolved rather than
+/// reporting a valid workflow the operator cannot run.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_dry_run_reports_an_unknown_agent_type_as_unresolved() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({
+            "name": "dry-missing",
+            "steps": [{"name": "s1", "agent_type": "no-such-type", "prompt": "go"}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let wf_id = body["workflow_id"].as_str().unwrap().to_string();
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/dry-run"),
+        Some(serde_json::json!({"input": "x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["valid"], false, "{body:?}");
+    assert_eq!(body["steps"][0]["agent_found"], false, "{body:?}");
+}

@@ -13,6 +13,10 @@ export type CanvasNodeData = {
   description?: string;
   agentId?: string;
   agentName?: string;
+  /** Agent *type* binding — the step resolves find-or-spawn from a template of
+   *  this name rather than a pre-registered instance (#7712). Mutually
+   *  exclusive with `agentId` / `agentName`; `buildSteps` sends exactly one. */
+  agentType?: string;
   prompt?: string;
   timeoutSecs?: number;
   maxRetries?: number;
@@ -58,7 +62,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isCanvasNodeData(value: unknown, depth: number): value is CanvasNodeData {
   if (!isRecord(value) || depth > 20) return false;
   const stringFields = [
-    "nodeType", "label", "name", "description", "agentId", "agentName", "prompt",
+    "nodeType", "label", "name", "description", "agentId", "agentName", "agentType", "prompt",
     "errorMode", "outputVar", "stepMode", "condition", "until", "_runState", "_groupId",
     "_origSource", "_origTarget",
   ];
@@ -183,7 +187,9 @@ export function parseCanvasImport(value: unknown): CanvasImport {
     }
   }
 
-  const stepNodes = value.nodes.filter((node) => node.data.agentId || node.data.agentName);
+  const stepNodes = value.nodes.filter(
+    (node) => node.data.agentId || node.data.agentName || node.data.agentType,
+  );
   const dependencyOptions = stepNodes.map((node, index) => ({
     id: node.id,
     label: node.data.label || `Step ${index + 1}`,
@@ -237,6 +243,34 @@ export function parseCanvasImport(value: unknown): CanvasImport {
 }
 
 /** Convert current IDs and unambiguous legacy labels into stable dependency IDs. */
+/** The routing key a workflow step sends to bind its agent. */
+export type StepAgentPayload =
+  | { agent_id: string }
+  | { agent_type: string }
+  | { agent_name: string };
+
+/**
+ * Pick the single agent routing key a canvas node contributes to a workflow
+ * step payload (#7712).
+ *
+ * A node carries `agentId` and `agentName` together so it can render the name
+ * next to the binding, but the workflow API accepts **exactly one** of
+ * `agent_id` / `agent_name` / `agent_type` per step: a payload with several is
+ * rejected rather than resolved by key precedence, because the step would
+ * otherwise bind to whichever key the server read first while the canvas kept
+ * showing the other one.
+ *
+ * Precedence follows specificity — a concrete instance id, then a type, then a
+ * name — and a node with no binding at all yields `null` so the caller can drop
+ * it rather than send a step the API will refuse.
+ */
+export function stepAgentPayload(data: CanvasNodeData): StepAgentPayload | null {
+  if (data.agentId) return { agent_id: data.agentId };
+  if (data.agentType) return { agent_type: data.agentType };
+  if (data.agentName) return { agent_name: data.agentName };
+  return null;
+}
+
 export function resolveDependencyIds(dependencies: string[], options: DependencyOption[]): string[] {
   const ids = new Set(options.map((option) => option.id));
   const labelToId = new Map<string, string | null>();

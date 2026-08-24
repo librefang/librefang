@@ -52,6 +52,7 @@ import {
   removeNodeAndCascadeEdges,
   resolveDependencyIds,
   resolveDependencyNames,
+  stepAgentPayload,
   type CanvasNode,
   type CanvasNodeData,
 } from "../lib/canvas";
@@ -82,7 +83,7 @@ type StoredCanvasNode = {
  *  attaches when rendering. Not on the canonical `WorkflowStep` because not
  *  every list endpoint hydrates it. */
 type LoadedWorkflowStep = WorkflowStep & {
-  agent?: { id?: string; name?: string };
+  agent?: { agent_id?: string; agent_name?: string; agent_type?: string };
 };
 
 /**
@@ -94,6 +95,7 @@ type WorkflowStepBuild = {
   name: string;
   agent_id?: string;
   agent_name?: string;
+  agent_type?: string;
   prompt: string;
   timeout_secs: number;
   mode?:
@@ -205,7 +207,9 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
   const isEnd = data.nodeType === "end";
   const runState = data._runState;
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
-  const missingAgent = needsAgent && !data.agentId;
+  // A step bound to an agent *type* is not missing an agent — it resolves
+  // find-or-spawn at run time (#7712).
+  const missingAgent = needsAgent && !data.agentId && !data.agentType;
   const KindIcon = NODE_KIND_ICON[data.nodeType ?? ""] ?? HelpCircle;
 
   // Status dot: pulsing color while running, success when done, warning
@@ -284,12 +288,12 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
       </div>
 
       {/* Inline meta strip — agent binding, missing warning, deps */}
-      {(data.agentName || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
+      {(data.agentName || data.agentType || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
         <div className="px-3 pb-2 flex items-center gap-2 flex-wrap text-[9px] font-mono">
-          {data.agentName && (
+          {(data.agentName || data.agentType) && (
             <span className="inline-flex items-center gap-1 text-text-dim/80">
               <span className="w-1 h-1 rounded-full bg-success" />
-              <span className="truncate max-w-[120px]">{data.agentName}</span>
+              <span className="truncate max-w-[120px]">{data.agentName || data.agentType}</span>
             </span>
           )}
           {missingAgent && (
@@ -698,6 +702,9 @@ function NodeConfigPanel({
       label, description,
       agentId: agentId || undefined,
       agentName: agent?.name || undefined,
+      // Binding a concrete instance replaces any type binding rather than
+      // leaving both on the node for `buildSteps` to pick between (#7712).
+      agentType: agentId ? undefined : d.agentType,
       prompt,
       stepMode: mode,
       errorMode,
@@ -1445,6 +1452,7 @@ function CanvasPageInner() {
           const agentBinding: {
             agentId?: string;
             agentName?: string;
+            agentType?: string;
             prompt?: string;
           } = (() => {
             if (nd?.agentId) {
@@ -1453,6 +1461,12 @@ function CanvasPageInner() {
                 agentName: nd.agentName || availableAgents.find(a => a.id === nd.agentId)?.name || nd.agentId,
                 prompt: nd.prompt || rawPrompt,
               };
+            }
+            // A template that binds a step to an agent *type* already answers
+            // "which agent runs this" — overwriting it with the default agent
+            // would discard the template author's choice (#7712).
+            if (nd?.agentType) {
+              return { agentType: nd.agentType, prompt: nd.prompt || rawPrompt };
             }
             if (needsAgent && defaultAgent) {
               return {
@@ -1519,7 +1533,14 @@ function CanvasPageInner() {
         id: `node-${idx}`,
         type: "custom",
         position: { x: 80 + idx * 260, y: 100 },
-        data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name },
+        data: {
+          label: s.name,
+          prompt: s.prompt_template || "",
+          nodeType: "agent",
+          agentId: s.agent?.agent_id,
+          agentName: s.agent?.agent_name,
+          agentType: s.agent?.agent_type,
+        },
       }));
       const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
       if (hasDag) {
@@ -1804,7 +1825,7 @@ function CanvasPageInner() {
 
   // Build backend steps from nodes: only nodes bound to a real agent are steps
   const buildSteps = useCallback((nodeList: CanvasNode[]) => {
-    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName);
+    const stepNodes = nodeList.filter(n => n.data.agentId || n.data.agentName || n.data.agentType);
     const dependencyOptions = stepNodes.map((node, idx) => ({
       id: node.id,
       label: node.data.label || `Step ${idx + 1}`,
@@ -1812,10 +1833,10 @@ function CanvasPageInner() {
     return stepNodes
       .map((n, idx) => {
         const d = n.data;
+        // Exactly one routing key per step (#7712) — see `stepAgentPayload`.
         const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
-          agent_id: d.agentId,
-          agent_name: d.agentName,
+          ...(stepAgentPayload(d) ?? {}),
           prompt: d.prompt || d.description || "",
           timeout_secs: d.timeoutSecs || 120,
         };

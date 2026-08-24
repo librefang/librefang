@@ -31,18 +31,9 @@ pub async fn create_workflow(
     let mut steps = Vec::new();
     for s in steps_json {
         let step_name = s["name"].as_str().unwrap_or("step").to_string();
-        let agent = if let Some(id) = s["agent_id"].as_str() {
-            StepAgent::ById { id: id.to_string() }
-        } else if let Some(name) = s["agent_name"].as_str() {
-            StepAgent::ByName {
-                name: name.to_string(),
-            }
-        } else {
-            return ApiErrorResponse::bad_request(format!(
-                "Step '{}' needs 'agent_id' or 'agent_name'",
-                step_name
-            ))
-            .into_json_tuple();
+        let agent = match parse_step_agent(s, &step_name) {
+            Ok(agent) => agent,
+            Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -322,20 +313,9 @@ pub async fn update_workflow(
         let mut parsed_steps = Vec::new();
         for s in steps_json {
             let step_name = s["name"].as_str().unwrap_or("step").to_string();
-            let agent = if let Some(aid) = s["agent_id"].as_str() {
-                StepAgent::ById {
-                    id: aid.to_string(),
-                }
-            } else if let Some(aname) = s["agent_name"].as_str() {
-                StepAgent::ByName {
-                    name: aname.to_string(),
-                }
-            } else {
-                return ApiErrorResponse::bad_request(format!(
-                    "Step '{}' needs 'agent_id' or 'agent_name'",
-                    step_name
-                ))
-                .into_json_tuple();
+            let agent = match parse_step_agent(s, &step_name) {
+                Ok(agent) => agent,
+                Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -510,23 +490,7 @@ fn spawn_background_run(
             .workflow_engine()
             .execute_run(
                 run_id,
-                move |agent_ref| {
-                    use librefang_kernel::workflow::StepAgent;
-                    match agent_ref {
-                        StepAgent::ById { id } => {
-                            let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                            let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Some((agent_id, entry.name.clone(), inherit))
-                        }
-                        StepAgent::ByName { name } => {
-                            let entry =
-                                state_for_resolver.kernel.agent_registry().find_by_name(name)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Some((entry.id, entry.name.clone(), inherit))
-                        }
-                    }
-                },
+                move |agent_ref| state_for_resolver.kernel.resolve_step_agent(agent_ref),
                 move |agent_id: librefang_types::agent::AgentId,
                       message: String,
                       session_mode_override: Option<librefang_types::agent::SessionMode>| {
@@ -1074,23 +1038,7 @@ pub async fn resume_workflow_run(
     let state_for_sender = state.clone();
 
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
+        state_for_resolver.kernel.resolve_step_agent(agent_ref)
     };
 
     // Validate the token synchronously (quick state check) before spawning.
@@ -1334,23 +1282,7 @@ pub async fn operator_action_workflow_run(
     let payload = payload_opt.clone();
     let state_for_resolver = state.clone();
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
+        state_for_resolver.kernel.resolve_step_agent(agent_ref)
     };
 
     // Drive the resolution in the background; respond 200 immediately.

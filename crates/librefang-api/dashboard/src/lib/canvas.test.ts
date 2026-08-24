@@ -6,6 +6,7 @@ import {
   removeNodeAndCascadeEdges,
   resolveDependencyIds,
   resolveDependencyNames,
+  stepAgentPayload,
 } from "./canvas";
 
 type N = Node<{ label: string }>;
@@ -243,5 +244,46 @@ describe("canvas dependency references", () => {
       { id: "node-a", label: "Duplicate" },
       { id: "node-b", label: "Duplicate" },
     ])).toEqual([]);
+  });
+});
+
+describe("stepAgentPayload", () => {
+  it("sends only agent_id when a node is bound to a concrete instance", () => {
+    // A node carries the name alongside the id purely so the card can render
+    // it; sending both is the ambiguous payload the API rejects.
+    expect(stepAgentPayload({ agentId: "abc", agentName: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("sends agent_type when the node is bound to a type", () => {
+    expect(stepAgentPayload({ agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+  });
+
+  it("prefers a concrete instance over a stale type binding", () => {
+    expect(stepAgentPayload({ agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("falls back to agent_name when there is no id or type", () => {
+    expect(stepAgentPayload({ agentName: "researcher" })).toEqual({
+      agent_name: "researcher",
+    });
+  });
+
+  it("returns null for an unbound node so the caller can drop the step", () => {
+    expect(stepAgentPayload({ label: "unbound" })).toBeNull();
+  });
+
+  it("never returns more than one routing key", () => {
+    const payload = stepAgentPayload({
+      agentId: "abc",
+      agentName: "researcher",
+      agentType: "researcher",
+    });
+    expect(Object.keys(payload ?? {})).toHaveLength(1);
   });
 });

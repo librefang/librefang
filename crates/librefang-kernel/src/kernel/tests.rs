@@ -15436,3 +15436,203 @@ fn semantic_memory_tools_are_stripped_when_the_subsystem_is_disabled() {
     );
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Workflow step agent types — find-or-spawn (#7712)
+// ---------------------------------------------------------------------------
+
+/// Boot a kernel over a fresh tempdir home and hand back both, so the caller
+/// can seed agent templates on disk before resolving a `type` reference.
+fn boot_kernel_for_step_agent_tests(label: &str) -> (tempfile::TempDir, LibreFangKernel) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join(label);
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
+    (tmp, kernel)
+}
+
+/// Write `<home>/workspaces/agents/<name>/agent.toml`.
+fn seed_agent_template(kernel: &LibreFangKernel, name: &str, body: &str) {
+    let dir = kernel
+        .home_dir()
+        .join("workspaces")
+        .join("agents")
+        .join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("agent.toml"), body).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_spawns_from_template_when_unregistered() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-spawn");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\ndescription = \"finds things out\"\n",
+    );
+
+    let resolved = kernel.resolve_step_agent(&StepAgent::ByType {
+        template: "researcher".to_string(),
+    });
+    let (id, name, _) = resolved.expect("type should resolve by spawning the template");
+    assert_eq!(name, "researcher");
+    // Top-level spawn -> canonical name-derived UUID (#4614), so the same
+    // type keeps its id and session history across daemon restarts.
+    assert_eq!(id, AgentId::from_name("researcher"));
+    assert!(kernel.agents.registry.find_by_name("researcher").is_some());
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_reuses_the_registered_agent() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-reuse");
+    // A template exists, but so does a live agent of that name: the live one wins
+    // and no second instance is created.
+    seed_agent_template(&kernel, "researcher", "name = \"researcher\"\n");
+    let existing = kernel
+        .spawn_agent(AgentManifest {
+            name: "researcher".to_string(),
+            ..AgentManifest::default()
+        })
+        .expect("seed agent");
+    let before = kernel.agents.registry.list().len();
+
+    let (id, name, _) = kernel
+        .resolve_step_agent(&StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("type should resolve to the registered agent");
+    assert_eq!(id, existing);
+    assert_eq!(name, "researcher");
+    assert_eq!(
+        kernel.agents.registry.list().len(),
+        before,
+        "reuse must not spawn a second instance"
+    );
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_resolves_to_none_when_the_template_is_missing() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-missing");
+    assert!(kernel
+        .resolve_step_agent(&StepAgent::ByType {
+            template: "nope".to_string(),
+        })
+        .is_none());
+    let err = kernel.find_or_spawn_agent_type("nope").unwrap_err();
+    assert_eq!(err.kind(), "missing");
+    kernel.shutdown();
+}
+
+/// A corrupt template must be reported as corrupt, not as "no such type" —
+/// the two demand completely different operator actions.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_distinguishes_a_corrupt_template_from_a_missing_one() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-corrupt");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\nnot valid toml [[[\n",
+    );
+    let err = kernel.find_or_spawn_agent_type("researcher").unwrap_err();
+    assert_eq!(err.kind(), "malformed");
+    assert!(err.to_string().contains("agent.toml"), "{err}");
+    // Nothing was spawned off a manifest that never parsed.
+    assert!(kernel.agents.registry.find_by_name("researcher").is_none());
+    kernel.shutdown();
+}
+
+/// A template directory whose manifest names a *different* agent is refused.
+///
+/// Spawning it would register the agent under the declared name, so the next
+/// resolution of this type would miss the registry again and try to spawn a
+/// second copy — the type would never converge on one instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_rejects_a_template_naming_a_different_agent() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-mismatch");
+    seed_agent_template(&kernel, "researcher", "name = \"summarizer\"\n");
+    let err = kernel.find_or_spawn_agent_type("researcher").unwrap_err();
+    assert_eq!(err.kind(), "name_mismatch");
+    assert!(kernel.agents.registry.find_by_name("researcher").is_none());
+    assert!(kernel.agents.registry.find_by_name("summarizer").is_none());
+    kernel.shutdown();
+}
+
+/// A spawn that fails for a reason *other* than a duplicate name must surface
+/// as a spawn error, never as a silent reuse of whatever holds that name.
+///
+/// The template here declares a traversing `module` path, so
+/// `validate_spawnable` rejects it before anything is registered. The old
+/// shape re-probed the registry after *any* spawn error and returned whatever
+/// it found; the reuse arm now matches only `AgentAlreadyExists`, and
+/// `load_agent_template` pins the manifest name to the requested type so the
+/// entry a duplicate race hands back is the same agent this spawn was
+/// building — never a different one that happens to share the name.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_surfaces_a_rejected_manifest_as_a_spawn_failure() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-rejected");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\nmodule = \"python:../../etc/passwd\"\n",
+    );
+    let err = kernel.find_or_spawn_agent_type("researcher").unwrap_err();
+    assert_eq!(
+        err.kind(),
+        "spawn_failed",
+        "a rejected manifest must not be reported as a template problem: {err}"
+    );
+    assert!(
+        kernel.agents.registry.find_by_name("researcher").is_none(),
+        "a rejected spawn must leave no registry entry to fall back onto"
+    );
+    // And the run-facing resolver reports it as unresolved rather than
+    // binding the step to something else.
+    assert!(kernel
+        .resolve_step_agent(&StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .is_none());
+    kernel.shutdown();
+}
+
+/// `dry_run_workflow` is documented as side-effect free, so previewing a
+/// `type` step must not mint an agent.
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_preview_does_not_spawn() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-preview");
+    seed_agent_template(&kernel, "researcher", "name = \"researcher\"\n");
+    let before = kernel.agents.registry.list().len();
+
+    let (id, name, _) = kernel
+        .preview_step_agent(&StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("preview should report the agent the run would use");
+    assert_eq!(name, "researcher");
+    assert_eq!(id, AgentId::from_name("researcher"));
+    assert_eq!(
+        kernel.agents.registry.list().len(),
+        before,
+        "a dry run must not spawn the template agent"
+    );
+    assert!(kernel.agents.registry.find_by_name("researcher").is_none());
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_preview_reports_none_for_a_missing_template() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-preview-missing");
+    assert!(kernel
+        .preview_step_agent(&StepAgent::ByType {
+            template: "nope".to_string(),
+        })
+        .is_none());
+    kernel.shutdown();
+}

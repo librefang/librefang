@@ -313,19 +313,23 @@ fn clamp_timeout_duration(timeout_secs: u64) -> std::time::Duration {
 
 /// How to identify the agent for a step.
 ///
-/// Deserialization accepts THREE on-wire shapes for operator ergonomics
+/// Deserialization accepts these on-wire shapes for operator ergonomics
 /// (the issue / PR docs use the bare-string form; the kernel and HTTP
 /// payloads use the tagged forms):
 ///
-/// 1. Bare string: `agent = "researcher"` → [`StepAgent::ByName`].
-/// 2. Tagged object: `{ name = "researcher" }` → [`StepAgent::ByName`].
-/// 3. Tagged object: `{ id = "<uuid>" }` → [`StepAgent::ById`].
+/// 1. Bare string: `agent = "researcher"` -> [`StepAgent::ByName`].
+/// 2. Tagged object: `{ name = "researcher" }` -> [`StepAgent::ByName`].
+/// 3. Tagged object: `{ id = "<uuid>" }` -> [`StepAgent::ById`].
+/// 4. Tagged object: `{ type = "researcher" }` -> [`StepAgent::ByType`].
 ///
-/// Exactly one of `id` / `name` must be present in the tagged form;
-/// supplying both or neither is a deserialization error.
+/// Exactly one of `id` / `name` / `type` must be present in the tagged
+/// form; supplying none, or more than one, is a deserialization error.
+/// Ambiguity is rejected rather than resolved by key precedence because a
+/// silently-preferred key binds the step to a different agent than the one
+/// the author is looking at, and nothing in the run output says so.
 ///
-/// Serialization continues to emit the tagged-object form (`Serialize`
-/// derive on the untagged-style enum picks the matching variant cleanly).
+/// Serialization emits the tagged-object form (`Serialize` derive on the
+/// untagged-style enum picks the matching variant cleanly).
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum StepAgent {
@@ -333,6 +337,77 @@ pub enum StepAgent {
     ById { id: String },
     /// Reference an agent by name (first match).
     ByName { name: String },
+    /// Reference an agent *type* — a template name resolved find-or-spawn.
+    ///
+    /// The registered agent with this name is reused when one exists;
+    /// otherwise the template manifest of the same name is loaded from the
+    /// agent-template directories and spawned top-level under the canonical
+    /// name-derived UUID (#4614), so a workflow can express "use the
+    /// researcher agent type" without the operator pre-registering one.
+    ByType {
+        #[serde(rename = "type")]
+        template: String,
+    },
+}
+
+/// The tagged-object keys that select a [`StepAgent`] variant.
+///
+/// Ordered as they are reported in the "exactly one of" error so the
+/// message reads the same on every host.
+const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
+
+/// Select the [`StepAgent`] variant for one tagged-object payload.
+///
+/// Split out of the `Deserialize` impl so the exactly-one-of rule is
+/// expressible without threading `D::Error` through every branch; the caller
+/// wraps the returned message with `serde::de::Error::custom`.
+fn step_agent_from_object(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<StepAgent, String> {
+    // Presence is decided on the key, not on "the key holds a string":
+    // `{ id = 7, name = "x" }` is an ambiguous payload whose `id` happens to
+    // be mistyped, and answering it with `ByName` would bind the step to the
+    // agent the author did not write down. An explicit JSON `null` is treated
+    // as absent so a serializer that emits unset keys as null still
+    // round-trips (TOML has no null at all).
+    let present: Vec<&str> = STEP_AGENT_ROUTING_KEYS
+        .iter()
+        .copied()
+        .filter(|k| map.get(*k).is_some_and(|v| !v.is_null()))
+        .collect();
+
+    let key = match present.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(
+                "StepAgent: object form must set exactly one of `id`, `name` or `type`".to_string(),
+            )
+        }
+        many => {
+            return Err(format!(
+                "StepAgent: object form must set exactly one of `id`, `name` or `type`, but {} \
+                 were supplied ({})",
+                many.len(),
+                many.join(", ")
+            ))
+        }
+    };
+
+    let value = map[key]
+        .as_str()
+        .ok_or_else(|| format!("StepAgent: `{key}` must be a string"))?;
+
+    Ok(match key {
+        "id" => StepAgent::ById {
+            id: value.to_string(),
+        },
+        "name" => StepAgent::ByName {
+            name: value.to_string(),
+        },
+        _ => StepAgent::ByType {
+            template: value.to_string(),
+        },
+    })
 }
 
 impl<'de> Deserialize<'de> for StepAgent {
@@ -342,28 +417,16 @@ impl<'de> Deserialize<'de> for StepAgent {
     {
         use serde::de::Error;
 
-        // Accept either a bare string (treated as `ByName`) or an object
-        // with exactly one of `id` / `name`. Going through `serde_json::Value`
-        // keeps the impl format-agnostic — TOML, JSON, and YAML deserializers
-        // all feed through serde's data model and produce a `Value` here.
+        // Accept either a bare string (treated as `ByName`) or an object with
+        // exactly one of `id` / `name` / `type`. Going through
+        // `serde_json::Value` keeps the impl format-agnostic — TOML, JSON, and
+        // YAML deserializers all feed through serde's data model and produce a
+        // `Value` here.
         let v = serde_json::Value::deserialize(deserializer)?;
         match v {
             serde_json::Value::String(s) => Ok(StepAgent::ByName { name: s }),
             serde_json::Value::Object(map) => {
-                let id = map.get("id").and_then(|x| x.as_str());
-                let name = map.get("name").and_then(|x| x.as_str());
-                match (id, name) {
-                    (Some(_), Some(_)) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`, not both",
-                    )),
-                    (Some(id), None) => Ok(StepAgent::ById { id: id.to_string() }),
-                    (None, Some(name)) => Ok(StepAgent::ByName {
-                        name: name.to_string(),
-                    }),
-                    (None, None) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`",
-                    )),
-                }
+                step_agent_from_object(&map).map_err(D::Error::custom)
             }
             other => Err(D::Error::custom(format!(
                 "StepAgent: expected string or object, got {}",
@@ -1294,6 +1357,12 @@ fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
         StepAgent::ById { id } => format!(
             "Registry agent with id '{id}' not found for workflow step '{step_name}' \
              (referenced by id; check the agent exists and the id is well-formed)"
+        ),
+        StepAgent::ByType { template } => format!(
+            "Agent type '{template}' could not be resolved for workflow step '{step_name}' \
+             (referenced by type; no registered agent is named '{template}' and no spawnable \
+             template of that name was loaded — the daemon log carries the specific \
+             missing / unreadable / malformed / name-mismatch reason)"
         ),
     }
 }
@@ -6077,6 +6146,17 @@ impl Workflow {
                 let agent = match &step.agent {
                     StepAgent::ByName { name } => Some(name.clone()),
                     StepAgent::ById { id } => Some(id.clone()),
+                    // `WorkflowTemplateStep::agent` is a single `Option<String>`
+                    // that cannot say *how* the step addresses its agent, so a
+                    // saved template records the type name and `instantiate`
+                    // reads it back as `ByName` — the same flattening `ById`
+                    // has always had here. The name still points at the right
+                    // agent once the type has been spawned; what is lost is
+                    // find-or-spawn on a workflow instantiated from the saved
+                    // template into a daemon that has never run the type.
+                    // Fixing it means widening the persisted template format in
+                    // `librefang-types`, which is a separate change.
+                    StepAgent::ByType { template } => Some(template.clone()),
                 };
 
                 WorkflowTemplateStep {
@@ -11159,6 +11239,81 @@ prompt_template = "do {{x}}"
         );
         // Null is also invalid.
         assert!(serde_json::from_str::<StepAgent>("null").is_err());
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_type() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"type":"researcher"}"#).expect("object by type");
+        match v {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_by_type_serializes_back_to_the_type_key() {
+        let json = serde_json::to_value(StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(json, serde_json::json!({"type": "researcher"}));
+    }
+
+    /// Every ambiguous pair, plus the all-three case (#7712 review).
+    ///
+    /// Ambiguity is the failure mode this contract exists for: a step that
+    /// names two agents is a step whose author cannot tell which one will run.
+    #[test]
+    fn step_agent_rejects_every_ambiguous_routing_key_combination() {
+        for payload in [
+            r#"{"id":"a","name":"b"}"#,
+            r#"{"id":"a","type":"c"}"#,
+            r#"{"name":"b","type":"c"}"#,
+            r#"{"id":"a","name":"b","type":"c"}"#,
+        ] {
+            let err = serde_json::from_str::<StepAgent>(payload)
+                .expect_err(&format!("must reject {payload}"));
+            let rendered = err.to_string();
+            assert!(rendered.contains("exactly one"), "{payload} -> {rendered}");
+        }
+    }
+
+    /// A mistyped routing key must not read as an absent one.
+    ///
+    /// `{"id": 7, "name": "b"}` used to resolve to `ByName` because `id`
+    /// failed the `as_str()` cast and looked unset — binding the step to the
+    /// agent the author had stopped naming.
+    #[test]
+    fn step_agent_rejects_a_non_string_routing_key_rather_than_treating_it_as_absent() {
+        assert!(serde_json::from_str::<StepAgent>(r#"{"id":7,"name":"b"}"#).is_err());
+        assert!(serde_json::from_str::<StepAgent>(r#"{"name":["b"]}"#).is_err());
+    }
+
+    /// An explicit JSON `null` is an unset key, so a client that serializes
+    /// its unset fields still round-trips.
+    #[test]
+    fn step_agent_treats_an_explicit_null_routing_key_as_absent() {
+        let v: StepAgent = serde_json::from_str(r#"{"id":null,"name":"b","type":null}"#)
+            .expect("null keys are absent keys");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "b"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_round_trip_by_type_through_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let parsed: Wrap =
+            toml::from_str(r#"agent = { type = "researcher" }"#).expect("toml object by type");
+        match parsed.agent {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
+        }
     }
 
     #[test]

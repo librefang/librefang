@@ -127,6 +127,35 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn workflow_engine(&self) -> &WorkflowEngine;
 
     // ====================================================================
+    // Workflow step agent resolution (#7712)
+    // ====================================================================
+
+    /// Resolve a workflow step's agent reference for a real run, returning
+    /// `(agent id, agent name, inherit_parent_context)`.
+    ///
+    /// Every workflow driver in the API layer routes through this rather than
+    /// re-implementing the `match` over [`StepAgent`]: the variants are a
+    /// kernel-side policy (in particular `ByType`'s find-or-spawn, which the
+    /// API layer has no way to perform), and a driver carrying its own copy
+    /// silently reports "agent not found" for any variant it has not been
+    /// taught about.
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)>;
+
+    /// Resolve a workflow step's agent reference **without** side effects,
+    /// for dry runs and previews.
+    ///
+    /// Identical to [`Self::resolve_step_agent`] except that a `type`
+    /// reference with no registered instance is previewed from its template
+    /// instead of spawned — a dry run is documented as side-effect free.
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)>;
+
+    // ====================================================================
     // Autonomous goal runner (#5744)
     // ====================================================================
 
@@ -898,6 +927,18 @@ impl KernelApi for LibreFangKernel {
     }
     fn workflow_engine(&self) -> &WorkflowEngine {
         <Self as crate::WorkflowSubsystemApi>::engine_ref(self)
+    }
+    fn resolve_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)> {
+        LibreFangKernel::resolve_step_agent(self, agent_ref)
+    }
+    fn preview_step_agent(
+        &self,
+        agent_ref: &crate::workflow::StepAgent,
+    ) -> Option<(AgentId, String, bool)> {
+        LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
     fn start_goal_run(

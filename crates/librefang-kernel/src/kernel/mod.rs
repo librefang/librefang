@@ -108,6 +108,7 @@ mod provider_probe;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
+pub mod step_agent;
 mod subsystem_forwards;
 pub mod subsystems;
 mod task_registry;

@@ -3,7 +3,7 @@
 //! Implements `ChannelBridgeHandle` on `LibreFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
-use crate::workflow::{StepAgent, WorkflowId};
+use crate::workflow::WorkflowId;
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
@@ -1251,25 +1251,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         let kernel = self.kernel.clone();
-        let registry_ref = &self.kernel.agent_registry();
+        let resolver_kernel = self.kernel.clone();
         let result = self
             .kernel
             .workflow_engine()
             .execute_run(
                 run_id,
-                |step_agent| match step_agent {
-                    StepAgent::ById { id } => {
-                        let aid: AgentId = id.parse().ok()?;
-                        let entry = registry_ref.get(aid)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((aid, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = registry_ref.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                },
+                |step_agent| resolver_kernel.resolve_step_agent(step_agent),
                 |agent_id, message, session_mode_override| {
                     let k = kernel.clone();
                     async move {

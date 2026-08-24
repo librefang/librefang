@@ -193,6 +193,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "agent": match &s.agent {
                     StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
                     StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
+                    StepAgent::ByType { template } => serde_json::json!({"agent_type": template}),
                 },
                 "prompt_template": s.prompt_template,
                 "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
@@ -207,6 +208,74 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
         "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
+    })
+}
+
+/// The mutually exclusive routing keys a step carries in the HTTP payload,
+/// paired with the [`StepAgent`] variant each selects.
+///
+/// Fixed order so the "exactly one of" rejection reads identically on every
+/// host and every request.
+const STEP_AGENT_KEYS: [&str; 3] = ["agent_id", "agent_name", "agent_type"];
+
+/// Parse the agent reference of one step in a `POST` / `PUT /api/workflows`
+/// payload, requiring **exactly one** routing key (#7712).
+///
+/// The previous `if let Some(id) … else if let Some(name) …` chain accepted a
+/// payload carrying several keys and silently took the first one it matched.
+/// A workflow author who renames a step's target by adding `agent_name` while
+/// leaving the old `agent_id` in place gets a workflow bound to the agent they
+/// stopped naming, with nothing in the response or the run output saying so —
+/// the definition on disk and the agent that actually runs disagree. The same
+/// contract the kernel's `StepAgent` deserializer enforces for TOML/JSON
+/// definitions is therefore enforced here for the HTTP surface.
+///
+/// A key present but not a string is a rejection, not an absence: treating a
+/// mistyped `agent_id` as unset is exactly the silent re-binding above.
+fn parse_step_agent(step: &serde_json::Value, step_name: &str) -> Result<StepAgent, String> {
+    // An explicit JSON `null` counts as absent so a client that serializes
+    // unset fields rather than omitting them still round-trips.
+    let present: Vec<&str> = STEP_AGENT_KEYS
+        .iter()
+        .copied()
+        .filter(|k| step.get(*k).is_some_and(|v| !v.is_null()))
+        .collect();
+
+    let key = match present.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(format!(
+                "Step '{step_name}' needs exactly one of 'agent_id', 'agent_name' or 'agent_type'"
+            ))
+        }
+        many => {
+            return Err(format!(
+                "Step '{step_name}' sets {} of 'agent_id', 'agent_name', 'agent_type' ({}); \
+                 exactly one is allowed — a step with several agent references would bind to \
+                 whichever one the server happened to read first",
+                many.len(),
+                many.join(", ")
+            ))
+        }
+    };
+
+    let value = step[key]
+        .as_str()
+        .ok_or_else(|| format!("Step '{step_name}': '{key}' must be a string"))?;
+    if value.is_empty() {
+        return Err(format!("Step '{step_name}': '{key}' must not be empty"));
+    }
+
+    Ok(match key {
+        "agent_id" => StepAgent::ById {
+            id: value.to_string(),
+        },
+        "agent_name" => StepAgent::ByName {
+            name: value.to_string(),
+        },
+        _ => StepAgent::ByType {
+            template: value.to_string(),
+        },
     })
 }
 
