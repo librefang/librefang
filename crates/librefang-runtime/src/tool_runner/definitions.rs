@@ -79,6 +79,7 @@ pub(crate) mod tool_name {
     pub const CRON_CANCEL: &str = "cron_cancel";
     pub const CRON_ENABLE: &str = "cron_enable";
     pub const CHANNEL_SEND: &str = "channel_send";
+    pub const CHANNEL_MEMBERS: &str = "channel_members";
     pub const HAND_LIST: &str = "hand_list";
     pub const HAND_ACTIVATE: &str = "hand_activate";
     pub const HAND_STATUS: &str = "hand_status";
@@ -1007,6 +1008,17 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                     },
                     "required": ["channel", "message"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::CHANNEL_MEMBERS.to_string(),
+                description: "List the known members of a group conversation on a channel: the platform user_id, display_name, and username of everyone the daemon has seen speak there. Use it to answer \"who is in this channel?\", to attribute a request to the person who made it when handing work to an external system, and to obtain the platform user id needed to address one member individually. Both arguments default to the conversation the current message arrived on, so during message handling this can be called with no arguments; a direct message has no roster. Read-only.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": { "type": "string", "description": "Channel type to read the roster of (e.g. 'slack', 'telegram', 'discord', 'whatsapp'). Omit while handling an inbound message to use the channel it arrived on." },
+                        "chat_id": { "type": "string", "description": "Platform conversation id (Slack channel id, Telegram chat_id, WhatsApp group JID). Omit while handling an inbound message to use the current conversation — naming a different conversation on that same channel is refused." }
+                    }
                 }),
             },
             ToolDefinition {

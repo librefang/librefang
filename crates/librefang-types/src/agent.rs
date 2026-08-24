@@ -821,6 +821,11 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                // The read half of the channel surface (#7086): an agent that
+                // may reply into a shared group but cannot enumerate its
+                // members has no way to attribute a request to the person who
+                // made it.
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -835,6 +840,7 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -2474,14 +2480,17 @@ mod tests {
         assert!(tools.contains(&"agent_send".to_string()));
         assert!(tools.contains(&"channel_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 6);
+        // The roster read ships with the send (#7086).
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 7);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
         assert!(tools.contains(&"channel_send".to_string()));
-        assert_eq!(tools.len(), 12);
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]

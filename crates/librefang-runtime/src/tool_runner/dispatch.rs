@@ -1165,6 +1165,12 @@ pub async fn execute_tool_raw(
             .map_err(ToolError::upstream_msg)
         }
 
+        // Roster read — the companion of `channel_send` (#7086). The bridge has
+        // been persisting group senders through `roster_upsert` all along;
+        // this is the first caller of the matching read.
+        "channel_members" => tool_channel_members(input, *kernel, *sender_id, *channel, *chat_id)
+            .map_err(ToolError::upstream_msg),
+
         // Persistent process tools.
         "process_start" => {
             tool_process_start(

@@ -98,8 +98,14 @@ claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_
 | 工具 | 参数 | 用途 |
 |---|---|---|
 | `channel_send` | `channel`、`target`、`content`(文本 / 图 / 文件 / poll) | 给某 channel 用户发消息、图片、文件或 poll —— **不走 agent 循环**。适合推告警、异步结果、带外通知。 |
+| `channel_members` | 可选 `channel`、`chat_id` | 列出群会话中已知的成员 —— 守护进程见过发言的每个人的 `user_id`、`display_name`、`username`。只读。 |
 
 `channel_send` 是 `[deliver_only]` webhook 模式内部用的工具;agent 也能直接调。Capability:`channel.*`。
+
+`channel_members` 读取 channel bridge 在观察群消息时建立的花名册,因此它列出的是在该会话中发过言的人,而不是平台的完整成员列表。
+两个参数都默认取当前消息所在的会话,所以在处理消息时可以完全不带参数调用;私聊没有花名册。
+指定当前轮次所在 channel 上的另一个会话会被拒绝,理由与 `channel_send` 拒绝跨会话投递相同 —— 一个群不能枚举另一个群的成员。
+用它把请求归属到提出请求的人,并拿到外部系统通知此人所需的平台 `user_id`。
 
 ---
 
