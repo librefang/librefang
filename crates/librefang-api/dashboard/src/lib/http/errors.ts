@@ -55,3 +55,18 @@ export class ApiError extends Error {
     return new ApiError(response.status, code, message || `HTTP ${response.status}`);
   }
 }
+
+/**
+ * True when the daemon reached a skill marketplace but the marketplace did not answer with usable data.
+ *
+ * Two statuses mean the same thing to a reader of the Skills page.
+ * `502` is what every Skillhub / ClawHub handler returns today: the hub answers `200` with its own web shell, `serde_json` refuses the leading `<`, and the failure surfaces as a generic upstream error whose message is the parser's complaint.
+ * `503` is what the parsing boundary reports once it recognises "the marketplace is serving a webpage" as its own condition (#7748).
+ *
+ * Either way the request was fine and the hub is not — so the UI owes the reader an offline state, not a parser transcript.
+ */
+export function isMarketplaceUnavailable(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const status = (err as { status?: unknown }).status;
+  return status === 502 || status === 503;
+}
