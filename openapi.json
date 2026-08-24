@@ -3765,7 +3765,7 @@
           "auth"
         ],
         "summary": "Change the dashboard password and/or username.",
-        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.",
+        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.\n\nRefused with `423 Locked` in managed mode (#6695): the new username and password hash are persisted as top-level `dashboard_user` / `dashboard_pass_hash` keys in `config.toml`, so a deployment that owns the file owns the dashboard credential too.\nIn such a deployment the credential is rotated by changing the manifest and rolling, which is also the only way the change survives the next rollout.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -3793,6 +3793,16 @@
           },
           "401": {
             "description": "Current password is incorrect"
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; rotate the credential in the manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5166,6 +5176,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the entry from the manifest instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5231,6 +5251,16 @@
           },
           "409": {
             "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the sidecar in the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6231,6 +6261,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/install — Install a catalog entry (alias for\nPOST /api/mcp/servers with template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), and refused **unconditionally** rather than per-store the way `persist_mcp_upsert` is.\nThe difference is not a policy choice: this handler calls `upsert_mcp_server_config` directly, with no `mcp_runtime_store` check, so it rewrites `config.toml` even when the store is `\"db\"`.\nWhile that remains true the guard has to be unconditional or it would miss the write it exists to stop.\nThe route it aliases (`POST /api/mcp/servers`) honours the store, so a managed deployment that wants an install surface sets `mcp_runtime_store = \"db\"` and uses that route.",
         "operationId": "install_extension",
         "requestBody": {
           "content": {
@@ -6252,6 +6283,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the server in the manifest, or use POST /api/mcp/servers with `mcp_runtime_store = \"db\"`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -6262,6 +6303,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/uninstall — Uninstall by catalog id (template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), unconditionally, for the same reason as `install_extension`: it calls `remove_mcp_server_config` without consulting `mcp_runtime_store`.\nWithout the guard an uninstall would delete a `[[mcp_servers]]` entry the manifest declares and the next rollout would restore it, which is drift in both directions.",
         "operationId": "uninstall_extension",
         "requestBody": {
           "content": {
@@ -6276,6 +6318,16 @@
         "responses": {
           "200": {
             "description": "Uninstall a catalog-backed MCP server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the server from the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
