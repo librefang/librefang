@@ -263,7 +263,28 @@ impl ProactiveMemoryStore {
     /// For each memory not accessed in the last day, applies:
     ///   `effective_rate = decay_rate / boost`, where
     ///   `boost = min(1 + log2(access_count), MAX_BOOST)`.
-    ///   `new_confidence = current_confidence * e^(-effective_rate * days_since_access)`
+    ///   `new_confidence = current_confidence * e^(-effective_rate * days_since_last_charge)`
+    ///
+    /// `days_since_last_charge` is measured from the later of `last_decayed_at`
+    /// and `accessed_at` — **not** from `accessed_at` alone (#7756).
+    /// Each tick writes `last_decayed_at = now` alongside the new confidence, so
+    /// every interval of idle time is charged exactly once and the total decay
+    /// over a span depends on the span, not on how many times the scheduler
+    /// happened to fire inside it.
+    /// Before this bookkeeping existed the `UPDATE` wrote `confidence` only,
+    /// nothing advanced, and each hourly tick re-applied the *whole* elapsed
+    /// idle span to an already-decayed value: the accumulated exponent grew
+    /// quadratically in idle time instead of linearly, driving a corpus
+    /// configured for a ~70-day half-life to ~1e-3 within weeks.
+    ///
+    /// Taking the *later* of the two timestamps is what keeps an actively
+    /// recalled memory safe. Such a row never matches the `accessed_at <
+    /// one_day_ago` gate, so its `last_decayed_at` stays stale for the whole
+    /// active period; charging from that stale stamp would hand the row one
+    /// large retroactive decay the first hour it finally goes idle.
+    /// `last_decayed_at IS NULL` — every row written before the v48 migration —
+    /// falls back to `accessed_at`, so a pre-migration memory takes exactly the
+    /// one-time decay this formula always intended rather than collapsing.
     ///
     /// Popular memories decay *slower* (rate divided by boost) instead of being
     /// multiplied back up. The previous formula multiplied by `boost` and
@@ -294,19 +315,20 @@ impl ProactiveMemoryStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, confidence, accessed_at, access_count
+                "SELECT id, confidence, accessed_at, access_count, last_decayed_at
                  FROM memories
                  WHERE deleted = 0 AND accessed_at < ?1",
             )
             .map_err(LibreFangError::memory)?;
 
-        let rows: Vec<(String, f64, String, i64)> = stmt
+        let rows: Vec<(String, f64, String, i64, Option<String>)> = stmt
             .query_map(rusqlite::params![one_day_ago.to_rfc3339()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, f64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })
             .map_err(LibreFangError::memory)?
@@ -319,7 +341,9 @@ impl ProactiveMemoryStore {
             })
             .collect();
 
-        for (id, current_confidence, accessed_str, access_count) in &rows {
+        let now_rfc3339 = now.to_rfc3339();
+
+        for (id, current_confidence, accessed_str, access_count, last_decayed_str) in &rows {
             let accessed_at = match chrono::DateTime::parse_from_rfc3339(accessed_str) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(e) => {
@@ -333,8 +357,43 @@ impl ProactiveMemoryStore {
                 }
             };
 
-            let days_since_access = (now - accessed_at).num_seconds() as f64 / 86400.0;
-            if days_since_access <= 0.0 {
+            // An unparseable `last_decayed_at` is treated as absent rather than
+            // fatal: falling back to `accessed_at` charges this row from its
+            // access clock, which is the same conservative path a pre-migration
+            // row takes. Failing the whole pass instead would let one corrupt
+            // stamp stop decay for every other memory.
+            let last_decayed_at = last_decayed_str.as_deref().and_then(|raw| {
+                match chrono::DateTime::parse_from_rfc3339(raw) {
+                    Ok(dt) => Some(dt.with_timezone(&Utc)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse last_decayed_at '{}' for memory {}, \
+                             falling back to accessed_at: {}",
+                            raw,
+                            id,
+                            e
+                        );
+                        None
+                    }
+                }
+            });
+
+            // Charge from the later of the two clocks — see the method doc for
+            // why `last_decayed_at` alone is not safe for a row that was
+            // actively recalled while it never qualified for a tick.
+            let charged_through = match last_decayed_at {
+                Some(dt) if dt > accessed_at => dt,
+                _ => accessed_at,
+            };
+
+            // Milliseconds, not seconds: at the hourly scheduler cadence the two
+            // agree, but truncating to whole seconds would silently drop the
+            // remainder of every interval and let a fast caller (a manual
+            // `/decay` request, a test) advance `last_decayed_at` without ever
+            // charging the sub-second span it skipped.
+            let days_since_last_charge =
+                (now - charged_through).num_milliseconds() as f64 / 86_400_000.0;
+            if days_since_last_charge <= 0.0 {
                 continue;
             }
 
@@ -347,12 +406,16 @@ impl ProactiveMemoryStore {
             let count = (*access_count).max(1) as f64;
             let boost = (1.0 + count.log2()).min(MAX_BOOST);
             let effective_rate = decay_rate / boost;
-            let new_confidence =
-                (current_confidence * (-effective_rate * days_since_access).exp()).clamp(0.0, 1.0);
+            let new_confidence = (current_confidence
+                * (-effective_rate * days_since_last_charge).exp())
+            .clamp(0.0, 1.0);
 
+            // `last_decayed_at` moves in the same statement as `confidence`.
+            // Writing one without the other is the bug this replaces: the next
+            // tick would charge the same span again.
             conn.execute(
-                "UPDATE memories SET confidence = ?1 WHERE id = ?2",
-                rusqlite::params![new_confidence, id],
+                "UPDATE memories SET confidence = ?1, last_decayed_at = ?2 WHERE id = ?3",
+                rusqlite::params![new_confidence, now_rfc3339, id],
             )
             .map_err(LibreFangError::memory)?;
         }
@@ -4876,6 +4939,219 @@ mod tests {
             "popular memory must decay below 1.0; got {after} (boost-immortality regression)"
         );
         assert!(after > 0.0, "confidence must remain positive; got {after}");
+    }
+
+    /// Seed one stale, non-popular memory: 10 days idle, `confidence = 1.0`,
+    /// `access_count = 1` (so `boost = 1 + log2(1) = 1` and the effective rate is
+    /// exactly the configured `confidence_decay_rate`), and `last_decayed_at`
+    /// left NULL as if the row predates the v48 migration.
+    fn seed_stale_memory(store: &ProactiveMemoryStore, idle_days: i64) -> String {
+        let agent = AgentId::new();
+        let mid = store
+            .semantic
+            .remember(
+                agent,
+                "the deploy key lives in the vault",
+                MemorySource::Conversation,
+                "agent_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        let id = mid.0.to_string();
+        let stale = (Utc::now() - chrono::Duration::days(idle_days)).to_rfc3339();
+        let db = store.semantic.pool().get().unwrap();
+        db.execute(
+            "UPDATE memories \
+             SET confidence = 1.0, access_count = 1, accessed_at = ?1, last_decayed_at = NULL \
+             WHERE id = ?2",
+            rusqlite::params![stale, id],
+        )
+        .unwrap();
+        id
+    }
+
+    fn read_confidence(store: &ProactiveMemoryStore, id: &str) -> f64 {
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn read_last_decayed_at(store: &ProactiveMemoryStore, id: &str) -> Option<String> {
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT last_decayed_at FROM memories WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Rewind a row's decay clock, simulating wall-clock time passing between
+    /// two scheduler ticks without making the test sleep.
+    fn rewind_decay_clock(store: &ProactiveMemoryStore, id: &str, days: i64) {
+        let then = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET last_decayed_at = ?1 WHERE id = ?2",
+                rusqlite::params![then, id],
+            )
+            .unwrap();
+    }
+
+    /// The #7756 regression: total decay must be a function of elapsed time, not
+    /// of how many times the scheduler fired.
+    ///
+    /// Before the fix the `UPDATE` wrote `confidence` only, so `days_since_access`
+    /// was recomputed from an `accessed_at` that never moved and each tick
+    /// re-applied the *entire* 10-day span to an already-decayed value. Five
+    /// back-to-back ticks produced `exp(-0.01 * 10)^5 = 0.607` instead of
+    /// `exp(-0.01 * 10) = 0.905` — and the real scheduler fires hourly, which is
+    /// how a corpus configured for a ~70-day half-life reached ~1e-3 in weeks.
+    #[test]
+    fn decay_total_depends_on_elapsed_time_not_tick_count() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 10);
+
+        store.decay_confidence().unwrap();
+        let after_one_tick = read_confidence(&store, &id);
+
+        // Four more ticks with no wall-clock time to charge for.
+        for _ in 0..4 {
+            store.decay_confidence().unwrap();
+        }
+        let after_five_ticks = read_confidence(&store, &id);
+
+        let expected = (-rate * 10.0f64).exp();
+        assert!(
+            (after_one_tick - expected).abs() < 1e-6,
+            "one tick over a 10-day idle span must apply exp(-rate*10) = {expected}; got {after_one_tick}"
+        );
+        assert!(
+            (after_five_ticks - after_one_tick).abs() < 1e-6,
+            "five ticks in the same instant must equal one tick: \
+             got {after_five_ticks} after five vs {after_one_tick} after one \
+             (pre-fix this compounded to {})",
+            after_one_tick.powi(5)
+        );
+    }
+
+    /// The other half of the same property: when time *does* pass between ticks,
+    /// decay must accumulate for exactly that extra span.
+    #[test]
+    fn decay_accumulates_over_time_between_ticks() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 10);
+
+        store.decay_confidence().unwrap();
+        let after_first = read_confidence(&store, &id);
+
+        // Five more days of idleness elapse, then the scheduler fires again.
+        rewind_decay_clock(&store, &id, 5);
+        store.decay_confidence().unwrap();
+        let after_second = read_confidence(&store, &id);
+
+        assert!(
+            after_second < after_first,
+            "a tick after five more idle days must decay further: {after_second} !< {after_first}"
+        );
+        let expected = (-rate * 15.0f64).exp();
+        assert!(
+            (after_second - expected).abs() < 1e-6,
+            "10 idle days then 5 more must total exp(-rate*15) = {expected}; got {after_second}"
+        );
+    }
+
+    /// A row written before the v48 migration has `last_decayed_at IS NULL`. It
+    /// must fall back to `accessed_at` and take the single one-time decay the
+    /// formula always intended — not collapse to zero, and not be skipped.
+    #[test]
+    fn pre_migration_row_decays_once_without_collapsing() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 60);
+
+        assert_eq!(
+            read_last_decayed_at(&store, &id),
+            None,
+            "seed must reproduce a pre-migration row"
+        );
+
+        store.decay_confidence().unwrap();
+
+        let after = read_confidence(&store, &id);
+        let expected = (-rate * 60.0f64).exp();
+        assert!(
+            (after - expected).abs() < 1e-6,
+            "a 60-day-idle pre-migration row must decay to exp(-rate*60) = {expected}; got {after}"
+        );
+        assert!(
+            after > 0.5,
+            "60 days at the default rate must not collapse the row; got {after}"
+        );
+        assert!(
+            read_last_decayed_at(&store, &id).is_some(),
+            "the tick must stamp last_decayed_at so the next one charges only the new span"
+        );
+    }
+
+    /// Decay is monotonic and stays inside `[0, 1]` no matter how far it runs,
+    /// including once the exponential has underflowed to zero.
+    #[test]
+    fn decay_is_monotonic_and_clamped_to_unit_range() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let mut config = store.config();
+        // An aggressive rate so 20 charged intervals drive the value through the
+        // floor within the test rather than hovering near 1.0.
+        config.confidence_decay_rate = 2.0;
+        store.update_config(config);
+
+        let id = seed_stale_memory(&store, 10);
+
+        let mut previous = read_confidence(&store, &id);
+        for tick in 0..20 {
+            rewind_decay_clock(&store, &id, 10);
+            store.decay_confidence().unwrap();
+            let current = read_confidence(&store, &id);
+            assert!(
+                (0.0..=1.0).contains(&current),
+                "confidence must stay in [0,1]; tick {tick} gave {current}"
+            );
+            assert!(
+                current <= previous,
+                "confidence must never increase; tick {tick} went {previous} -> {current}"
+            );
+            previous = current;
+        }
+        assert!(
+            previous < 1e-100,
+            "200 idle days at rate 2.0 must drive confidence to the floor; got {previous}"
+        );
+        assert!(
+            previous >= 0.0,
+            "confidence must never go negative or NaN; got {previous}"
+        );
     }
 
     /// `metadata["confidence"]` written by the LLM extractor must be honored

@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 47;
+const SCHEMA_VERSION: u32 = 48;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -225,6 +225,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // which is backward compatible with every existing row and a no-op for
     // single-user agents.
     run_step!(47, migrate_v47);
+    // v48 (#7756): add `memories.last_decayed_at` so confidence decay charges
+    // each interval of idle time exactly once instead of re-applying the whole
+    // elapsed idle span on every hourly tick. NULL on pre-migration rows, which
+    // the read path treats as "clock starts at accessed_at".
+    run_step!(48, migrate_v48);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -884,6 +889,36 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (47, datetime('now'), 'Add peer_id to entities and relations for per-user isolation (#6494)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v48 (#7756): Record when confidence decay last ran for each memory.
+///
+/// `decay_confidence` derived its exponent from `accessed_at` and wrote back
+/// only `confidence`, so nothing advanced between ticks.
+/// Every hourly run therefore re-applied the *entire* elapsed idle span to an
+/// already-decayed value, and the accumulated exponent grew quadratically in
+/// idle time rather than linearly — a row idle for `D` days accrued
+/// `24 * rate * D` per day instead of `rate`.
+/// A corpus configured for a ~70-day half-life collapsed to ~1e-3 in weeks.
+///
+/// `NULL` means "no decay tick has stamped this row yet", which is every row
+/// written before this migration.
+/// The read path falls back to `accessed_at` for those, so a pre-migration
+/// memory takes exactly the one-time decay its doc-commented formula always
+/// intended and no row jumps at the migration boundary.
+fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "memories", "last_decayed_at")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN last_decayed_at TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (48, datetime('now'), 'Add memories.last_decayed_at so confidence decay charges each idle interval once (#7756)')",
         [],
     )?;
     Ok(())
@@ -2466,6 +2501,52 @@ mod tests {
         assert_eq!(name, "Acme");
         assert_eq!(props, "{\"k\":1}");
         assert_eq!(peer, "", "a pre-v47 row migrates to the '' shared sentinel");
+    }
+
+    #[test]
+    fn test_migrate_v48_adds_last_decayed_at_column() {
+        // #7756: confidence decay needs to know when it last ran for a row.
+        // The column is nullable with no default so every pre-migration memory
+        // reads back NULL, which the decay pass treats as "charge from
+        // accessed_at" — no row jumps at the migration boundary.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "last_decayed_at"));
+
+        // A legacy-shaped INSERT that omits last_decayed_at leaves it NULL.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('legacy-mem', 'agent-1', 'c', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT last_decayed_at FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp, None,
+            "a pre-v48 memory row must read back NULL, not a synthetic timestamp"
+        );
+
+        // A second call is a no-op (column already present) and must not
+        // disturb the seeded row.
+        migrate_v48(&conn).unwrap();
+        let confidence: f64 = conn
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            confidence, 1.0,
+            "re-running migrate_v48 must not touch data"
+        );
     }
 
     #[test]
