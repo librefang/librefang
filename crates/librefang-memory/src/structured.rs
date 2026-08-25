@@ -799,8 +799,7 @@ mod tests {
             .max_size(8)
             .build(SqliteConnectionManager::file(path).with_init(|c| {
                 c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS)?;
-                // Longer than the 5 s production default: CI runners are slow
-                // and 24 threads contend far harder than any real workload.
+                // Longer than the 5 s production default: CI runners are slow and 24 threads contend far harder than any real workload.
                 c.busy_timeout(std::time::Duration::from_secs(30))
             }))
             .unwrap();
@@ -810,13 +809,9 @@ mod tests {
 
     #[test]
     fn file_backed_test_pool_runs_in_wal_like_production() {
-        // Guard for the #7905 main-red: `modify_concurrent_appends_lose_no_writes_5138`
-        // contends 24 threads on one key, and in rollback-journal mode the
-        // commit-time RESERVED -> EXCLUSIVE promotion returns SQLITE_BUSY
-        // without ever consulting the busy handler. The pool has already been
-        // "fixed" once by raising busy_timeout, which cannot help on that path.
-        // Pin the journal mode so the next edit to the helper cannot silently
-        // drop back to a configuration production never uses.
+        // Guard for the #7905 main-red: `modify_concurrent_appends_lose_no_writes_5138` contends 24 threads on one key, and in rollback-journal mode the commit-time RESERVED -> EXCLUSIVE promotion returns SQLITE_BUSY without ever consulting the busy handler.
+        // The pool has already been "fixed" once by raising busy_timeout, which cannot help on that path.
+        // Pin the journal mode so the next edit to the helper cannot silently drop back to a configuration production never uses.
         let tmp = tempfile::tempdir().unwrap();
         let store = setup_file_backed(&tmp.path().join("kv.db"));
         let conn = store.pool.get().unwrap();
