@@ -173,7 +173,13 @@
 }
 ```
 
-**可选 `session_id`**：按请求覆盖此消息落到哪个 session。省略时用 agent 当前 session。给了就路由到那个特定 session（必须是该 agent 已存在的 session），让一个 agent 从单个客户端同时服务多条平行 chat，不需要先 `POST /sessions/{id}/switch`。fan-out 后端和多 tab dashboard 用得上。
+**可选 `session_id`**：按请求覆盖此消息落到哪个 session。
+省略时用 agent 当前 session。
+给了就路由到那个特定 session，让一个 agent 从单个客户端同时服务多条平行 chat，不需要先 `POST /sessions/{id}/switch`。
+该 session 不必事先存在——未知的 id 会就地创建一个使用该 id 的新 session，正是这一点让调用方自己生成的按对话 UUID 可用。
+但它不能属于*另一个* agent：那种情况会被拒绝而不会被读取，因此一个 agent 的 id 永远无法暴露另一个 agent 的历史。
+fan-out 后端、多 tab dashboard 以及面向公众的多用户前端都用得上。
+CLI 侧的同一字段是 `librefang message <agent> <text> --session-id <UUID>`。
 
 **响应** `200 OK`：
 

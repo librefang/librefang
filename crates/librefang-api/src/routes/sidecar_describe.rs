@@ -9,6 +9,7 @@ use librefang_channels::sidecar::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -33,6 +34,56 @@ pub struct SidecarSchema {
     pub display_name: String,
     pub description: String,
     pub fields: Vec<SidecarSchemaField>,
+    // `--describe` runs the same interpreter, with the same PYTHONPATH resolution, as the eventual sidecar spawn, so the version reported here is the version that will actually serve traffic — precisely what #7140 had no way to find out short of reading logs on the box.
+    // `None` for an adapter whose SDK predates the field, and for the compile-time fallback schema used when `--describe` fails outright.
+    /// The `librefang-sdk` version the adapter reported on `--describe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum DescribeSidecarError {
+    #[error("`{command} ...--describe` timed out after 5s")]
+    Timeout { command: String },
+    #[error("spawn failed: {0}")]
+    Spawn(#[source] std::io::Error),
+    #[error("{0}")]
+    SdkMissing(String),
+    #[error("describe exited {code}: {stderr}")]
+    Exited { code: i32, stderr: String },
+    #[error("describe stdout was not valid UTF-8: {0}")]
+    InvalidUtf8(#[source] std::string::FromUtf8Error),
+    #[error("invalid describe JSON: {source}; raw stdout: {stdout}")]
+    InvalidJson {
+        #[source]
+        source: serde_json::Error,
+        stdout: String,
+    },
+}
+
+/// Preserve only non-secret process context needed to locate and run an
+/// interpreter. Callers must still supply catalog-controlled commands and
+/// arguments; this probe is not a general subprocess execution API.
+fn set_describe_environment(cmd: &mut Command) {
+    const ALLOWED: &[&str] = &[
+        "PATH",
+        "PYTHONPATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SYSTEMROOT",
+        "WINDIR",
+        "PATHEXT",
+    ];
+    cmd.env_clear();
+    for name in ALLOWED {
+        if let Some(value) = std::env::var_os(name) {
+            cmd.env(name, value);
+        }
+    }
 }
 
 /// Spawn `<command> <args> --describe`, parse stdout as JSON.
@@ -45,7 +96,7 @@ pub async fn describe_sidecar(
     command: &str,
     args: &[String],
     home_dir: &Path,
-) -> Result<SidecarSchema, String> {
+) -> Result<SidecarSchema, DescribeSidecarError> {
     let mut full_args: Vec<String> = args.to_vec();
     full_args.push("--describe".into());
 
@@ -55,6 +106,7 @@ pub async fn describe_sidecar(
     // — the timeout returns to the caller but the child keeps running
     // until it crashes on its own.
     let mut cmd = Command::new(command);
+    set_describe_environment(&mut cmd);
     cmd.args(&full_args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -71,8 +123,10 @@ pub async fn describe_sidecar(
 
     let out = tokio::time::timeout(Duration::from_secs(5), fut)
         .await
-        .map_err(|_| format!("`{command} ...--describe` timed out after 5s"))?
-        .map_err(|e| format!("spawn failed: {e}"))?;
+        .map_err(|_| DescribeSidecarError::Timeout {
+            command: command.to_string(),
+        })?
+        .map_err(DescribeSidecarError::Spawn)?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -82,9 +136,9 @@ pub async fn describe_sidecar(
             stderr.trim(),
         ));
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8(out.stdout).map_err(DescribeSidecarError::InvalidUtf8)?;
     serde_json::from_str::<SidecarSchema>(stdout.trim())
-        .map_err(|e| format!("invalid describe JSON: {e}; raw stdout: {stdout}"))
+        .map_err(|source| DescribeSidecarError::InvalidJson { source, stdout })
 }
 
 /// Translate the cryptic Python-side failure mode that fires when
@@ -102,9 +156,12 @@ pub async fn describe_sidecar(
 /// `librefang_channels::sidecar::format_librefang_sdk_missing_hint`
 /// (and the `looks_like_librefang_sdk_missing` detector next to it)
 /// to update both paths in lockstep.
-fn translate_describe_error(command: &str, code: i32, stderr: &str) -> String {
+fn translate_describe_error(command: &str, code: i32, stderr: &str) -> DescribeSidecarError {
     if looks_like_librefang_sdk_missing(stderr) {
-        return format_librefang_sdk_missing_hint(command);
+        return DescribeSidecarError::SdkMissing(format_librefang_sdk_missing_hint(command));
     }
-    format!("describe exited {code}: {stderr}")
+    DescribeSidecarError::Exited {
+        code,
+        stderr: stderr.to_string(),
+    }
 }

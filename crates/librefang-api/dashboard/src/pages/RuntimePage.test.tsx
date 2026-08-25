@@ -381,6 +381,6 @@ describe("RuntimePage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore" }));
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore_confirm" }));
-    expect(mutateAsync).toHaveBeenCalledWith("backup-1.tar.gz");
+    expect(mutateAsync).toHaveBeenCalledWith({ filename: "backup-1.tar.gz", keepConfig: false, components: [] });
   });
 });

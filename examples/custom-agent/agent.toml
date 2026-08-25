@@ -24,9 +24,11 @@ When you don't know something, you say so honestly.
 
 [resources]
 max_llm_tokens_per_hour = 50000
+max_cost_per_hour_usd = 1.0
 
 [capabilities]
-tools = ["web_fetch", "file_read", "file_list"]
+tools = ["web_fetch", "file_read", "file_list", "memory_store", "memory_recall", "memory_list"]
+network = ["*"]
 memory_read = ["self.*"]
 memory_write = ["self.*"]
 agent_spawn = false

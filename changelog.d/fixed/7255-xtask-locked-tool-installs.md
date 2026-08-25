@@ -1,0 +1,2 @@
+Install `cargo-audit`, `cargo-outdated`, `cargo-llvm-cov` and `cargo-watch` with `--locked` in `cargo xtask`, matching what every `cargo install` in the workflows already does.
+Without it cargo re-resolves each tool's dependencies to the newest semver-compatible versions, so a tool that built yesterday can demand a rustc newer than the pinned toolchain and fail to install — which is what took the Security lane down once `rust-toolchain.toml` started pinning the MSRV. (#7255) (@houko)

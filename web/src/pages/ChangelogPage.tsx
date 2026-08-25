@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { ArrowLeft, ExternalLink, Download, Tag, Loader2, Filter } from 'lucide-react'
 import { Github } from '../components/BrandIcons'
@@ -7,6 +7,7 @@ import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 import { getTranslation } from '../i18n'
 import type { Translation } from '../i18n'
+import { z } from 'zod'
 
 type ChangelogCopy = NonNullable<Translation['changelog']>
 
@@ -45,6 +46,7 @@ interface ParsedRelease {
 }
 
 type FilterType = 'all' | 'stable' | 'prerelease'
+type ReleaseType = 'stable' | 'rc' | 'beta'
 
 // ---- Constants ----
 
@@ -71,7 +73,7 @@ const TYPE_CONFIG: Record<ChangeType, { dotClass: string; badgeClass: string }> 
   },
 }
 
-const RELEASE_TYPE_BADGE: Record<string, { className: string }> = {
+const RELEASE_TYPE_BADGE: Record<ReleaseType, { className: string }> = {
   stable: {
     className: 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border-emerald-500/20',
   },
@@ -88,14 +90,14 @@ const CATEGORY_ORDER: ChangeType[] = ['breaking', 'feature', 'fix', 'performance
 
 // ---- Parsing helpers ----
 
-function detectReleaseType(tag: string): 'stable' | 'rc' | 'beta' {
+export function detectReleaseType(tag: string, prerelease: boolean): ReleaseType {
   const lower = tag.toLowerCase()
   if (lower.includes('-beta')) return 'beta'
   if (lower.includes('-rc')) return 'rc'
-  return 'stable'
+  return prerelease ? 'rc' : 'stable'
 }
 
-function parseChanges(body: string | null): Map<ChangeType, ParsedChange[]> {
+export function parseChanges(body: string | null): Map<ChangeType, ParsedChange[]> {
   const grouped = new Map<ChangeType, ParsedChange[]>()
   if (!body) return grouped
 
@@ -133,17 +135,19 @@ function parseChanges(body: string | null): Map<ChangeType, ParsedChange[]> {
     // Detect section headers: ### Added, ### Fixed, etc.
     const headerMatch = trimmed.match(/^#{1,3}\s+(.+)$/)
     if (headerMatch) {
-      const heading = headerMatch[1]!.toLowerCase().trim()
-      if (sectionMap[heading] !== undefined) {
-        currentSection = sectionMap[heading]!
-      }
+      const headingText = headerMatch[1]
+      if (!headingText) continue
+      const section = sectionMap[headingText.toLowerCase().trim()]
+      if (section) currentSection = section
       continue
     }
 
     // Detect list items: - item or * item
     const listMatch = trimmed.match(/^[*-]\s+(.+)$/)
     if (listMatch && currentSection) {
-      const text = listMatch[1]!.trim()
+      const listText = listMatch[1]
+      if (!listText) continue
+      const text = listText.trim()
       if (text.length < 3) continue
 
       // Skip section dividers, installation instructions, links
@@ -201,7 +205,8 @@ function getTotalDownloads(release: GitHubRelease): number {
   return release.assets.reduce((sum, a) => sum + a.download_count, 0)
 }
 
-function formatDate(dateStr: string): string {
+export function formatDate(dateStr: string | null): string {
+  if (!dateStr) return ''
   return new Date(dateStr).toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
@@ -211,35 +216,78 @@ function formatDate(dateStr: string): string {
 
 /**
  * Auto-link #123 references and @user mentions within a change line.
- * Returns an HTML string.
+ * Returns React nodes so release text is escaped by React.
  */
-function linkify(text: string): string {
-  let result = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
+export function linkify(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const pattern = /(^|[^\w&])(?:#(\d+)|@([a-zA-Z0-9-]+))/g
+  let cursor = 0
 
-  // #issue
-  result = result.replace(
-    /(?<![&\w])#(\d+)/g,
-    '<a href="https://github.com/librefang/librefang/issues/$1" target="_blank" rel="noopener noreferrer" class="text-cyan-600 dark:text-cyan-400 hover:underline">#$1</a>',
-  )
-  // @user
-  result = result.replace(
-    /(?<![&\w])@([a-zA-Z0-9-]+)/g,
-    '<a href="https://github.com/$1" target="_blank" rel="noopener noreferrer" class="text-cyan-600 dark:text-cyan-400 hover:underline">@$1</a>',
-  )
-  return result
+  for (const match of text.matchAll(pattern)) {
+    const matchIndex = match.index
+    const prefix = match[1]
+    const issue = match[2]
+    const user = match[3]
+    if (matchIndex === undefined || prefix === undefined || (!issue && !user)) continue
+
+    nodes.push(text.slice(cursor, matchIndex), prefix)
+    const label = issue ? `#${issue}` : `@${user}`
+    const href = issue
+      ? `https://github.com/librefang/librefang/issues/${issue}`
+      : `https://github.com/${user}`
+    nodes.push(
+      <a
+        key={`${matchIndex}-${label}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-cyan-600 dark:text-cyan-400 hover:underline"
+      >
+        {label}
+      </a>,
+    )
+    cursor = matchIndex + match[0].length
+  }
+
+  nodes.push(text.slice(cursor))
+  return nodes
 }
 
 // ---- Data fetching ----
+
+const releaseAssetSchema = z.object({
+  name: z.string(),
+  download_count: z.number().int().nonnegative(),
+  browser_download_url: z.string().url(),
+})
+
+const githubReleaseSchema = z.object({
+  id: z.number().int().nonnegative(),
+  tag_name: z.string().min(1),
+  name: z.string().nullable(),
+  body: z.string().nullable(),
+  html_url: z.string().url(),
+  published_at: z.string().datetime().nullable(),
+  prerelease: z.boolean(),
+  draft: z.boolean(),
+  assets: z.array(releaseAssetSchema),
+})
+
+export function parseReleasesPayload(payload: unknown): GitHubRelease[] {
+  const result = z.array(githubReleaseSchema).safeParse(payload)
+  if (!result.success) {
+    throw new Error('Invalid release response from stats.librefang.ai')
+  }
+  return result.data
+}
 
 async function fetchReleases(): Promise<GitHubRelease[]> {
   const res = await fetch('https://stats.librefang.ai/api/releases')
   if (!res.ok) {
     throw new Error(String(res.status))
   }
-  return res.json() as Promise<GitHubRelease[]>
+  const payload: unknown = await res.json()
+  return parseReleasesPayload(payload)
 }
 
 // ---- Sub-components ----
@@ -258,8 +306,8 @@ function TimelineDot({ isFirst }: { isFirst: boolean }) {
   )
 }
 
-function ReleaseBadge({ type, copy }: { type: 'stable' | 'rc' | 'beta'; copy: ChangelogCopy }) {
-  const config = RELEASE_TYPE_BADGE[type]!
+function ReleaseBadge({ type, copy }: { type: ReleaseType; copy: ChangelogCopy }) {
+  const config = RELEASE_TYPE_BADGE[type]
   return (
     <span
       className={cn(
@@ -300,7 +348,7 @@ function ChangeCategory({
       <ul className="space-y-1 ml-4 pl-4 border-l border-black/5 dark:border-white/5">
         {changes.map((change, i) => (
           <li key={i} className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
-            <span dangerouslySetInnerHTML={{ __html: linkify(change.text) }} />
+            <span>{linkify(change.text)}</span>
           </li>
         ))}
       </ul>
@@ -320,7 +368,12 @@ function ReleaseCard({
   copy: ChangelogCopy
 }) {
   const { release, changes, totalDownloads, releaseType } = parsed
-  const orderedCategories = CATEGORY_ORDER.filter((t) => changes.has(t))
+  const orderedCategories: { type: ChangeType; changes: ParsedChange[] }[] = CATEGORY_ORDER.flatMap(
+    (type) => {
+      const categoryChanges = changes.get(type)
+      return categoryChanges ? [{ type, changes: categoryChanges }] : []
+    },
+  )
 
   return (
     <motion.div
@@ -379,8 +432,13 @@ function ReleaseCard({
           {/* Card body: grouped changes */}
           {orderedCategories.length > 0 && (
             <div className="px-4 py-3 sm:px-5 sm:py-4 space-y-4">
-              {orderedCategories.map((type) => (
-                <ChangeCategory key={type} type={type} changes={changes.get(type)!} copy={copy} />
+              {orderedCategories.map((category) => (
+                <ChangeCategory
+                  key={category.type}
+                  type={category.type}
+                  changes={category.changes}
+                  copy={copy}
+                />
               ))}
             </div>
           )}
@@ -464,7 +522,6 @@ function FilterTabs({
 
 export default function ChangelogPage() {
   const lang = useAppStore((s) => s.lang)
-  const theme = useAppStore((s) => s.theme)
   const t = getTranslation(lang)
   const copy = t.changelog!
   const [filter, setFilter] = useState<FilterType>('all')
@@ -487,7 +544,7 @@ export default function ChangelogPage() {
         release,
         changes: parseChanges(release.body),
         totalDownloads: getTotalDownloads(release),
-        releaseType: detectReleaseType(release.tag_name),
+        releaseType: detectReleaseType(release.tag_name, release.prerelease),
       }),
     )
   }, [releases])
@@ -514,7 +571,7 @@ export default function ChangelogPage() {
   )
 
   return (
-    <div className={cn('min-h-screen bg-surface', theme)}>
+    <div className="min-h-screen bg-surface">
       <div className="max-w-[860px] mx-auto px-4 sm:px-6 py-8 sm:py-12">
         {/* Navigation */}
         <a

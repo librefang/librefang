@@ -21,6 +21,15 @@ on:
 permissions:
   contents: read
 
+# The per-issue paths are safe to cancel WITHIN one event type: `area` recomputes labels from the current title and body, and `response-state` derives the awaiting-response / needs-attention pair from the triggering comment, so the newest event of the same kind is the one whose answer should win.
+# The event name is part of the group because the two paths run DIFFERENT jobs: `area` is gated on `github.event_name == 'issues'`, so an `issue_comment` run cancelling an in-flight `issues` run would drop the `area/*` labels permanently.
+# The `workflow_dispatch` backfill cannot repair that, because it only selects issues that have no labels at all and the comment run has already added one.
+# The `workflow_dispatch` backfill instead walks every unlabeled open issue, so it shares one constant group key and is never cancelled — a half-finished backfill leaves part of the backlog unlabeled with nothing to retrigger it.
+# Issue numbers are unique within the repository, so two different issues can never share a group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || 'backfill' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   test-labeler:
     if: github.event_name == 'pull_request'
@@ -44,6 +53,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Compute and apply labels
@@ -75,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+    timeout-minutes: 10
     steps:
       - name: Update response state labels
         env:
@@ -119,6 +130,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Re-label every unlabeled open issue

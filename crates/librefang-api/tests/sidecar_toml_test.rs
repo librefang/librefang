@@ -253,6 +253,63 @@ fn backfills_command_and_args_when_existing_block_is_a_stub() {
 }
 
 #[test]
+fn backfills_args_without_overwriting_operator_command() {
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         command = \"/opt/venv/bin/python\"\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[]),
+        &[],
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(content.contains("command = \"/opt/venv/bin/python\""));
+    assert!(content.contains("args = [\"-m\", \"librefang.sidecar.adapters.telegram\"]"));
+}
+
+#[test]
+fn backfills_command_without_overwriting_operator_args() {
+    let tmp = NamedTempFile::new().unwrap();
+    fs::write(
+        tmp.path(),
+        "[[sidecar_channels]]\n\
+         name = \"telegram\"\n\
+         channel_type = \"telegram\"\n\
+         args = [\"-m\", \"custom.adapter\", \"--debug\"]\n",
+    )
+    .unwrap();
+
+    upsert_sidecar_block(
+        tmp.path(),
+        "telegram",
+        "telegram",
+        "python3",
+        &["-m", "librefang.sidecar.adapters.telegram"],
+        &pairs(&[]),
+        &[],
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(tmp.path()).unwrap();
+    assert!(content.contains("command = \"python3\""));
+    assert!(content.contains("args = [\"-m\", \"custom.adapter\", \"--debug\"]"));
+    assert!(!content.contains("librefang.sidecar.adapters.telegram"));
+}
+
+#[test]
 fn preserves_non_schema_env_keys_on_replace() {
     // Operators sometimes hand-edit the `[sidecar_channels.env]` table
     // with operational vars the schema doesn't know about — `PYTHONPATH`
