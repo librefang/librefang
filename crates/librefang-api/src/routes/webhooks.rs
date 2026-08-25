@@ -29,6 +29,10 @@ use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn webhook_internal_error(error: impl std::fmt::Display) -> ApiErrorResponse {
+    ApiErrorResponse::internal_scrub(error)
+}
+
 /// Build webhook subscription routes.
 ///
 /// `trigger_body_limit` sizes a wire-level `RequestBodyLimitLayer` on the
@@ -146,14 +150,7 @@ pub async fn webhook_wake(
         EventBus::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
     {
         tracing::warn!("Webhook wake event publish failed: {e}");
-        let err_msg = {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args(
-                "api-error-webhook-publish-failed",
-                &[("error", &e.to_string())],
-            )
-        };
-        return ApiErrorResponse::internal(err_msg).into_response();
+        return webhook_internal_error(e).into_response();
     }
 
     (
@@ -282,14 +279,7 @@ pub async fn webhook_agent(
             })),
         )
             .into_response(),
-        Err(e) => {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(
-                "api-error-webhook-agent-exec-failed",
-                &[("error", &e.to_string())],
-            );
-            ApiErrorResponse::internal(msg).into_response()
-        }
+        Err(e) => webhook_internal_error(e).into_response(),
     }
 }
 
@@ -812,14 +802,7 @@ pub async fn test_webhook(
             // A TLS / root-cert / proxy misconfiguration must not panic the
             // user-facing handler — surface it as a 500 so the dashboard
             // shows an error instead of the connection resetting.
-            let msg = {
-                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                t.t_args(
-                    "api-error-webhook-reach-failed",
-                    &[("error", &e.to_string())],
-                )
-            };
-            return ApiErrorResponse::internal(msg).into_json_tuple();
+            return webhook_internal_error(e).into_json_tuple();
         }
     };
 
@@ -892,6 +875,19 @@ mod event_webhook_tests {
 
     async fn clear_webhooks() {
         EVENT_WEBHOOKS.write().await.clear();
+    }
+
+    #[test]
+    fn internal_webhook_errors_are_scrubbed() {
+        let response = webhook_internal_error(
+            "event bus failed at /srv/private/events.db: connection refused",
+        );
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.error, "Internal server error");
+        let body = serde_json::to_string(&response).expect("serialize error response");
+        assert!(!body.contains("/srv/private"));
+        assert!(!body.contains("connection refused"));
     }
 
     #[tokio::test]

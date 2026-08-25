@@ -2,14 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import * as http from "../http/client";
 import type { SidecarSaveResult } from "../../api";
-import { useSaveSidecarConfig } from "./channels";
-import { channelKeys } from "../queries/keys";
+import { useSaveSidecarConfig, useSendCommsMessage } from "./channels";
+import { channelKeys, commsKeys } from "../queries/keys";
 import { createQueryClientWrapper } from "../test/query-client";
 
 // Mutations import from the typed http/client whitelist (see dashboard/CLAUDE.md),
 // so the mock target is "../http/client", not "../../api".
 vi.mock("../http/client", () => ({
   saveSidecarConfig: vi.fn(),
+  sendCommsMessage: vi.fn().mockResolvedValue({}),
 }));
 
 const sidecarSaved: SidecarSaveResult = {
@@ -45,5 +46,23 @@ describe("useSaveSidecarConfig", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: channelKeys.all,
     });
+  });
+});
+
+describe("useSendCommsMessage", () => {
+  it("forwards protocol-valid payloads and invalidates comms lists", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useSendCommsMessage(), { wrapper });
+    const payload = {
+      from_agent_id: "agent-1",
+      to_agent_id: "agent-1",
+      message: "",
+    };
+
+    await result.current.mutateAsync(payload);
+
+    expect(http.sendCommsMessage).toHaveBeenCalledWith(payload);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: commsKeys.lists() });
   });
 });

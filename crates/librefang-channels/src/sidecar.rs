@@ -255,9 +255,46 @@ pub struct SidecarReadyParams {
     /// auth is only emitted for URLs whose host matches exactly.
     #[serde(default)]
     pub header_rules: Vec<(String, Vec<(String, String)>)>,
-    /// Reserved for skew diagnostics (logged, never enforced).
+    /// Wire-protocol version the adapter implements, compared against [`SIDECAR_PROTOCOL_VERSION`] on arrival.
+    /// Still never *enforced* — a mismatch downgrades the adapter to a `WARN`, it does not refuse the connection — but it is no longer merely logged: [`classify_protocol_version`] turns the value into an operator-visible diagnostic, which is the whole point of carrying it.
+    /// `None` means the adapter declared nothing, not "version 0".
     #[serde(default)]
     pub protocol_version: Option<u32>,
+}
+
+/// The sidecar wire-protocol version this daemon implements.
+///
+/// This constant is the source of truth for the number.
+/// Four other places encode the same value and every one of them is pinned to this constant by `crates/librefang-channels/tests/sidecar_version_contract.rs`: `docs/architecture/sidecar-protocol.md`, the shared corpus fixture `conformance/sidecar/corpus/events/ready_full.json`, the Python SDK's `librefang.sidecar.protocol.PROTOCOL_VERSION`, and the Rust SDK's `librefang_sidecar::protocol::PROTOCOL_VERSION`.
+///
+/// Bump it only when a frozen-core frame changes in a non-additive way (a removed or renamed field, a changed type, a new required field); adding an optional field, a capability string, or a whole new frame method is additive and does not move this number.
+pub const SIDECAR_PROTOCOL_VERSION: u32 = 1;
+
+/// How an adapter's declared `ready.params.protocol_version` compares to
+/// [`SIDECAR_PROTOCOL_VERSION`].
+///
+/// Split out from the reader loop so the decision is unit-testable without spawning a subprocess — the reason the field sat unexamined for so long is that checking it used to mean writing a process-level test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolSkew {
+    /// The adapter declared exactly the version this daemon speaks.
+    Match,
+    /// The adapter declared nothing.
+    /// Every SDK-built adapter has declared a version since #7140, so this now means either a hand-rolled adapter or an SDK install old enough to predate the default — which is the case the reporter hit.
+    Unspecified,
+    /// The adapter speaks an older protocol than this daemon.
+    Older(u32),
+    /// The adapter speaks a newer protocol than this daemon.
+    Newer(u32),
+}
+
+/// Classify a `ready` frame's declared protocol version.
+pub fn classify_protocol_version(declared: Option<u32>) -> ProtocolSkew {
+    match declared {
+        None => ProtocolSkew::Unspecified,
+        Some(v) if v == SIDECAR_PROTOCOL_VERSION => ProtocolSkew::Match,
+        Some(v) if v < SIDECAR_PROTOCOL_VERSION => ProtocolSkew::Older(v),
+        Some(v) => ProtocolSkew::Newer(v),
+    }
 }
 
 /// Commands from LibreFang TO the sidecar process (one JSON per line on stdin).
@@ -1028,12 +1065,42 @@ async fn spawn_once(
                                     }
                                     let _ = account_id_cell
                                         .set(params.account_id.clone());
-                                    info!(
-                                        adapter = %adapter_name,
-                                        capabilities = cap_count,
-                                        protocol_version = params.protocol_version,
-                                        "Sidecar adapter ready"
-                                    );
+                                    match classify_protocol_version(params.protocol_version) {
+                                        ProtocolSkew::Match => info!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            protocol_version = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter ready"
+                                        ),
+                                        ProtocolSkew::Unspecified => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter declared no protocol_version — \
+                                             it predates the SDK default and may misparse or \
+                                             silently drop frames this daemon sends. \
+                                             Upgrade the adapter's librefang-sdk install, or \
+                                             have a hand-rolled adapter declare \
+                                             protocol_version in its ready frame."
+                                        ),
+                                        ProtocolSkew::Older(v) => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            declared = v,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter speaks an older sidecar protocol \
+                                             than this daemon — upgrade its librefang-sdk \
+                                             install to match the daemon"
+                                        ),
+                                        ProtocolSkew::Newer(v) => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            declared = v,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter speaks a newer sidecar protocol \
+                                             than this daemon — upgrade the daemon to match"
+                                        ),
+                                    }
                                     if let Some(t) = ready_tx.take() {
                                         let _ = t.send(());
                                     }
@@ -2536,6 +2603,48 @@ mod tests {
             }
             _ => panic!("Expected Message variant"),
         }
+    }
+
+    /// The March-SDK case from #7140: an adapter old enough to predate the
+    /// SDK's `protocol_version` default sends `ready` with the field absent,
+    /// and until now that was indistinguishable from a current adapter
+    /// because the value was logged and thrown away.
+    #[test]
+    fn absent_protocol_version_is_unspecified_not_a_match() {
+        let bare: SidecarEvent = serde_json::from_str(r#"{"method":"ready"}"#).unwrap();
+        let SidecarEvent::Ready { params } = bare else {
+            panic!("expected Ready");
+        };
+        assert_eq!(
+            classify_protocol_version(params.protocol_version),
+            ProtocolSkew::Unspecified
+        );
+
+        let explicit_null: SidecarEvent =
+            serde_json::from_str(r#"{"method":"ready","params":{"protocol_version":null}}"#)
+                .unwrap();
+        let SidecarEvent::Ready { params } = explicit_null else {
+            panic!("expected Ready");
+        };
+        assert_eq!(
+            classify_protocol_version(params.protocol_version),
+            ProtocolSkew::Unspecified
+        );
+    }
+
+    #[test]
+    fn protocol_version_skew_is_classified_by_direction() {
+        assert_eq!(
+            classify_protocol_version(Some(SIDECAR_PROTOCOL_VERSION)),
+            ProtocolSkew::Match
+        );
+        assert_eq!(
+            classify_protocol_version(Some(SIDECAR_PROTOCOL_VERSION + 1)),
+            ProtocolSkew::Newer(SIDECAR_PROTOCOL_VERSION + 1)
+        );
+        // `Older` is only reachable once the constant leaves 1; assert the
+        // boundary that exists today rather than a version that cannot occur.
+        assert_eq!(classify_protocol_version(Some(0)), ProtocolSkew::Older(0));
     }
 
     #[test]

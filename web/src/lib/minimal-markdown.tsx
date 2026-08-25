@@ -16,6 +16,23 @@ function escapeKey(s: string): string {
   return s.slice(0, 48).replace(/[^A-Za-z0-9_-]/g, '_')
 }
 
+function isSafeHref(href: string): boolean {
+  // External links must state their http(s) or mailto scheme explicitly.
+  // A single leading slash is local; a double slash is protocol-relative
+  // and can silently navigate to an external host.
+  return /^(?:https?:|mailto:|#|\/(?!\/)|\.\.?\/)/i.test(href)
+}
+
+function isTableSeparator(line: string): boolean {
+  if (!line.includes('|')) return false
+  const cells = line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+  return cells.length > 0 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell))
+}
+
 function renderInline(line: string): ReactNode[] {
   // Tokenize into spans: code > links > bold > italic, in that priority.
   // A single linear scan; recursion-free to keep the code small.
@@ -29,14 +46,14 @@ function renderInline(line: string): ReactNode[] {
     // **bold**
     const boldM = rest.match(/^([\s\S]*?)\*\*([^*]+)\*\*/)
     // *italic* (single asterisk, not part of **)
-    const italM = rest.match(/^([\s\S]*?)(?<!\*)\*([^*]+)\*(?!\*)/)
+    const italM = rest.match(/^([\s\S]*?)(^|[^*])\*([^*]+)\*(?!\*)/)
 
     const candidates = [
-      codeM && { idx: codeM.index ?? 0, pre: codeM[1]!, body: codeM[2]!, consume: codeM[0]!.length, kind: 'code' as const },
-      linkM && { idx: linkM.index ?? 0, pre: linkM[1]!, body: linkM[2]!, consume: linkM[0]!.length, kind: 'link' as const, href: linkM[3]! },
-      boldM && { idx: boldM.index ?? 0, pre: boldM[1]!, body: boldM[2]!, consume: boldM[0]!.length, kind: 'bold' as const },
-      italM && { idx: italM.index ?? 0, pre: italM[1]!, body: italM[2]!, consume: italM[0]!.length, kind: 'ital' as const },
-    ].filter(Boolean) as { idx: number; pre: string; body: string; consume: number; kind: 'code' | 'link' | 'bold' | 'ital'; href?: string }[]
+      codeM && { pre: codeM[1]!, body: codeM[2]!, consume: codeM[0]!.length, kind: 'code' as const },
+      linkM && { pre: linkM[1]!, body: linkM[2]!, consume: linkM[0]!.length, kind: 'link' as const, href: linkM[3]! },
+      boldM && { pre: boldM[1]!, body: boldM[2]!, consume: boldM[0]!.length, kind: 'bold' as const },
+      italM && { pre: italM[1]! + italM[2]!, body: italM[3]!, consume: italM[0]!.length, kind: 'ital' as const },
+    ].filter(Boolean) as { pre: string; body: string; consume: number; kind: 'code' | 'link' | 'bold' | 'ital'; href?: string }[]
 
     if (candidates.length === 0) {
       spans.push({ text: rest })
@@ -67,8 +84,7 @@ function renderInline(line: string): ReactNode[] {
       // and relative/anchor hrefs; drop everything else to plain text so
       // javascript: / data: / vbscript: can't sneak in.
       const href = s.href.trim()
-      const safe = /^(https?:|mailto:|\/|#|\.)/i.test(href)
-      if (!safe) return <span key={key}>{s.text}</span>
+      if (!isSafeHref(href)) return <span key={key}>{s.text}</span>
       return (
         <a key={key} href={href} target="_blank" rel="noopener noreferrer" className="text-cyan-600 dark:text-cyan-400 hover:underline">
           {s.text}
@@ -108,6 +124,7 @@ export function renderMarkdown(md: string): ReactNode[] {
       const level = h[1]!.length
       const text = h[2]!
       const cls = level === 1 ? 'text-lg font-bold mt-6 mb-2' : level === 2 ? 'text-base font-bold mt-5 mb-2' : 'text-sm font-semibold mt-4 mb-2'
+      // The README lives below the detail page's README h2 section.
       const Tag = level === 1 ? 'h3' : level === 2 ? 'h4' : 'h5'
       out.push(<Tag key={`h-${blockIdx++}`} className={cls}>{renderInline(text)}</Tag>)
       i++
@@ -116,7 +133,7 @@ export function renderMarkdown(md: string): ReactNode[] {
     // GFM pipe table: a row starts with `|`, the next row is the
     // separator `| --- | :---: | ---: |`. Minimal support — cells
     // render inline markdown; header row gets `<th>`, rest `<td>`.
-    if (line.trim().startsWith('|') && i + 1 < lines.length && /^\s*\|?[\s-:|]+\|?\s*$/.test(lines[i + 1]!) && lines[i + 1]!.includes('-')) {
+    if (line.trim().startsWith('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1]!)) {
       const splitRow = (l: string): string[] => {
         let s = l.trim()
         if (s.startsWith('|')) s = s.slice(1)

@@ -16,6 +16,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# `actions/labeler` runs with `sync-labels: true`, so each run recomputes the complete area-label set from the PR's changed paths and the newest run supersedes the older one.
+# `pull_request_target` reports `github.ref` as the base branch (`refs/heads/main`) for every PR, so the group keys on the PR number instead — a ref-keyed group would let one PR's run cancel another's.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   # ── Area labels based on changed file paths ───────────────────────
   area:
@@ -23,6 +29,7 @@ jobs:
       github.event_name == 'pull_request_target' &&
       github.event.action != 'closed'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:

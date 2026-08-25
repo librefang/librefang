@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 47;
+const SCHEMA_VERSION: u32 = 50;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -225,6 +225,23 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // which is backward compatible with every existing row and a no-op for
     // single-user agents.
     run_step!(47, migrate_v47);
+    // v48 (#7756): add `memories.last_decayed_at` so confidence decay charges
+    // each interval of idle time exactly once instead of re-applying the whole
+    // elapsed idle span on every hourly tick. NULL on pre-migration rows, which
+    // the read path treats as "clock starts at accessed_at".
+    run_step!(48, migrate_v48);
+    // v49 (#7714): add `workflow_runs.owner_agent_id` so a run records which
+    // agent asked for it, and `usage_events.billed_agent_id` so a spawned
+    // worker's spend rolls up to the agent that spawned it. Both are NULL on
+    // every pre-migration row: an ownerless run stays ownerless, and a usage
+    // row with no `billed_agent_id` bills to `agent_id` exactly as before.
+    run_step!(49, migrate_v49);
+
+    // v50 (#7808): add the `memories_fts` FTS5 index plus the triggers that
+    // keep it in step with `memories`, so a deployment with no embedding
+    // provider gets real full-text search instead of a `content LIKE` scan —
+    // and so `memory.fts_only` finally has a memories index to fall back to.
+    run_step!(50, migrate_v50);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -884,6 +901,158 @@ fn migrate_v47(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) VALUES (47, datetime('now'), 'Add peer_id to entities and relations for per-user isolation (#6494)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v48 (#7756): Record when confidence decay last ran for each memory.
+///
+/// `decay_confidence` derived its exponent from `accessed_at` and wrote back
+/// only `confidence`, so nothing advanced between ticks.
+/// Every hourly run therefore re-applied the *entire* elapsed idle span to an
+/// already-decayed value, and the accumulated exponent grew quadratically in
+/// idle time rather than linearly — a row idle for `D` days accrued
+/// `24 * rate * D` per day instead of `rate`.
+/// A corpus configured for a ~70-day half-life collapsed to ~1e-3 in weeks.
+///
+/// `NULL` means "no decay tick has stamped this row yet", which is every row
+/// written before this migration.
+/// The read path falls back to `accessed_at` for those, so a pre-migration
+/// memory takes exactly the one-time decay its doc-commented formula always
+/// intended and no row jumps at the migration boundary.
+fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "memories", "last_decayed_at")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN last_decayed_at TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (48, datetime('now'), 'Add memories.last_decayed_at so confidence decay charges each idle interval once (#7756)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v49 (#7714): Record who owns a workflow run, and who a call's spend bills to.
+///
+/// `workflow_runs.owner_agent_id` is the agent that asked for the run — the caller of `workflow_run` / `workflow_start`, the agent bound to the channel that issued the command, or the agent an API caller named.
+/// It is a property of the *run*, not of the agent that executes a step, which is what lets two owners drive the same shared step-agent type and still keep their attribution apart.
+///
+/// `usage_events.billed_agent_id` is the agent a call's cost rolls up to: a spawned worker's spend belongs on its spawner's budget line, not on the throwaway child's.
+/// It is deliberately a second column rather than a rewrite of `agent_id`: `agent_id` remains the quota subject that both the pre-call `check_quota` and the post-call `check_all_and_record` evaluate, so those two continue to ask about the same agent against that same agent's limits.
+/// Folding attribution into `agent_id` would have made the pre-call check read the child's history while the post-call check read the parent's, both against the child's ceiling.
+///
+/// `NULL` in either column means "no attribution recorded", which is every row written before this migration and every call with no owner or parent.
+fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "workflow_runs", "owner_agent_id")? {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN owner_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !try_column_exists(conn, "usage_events", "billed_agent_id")? {
+        conn.execute(
+            "ALTER TABLE usage_events ADD COLUMN billed_agent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Add workflow_runs.owner_agent_id and usage_events.billed_agent_id for run ownership and spend rollup (#7714)')",
+        [],
+    )?;
+    Ok(())
+}
+/// v50 (#7808): Full-text index over `memories.content`.
+///
+/// The schema had exactly one FTS5 table, `sessions_fts`, and nothing over
+/// `memories`.
+/// Recall with no query embedding therefore fell back to
+/// `content LIKE '%{query}%'` — a substring scan that matches nothing unless
+/// the caller's entire phrasing appears verbatim inside a memory, which for a
+/// natural-language question it essentially never does.
+/// The same gap made `memory.fts_only = true` a misnomer for memories: it
+/// switches vector search off deliberately, and there was no memories index on
+/// the other side of that switch.
+///
+/// # Shape
+///
+/// A standalone (non-external-content) FTS5 table mirroring `memories.id` and
+/// `content`, matching `sessions_fts`, which the codebase already maintains
+/// this way.
+/// External-content tables are leaner, but they resolve every hit by rowid
+/// against the base table and go silently wrong if the two ever drift; a
+/// standalone mirror can be rebuilt from `memories` at any time, and
+/// [`rebuild_memories_fts`] does exactly that.
+///
+/// `agent_id` is carried UNINDEXED so a per-agent search can narrow inside the
+/// FTS query rather than filtering after the fact.
+/// The tokenizer is declared explicitly for the reason #3548 established on
+/// `sessions_fts`: the default is version-dependent, and an index built under
+/// one tokenizer answers differently from one built under another.
+/// `remove_diacritics 2` folds accents, so `cafe` finds `café`.
+///
+/// # Sync
+///
+/// Three triggers mirror INSERT / UPDATE / DELETE on `memories`.
+/// Soft deletes (`deleted = 1`) deliberately stay *in* the index: the query
+/// path joins back to `memories` and filters `deleted = 0` anyway, and keeping
+/// the row means an undelete needs no re-index.
+/// The backfill runs unconditionally through [`rebuild_memories_fts`], so
+/// re-running this migration on a partially-populated index converges instead
+/// of double-inserting.
+fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            memory_id UNINDEXED,
+            agent_id UNINDEXED,
+            content,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+        ",
+    )?;
+
+    rebuild_memories_fts(conn)?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Rebuild `memories_fts` from `memories`, dropping whatever was there.
+///
+/// Idempotent and safe to call at any time: the index is a pure derivative of
+/// `memories`, so a full rebuild is always the correct repair for drift and is
+/// what makes [`migrate_v50`] re-runnable.
+/// Kept separate from the migration so a future integrity check can reach it
+/// without replaying DDL.
+fn rebuild_memories_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM memories_fts", [])?;
+    conn.execute(
+        "INSERT INTO memories_fts (memory_id, agent_id, content) \
+         SELECT id, agent_id, content FROM memories",
         [],
     )?;
     Ok(())
@@ -2466,6 +2635,222 @@ mod tests {
         assert_eq!(name, "Acme");
         assert_eq!(props, "{\"k\":1}");
         assert_eq!(peer, "", "a pre-v47 row migrates to the '' shared sentinel");
+    }
+
+    #[test]
+    fn test_migrate_v48_adds_last_decayed_at_column() {
+        // #7756: confidence decay needs to know when it last ran for a row.
+        // The column is nullable with no default so every pre-migration memory
+        // reads back NULL, which the decay pass treats as "charge from
+        // accessed_at" — no row jumps at the migration boundary.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "last_decayed_at"));
+
+        // A legacy-shaped INSERT that omits last_decayed_at leaves it NULL.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('legacy-mem', 'agent-1', 'c', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT last_decayed_at FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp, None,
+            "a pre-v48 memory row must read back NULL, not a synthetic timestamp"
+        );
+
+        // A second call is a no-op (column already present) and must not
+        // disturb the seeded row.
+        migrate_v48(&conn).unwrap();
+        let confidence: f64 = conn
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = 'legacy-mem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            confidence, 1.0,
+            "re-running migrate_v48 must not touch data"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v49_adds_owner_and_billed_agent_columns() {
+        // #7714: a run records who asked for it, and a usage row records whose
+        // budget line its cost belongs on. Both columns are nullable with no
+        // default, so every pre-migration row reads back NULL — an ownerless
+        // run stays ownerless and an unbilled usage row still bills to
+        // `agent_id`, which is exactly the pre-migration behaviour.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "workflow_runs", "owner_agent_id"));
+        assert!(column_exists(&conn, "usage_events", "billed_agent_id"));
+
+        // Legacy-shaped INSERTs that omit the new columns leave them NULL.
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workflow_name, state, input, step_results, started_at) \
+             VALUES ('legacy-run', 'wf-1', 'wf', 'completed', 'in', '[]', '2026-07-19T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_agent_id FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            owner, None,
+            "a pre-v49 workflow run must read back an absent owner, not a synthetic one"
+        );
+
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+             VALUES ('legacy-usage', 'agent-1', '2026-07-19T00:00:00+00:00', 'm', 'p', 1, 2, 0.5, 0, 10)",
+            [],
+        )
+        .unwrap();
+        let billed: Option<String> = conn
+            .query_row(
+                "SELECT billed_agent_id FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            billed, None,
+            "a pre-v49 usage row must read back NULL so it still bills to agent_id"
+        );
+
+        // A second call is a no-op (both columns already present) and must not
+        // disturb either seeded row.
+        migrate_v49(&conn).unwrap();
+        let (state, cost): (String, f64) = (
+            conn.query_row(
+                "SELECT state FROM workflow_runs WHERE id = 'legacy-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT cost_usd FROM usage_events WHERE id = 'legacy-usage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            state, "completed",
+            "re-running migrate_v49 must not touch data"
+        );
+        assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
+    }
+
+    #[test]
+    fn test_migrate_v50_creates_memories_fts_and_keeps_it_in_step() {
+        // #7808: the schema had exactly one FTS5 table (`sessions_fts`) and
+        // nothing over `memories`, so recall with no embedding provider was a
+        // `content LIKE '%…%'` scan and `memory.fts_only` had no memories index
+        // to fall back to.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("memories_fts must exist after the ladder runs");
+        assert!(
+            sql.contains("unicode61"),
+            "the tokenizer must be declared explicitly, per the #3548 lesson on sessions_fts; got: {sql}"
+        );
+
+        // Writes reach the index through triggers, so no write path in the
+        // crate has to remember to maintain it.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('m1', 'agent-1', 'the release train leaves on Thursday', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"release\" OR \"train\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "an inserted memory must be searchable immediately");
+
+        // Soft deletes stay indexed on purpose: the query path filters
+        // `deleted = 0` against `memories` anyway, and an undelete then needs
+        // no re-index.
+        conn.execute("UPDATE memories SET deleted = 1 WHERE id = 'm1'", [])
+            .unwrap();
+        let after_soft_delete: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after_soft_delete, 1);
+
+        // Re-running the migration converges rather than double-inserting —
+        // the backfill is a rebuild, not an append.
+        migrate_v50(&conn).unwrap();
+        let after_rerun: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after_rerun, 1,
+            "re-running migrate_v50 must not duplicate index rows"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v50_backfills_memories_written_before_the_index_existed() {
+        // The realistic upgrade: rows already sitting in `memories` when the
+        // index is created. Without the backfill an existing store would look
+        // empty to every FTS-backed search until each row happened to be
+        // rewritten.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Reproduce the pre-v49 state: rows present, index absent.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('old', 'agent-1', 'the postgres primary lives in Frankfurt', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER memories_fts_ai;
+             DROP TRIGGER memories_fts_au;
+             DROP TRIGGER memories_fts_ad;
+             DROP TABLE memories_fts;",
+        )
+        .unwrap();
+
+        migrate_v50(&conn).unwrap();
+
+        let (id, _): (String, String) = conn
+            .query_row(
+                "SELECT memory_id, content FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"postgres\""],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("a row written before the index existed must be backfilled");
+        assert_eq!(id, "old");
     }
 
     #[test]

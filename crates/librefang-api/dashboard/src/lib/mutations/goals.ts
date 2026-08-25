@@ -38,7 +38,13 @@ export function useDeleteGoal() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteGoal,
-    onSuccess: () => qc.invalidateQueries({ queryKey: goalKeys.lists() }),
+    onSuccess: (_data, id) => {
+      qc.setQueryData<GoalItem[]>(goalKeys.lists(), (previous) =>
+        previous?.filter((goal) => goal.id !== id),
+      );
+      qc.removeQueries({ queryKey: goalKeys.run(id) });
+      qc.invalidateQueries({ queryKey: goalKeys.lists() });
+    },
   });
 }
 

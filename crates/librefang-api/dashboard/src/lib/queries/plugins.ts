@@ -3,23 +3,24 @@ import { listPlugins, listPluginRegistries } from "../http/client";
 import { pluginKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const STALE_MS = 60_000;
+const PLUGIN_REFRESH_MS = 60_000;
+const REGISTRY_REFRESH_MS = 5 * 60_000;
 
 export const pluginQueries = {
   list: () =>
     queryOptions({
       queryKey: pluginKeys.lists(),
       queryFn: listPlugins,
-      staleTime: STALE_MS,
-      refetchInterval: STALE_MS,
+      staleTime: PLUGIN_REFRESH_MS,
+      refetchInterval: PLUGIN_REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
   registries: () =>
     queryOptions({
       queryKey: pluginKeys.registries(),
       queryFn: listPluginRegistries,
-      staleTime: 300_000,
-      refetchInterval: 300_000,
+      staleTime: REGISTRY_REFRESH_MS,
+      refetchInterval: REGISTRY_REFRESH_MS,
       refetchIntervalInBackground: false, // #3393
     }),
 };

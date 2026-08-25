@@ -26,11 +26,17 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+    <title>LibreFang - The Agent Operating System</title>
     <script>
-      // Load CJK font based on detected language
       (function() {
+        var path = window.location.pathname;
+        var localeMatch = path.match(/^\/(zh-TW|zh|de|ja|ko|es|pl|uk)(?:\/|$)/);
+        var lang = localeMatch ? localeMatch[1] : 'en';
+        document.documentElement.lang = lang;
+        window.__INITIAL_LANG__ = lang;
+
+        // Load the locale font only after language detection has completed.
         var fontMap = { 'zh': 'Noto+Sans+SC', 'zh-TW': 'Noto+Sans+TC', 'ja': 'Noto+Sans+JP', 'ko': 'Noto+Sans+KR' };
-        var lang = window.__INITIAL_LANG__ || 'en';
         var font = fontMap[lang];
         if (font) {
           var link = document.createElement('link');
@@ -38,23 +44,6 @@
           link.href = 'https://fonts.googleapis.com/css2?family=' + font + ':wght@400;500;700;900&display=swap';
           document.head.appendChild(link);
         }
-      })();
-    </script>
-    <title>LibreFang - The Agent Operating System</title>
-    <script>
-      (function() {
-        var lang = 'en';
-        var path = window.location.pathname;
-        if (path.startsWith('/zh-TW')) lang = 'zh-TW';
-        else if (path.startsWith('/zh')) lang = 'zh';
-        else if (path.startsWith('/de')) lang = 'de';
-        else if (path.startsWith('/ja')) lang = 'ja';
-        else if (path.startsWith('/ko')) lang = 'ko';
-        else if (path.startsWith('/es')) lang = 'es';
-        else if (path.startsWith('/pl')) lang = 'pl';
-        else if (path.startsWith('/uk')) lang = 'uk';
-        document.documentElement.lang = lang;
-        window.__INITIAL_LANG__ = lang;
 
         // Localized meta description before React hydrates, so crawlers /
         // link-unfurls that don't execute JS still see the right language.
@@ -78,7 +67,11 @@
         }
 
         // Initialize theme
-        var theme = localStorage.getItem('theme') || 'dark';
+        var theme = 'dark';
+        try {
+          var storedTheme = localStorage.getItem('theme');
+          if (storedTheme === 'dark' || storedTheme === 'light') theme = storedTheme;
+        } catch (_) {}
         document.documentElement.classList.add(theme);
       })();
     </script>

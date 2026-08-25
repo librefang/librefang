@@ -30,10 +30,12 @@ export function OfflineBanner() {
   const retry = async () => {
     setRetrying(true);
     try {
-      await refetch();
+      const result = await refetch();
+      if (result.isError) return;
+      setRetrying(false);
       // Once connectivity is back, prod any other queries that may have
       // failed during the outage so the rest of the dashboard refreshes.
-      await qc.refetchQueries({ queryKey: runtimeKeys.all, exact: false });
+      void qc.refetchQueries({ queryKey: runtimeKeys.all, exact: false });
     } finally {
       setRetrying(false);
     }

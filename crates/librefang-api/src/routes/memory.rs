@@ -1174,6 +1174,7 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1181,7 +1182,16 @@ pub async fn memory_duplicates(
         Err(e) => return e,
     };
 
-    match store.find_duplicates(&agent_id, None).await {
+    // Duplicate groups are memory contents, so this read needs the same
+    // namespace gate and PII redaction every other memory read gets — it was
+    // the one `/api/memory` read that had neither (#7808).
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store
+        .find_duplicates_with_guard(&agent_id, None, &guard)
+        .await
+    {
         Ok(groups) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1254,14 +1264,12 @@ pub async fn memory_consolidate(
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
     let guard = guard_for_user(&state, user_ref);
-    // Consolidate merges and soft-deletes duplicate memories → delete capability.
-    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
-        guard.check_delete("proactive")
-    {
-        return auth_denied_for(&state, user_ref, reason);
-    }
 
-    match store.consolidate(&agent_id).await {
+    // Consolidate merges and soft-deletes duplicate memories → delete
+    // capability. The gate lives in `consolidate_with_guard` so this route and
+    // the agent-callable `memory_semantic_consolidate` tool cannot drift apart
+    // on what consolidation costs (#7808).
+    match store.consolidate_with_guard(&agent_id, &guard).await {
         Ok(merged) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1661,6 +1669,25 @@ pub async fn memory_query_relations(
 #[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = crate::types::JsonObject)))]
 pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
+
+    // `extraction_model` unset means "inherit the kernel default", and that
+    // used to be all a caller could learn: an absent field, with no way to ask
+    // which model was actually doing the work. That gap cost a live deployment
+    // hours — an agent conversing on a fast model had its memory extraction
+    // silently inheriting a slow reasoning model, and no surface could show
+    // it.
+    //
+    // The answer is read from the resolution boot recorded, never re-derived
+    // from `config` here. Re-deriving reintroduces the same bug one level up:
+    // it hands back the configured (or inherited) spec unsplit, and it reports
+    // that model as effective even when no LLM extracts anything at all —
+    // extraction switched off, an `extractor_sidecar` taking over, or the
+    // driver failing to build so extraction silently fell back to substring
+    // matching. Two derivations of "which model extracts memories" can
+    // disagree, and the one an operator reads is then the one that is wrong.
+    let resolution = state.kernel.extraction_model_resolution();
+    let effective = resolution.and_then(|r| r.effective_target());
+
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
         "embedding_model": &config.memory.embedding_model,
@@ -1670,7 +1697,52 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
             "enabled": config.proactive_memory.enabled,
             "auto_memorize": config.proactive_memory.auto_memorize,
             "auto_retrieve": config.proactive_memory.auto_retrieve,
+            // The raw setting, read live. It can legitimately differ from the
+            // resolved fields below: `POST /api/config/reload` swaps the
+            // `[proactive_memory]` table onto the running store but does not
+            // rebuild the extraction driver, so after such an edit this is what
+            // the file says and `effective_extraction_model` is what is running.
             "extraction_model": &config.proactive_memory.extraction_model,
+            // Provider and model as boot resolved them — already split, so a
+            // `provider/model` spec answers "which provider" and names the
+            // model in the form the upstream API receives.
+            //
+            // `null` whenever no model runs: extraction inactive, a sidecar
+            // doing the work, or the driver having failed to build so
+            // extraction fell back to substring matching. Naming a model as
+            // *effective* in that last case is the misreport this whole field
+            // exists to prevent — what was attempted is named in
+            // `extraction_degraded_reason`.
+            "effective_extraction_model": effective.map(|t| t.model.as_str()),
+            "effective_extraction_provider": effective.map(|t| t.provider.as_str()),
+            // "configured" when `extraction_model` was set at boot, otherwise
+            // "inherited_default" — the operator never picked this, it came
+            // from `[default_model]`. Still answerable after a failed driver
+            // build, so it reads the resolved target rather than the effective
+            // one.
+            "extraction_model_source": resolution
+                .and_then(|r| r.resolved_target())
+                .map(|t| t.source()),
+            // What actually extracts: "llm", "sidecar", "degraded_substring"
+            // (the driver failed to build — no model at all), "inactive"
+            // (nothing extracts), or "unknown" if boot never got that far.
+            "extraction_status": resolution.map_or("unknown", |r| r.status()),
+            // The single question a model name alone cannot answer. `null` only
+            // for "unknown", where claiming either answer would be a guess.
+            "extraction_llm_active": resolution.map(|r| r.llm_active()),
+            // Why extraction lost its LLM, when it did.
+            "extraction_degraded_reason": resolution.and_then(|r| r.degraded_reason()),
+            // The out-of-process extractor's command, when one is what runs.
+            // Naming it is the sidecar's equivalent of naming the model.
+            "extraction_sidecar_command": match resolution {
+                Some(librefang_kernel::MemoryExtractionResolution::Sidecar { command }) => {
+                    Some(command.as_str())
+                }
+                _ => None,
+            },
+            // Whether a memory is recallable only from the conversation that produced it (#7605).
+            // It governs whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn, so an operator who cannot read it here cannot audit their own isolation posture without opening `config.toml` on the host.
+            "session_scoped_recall": config.proactive_memory.session_scoped_recall,
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))
@@ -1701,14 +1773,14 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
     // Keep the complete read-modify-write-reload transaction under the shared config lock.
     // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
     let _config_guard = state.config_write_lock.lock().await;
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,
@@ -1779,6 +1851,9 @@ pub async fn memory_config_patch(
                 "extraction_model".into(),
                 toml::Value::String(v.to_string()),
             );
+        }
+        if let Some(v) = pm.get("session_scoped_recall").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("session_scoped_recall".into(), toml::Value::Boolean(v));
         }
         if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
             pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
@@ -1907,6 +1982,8 @@ pub async fn memory_config_patch(
                 .unwrap_or(live.proactive_memory.auto_retrieve),
             "extraction_model": toml_str(proactive_section, "extraction_model")
                 .or_else(|| live.proactive_memory.extraction_model.clone()),
+            "session_scoped_recall": toml_bool(proactive_section, "session_scoped_recall")
+                .unwrap_or(live.proactive_memory.session_scoped_recall),
             "max_retrieve": toml_u64(proactive_section, "max_retrieve")
                 .unwrap_or(live.proactive_memory.max_retrieve as u64),
         },
