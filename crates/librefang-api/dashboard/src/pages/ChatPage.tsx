@@ -45,8 +45,7 @@ import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useResolveApproval,
   useSendAgentMessage,
   useStopAgent,
@@ -2290,7 +2289,13 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
     );
   }
 
-  const { used_tokens: used, max_context_tokens: max, pct, pressure } = query.data;
+  const {
+    used_tokens: used,
+    max_context_tokens: max,
+    max_context_tokens_assumed: assumed,
+    pct,
+    pressure,
+  } = query.data;
 
   // Theme-token fill color stepped by pressure. Neutral (brand) until the
   // context is genuinely tight, then amber, then red. Dark-mode aware via
@@ -2310,8 +2315,21 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
   });
   const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
 
+  // The denominator is only as trustworthy as its source. When nothing knows
+  // this model's window the server says so (`max_context_tokens_assumed`), and
+  // the bar has to say so too — a percentage measured against a guessed 8192 is
+  // what turns a conversation inside the model's real window into an overflow
+  // the operator cannot explain. Refs #7774.
+  const assumedLabel = assumed ? t("chat.context_usage_assumed") : "";
+  const assumedDetail = assumed
+    ? t("chat.context_usage_assumed_detail", { max: max.toLocaleString() })
+    : "";
+
   return (
-    <div className="hidden md:flex items-center gap-2 text-xs text-text-dim/70" title={label}>
+    <div
+      className="hidden md:flex items-center gap-2 text-xs text-text-dim/70"
+      title={assumed ? `${label} — ${assumedDetail}` : label}
+    >
       <div
         role="progressbar"
         aria-label={ariaLabel}
@@ -2326,6 +2344,14 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
         />
       </div>
       <span className="hidden lg:inline tabular-nums whitespace-nowrap">{label}</span>
+      {assumed && (
+        <span
+          className="hidden lg:inline whitespace-nowrap rounded px-1.5 py-0.5 bg-warning/15 text-warning"
+          title={assumedDetail}
+        >
+          {assumedLabel}
+        </span>
+      )}
     </div>
   );
 }
@@ -2371,11 +2397,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   // Route by role: hand agents go through the hand-runtime-config endpoint,
   // everyone else hits the standalone /config route. Both hooks share the
   // same AgentConfigPatch payload shape.
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
-  const modelConfigMutation = isHand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
+  const modelConfigMutation = usePatchAgentRuntimeConfig();
   const modelsQuery = useModels(
     { available: true },
     {
@@ -2464,6 +2486,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     try {
       await modelConfigMutation.mutateAsync({
         agentId,
+        isHand: isHand === true,
         config: { model: model.id, provider: model.provider },
       });
       setModelOpen(false);
@@ -2943,8 +2966,7 @@ export function ChatPage() {
   // #2959. Sessions are URL-driven per tab; other callers (CLI, cron) still
   // use the endpoint for registry-canonical switching.
   const deleteSessionMutation = useDeleteAgentSession();
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
 
   // Sync agent selection to URL search params. Also reset the visible-message
   // window so new agent sessions start from the tail end of history.
@@ -3592,11 +3614,9 @@ export function ChatPage() {
                 try {
                   // Branch in the caller — only the caller knows from the
                   // cached agent detail whether this is a hand role.
-                  const mutation = selectedAgent?.is_hand
-                    ? patchHandAgentRuntimeConfigMutation
-                    : patchAgentConfigMutation;
-                  await mutation.mutateAsync({
+                  await patchAgentRuntimeConfigMutation.mutateAsync({
                     agentId: selectedAgentId,
+                    isHand: selectedAgent?.is_hand === true,
                     config: { web_search_augmentation: mode },
                   });
                   await agentsQuery.refetch();

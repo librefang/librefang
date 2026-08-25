@@ -1,0 +1,3 @@
+An agent in a shared Slack or Telegram group can now answer one person privately with the new `channel_dm` tool, instead of having to broadcast a notice meant for a single member or drop it silently.
+The recipient must already appear in that conversation's roster — someone the daemon has seen speak there — so the cross-chat dispatch guard that closed the #6117 leak stays closed: an agent still cannot address a platform id it has never met, or use one conversation to reach into another.
+Slack lets a bot open a DM with any workspace member; Telegram and Discord bots cannot message someone who never started a chat with them, and that send now fails visibly rather than quietly reappearing in the group (#7874) (@houko)

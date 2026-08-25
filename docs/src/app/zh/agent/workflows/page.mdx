@@ -85,8 +85,9 @@ pub struct Workflow {
 | JSON 字段 | Rust 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|---|
 | `name` | `name` | `String` | `"step"` | 步骤名称，用于日志和显示。 |
-| `agent_name` | `agent` | `StepAgent::ByName` | -- | 按名称引用 Agent（匹配第一个）。与 `agent_id` 互斥。 |
-| `agent_id` | `agent` | `StepAgent::ById` | -- | 按 UUID 引用 Agent。与 `agent_name` 互斥。 |
+| `agent_name` | `agent` | `StepAgent::ByName` | -- | 按名称引用 Agent（匹配第一个）。与 `agent_id`、`agent_type` 互斥。 |
+| `agent_id` | `agent` | `StepAgent::ById` | -- | 按 UUID 引用 Agent。与 `agent_name`、`agent_type` 互斥。 |
+| `agent_type` | `agent` | `StepAgent::ByType` | -- | 按 Agent *类型* 引用：若已注册同名 Agent 则复用，否则从同名模板创建。与 `agent_id`、`agent_name` 互斥。 |
 | `prompt` | `prompt_template` | `String` | `"{{input}}"` | 带变量占位符的提示词模板。 |
 | `mode` | `mode` | `StepMode` | `"sequential"` | 执行模式（见下文）。 |
 | `timeout_secs` | `timeout_secs` | `u64` | `120` | 步骤超时时间上限（秒）。 |
@@ -99,16 +100,33 @@ pub struct Workflow {
 
 ### Agent 解析
 
-每个步骤必须指定 `agent_name` 或 `agent_id` 其中之一。`StepAgent` 枚举定义如下：
+每个步骤必须且只能指定 `agent_name`、`agent_id`、`agent_type` 三者之一。`StepAgent` 枚举定义如下：
 
 ```rust
 pub enum StepAgent {
-    ById { id: String },    // UUID of an existing agent
-    ByName { name: String }, // Name match (first agent with this name)
+    ById { id: String },       // UUID of an existing agent
+    ByName { name: String },   // Name match (first agent with this name)
+    ByType { template: String }, // Agent type — find-or-spawn from a template
 }
 ```
 
+同时指定多个路由键的步骤会在 API 边界以及 TOML / JSON 反序列化时被拒绝，而不是按优先级静默取其一。
+静默消歧会让步骤绑定到与作者所见不同的 Agent，且运行输出中没有任何提示。
+
 如果在执行时无法解析到 Agent，工作流将失败并报错 `"Agent not found for step '<name>'"`。
+
+#### Agent 类型（find-or-spawn）
+
+`agent_type` 让工作流可以表达"使用 researcher 这一类型的 Agent"，而无需操作者预先注册实例。
+解析规则为 find-or-spawn：若已注册同名 Agent 则复用；否则加载同名模板清单，并以按名称派生的规范 UUID 在顶层创建，使该类型在守护进程重启后仍保持同一身份与同一会话历史。
+
+模板从 `<home>/workspaces/agents/<type>/agent.toml` 读取，找不到时回退到只读注册表检出目录 `<home>/registry/agents/<type>/agent.toml`。
+同名的本地模板会覆盖注册表副本。
+清单中的 `name` 必须与所在目录一致（省略 `name` 时继承目录名）；声明了不同名称的清单会被拒绝而不是被创建，否则它会以所声明的名称注册，该类型将永远无法收敛到同一个实例。
+
+加载过程会在守护进程日志中区分各种失败原因——模板缺失、文件不可读、清单无法解析、名称不匹配各自报告自己的原因与路径，因此工作流中的拼写错误绝不会与磁盘上损坏的清单混为一谈。
+
+**试运行绝不创建 Agent**：`POST /api/workflows/{id}/dry-run` 只预览 `agent_type` 步骤将要使用的 Agent，而不会真的创建它。
 
 ---
 

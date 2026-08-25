@@ -26,8 +26,8 @@
 //!   `librefang-runtime`'s `StreamEvent::ToolExecutionResult` — it
 //!   needs to carry the originating tool-use id (cross-crate change,
 //!   tracked as a follow-up). Until that lands, the pump prepends a
-//!   disambiguation note to the result content whenever ≥2 calls are
-//!   in flight for the same name (#3313 review, PR-3). The editor
+//!   disambiguation note to every result in a same-name group that
+//!   reached ≥2 concurrent calls (#3313 review, PR-3). The editor
 //!   user sees the wire-level attribution may be a guess and can
 //!   verify against tool input args before relying on it. The
 //!   misattribution still doesn't affect what runs or what the agent
@@ -41,12 +41,25 @@ use agent_client_protocol::schema::v1::{
 };
 use librefang_llm_driver::StreamEvent;
 
+/// Bound state retained for starts whose result has not arrived yet.
+///
+/// A normal turn stays far below this. The cap protects the turn translator
+/// from a malformed stream that emits starts without results.
+const MAX_TRACKED_TOOL_CALLS: usize = 1024;
+
+#[derive(Debug, Default)]
+struct InFlightCalls {
+    ids: VecDeque<ToolCallId>,
+    max_concurrent: usize,
+}
+
 /// Stateful translator. One per session/prompt turn.
 #[derive(Debug, Default)]
 pub(crate) struct EventTranslator {
     /// FIFO of in-flight tool call ids keyed by tool name. We use a queue
     /// per name so parallel calls of the same tool don't get conflated.
-    in_flight_by_name: HashMap<String, VecDeque<ToolCallId>>,
+    in_flight_by_name: HashMap<String, InFlightCalls>,
+    tracked_tool_calls: usize,
 }
 
 impl EventTranslator {
@@ -80,13 +93,22 @@ impl EventTranslator {
 
             StreamEvent::ToolUseStart { id, name } => {
                 let tool_call_id = ToolCallId::new(id);
-                self.in_flight_by_name
-                    .entry(name.clone())
-                    .or_default()
-                    .push_back(tool_call_id.clone());
+                let kind = infer_tool_kind(&name);
+                if self.tracked_tool_calls < MAX_TRACKED_TOOL_CALLS {
+                    let calls = self.in_flight_by_name.entry(name.clone()).or_default();
+                    calls.ids.push_back(tool_call_id.clone());
+                    calls.max_concurrent = calls.max_concurrent.max(calls.ids.len());
+                    self.tracked_tool_calls += 1;
+                } else {
+                    tracing::warn!(
+                        tool_name = %name,
+                        max_tracked = MAX_TRACKED_TOOL_CALLS,
+                        "ACP tool-call tracker is full; start will not be correlated to its result"
+                    );
+                }
                 vec![SessionUpdate::ToolCall(
-                    ToolCall::new(tool_call_id, name.clone())
-                        .kind(infer_tool_kind(&name))
+                    ToolCall::new(tool_call_id, name)
+                        .kind(kind)
                         .status(ToolCallStatus::Pending),
                 )]
             }
@@ -112,36 +134,44 @@ impl EventTranslator {
                 result_preview,
                 is_error,
             } => {
-                // Pop the oldest in-flight call for this name. If we don't
-                // have one (mismatched event ordering), fall back to a
-                // synthetic id so the update is still well-formed.
-                let queue = self.in_flight_by_name.get_mut(&name);
-                // Snapshot the queue depth *before* popping so we can
-                // tell whether more than one call is in flight for this
-                // tool name. When >1 are pending the FIFO pop is a
-                // best-effort guess (the runtime can't yet tell us
-                // which call this result came from — see crate-level
-                // doc for the limitation), so we annotate the wire
-                // payload to surface that ambiguity instead of
-                // confidently attributing the result to the wrong
-                // tool-call card. (#3313 review, PR-3)
-                let pending_before = queue.as_ref().map(|q| q.len()).unwrap_or(0);
-                let tool_call_id = queue
-                    .map(|q| q.pop_front())
-                    .unwrap_or(None)
-                    .unwrap_or_else(|| ToolCallId::new(format!("orphan-{name}")));
+                // Pop the oldest in-flight call for this name. Preserve the
+                // group's high-water mark so every result in a concurrently
+                // ambiguous group carries the same warning, including the
+                // final result after its siblings have already completed.
+                let matched = self.in_flight_by_name.get_mut(&name).and_then(|calls| {
+                    calls
+                        .ids
+                        .pop_front()
+                        .map(|id| (id, calls.max_concurrent, calls.ids.is_empty()))
+                });
+                let (tool_call_id, max_concurrent, drained, is_orphan) = match matched {
+                    Some((id, max_concurrent, drained)) => {
+                        debug_assert!(self.tracked_tool_calls > 0);
+                        self.tracked_tool_calls -= 1;
+                        (id, max_concurrent, drained, false)
+                    }
+                    None => {
+                        // A translator is recreated for every prompt, while ACP
+                        // tool-call ids live in the longer session timeline. A
+                        // per-translator counter would therefore repeat across
+                        // turns and let a client attach a new orphan result to
+                        // an old card.
+                        let id =
+                            ToolCallId::new(format!("librefang-orphan-{}", uuid::Uuid::new_v4()));
+                        tracing::warn!(
+                            tool_name = %name,
+                            tool_call_id = %id,
+                            "ACP received a tool result without a matching start"
+                        );
+                        (id, 1, false, true)
+                    }
+                };
                 // Reap the outer entry once its queue drains. Without
-                // this the `(name, empty-VecDeque)` pair lingers for the
+                // this the `(name, empty queue)` pair lingers for the
                 // life of the translator (this turn / ACP session) and
                 // grows with the count of distinct tool names invoked —
-                // a per-session leak (#5144). Re-borrow and check
-                // emptiness directly so a queue emptied by this pop (or
-                // one already empty from a prior result) is removed.
-                if self
-                    .in_flight_by_name
-                    .get(&name)
-                    .is_some_and(|q| q.is_empty())
-                {
+                // a per-session leak (#5144).
+                if drained {
                     self.in_flight_by_name.remove(&name);
                 }
                 let status = if is_error {
@@ -149,9 +179,9 @@ impl EventTranslator {
                 } else {
                     ToolCallStatus::Completed
                 };
-                let payload = if pending_before > 1 {
+                let payload = if max_concurrent > 1 {
                     format!(
-                        "[note: {pending_before} concurrent calls to `{name}` are in flight; the runtime does \
+                        "[note: this tool had {max_concurrent} concurrent calls to `{name}`; the runtime does \
                          not yet correlate results back to a specific tool_use_id, so this result may be \
                          attributed to a sibling call. Verify against the tool's input arguments before relying \
                          on the attribution.]\n\n{result_preview}"
@@ -159,12 +189,24 @@ impl EventTranslator {
                 } else {
                     result_preview
                 };
-                vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                let mut updates = Vec::with_capacity(if is_orphan { 2 } else { 1 });
+                if is_orphan {
+                    // ACP clients expect a ToolCall before its ToolCallUpdate.
+                    // Create the missing card rather than emitting an update
+                    // for an identifier the client has never observed.
+                    updates.push(SessionUpdate::ToolCall(
+                        ToolCall::new(tool_call_id.clone(), name.clone())
+                            .kind(infer_tool_kind(&name))
+                            .status(ToolCallStatus::InProgress),
+                    ));
+                }
+                updates.push(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                     tool_call_id,
                     ToolCallUpdateFields::new().status(status).content(vec![
                         ToolCallContent::from(ContentBlock::Text(TextContent::new(payload))),
                     ]),
-                ))]
+                )));
+                updates
             }
 
             // `ContentComplete` and `PhaseChange` are signalling events
@@ -179,33 +221,44 @@ impl EventTranslator {
     }
 }
 
-/// Best-effort mapping from a LibreFang tool name to an ACP `ToolKind`.
+/// Conservative mapping from a LibreFang tool name to an ACP `ToolKind`.
 ///
 /// We err on the side of `Other` so unknown tools still render with a neutral
-/// icon. The categories we recognise are the ones that have established
-/// names across LibreFang's stdlib (`read_*`, `write_*`, `bash`, etc.).
+/// icon. Matching uses complete separator-delimited action words. Generic
+/// editing is restricted to known file/document targets so names such as
+/// `edit_history` are not assigned a misleading file-edit affordance.
 pub(crate) fn infer_tool_kind(name: &str) -> ToolKind {
     let lower = name.to_ascii_lowercase();
-    if lower.starts_with("read") || lower.contains("get_") || lower.contains("list_") {
-        ToolKind::Read
-    } else if lower.starts_with("write") || lower.contains("edit") || lower.contains("patch") {
-        ToolKind::Edit
-    } else if lower.starts_with("delete") || lower.starts_with("rm_") {
-        ToolKind::Delete
-    } else if lower.starts_with("move") || lower.starts_with("rename") {
-        ToolKind::Move
-    } else if lower.contains("search") || lower.contains("grep") || lower.contains("find") {
-        ToolKind::Search
-    } else if lower == "bash"
-        || lower.starts_with("exec")
-        || lower.starts_with("run_")
-        || lower.contains("shell")
-    {
-        ToolKind::Execute
-    } else if lower.contains("think") || lower.contains("plan") {
-        ToolKind::Think
-    } else if lower.contains("fetch") || lower.starts_with("http_") {
+    let words: Vec<&str> = lower
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    let has_edit_target = ["file", "files", "document", "documents", "text", "content"]
+        .iter()
+        .any(|target| has(target));
+    let is_run_action = has("run")
+        && ["command", "script", "process"]
+            .iter()
+            .any(|target| has(target));
+    let is_http_fetch = has("http") && ["get", "request", "fetch"].iter().any(|action| has(action));
+
+    if has("fetch") || is_http_fetch {
         ToolKind::Fetch
+    } else if has("read") || has("get") || has("list") || has("cat") || has("ls") {
+        ToolKind::Read
+    } else if has("write") || has("patch") || (has("edit") && has_edit_target) {
+        ToolKind::Edit
+    } else if has("delete") || has("remove") || has("rm") {
+        ToolKind::Delete
+    } else if has("move") || has("rename") {
+        ToolKind::Move
+    } else if has("search") || has("grep") || has("find") || has("glob") {
+        ToolKind::Search
+    } else if has("bash") || has("exec") || has("execute") || has("shell") || is_run_action {
+        ToolKind::Execute
+    } else if has("think") || has("plan") {
+        ToolKind::Think
     } else {
         ToolKind::Other
     }
@@ -215,6 +268,25 @@ pub(crate) fn infer_tool_kind(name: &str) -> ToolKind {
 mod tests {
     use super::*;
     use librefang_types::message::{StopReason as LfStopReason, TokenUsage};
+
+    fn tool_call_id(update: &ToolCallUpdate) -> String {
+        update.tool_call_id.to_string()
+    }
+
+    fn tool_call_status(update: &ToolCallUpdate) -> Option<ToolCallStatus> {
+        update.fields.status
+    }
+
+    fn tool_call_text(update: &ToolCallUpdate) -> &str {
+        let content = update.fields.content.as_ref().expect("content set");
+        match &content[0] {
+            ToolCallContent::Content(content) => match &content.content {
+                ContentBlock::Text(text) => &text.text,
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected ToolCallContent::Content"),
+        }
+    }
 
     #[test]
     fn text_delta_becomes_agent_message_chunk() {
@@ -278,7 +350,7 @@ mod tests {
         });
         match &result[0] {
             SessionUpdate::ToolCallUpdate(u) => {
-                assert_eq!(u.fields.status, Some(ToolCallStatus::Completed));
+                assert_eq!(tool_call_status(u), Some(ToolCallStatus::Completed));
             }
             _ => panic!("expected ToolCallUpdate"),
         }
@@ -312,7 +384,7 @@ mod tests {
             is_error: false,
         });
         match &r1[0] {
-            SessionUpdate::ToolCallUpdate(u) => assert_eq!(u.tool_call_id.0.as_ref(), "a"),
+            SessionUpdate::ToolCallUpdate(u) => assert_eq!(tool_call_id(u), "a"),
             _ => panic!(),
         }
         let r2 = t.translate(StreamEvent::ToolExecutionResult {
@@ -322,8 +394,8 @@ mod tests {
         });
         match &r2[0] {
             SessionUpdate::ToolCallUpdate(u) => {
-                assert_eq!(u.tool_call_id.0.as_ref(), "b");
-                assert_eq!(u.fields.status, Some(ToolCallStatus::Failed));
+                assert_eq!(tool_call_id(u), "b");
+                assert_eq!(tool_call_status(u), Some(ToolCallStatus::Failed));
             }
             _ => panic!(),
         }
@@ -335,11 +407,11 @@ mod tests {
     /// crate-level docs). PR-3 (#3313 review) takes the
     /// best-available middle ground: the result still ends up on the
     /// front-of-queue card (so the FIFO test above still passes),
-    /// but the wire payload carries a disambiguation note when two
-    /// or more calls are pending so the editor user knows the
-    /// attribution is a guess.
+    /// but every result from a group that reached two or more pending
+    /// calls carries a disambiguation note so the editor user knows
+    /// the attribution is a guess.
     #[test]
-    fn parallel_same_named_first_result_carries_ambiguity_note() {
+    fn every_parallel_same_named_result_carries_ambiguity_note() {
         let mut t = EventTranslator::new();
         let _ = t.translate(StreamEvent::ToolUseStart {
             id: "a".into(),
@@ -358,14 +430,7 @@ mod tests {
         // disambiguation note prepended.
         match &r1[0] {
             SessionUpdate::ToolCallUpdate(u) => {
-                let content = u.fields.content.as_ref().expect("content set");
-                let text = match &content[0] {
-                    ToolCallContent::Content(c) => match &c.content {
-                        ContentBlock::Text(t) => t.text.clone(),
-                        _ => panic!("expected text content"),
-                    },
-                    _ => panic!("expected ToolCallContent::Content"),
-                };
+                let text = tool_call_text(u);
                 assert!(
                     text.contains("concurrent calls to `fetch`"),
                     "expected ambiguity note, got: {text}"
@@ -377,8 +442,8 @@ mod tests {
             }
             _ => panic!(),
         }
-        // After the first pop only one is pending — second result
-        // is unambiguous, no note.
+        // After the first pop only one is pending, but this result is still
+        // part of the same ambiguous concurrent group and must be annotated.
         let r2 = t.translate(StreamEvent::ToolExecutionResult {
             name: "fetch".into(),
             result_preview: "second body".into(),
@@ -386,22 +451,135 @@ mod tests {
         });
         match &r2[0] {
             SessionUpdate::ToolCallUpdate(u) => {
-                let content = u.fields.content.as_ref().expect("content set");
-                let text = match &content[0] {
-                    ToolCallContent::Content(c) => match &c.content {
-                        ContentBlock::Text(t) => t.text.clone(),
-                        _ => panic!("expected text content"),
-                    },
-                    _ => panic!("expected ToolCallContent::Content"),
-                };
+                let text = tool_call_text(u);
                 assert!(
-                    !text.contains("concurrent calls"),
-                    "single-pending result must not carry ambiguity note"
+                    text.contains("concurrent calls to `fetch`"),
+                    "last sibling must retain the ambiguity note"
                 );
-                assert_eq!(text, "second body");
+                assert!(text.contains("second body"));
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn orphan_result_emits_a_synthetic_call_before_its_update() {
+        let mut translator = EventTranslator::new();
+        let updates = translator.translate(StreamEvent::ToolExecutionResult {
+            name: "web_fetch".into(),
+            result_preview: "orphan body".into(),
+            is_error: false,
+        });
+
+        assert_eq!(updates.len(), 2);
+        let synthetic_id = match &updates[0] {
+            SessionUpdate::ToolCall(call) => call.tool_call_id.to_string(),
+            _ => panic!("expected synthetic ToolCall first"),
+        };
+        match &updates[1] {
+            SessionUpdate::ToolCallUpdate(update) => {
+                assert_eq!(tool_call_id(update), synthetic_id);
+                assert_eq!(tool_call_status(update), Some(ToolCallStatus::Completed));
+                assert_eq!(tool_call_text(update), "orphan body");
+            }
+            _ => panic!("expected ToolCallUpdate second"),
+        }
+
+        let next = translator.translate(StreamEvent::ToolExecutionResult {
+            name: "web_fetch".into(),
+            result_preview: "another orphan".into(),
+            is_error: true,
+        });
+        let next_id = match &next[0] {
+            SessionUpdate::ToolCall(call) => call.tool_call_id.to_string(),
+            _ => panic!("expected synthetic ToolCall first"),
+        };
+        assert_ne!(synthetic_id, next_id, "synthetic ids must not collide");
+
+        // EventTranslator is recreated for every prompt. IDs must remain
+        // unique across those instances because the ACP client keeps the
+        // session timeline from earlier prompts.
+        let mut next_prompt_translator = EventTranslator::new();
+        let next_prompt = next_prompt_translator.translate(StreamEvent::ToolExecutionResult {
+            name: "web_fetch".into(),
+            result_preview: "later prompt orphan".into(),
+            is_error: false,
+        });
+        let next_prompt_id = match &next_prompt[0] {
+            SessionUpdate::ToolCall(call) => call.tool_call_id.to_string(),
+            _ => panic!("expected synthetic ToolCall first"),
+        };
+        assert_ne!(
+            synthetic_id, next_prompt_id,
+            "synthetic ids must not repeat across prompt translators"
+        );
+    }
+
+    #[test]
+    fn tool_kind_matching_uses_complete_action_words() {
+        for (name, expected) in [
+            ("mcp_filesystem_read_file", ToolKind::Read),
+            ("get_weather", ToolKind::Read),
+            ("file_edit", ToolKind::Edit),
+            ("apply_patch", ToolKind::Edit),
+            ("file_delete", ToolKind::Delete),
+            ("skill_evolve_remove_file", ToolKind::Delete),
+            ("rename_file", ToolKind::Move),
+            ("memory_search", ToolKind::Search),
+            ("shell_exec", ToolKind::Execute),
+            ("execute_command", ToolKind::Execute),
+            ("plan", ToolKind::Think),
+            ("web_fetch", ToolKind::Fetch),
+            ("http_get", ToolKind::Fetch),
+        ] {
+            assert_eq!(
+                infer_tool_kind(name),
+                expected,
+                "unexpected kind for {name}"
+            );
+        }
+
+        for name in [
+            "edit_history",
+            "planet_tool",
+            "findings_aggregator",
+            "deletegate",
+            "refind",
+            "shellfish",
+            "run_id",
+            "http_server",
+        ] {
+            assert_eq!(
+                infer_tool_kind(name),
+                ToolKind::Other,
+                "unknown tool {name} must keep the neutral kind"
+            );
+        }
+    }
+
+    #[test]
+    fn unmatched_tool_starts_are_bounded() {
+        let mut translator = EventTranslator::new();
+        for index in 0..=MAX_TRACKED_TOOL_CALLS {
+            let _ = translator.translate(StreamEvent::ToolUseStart {
+                id: format!("id-{index}"),
+                name: format!("tool-{index}"),
+            });
+        }
+
+        assert_eq!(translator.tracked_tool_calls, MAX_TRACKED_TOOL_CALLS);
+        assert_eq!(translator.in_flight_by_name.len(), MAX_TRACKED_TOOL_CALLS);
+
+        let overflow_result = translator.translate(StreamEvent::ToolExecutionResult {
+            name: format!("tool-{MAX_TRACKED_TOOL_CALLS}"),
+            result_preview: "done".into(),
+            is_error: false,
+        });
+        assert!(matches!(overflow_result[0], SessionUpdate::ToolCall(_)));
+        assert!(matches!(
+            overflow_result[1],
+            SessionUpdate::ToolCallUpdate(_)
+        ));
     }
 
     /// Regression (#5144): once a tool name's in-flight queue drains,

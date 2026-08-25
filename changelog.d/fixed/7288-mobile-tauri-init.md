@@ -1,0 +1,1 @@
+Remove checked-in iOS placeholders before Tauri initialization, pin, cache, and verify Tauri CLI 2.11.4 consistently in smoke/release jobs, and fail early when expected Android NDK tools are absent. (#7288) (@xiaomo)

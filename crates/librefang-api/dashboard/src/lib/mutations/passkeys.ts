@@ -6,7 +6,7 @@ export function useRegisterPasskey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (label?: string) => registerPasskey(label),
-    onSuccess: () => qc.invalidateQueries({ queryKey: passkeyKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: passkeyKeys.lists() }),
   });
 }
 
@@ -14,6 +14,6 @@ export function useRevokePasskey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (credentialId: string) => revokePasskey(credentialId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: passkeyKeys.all }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: passkeyKeys.lists() }),
   });
 }

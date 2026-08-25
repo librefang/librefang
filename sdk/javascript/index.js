@@ -185,6 +185,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/identities/${name}/reset`, undefined, query);
   }
 
+  async spawnEphemeralAgent(data) {
+    return this._c._request("POST", "/api/agents/spawn-ephemeral", data, undefined);
+  }
+
   async getAgent(id) {
     return this._c._request("GET", `/api/agents/${id}`);
   }
@@ -925,6 +929,18 @@ class ModelsResource {
     return this._c._request("DELETE", `/api/models/custom/${id}`);
   }
 
+  async getModelOverrides(id) {
+    return this._c._request("GET", `/api/models/overrides/${id}`);
+  }
+
+  async setModelOverrides(id, data) {
+    return this._c._request("PUT", `/api/models/overrides/${id}`, data, undefined);
+  }
+
+  async deleteModelOverrides(id) {
+    return this._c._request("DELETE", `/api/models/overrides/${id}`);
+  }
+
   async getModel(id) {
     return this._c._request("GET", `/api/models/${id}`);
   }
@@ -1555,8 +1571,20 @@ class SystemResource {
     return this._c._request("GET", "/api/templates");
   }
 
+  async createAgentType(data) {
+    return this._c._request("POST", "/api/templates", data, undefined);
+  }
+
   async getAgentTemplate(name) {
     return this._c._request("GET", `/api/templates/${name}`);
+  }
+
+  async updateAgentType(name, data) {
+    return this._c._request("PUT", `/api/templates/${name}`, data, undefined);
+  }
+
+  async deleteAgentType(name) {
+    return this._c._request("DELETE", `/api/templates/${name}`);
   }
 
   async getAgentTemplateToml(name) {
