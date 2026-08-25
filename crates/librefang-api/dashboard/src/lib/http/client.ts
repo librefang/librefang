@@ -193,6 +193,7 @@ export {
   createAgentType,
   updateAgentType,
   deleteAgentType,
+  spawnEphemeral,
   spawnAgent,
   cloneAgent,
   stopAgent,

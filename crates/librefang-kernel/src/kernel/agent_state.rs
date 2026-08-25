@@ -11,6 +11,7 @@
 //! `LibreFangKernel`'s private fields and inherent methods without any
 //! visibility surgery.
 
+use super::subsystems::McpSubsystemApi;
 use super::*;
 use serde::{Deserialize, Serialize};
 
@@ -548,6 +549,18 @@ impl LibreFangKernel {
     }
 
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
+    ///
+    /// A name is accepted when it is loaded in the skill registry, or when it is the `[skill].name` of a directory that exists under the skills directory but has not been loaded (#7772).
+    /// The second case is a *pending declaration*, which the read side already treats as a normal state rather than an error: `pending_skill_and_mcp_declarations` reports it, the dashboard badges it, and `spawn` accepts a manifest carrying it without any equivalent check.
+    /// Rejecting it only here made the edit path stricter than the path that created the agent, so an agent could exist in a state its own editor refused to save — and because the dashboard PUTs the whole array, one inherited name took every unrelated edit down with it.
+    /// Accepting it persists the allowlist entry and nothing else: no skill is loaded or activated as a side effect.
+    ///
+    /// The pending set comes from [`SkillRegistry::unloaded_on_disk_manifest_names`], not from `unloaded_on_disk_dirs`.
+    /// Those two return different kinds of identifier — the registry is keyed by `manifest.skill.name`, while the directory report is keyed by `path.file_name()` — so for `skills/package-dir/skill.toml` declaring `name = "actual-skill"`, validating against directory names would reject `actual-skill`, the only value that can ever match, and accept `package-dir`, which matches nothing once the skill loads.
+    ///
+    /// Unlike the MCP check below, skills have no locally cached catalog of everything installable: skill content is not part of `registry_sync`'s copy set, so on-disk-but-unloaded is the only additional source available, and the criterion is narrower on purpose.
+    /// `"*"` is likewise not special here, again unlike `mcp_servers`: the skill path has no wildcard, and `skills = ["*"]` grants no skill tools at all, so it is just a name that matches nothing.
+    /// A name that is neither loaded nor on disk is rejected as `InvalidInput` — it is a typo in user input, not an internal fault, and the old `Internal` variant is why the dashboard rendered "Internal error" for it.
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty
         if !skills.is_empty() {
@@ -556,13 +569,17 @@ impl LibreFangKernel {
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            let known = registry.skill_names();
+            let loaded = registry.skill_names();
+            let pending = registry.unloaded_on_disk_manifest_names();
             for name in &skills {
-                if !known.contains(name) {
-                    return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                        "Unknown skill: {name}"
-                    ))));
+                if loaded.iter().any(|n| n == name) || pending.iter().any(|n| n == name) {
+                    continue;
                 }
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "Unknown skill '{name}': not loaded, and no skill under the skills directory declares that name. Check the spelling, or install the skill first."
+                    ),
+                )));
             }
         }
 
@@ -614,6 +631,14 @@ impl LibreFangKernel {
 
     /// Update an agent's MCP server allowlist.
     /// Empty disables MCP servers; `["*"]` enables all connected servers.
+    ///
+    /// A name is accepted when it is configured in `config.toml` (`effective_mcp_servers`, which answers "did somebody write this down" — so a configured server that has not connected yet counts), or when it is present in the locally cached MCP catalog synced from the registry (`~/.librefang/mcp/catalog/`) (#7772).
+    /// The previous check built its accept-set by walking the MCP tools connected at that instant and resolving each back to a server, which is a strict subset of what is configured, never mind what is installed: it rejected a configured-but-not-yet-connected server and a catalog entry that is installed but not configured.
+    /// Since agent types are shared artefacts that declare what the agent *wants*, and `spawn` performs no equivalent check, a declaration this instance has not installed is a legitimate pending state — the same one `pending_skill_and_mcp_declarations` surfaces on the read side.
+    /// Accepting it persists the allowlist entry and nothing else: it does not install, connect, or touch `config.toml`.
+    ///
+    /// Only a name absent from both sources is rejected, as `InvalidInput` rather than `Internal`, so a typo stops being reported as a server fault.
+    /// Dropping the tool walk also removes the old lock guard: the whole check used to sit inside `if let Ok(mcp_tools) = self.mcp.mcp_tools.lock()`, so a poisoned lock skipped validation entirely instead of failing.
     pub fn set_agent_mcp_servers(
         &self,
         agent_id: AgentId,
@@ -632,31 +657,41 @@ impl LibreFangKernel {
 
         // Validate server names if allowlist is non-empty
         if !servers.is_empty() {
-            if let Ok(mcp_tools) = self.mcp.mcp_tools.lock() {
-                let mut known_servers: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                let configured_servers: Vec<String> = self
-                    .mcp
-                    .effective_mcp_servers
-                    .read()
-                    .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
-                    .unwrap_or_default();
-                for tool in mcp_tools.iter() {
-                    if let Some(s) = librefang_runtime::mcp::resolve_mcp_server_from_known(
-                        &tool.name,
-                        configured_servers.iter().map(String::as_str),
-                    ) {
-                        known_servers.insert(librefang_runtime::mcp::normalize_name(s));
-                    }
+            let configured: std::collections::HashSet<String> = self
+                .mcp
+                .effective_mcp_servers
+                .read()
+                .map(|configured| {
+                    configured
+                        .iter()
+                        .map(|s| librefang_runtime::mcp::normalize_name(&s.name))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let catalog = self.mcp_catalog_load();
+            // Catalog entries carry an `id` from their manifest and are keyed by their file / directory name, and upstream does not guarantee the two agree. Accept either.
+            let catalog_ids: std::collections::HashSet<String> = catalog
+                .list()
+                .iter()
+                .map(|e| librefang_runtime::mcp::normalize_name(&e.id))
+                .collect();
+            for name in &servers {
+                // `["*"]` is a documented value meaning "all connected servers" (`AgentManifest::mcp_servers`, and `available_tools` step 3 honours it), but it is not the name of anything, so the old accept-set never contained it and saving a wildcard allowlist failed with `Unknown MCP server: *`.
+                if name == "*" {
+                    continue;
                 }
-                for name in &servers {
-                    let normalized = librefang_runtime::mcp::normalize_name(name);
-                    if !known_servers.contains(&normalized) {
-                        return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
-                            "Unknown MCP server: {name}"
-                        ))));
-                    }
+                let normalized = librefang_runtime::mcp::normalize_name(name);
+                if configured.contains(&normalized)
+                    || catalog_ids.contains(&normalized)
+                    || catalog.get(name).is_some()
+                {
+                    continue;
                 }
+                return Err(KernelError::LibreFang(LibreFangError::InvalidInput(
+                    format!(
+                        "Unknown MCP server '{name}': not configured in config.toml and not present in the installed MCP catalog. Check the spelling, or add the server from the MCP settings surface first."
+                    ),
+                )));
             }
         }
 

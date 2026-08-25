@@ -326,6 +326,7 @@ automation-workflow-created-id =   ID: { $id }
 automation-workflow-create-failed = Не вдалося створити воркфлоу: { $error }
 automation-workflow-completed = Воркфлоу завершено!
 automation-workflow-run-id =   ID запуску: { $id }
+automation-workflow-still-running = Воркфлоу запущено; він ще виконується.
 automation-workflow-failed = Помилка воркфлоу: { $error }
 automation-trigger-none = Немає зареєстрованих тригерів.
 automation-trigger-invalid-pattern = Некоректний JSON шаблону: { $error }
@@ -1410,6 +1411,8 @@ chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
 
 # tui/event.rs
 tui-event-workflow-completed = Воркфлоу завершено
+tui-event-workflow-still-running = Воркфлоу запущено; ще виконується (запуск { $id })
+tui-event-workflow-run-failed = Запуск воркфлоу не вдався ({ $status }): { $detail }
 tui-event-workflow-exec-not-available-in-process = Виконання воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-create-not-available-in-process = Створення воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-steps-empty = Потрібні кроки: введіть JSON-масив об'єктів кроків

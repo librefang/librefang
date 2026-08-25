@@ -1,5 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use crate::commands::automation::WorkflowRunOutcome;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::McpSubsystemApi;
@@ -919,6 +920,35 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// How long the daemon may hold the run request open before handing the run back as a background task.
+///
+/// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
+/// 45 s leaves 15 s of that budget for the response itself.
+const WORKFLOW_RUN_WAIT_MS: u64 = 45_000;
+
+/// The wait has to expire before this thread's own client does, or a slow run comes back as a disconnect instead of the 202 the screen knows how to render.
+const _: () = assert!(
+    WORKFLOW_RUN_WAIT_MS < 60_000,
+    "spawn_run_workflow builds a 60 s client; a longer wait can never return 202"
+);
+
+/// Render one workflow-run response for the Workflows screen.
+///
+/// Reading `output` and nothing else meant a 202 (still running) and a 422 (the run failed) both rendered the generic "completed" line, so the screen announced success on every failure.
+/// The classification is shared with `librefang workflow run` so the two surfaces cannot drift apart again.
+fn workflow_run_result_message(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    match crate::commands::automation::classify_workflow_run(status, body) {
+        WorkflowRunOutcome::Completed { output, .. } => output.to_string(),
+        WorkflowRunOutcome::Accepted { run_id } => {
+            crate::i18n::t_args("tui-event-workflow-still-running", &[("id", run_id)])
+        }
+        WorkflowRunOutcome::Failed { error } => crate::i18n::t_args(
+            "tui-event-workflow-run-failed",
+            &[("status", &status.to_string()), ("detail", error)],
+        ),
+    }
+}
+
 /// Run a workflow in background.
 pub fn spawn_run_workflow(
     backend: BackendRef,
@@ -932,17 +962,18 @@ pub fn spawn_run_workflow(
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
-                .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
+                .post(format!(
+                    "{base_url}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
+                ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
             {
                 Ok(resp) => {
+                    let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let result = body["output"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-workflow-completed"));
-                    let _ = tx.send(AppEvent::WorkflowRunResult(result));
+                    let _ = tx.send(AppEvent::WorkflowRunResult(
+                        workflow_run_result_message(status, &body),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::WorkflowRunResult(format!("Error: {e}")));
@@ -3746,6 +3777,54 @@ mod tests {
             array[0]["session_mode"], "new",
             "the per-step session override must survive the parse untouched"
         );
+    }
+
+    /// The Workflows screen used to read `output` and nothing else, so the generic "completed" line was printed for a 202 that had not finished and for a 422 that had failed.
+    /// A failure must never render as a completion.
+    #[test]
+    fn a_failed_run_is_not_rendered_as_completed() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            &serde_json::json!({"error": "workflow_failed", "detail": "step 'draft' timed out"}),
+        );
+
+        assert!(
+            message.contains("step 'draft' timed out"),
+            "the run's reason must reach the screen: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a failed run must not render as a completed one"
+        );
+    }
+
+    #[test]
+    fn an_accepted_run_names_the_run_id_to_poll() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::ACCEPTED,
+            &serde_json::json!({"run_id": "3f1c-run", "status": "running"}),
+        );
+
+        assert!(
+            message.contains("3f1c-run"),
+            "a still-running launch must name the run so it stays traceable: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a run that has not finished must not claim to have completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_shows_its_output_verbatim() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({"run_id": "3f1c-run", "output": "the summary"}),
+        );
+
+        assert_eq!(message, "the summary");
     }
 
     #[test]

@@ -474,6 +474,8 @@ chat-runner-press-esc-to-exit =   按 Esc 键退出。
 
 # tui/event.rs
 tui-event-workflow-completed = 工作流已完成
+tui-event-workflow-still-running = 工作流已启动，仍在运行中（运行 { $id }）
+tui-event-workflow-run-failed = 工作流运行失败（{ $status }）：{ $detail }
 tui-event-workflow-exec-not-available-in-process = 进程内模式下工作流执行不可用
 tui-event-workflow-create-not-available-in-process = 进程内模式下工作流创建不可用
 tui-event-workflow-steps-empty = 需要填写步骤：请输入步骤对象的 JSON 数组
@@ -1442,6 +1444,7 @@ automation-workflow-created-id =   ID：{ $id }
 automation-workflow-create-failed = 创建工作流失败：{ $error }
 automation-workflow-completed = 工作流已完成！
 automation-workflow-run-id =   运行 ID：{ $id }
+automation-workflow-still-running = 工作流已启动，仍在运行中。
 automation-workflow-failed = 工作流失败：{ $error }
 automation-trigger-none = 未注册触发器。
 automation-trigger-invalid-pattern = 无效模式 JSON：{ $error }

@@ -2801,8 +2801,12 @@ fn should_process_group_message(
 }
 
 /// Extract structured `GroupMember` entries from the inbound message metadata.
-/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`)
-/// populate this; the bridge persists them to the roster store for later queries.
+///
+/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`) populate `SenderContext.group_members` through this, and that is where it stops: nothing outside this crate reads that field, and no channel adapter on `main` emits the key.
+///
+/// This is NOT the roster write path, despite what this comment claimed until #7086 was audited.
+/// The persistent `group_roster` table is written from exactly one place, `upsert_sender_into_roster`, one row per person actually observed speaking — bulk membership metadata is parsed here and dropped.
+/// The distinction is load-bearing rather than pedantic: `channel_dm` authorizes a private message against the roster, so widening it from "people this daemon has heard from" to "everyone a platform reports as a member" would let an agent DM someone who has never interacted with it.
 fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
     message
         .metadata
@@ -12709,6 +12713,182 @@ mod tests {
                 lifecycle_reaction_emoji(&AgentPhase::Error, true),
                 default_phase_emoji(&AgentPhase::Error)
             );
+        }
+    }
+
+    /// The roster write path, which is what makes `channel_members` (#7865) and Slack display-name resolution (#7874) visible to an agent.
+    ///
+    /// `upsert_sender_into_roster` is the only `roster_upsert` call site in the tree, and until now nothing exercised it.
+    /// Every way it can go wrong looks like a working feature from the outside: drop the display name and `channel_members` goes back to listing opaque `U09…` ids, roster the conversation's own `platform_id` instead of the speaker and `channel_dm` will accept the group id as a "member", skip a message that should have been recorded and the person who spoke is simply never addressable.
+    mod roster_write_path {
+        use super::*;
+
+        /// One recorded `roster_upsert`, in the argument order the trait declares.
+        type RosterCall = (String, String, String, String, Option<String>);
+
+        /// Records every `roster_upsert` with the exact arguments it arrived with.
+        #[derive(Default)]
+        struct RosterRecorder {
+            calls: Mutex<Vec<RosterCall>>,
+        }
+
+        #[async_trait]
+        impl ChannelBridgeHandle for RosterRecorder {
+            async fn send_message(
+                &self,
+                _agent_id: AgentId,
+                _message: &str,
+            ) -> Result<String, String> {
+                Ok(String::new())
+            }
+            async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+                Ok(None)
+            }
+            async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+                Ok(Vec::new())
+            }
+            async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+                Err("spawn not implemented in mock".to_string())
+            }
+            async fn roster_upsert(
+                &self,
+                channel: &str,
+                chat_id: &str,
+                user_id: &str,
+                display_name: &str,
+                username: Option<&str>,
+            ) -> Result<(), String> {
+                self.calls.lock().unwrap().push((
+                    channel.to_string(),
+                    chat_id.to_string(),
+                    user_id.to_string(),
+                    display_name.to_string(),
+                    username.map(str::to_string),
+                ));
+                Ok(())
+            }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+                // Test mock: no event bus to forward to.
+            }
+        }
+
+        /// A Slack message shaped the way the sidecar emits one: `platform_id` is the conversation, the individual speaker lives under `SENDER_USER_ID_KEY`, and `display_name` carries whatever the adapter resolved for them.
+        fn slack_message(
+            is_group: bool,
+            sender_user_id: Option<&str>,
+            display_name: &str,
+            username: Option<&str>,
+        ) -> ChannelMessage {
+            let mut metadata = std::collections::HashMap::new();
+            if let Some(uid) = sender_user_id {
+                metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(uid));
+            }
+            if let Some(handle) = username {
+                metadata.insert("sender_username".to_string(), serde_json::json!(handle));
+            }
+            ChannelMessage {
+                channel: ChannelType::Slack,
+                platform_message_id: "1700000000.000100".to_string(),
+                sender: ChannelUser {
+                    platform_id: "C0DESIGN".to_string(),
+                    display_name: display_name.to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::Text("ship it".to_string()),
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group,
+                thread_id: None,
+                metadata,
+            }
+        }
+
+        async fn record(message: &ChannelMessage) -> Vec<RosterCall> {
+            let recorder = Arc::new(RosterRecorder::default());
+            let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+            upsert_sender_into_roster(&handle, message).await;
+            let calls = recorder.calls.lock().unwrap().clone();
+            calls
+        }
+
+        /// The #7086 payoff: a name the Slack adapter resolved through `users.info` has to survive the bridge to reach `group_roster.display_name`, because that column is verbatim what `channel_members` hands the model.
+        #[tokio::test]
+        async fn a_resolved_display_name_and_handle_reach_the_roster() {
+            let calls = record(&slack_message(
+                true,
+                Some("U09ABC"),
+                "Ada Lovelace",
+                Some("ada"),
+            ))
+            .await;
+
+            assert_eq!(
+                calls,
+                vec![(
+                    "slack".to_string(),
+                    "C0DESIGN".to_string(),
+                    "U09ABC".to_string(),
+                    "Ada Lovelace".to_string(),
+                    Some("ada".to_string()),
+                )],
+                "the roster is keyed on (bare channel type, conversation id, speaker id) and stores the resolved name and handle"
+            );
+        }
+
+        /// `SLACK_RESOLVE_DISPLAY_NAMES` defaults to off, and every failure path in the adapter falls back to the raw id.
+        /// Turning resolution off must degrade the *label*, never the membership record — otherwise `channel_dm` would refuse to reach anyone on a default install.
+        #[tokio::test]
+        async fn an_unresolved_raw_id_is_still_rostered() {
+            let calls = record(&slack_message(true, Some("U09ABC"), "U09ABC", None)).await;
+
+            assert_eq!(calls.len(), 1, "membership does not depend on resolution");
+            assert_eq!(calls[0].2, "U09ABC");
+            assert_eq!(calls[0].3, "U09ABC");
+            assert_eq!(calls[0].4, None, "no handle resolved, no handle stored");
+        }
+
+        /// A DM has no roster: `platform_id` is the peer rather than a conversation with members, and recording it would invent a one-person group.
+        #[tokio::test]
+        async fn a_direct_message_is_not_rostered() {
+            let calls = record(&slack_message(false, Some("U09ABC"), "Ada Lovelace", None)).await;
+            assert!(calls.is_empty(), "DMs must not write roster rows");
+        }
+
+        /// Without `SENDER_USER_ID_KEY` the only id available is the conversation's own `platform_id`.
+        /// Storing that would make the group a member of itself, and `channel_dm`'s membership check would then authorize the group id as a private recipient — the broadcast the tool exists to avoid.
+        #[tokio::test]
+        async fn a_group_message_with_no_sender_user_id_is_not_rostered() {
+            let calls = record(&slack_message(true, None, "Ada Lovelace", None)).await;
+            assert!(
+                calls.is_empty(),
+                "a message with no individual speaker id must not fall back to the conversation id"
+            );
+        }
+
+        /// An empty id is the same hazard as a missing one, and an empty conversation id would key a row nothing can ever read back.
+        #[tokio::test]
+        async fn empty_ids_are_not_rostered() {
+            assert!(record(&slack_message(true, Some(""), "Ada Lovelace", None))
+                .await
+                .is_empty());
+
+            let mut blank_conversation = slack_message(true, Some("U09ABC"), "Ada Lovelace", None);
+            blank_conversation.sender.platform_id = String::new();
+            assert!(record(&blank_conversation).await.is_empty());
+        }
+
+        /// The WhatsApp gateway stamps its channel as `whatsapp:<jid>` (#5227), but the roster is keyed on the bare channel *type* that `channel_type_str` produces.
+        /// `channel_members` and `channel_dm` both strip the suffix before reading, so the write side has to agree or every WhatsApp lookup misses.
+        #[tokio::test]
+        async fn the_roster_key_is_the_bare_channel_type() {
+            let mut msg = slack_message(true, Some("44@s.whatsapp.net"), "Ada", None);
+            msg.channel = ChannelType::WhatsApp;
+            msg.sender.platform_id = "123@g.us".to_string();
+
+            let calls = record(&msg).await;
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, "whatsapp");
+            assert_eq!(calls[0].1, "123@g.us");
         }
     }
 }

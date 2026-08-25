@@ -20,6 +20,13 @@
 //!                                   the fields it omits, empty string clears,
 //!                                   and the result matches PATCH /config for
 //!                                   the same body — refs #6608)
+//!   PUT   /api/agents/{id}/mcp_servers (an inherited declaration this instance
+//!                                   has not installed saves rather than 400s,
+//!                                   a genuinely unknown name is still rejected
+//!                                   without "Internal error" wording — #7772)
+//!   PUT   /api/agents/{id}/skills  (an on-disk-but-unloaded skill saves under
+//!                                   its `[skill].name`, not its directory name
+//!                                   — #7772)
 //!
 //! Run: cargo test -p librefang-api --test agents_routes_integration
 
@@ -2704,5 +2711,217 @@ model = "test-model"
         body["available"],
         serde_json::json!(["ghost-mcp"]),
         "the connected server must now be in the available pool"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/agents/{id}/mcp_servers and PUT /api/agents/{id}/skills — an
+// inherited declaration this instance has not installed must not take the
+// whole save down with it (#7772).
+//
+// The dashboard PUTs the entire array, so an agent that inherited `fetch`
+// from a registry agent type could not be edited at all: the request failed
+// with `[400] Internal error: Unknown MCP server: fetch`, naming a server the
+// operator never asked for, and the servers they were actually adding were
+// never stored.
+// ---------------------------------------------------------------------------
+
+/// A helper to build a configured-but-transportless MCP server entry, the
+/// shape `config.toml`'s `[[mcp_servers]]` produces before anything dials.
+fn configured_mcp_entry(name: &str) -> librefang_types::config::McpServerConfigEntry {
+    librefang_types::config::McpServerConfigEntry {
+        name: name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_mcp_servers_keeps_inherited_declaration_while_adding_configured_ones() {
+    // The reported failure, end to end. `fetch` ships in the pinned registry
+    // fixture's MCP catalog and is never configured here, so it is installed
+    // but not configured — exactly the state that used to 400.
+    let h = boot_with_mcp_servers(
+        TEST_TOKEN,
+        vec![
+            configured_mcp_entry("memory"),
+            configured_mcp_entry("camoufox"),
+            configured_mcp_entry("sequential-thinking"),
+        ],
+    )
+    .await;
+    let id = spawn_named(&h.state, "inherited-fetch-agent");
+
+    let saved = serde_json::json!(["memory", "fetch", "camoufox", "sequential-thinking"]);
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": saved }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an inherited catalog-only declaration must not block a save that adds configured servers; body={body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["assigned"], saved,
+        "every name in the PUT must be persisted, the pending one included"
+    );
+    // `pending` here is a liveness answer (`unconnected_mcp_declarations`), and
+    // nothing dials in this harness, so every declared name is listed. What
+    // matters is that the un-installed one is reported rather than dropped.
+    let pending = body["pending"].as_array().expect("pending array");
+    assert!(
+        pending.iter().any(|v| v == "fetch"),
+        "the un-installed declaration stays visible as pending rather than being silently dropped, got: {pending:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_mcp_servers_rejects_unknown_name_without_internal_error_wording() {
+    // A name in neither config.toml nor the catalog is still rejected, but as
+    // a user-input problem: the old `Internal` variant is what made the
+    // dashboard say "Internal error" for a typo.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "unknown-mcp-put-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": ["totally-made-up-server"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        msg.contains("totally-made-up-server"),
+        "the message must name the rejected server, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_skills_accepts_pending_manifest_name_not_directory_name() {
+    // The skills half, with the directory name and `[skill].name` deliberately
+    // different. The running registry is keyed by the manifest name, so
+    // `actual-skill` is the only value that can ever match and `package-dir`
+    // is the value that never will — validating against directory names got
+    // this exactly backwards.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "pending-skill-put-agent");
+
+    // Written after boot, so the directory is on disk but not in the loaded registry.
+    let skill_dir = h.state.kernel.home_dir().join("skills").join("package-dir");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("skill.toml"),
+        r#"
+[skill]
+name = "actual-skill"
+version = "0.1.0"
+description = "directory name and manifest name deliberately differ"
+author = "test"
+
+[runtime]
+type = "promptonly"
+
+[source]
+type = "local"
+"#,
+    )
+    .expect("write skill.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["actual-skill"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the manifest name of an on-disk-but-unloaded skill must be accepted; body={body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["assigned"], serde_json::json!(["actual-skill"]));
+
+    // The directory name must not be accepted in its place — a stored
+    // `package-dir` would match nothing once the skill loads.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["package-dir"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the directory name can never match after load and must be rejected; body={body:?}"
+    );
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["assigned"],
+        serde_json::json!(["actual-skill"]),
+        "a rejected save must leave the stored allowlist untouched"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_skills_rejects_unknown_name_without_internal_error_wording() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "unknown-skill-put-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["totally-made-up-skill"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        msg.contains("totally-made-up-skill"),
+        "the message must name the rejected skill, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
     );
 }

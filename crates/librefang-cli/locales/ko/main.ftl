@@ -318,6 +318,7 @@ automation-workflow-created-id =   ID: { $id }
 automation-workflow-create-failed = 워크플로 생성 실패: { $error }
 automation-workflow-completed = 워크플로가 완료되었습니다!
 automation-workflow-run-id =   실행 ID: { $id }
+automation-workflow-still-running = 워크플로를 시작했습니다. 아직 실행 중입니다.
 automation-workflow-failed = 워크플로 실패: { $error }
 automation-trigger-none = 등록된 트리거가 없습니다.
 automation-trigger-invalid-pattern = 잘못된 패턴 JSON: { $error }
@@ -1396,6 +1397,8 @@ chat-runner-press-esc-to-exit =   Esc를 눌러 종료하십시오.
 
 # tui/event.rs
 tui-event-workflow-completed = 워크플로가 완료되었습니다
+tui-event-workflow-still-running = 워크플로를 시작했습니다. 아직 실행 중입니다(실행 { $id })
+tui-event-workflow-run-failed = 워크플로 실행 실패({ $status }): { $detail }
 tui-event-workflow-exec-not-available-in-process = 인프로세스 모드에서는 워크플로 실행을 사용할 수 없습니다
 tui-event-workflow-create-not-available-in-process = 인프로세스 모드에서는 워크플로 생성을 사용할 수 없습니다
 tui-event-workflow-steps-empty = 단계가 필요합니다: 단계 객체의 JSON 배열을 입력하세요

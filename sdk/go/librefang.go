@@ -320,6 +320,10 @@ func (r *AgentsResource) ResetAgentIdentity(name string, query map[string]string
 	return r.client.request("POST", fmt.Sprintf("/api/agents/identities/%s/reset", name), nil, query)
 }
 
+func (r *AgentsResource) SpawnEphemeralAgent(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/agents/spawn-ephemeral", data, nil)
+}
+
 func (r *AgentsResource) GetAgent(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s", id), nil, nil)
 }
