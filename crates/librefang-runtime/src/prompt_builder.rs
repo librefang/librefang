@@ -627,11 +627,7 @@ pub const MEMORY_BULLET_MAX_CHARS: usize = 500;
 
 /// Maximum characters of a memory key rendered into a bullet's `[key] ` label.
 ///
-/// The key half of a recalled memory is caller-controlled — `PromptContext.recalled_memories`
-/// is a public field and [`format_memory_items_as_personal_context`] a public function, and
-/// neither `librefang-memory` nor `librefang-types::memory` bounds a key's length — so an
-/// uncapped label let three memories with 50 000-character keys render 151 003 characters into
-/// a section whose stated budget is 5 000 (#7910).
+/// The key half of a recalled memory is caller-controlled — `PromptContext.recalled_memories` is a public field and [`format_memory_items_as_personal_context`] a public function, and neither `librefang-memory` nor `librefang-types::memory` bounds a key's length — so an uncapped label let three memories with 50 000-character keys render 151 003 characters into a section whose stated budget is 5 000 (#7910).
 /// Mirrors `SKILL_NAME_DISPLAY_CAP`, which bounds a third-party-controlled name the same way.
 pub const MEMORY_KEY_DISPLAY_CAP: usize = 64;
 
@@ -641,24 +637,15 @@ pub const MEMORY_KEY_DISPLAY_CAP: usize = 64;
 /// - `[`, `] ` around the key label = 3
 /// - sanitized key (up to `MEMORY_KEY_DISPLAY_CAP`) + `...` = N + 3
 ///
-/// Counted explicitly, the way `SKILL_BOILERPLATE_OVERHEAD` counts a skill entry's framing,
-/// so that [`MEMORY_SECTION_MAX_CHARS`] can be a ceiling over every character the bullet list
-/// contributes rather than over content alone.
+/// Counted explicitly, the way `SKILL_BOILERPLATE_OVERHEAD` counts a skill entry's framing, so that [`MEMORY_SECTION_MAX_CHARS`] can be a ceiling over every character the bullet list contributes rather than over content alone.
 const MEMORY_BULLET_FRAMING_OVERHEAD: usize = 3 + 3 + MEMORY_KEY_DISPLAY_CAP + 3;
 
-/// Character budget for the memory bullets as a whole, counted over the bullets as they are
-/// rendered — content, `- [key] ` scaffolding, truncation marker and newline all included.
+/// Character budget for the memory bullets as a whole, counted over the bullets as they are rendered — content, `- [key] ` scaffolding, truncation marker and newline all included.
 ///
-/// Deliberately equal to `MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS +
-/// MEMORY_BULLET_FRAMING_OVERHEAD)`, so it is a true ceiling rather than a behaviour change:
-/// with today's constants it is saturated by ten full-length bullets carrying maximum-length
-/// keys, and never binds below that. It exists because three producers feed this section —
-/// substrate recall, proactive memory, and the context engine — and until now nobody owned its
-/// total, so raising either constant would have silently multiplied the section's share of the
-/// context window (#7756 §1.3).
+/// Deliberately equal to `MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD)`, so it is a true ceiling rather than a behaviour change: with today's constants it is saturated by ten full-length bullets carrying maximum-length keys, and never binds below that.
+/// It exists because three producers feed this section — substrate recall, proactive memory, and the context engine — and until now nobody owned its total, so raising either constant would have silently multiplied the section's share of the context window (#7756 §1.3).
 ///
-/// The framing allowance is part of the budget rather than excluded from it because excluding
-/// a quantity is only safe while that quantity is bounded, and the key label was not (#7910).
+/// The framing allowance is part of the budget rather than excluded from it because excluding a quantity is only safe while that quantity is bounded, and the key label was not (#7910).
 /// The fixed preamble above the bullets is a compile-time constant and is not counted.
 pub const MEMORY_SECTION_MAX_CHARS: usize =
     MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD);
@@ -691,20 +678,14 @@ fn char_boundary_at(s: &str, n: usize) -> usize {
 
 /// Truncate a memory bullet at a sentence boundary, falling back to a word boundary.
 ///
-/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there,
-/// this walks back to the last sentence terminator inside the budget, then to the last
-/// word boundary, and only performs a bare character cut when the text offers neither
-/// (scripts without spaces, or a single unbroken token). Every shortened result carries
-/// [`MEMORY_TRUNCATION_MARKER`], except in the degenerate case where `max_chars` leaves no
-/// room for both a marker and any content at all.
+/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there, this walks back to the last sentence terminator inside the budget, then to the last word boundary, and only performs a bare character cut when the text offers neither (scripts without spaces, or a single unbroken token).
+/// Every shortened result carries [`MEMORY_TRUNCATION_MARKER`], except in the degenerate case where `max_chars` leaves no room for both a marker and any content at all.
 ///
-/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget,
-/// so a boundary never costs more content than it saves.
+/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget, so a boundary never costs more content than it saves.
 ///
-/// The result never exceeds `max_chars` characters. The marker is part of what is returned,
-/// so it is reserved out of the budget before the window is chosen — appending it to a window
-/// that already filled `max_chars` is what let every truncated bullet overshoot the section
-/// budget by exactly one marker's worth (#7910). All cuts are made at character boundaries.
+/// The result never exceeds `max_chars` characters.
+/// The marker is part of what is returned, so it is reserved out of the budget before the window is chosen — appending it to a window that already filled `max_chars` is what let every truncated bullet overshoot the section budget by exactly one marker's worth (#7910).
+/// All cuts are made at character boundaries.
 fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();
@@ -712,8 +693,8 @@ fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     let marker_chars = MEMORY_TRUNCATION_MARKER.chars().count();
     let content_chars = max_chars.saturating_sub(marker_chars);
     if content_chars == 0 {
-        // Not enough room for content and a marker both. A bare character cut still honours
-        // the cap, and a bullet that is nothing but a marker carries no information anyway.
+        // Not enough room for content and a marker both.
+        // A bare character cut still honours the cap, and a bullet that is nothing but a marker carries no information anyway.
         let end = char_boundary_at(content, max_chars);
         return content[..end].trim_end().to_string();
     }
@@ -797,9 +778,7 @@ fn format_memory_items_within_budget(
     let mut spent = 0usize;
     let mut rendered = 0usize;
     for (key, content) in memories.iter().take(bullet_limit) {
-        // The key is caller-controlled, so it is sanitized and capped before it is rendered
-        // and charged at its rendered length — an uncapped, uncharged label is unbounded
-        // growth in the one section whose whole purpose is to be bounded (#7910).
+        // The key is caller-controlled, so it is sanitized and capped before it is rendered and charged at its rendered length — an uncapped, uncharged label is unbounded growth in the one section whose whole purpose is to be bounded (#7910).
         let label = match sanitize_for_prompt(key, MEMORY_KEY_DISPLAY_CAP) {
             k if k.is_empty() => String::new(),
             k => format!("[{k}] "),
@@ -807,8 +786,7 @@ fn format_memory_items_within_budget(
         // `- ` + label + `\n`: everything in the rendered line that is not content.
         let framing = 3 + label.chars().count();
         let remaining = section_max_chars.saturating_sub(spent);
-        // Charge the framing before deciding whether a bullet is worth rendering, so that
-        // what survives is at least `MEMORY_BULLET_MIN_CHARS` of content rather than a label.
+        // Charge the framing before deciding whether a bullet is worth rendering, so that what survives is at least `MEMORY_BULLET_MIN_CHARS` of content rather than a label.
         let content_budget = remaining.saturating_sub(framing);
         if content_budget < MEMORY_BULLET_MIN_CHARS {
             break;
