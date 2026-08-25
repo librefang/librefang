@@ -245,7 +245,7 @@ cd deploy/kubernetes/overlays/managed-config
 $EDITOR config.toml
 # The annotation IS the rollout trigger.
 # Without this line the pod template is unchanged, `kubectl apply -k` reports no change, and the daemon keeps the old file — so CI recomputes the hash and fails when the two disagree.
-printf 'sha256:%s\n' "$(sha256sum config.toml | awk '{print $1}')"
+printf 'sha256:%s\n' "$(openssl dgst -sha256 -r config.toml | awk '{print $1}')"
 $EDITOR statefulset-managed-config.yaml   # paste it into checksum/config
 
 kubectl -n librefang apply -k deploy/kubernetes/overlays/managed-config

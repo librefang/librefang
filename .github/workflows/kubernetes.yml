@@ -52,7 +52,7 @@ jobs:
 
       # `kubectl kustomize` rather than a standalone kustomize binary: it is
       # preinstalled on the runner and is what the README tells operators to
-      # use (`kubectl apply -k`), so CI validates the same renderer they use.
+      # use (`kubectl apply -k`), so CI validates the same renderer they run.
       - name: Render base kustomization
         run: |
           set -euo pipefail

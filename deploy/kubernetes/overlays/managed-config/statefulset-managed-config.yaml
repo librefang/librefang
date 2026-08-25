@@ -12,7 +12,7 @@ spec:
         # Changing config.toml without changing this annotation leaves the pod template identical, so no rollout happens and the running daemon keeps the old file — which is why scripts/check-k8s-manifests.py recomputes the hash from the rendered ConfigMap and fails when the two disagree.
         #
         # Regenerate with:
-        #   printf 'sha256:%s\n' "$(shasum -a 256 config.toml | cut -d' ' -f1)"
+        #   printf 'sha256:%s\n' "$(openssl dgst -sha256 -r config.toml | awk '{print $1}')"
         #
         # `checksum/config` rather than a librefang-specific key: it is the convention Helm charts use for exactly this, so an operator reading the pod template already knows what it is for.
         checksum/config: "sha256:c7607f7151246fb65efc1183680a450cfc3174dbfb9f32e78bb85c1ee6b19336"
