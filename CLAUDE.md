@@ -206,7 +206,8 @@ The rules you must not break without asking:
   Write the check to produce the *timestamped run itself*, print it, and read it — never a derived boolean.
 - **A suspiciously fast `cargo check` is not evidence of anything until you prove the compiler saw your tree.**
   In a shared `CARGO_TARGET_DIR` a check can print `Finished in 0.35s` with no `Checking` lines because the artifacts are already there.
-  `touch`ing sources often does not force a rebuild. Appending `compile_error!("SENTINEL");` to the crate's `lib.rs` and confirming cargo reports it takes one command and is conclusive; do that before trusting a green that arrived too quickly, and before reporting one.
+  `touch`ing sources often does not force a rebuild.
+  Appending `compile_error!("SENTINEL");` to the crate's `lib.rs` and confirming cargo reports it takes one command and is conclusive; do that before trusting a green that arrived too quickly, and before reporting one.
 - **Two green PRs can still break `main` together.** The `main` ruleset has no `strict_required_status_checks_policy`, so each PR merges on CI run against its own base. Group a merge sweep by changed file, re-run CI on later PRs in a group, and verify `main` itself after the batch.
 
 ## Common Gotchas
