@@ -88,9 +88,13 @@ SECRET_ASSIGNMENT = re.compile(
 # `vault:` and `env:` values are indirections, which is the pattern this check exists to steer people towards rather than away from.
 SECRET_INDIRECTIONS = ("vault:", "env:")
 
-# `include = [...]` pulls further TOML files into the effective configuration, but the checksum on `GET /api/config/status` is computed over the primary file's raw bytes alone.
-# Editing an included file would therefore leave the checksum unchanged, and an operator using it to confirm a rollout landed gets a false negative — so the annotation this overlay is built around would stop meaning what it says.
-INCLUDE_DIRECTIVE = re.compile(r"^\s*include\s*=", re.MULTILINE)
+# `include = [...]` pulls further TOML files into the effective configuration.
+# Since #6695 the checksum on `GET /api/config/status` covers the whole include closure rather than the primary file alone, so an included file can be part of a managed deployment — but only when the manifest actually renders it, which is what `check_include_targets` below verifies.
+INCLUDE_ARRAY = re.compile(r"^[ \t]*include[ \t]*=[ \t]*\[(.*?)\]", re.MULTILINE | re.DOTALL)
+INCLUDE_ITEM = re.compile(r"""["']([^"']+)["']""")
+
+# Mirrors `MAX_INCLUDE_DEPTH` in crates/librefang-kernel/src/config.rs.
+MAX_INCLUDE_DEPTH = 10
 
 
 class Failures:
@@ -490,9 +494,14 @@ def check_managed_config(
         )
         return
 
+    data = config_map.get("data", {})
     check_no_secret_values(cm_name, config_key, contents, failures)
-    check_no_include(cm_name, config_key, contents, failures)
-    check_checksum_annotation(template, contents, failures)
+    chain = check_include_targets(
+        cm_name, config_key, data, bool(mount.get("subPath")), failures
+    )
+    if chain is None:
+        return
+    check_checksum_annotation(template, data, chain, failures)
 
 
 def _find_config_mount(
@@ -529,37 +538,97 @@ def check_no_secret_values(
         )
 
 
-def check_no_include(
-    cm_name: str, key: str, contents: str, failures: Failures
-) -> None:
-    """A managed config must be one file, because its checksum only covers one.
+def check_include_targets(
+    cm_name: str,
+    config_key: str,
+    data: dict[str, str],
+    mount_is_subpath: bool,
+    failures: Failures,
+) -> list[str] | None:
+    """Resolve `include = [...]` against the ConfigMap's own keys and return the source chain.
 
-    Of the three ways to reconcile `include` with the checksum — hash the transitive closure, refuse `include`, or document primary-file-only and tell operators not to key rollouts on it — this overlay takes the second, and only within its own scope.
-    It is the option that keeps the annotation honest without changing what the daemon computes, and a managed deployment loses nothing by it: the file is generated from a manifest, so composing it is the manifest's job rather than the config loader's.
+    The daemon resolves an include relative to the primary file's directory, and a directory-mounted ConfigMap puts every data key in that one directory — so `include = ["extra.toml"]` works exactly when `extra.toml` is another key of the same ConfigMap.
+    Anything else the daemon would silently skip or fail to read, which is worth catching in CI rather than at boot.
+
+    Returns the ordered, deduplicated list of contributing keys (primary first), or `None` when the chain is unusable and the caller should stop.
     """
-    if INCLUDE_DIRECTIVE.search(contents):
+    if mount_is_subpath and INCLUDE_ARRAY.search(data.get(config_key, "")):
         failures.fail(
-            f"ConfigMap {cm_name!r} key {key!r} uses `include = [...]`. The "
-            "checksum on GET /api/config/status covers this file's bytes only, "
-            "so an edit to an included file would leave it unchanged and the "
-            "checksum annotation would report a rollout that never happened. "
-            "Compose the configuration in the manifest — a kustomize patch, or "
-            "one ConfigMap key — so the file the daemon hashes is the whole of "
-            "what it reads."
+            f"ConfigMap {cm_name!r} key {config_key!r} uses `include = [...]` "
+            "but is mounted with a subPath, which exposes this one file and "
+            "nothing else. The included files would not exist in the "
+            "container. Mount the whole directory instead."
         )
+        return None
+
+    chain: list[str] = []
+    seen: set[str] = set()
+
+    def walk(key: str, depth: int) -> bool:
+        if key in seen:
+            return True
+        seen.add(key)
+        chain.append(key)
+        if depth >= MAX_INCLUDE_DEPTH:
+            failures.fail(
+                f"ConfigMap {cm_name!r} `include` nesting exceeds the daemon's "
+                f"maximum depth of {MAX_INCLUDE_DEPTH}."
+            )
+            return False
+        match = INCLUDE_ARRAY.search(data.get(key, ""))
+        if match is None:
+            return True
+        for target in INCLUDE_ITEM.findall(match.group(1)):
+            if target.startswith("/") or ".." in target.split("/"):
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}. "
+                    "The daemon rejects absolute paths and `..` components, so "
+                    "this include is silently skipped and the file it names "
+                    "never reaches the effective configuration."
+                )
+                return False
+            if "/" in target:
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}, "
+                    "but a ConfigMap key cannot contain '/' and every key is "
+                    "mounted flat in one directory. A subdirectory include can "
+                    "never resolve here."
+                )
+                return False
+            if target not in data:
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}, "
+                    f"which this kustomization does not render — it has "
+                    f"{sorted(data)!r}. Add it to the configMapGenerator, or "
+                    "fold its contents into the primary file."
+                )
+                return False
+            if not walk(target, depth + 1):
+                return False
+        return True
+
+    if not walk(config_key, 0):
+        return None
+    return chain
 
 
 def check_checksum_annotation(
-    template: dict[str, Any], contents: str, failures: Failures
+    template: dict[str, Any],
+    data: dict[str, str],
+    chain: list[str],
+    failures: Failures,
 ) -> None:
     """The rollout trigger and the rollout *proof* must be the same string.
 
-    `GET /api/config/status` reports `sha256:<hex>` over the config file's raw bytes, and the ConfigMap's data value is those bytes.
+    `GET /api/config/status` reports `sha256:<hex>` over everything that contributes to the effective configuration, and the ConfigMap's data values are those bytes.
     Pinning the annotation to the same digest means one comparison answers both "will editing the config roll the pod?" and "is the running daemon on the file I edited?" — and a stale annotation, which would silently skip the rollout, fails here instead of in production.
+
+    With no `include` the digest is over the primary file's raw bytes, unchanged from before the include closure was folded in, so an existing annotation keeps matching.
+    With includes it is the digest of `sha256sum` output over the chain, matching `config_provenance` in crates/librefang-kernel/src/config.rs.
     """
     annotations = template.get("metadata", {}).get("annotations", {})
     actual = annotations.get(CHECKSUM_ANNOTATION)
-    expected = f"sha256:{hashlib.sha256(contents.encode()).hexdigest()}"
+    expected = f"sha256:{expected_config_digest(data, chain)}"
 
     if actual is None:
         failures.fail(
@@ -577,6 +646,16 @@ def check_checksum_annotation(
         "applying this would not roll the StatefulSet and the annotation would "
         "no longer match the checksum GET /api/config/status reports.",
     )
+
+
+def expected_config_digest(data: dict[str, str], chain: list[str]) -> str:
+    """The hex digest `GET /api/config/status` will report for this ConfigMap."""
+    if len(chain) <= 1:
+        return hashlib.sha256(data[chain[0]].encode()).hexdigest()
+    manifest = "".join(
+        f"{hashlib.sha256(data[key].encode()).hexdigest()}  {key}\n" for key in chain
+    )
+    return hashlib.sha256(manifest.encode()).hexdigest()
 
 
 def check_services(docs: list[dict[str, Any]], failures: Failures) -> None:

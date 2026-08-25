@@ -226,15 +226,31 @@ With external auth on the daemon **refuses to boot** without it, so the `state-s
 Managed mode does not add a restriction here — `external_auth.*` was never writable through `/api/config/set` even in mutable mode, because flipping an endpoint or the verification gate post-authentication is the #3703 impersonation vector.
 Managed mode only makes the file it lives in match that.
 
-### One file, no `include`
+### Splitting the config across several files
 
-The config in the ConfigMap must not use `include = [...]`.
+One file is the simple case and what this overlay ships.
+`include = [...]` also works, as long as every file it names is another key of the same ConfigMap.
 
-`GET /api/config/status` computes its checksum over the primary file's raw bytes, so an edit to an included file leaves the checksum unchanged — and the whole rollout story here rests on that checksum meaning what it says.
-`scripts/check-k8s-manifests.py` fails the build on an `include` directive in a managed ConfigMap rather than leaving the annotation quietly untrustworthy.
+The daemon resolves an include relative to the primary file's directory, and a directory-mounted ConfigMap puts every data key in that one directory, so `include = ["extra.toml"]` resolves exactly when `extra.toml` is in the same `configMapGenerator`:
 
-This is a constraint on the overlay, not on the daemon: `include` works normally in a mutable deployment.
-A managed config is generated from a manifest anyway, so composing it is kustomize's job rather than the config loader's.
+```yaml
+configMapGenerator:
+  - name: librefang-config
+    files:
+      - config.toml
+      - extra.toml
+```
+
+`scripts/check-k8s-manifests.py` verifies that, and fails the build on an include this manifest does not render, on a `/`-containing target (a ConfigMap key cannot contain one, so a subdirectory include can never resolve), on an absolute or `..` path (the daemon skips those silently), and on an `include` in a file mounted with a `subPath`, which exposes that one file and nothing else.
+
+The checksum annotation then covers the whole set rather than the primary file alone, so editing any of them still rolls the StatefulSet.
+Recompute it over the files in include order:
+
+```bash
+printf 'sha256:%s\n' "$( (cd deploy/kubernetes/overlays/managed-config && sha256sum config.toml extra.toml) | sha256sum | awk '{print $1}')"
+```
+
+`GET /api/config/status` reports that same string, and lists the included files in its `includes` field.
 
 ### Updating a managed configuration
 

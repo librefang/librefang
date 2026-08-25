@@ -141,6 +141,7 @@ Each is named with the reason, so the list can be argued with rather than assume
   "source": "/etc/librefang/config.toml",
   "writable": false,
   "checksum": "sha256:9f2b…",
+  "includes": [],
   "modified_at": "2026-08-04T09:41:12+00:00"
 }
 ```
@@ -148,8 +149,27 @@ Each is named with the reason, so the list can be argued with rather than assume
 `writable` is the field to branch on.
 It is equivalent to `mode == "mutable"`, exposed separately so a client uses a boolean rather than string-matching a mode name.
 
-The checksum is over the config file's raw bytes and carries no value from inside it.
+The checksum carries no value from inside the configuration.
 Use it to confirm that a rollout actually replaced the file, rather than inferring it from a pod restart.
+
+### What the checksum covers when the config uses `include`
+
+With no `include`, the checksum is sha256 over the primary file's raw bytes, and `includes` is empty.
+That is the same digest the field has always carried, so an existing `checksum/config` annotation keeps matching.
+
+With `include = [...]`, hashing the primary file alone would be a false negative: an edit to an included file changes the effective configuration and leaves the primary byte-identical, so an operator using the checksum to confirm a rollout landed would be told nothing happened.
+The checksum therefore covers the whole include closure, and `includes` lists the contributing files relative to the primary file's directory, in include order.
+
+The composite is the digest of `sha256sum` output over those files, which reproduces as:
+
+```bash
+(cd /etc/librefang && sha256sum config.toml extra.toml) | sha256sum
+```
+
+`modified_at` is likewise the newest modification time across every contributing file, for the same reason.
+
+The walk that finds those files is deliberately more forgiving than the loader: an include that is absolute, contains `..`, is missing, or forms a cycle is skipped rather than reported as an error, because this endpoint answers "what is in effect" and must not fail while the daemon is running.
+A broken chain therefore shows up as a shorter `includes` list — the loader is where it is diagnosed.
 
 ## What the dashboard shows
 
