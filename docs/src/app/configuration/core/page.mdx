@@ -308,6 +308,8 @@ image_description = true
 audio_transcription = true
 video_description = false
 max_concurrency = 2
+transcription_timeout_secs = 60
+ffmpeg_timeout_secs = 30
 # image_provider = "openai"   # auto-detect if omitted
 # audio_provider = "openai"   # auto-detect if omitted
 ```
@@ -318,6 +320,8 @@ max_concurrency = 2
 | `audio_transcription` | bool | `true` | Enable automatic audio transcription for incoming audio attachments. |
 | `video_description` | bool | `false` | Enable video description. Disabled by default (expensive and slow). |
 | `max_concurrency` | usize | `2` | Maximum number of concurrent media processing tasks. |
+| `transcription_timeout_secs` | u64 | `60` | Timeout for one audio transcription provider request in seconds. Requires a daemon restart. |
+| `ffmpeg_timeout_secs` | u64 | `30` | Timeout for one ffmpeg subprocess in seconds. Requires a daemon restart. |
 | `image_provider` | string or null | `null` | Preferred provider for image description. Auto-detected from available providers if `null`. |
 | `audio_provider` | string or null | `null` | Preferred provider for audio transcription. Auto-detected from available providers if `null`. |
 | `audio_model` | string or null | `null` | Preferred model for audio transcription. Provider default if `null`. |

@@ -4,7 +4,7 @@
 [provider]
 id = "bedrock"
 display_name = "AWS Bedrock"
-api_key_env = "AWS_ACCESS_KEY_ID"
+api_key_env = "AWS_BEARER_TOKEN_BEDROCK"
 base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
 key_required = true
 

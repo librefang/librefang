@@ -20,12 +20,19 @@
 
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default TTL for a fresh claim. After this many seconds without a refresh,
 /// the next agent to dispatch can take ownership.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
+
+/// Reclaim expired entries after this many ownership decisions.
+///
+/// Decision-count scheduling avoids a background task while guaranteeing that
+/// a registry receiving continued traffic cannot retain dormant keys forever.
+const SWEEP_EVERY_DECISIONS: u64 = 256;
 
 /// Identity of one ownership slice. Built per-message from the canonical
 /// channel-type slug, the platform's thread identifier, and — when known —
@@ -35,21 +42,21 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ThreadKey {
     /// Adapter-qualified channel slug (e.g. `"slack"`, `"discord"`).
-    pub channel: String,
+    channel: String,
     /// Bot account this message reached, when the adapter is multi-tenant (e.g. one Slack workspace id, one Telegram bot token slug).
     /// Two accounts on the same channel-type never share a claim.
-    pub account_id: Option<String>,
+    account_id: Option<String>,
     /// Chat / group / DM container id.
     /// Distinguishes two chats that reuse the same platform-side `thread` id (rare but possible for forum topics).
-    pub chat_id: Option<String>,
+    chat_id: Option<String>,
     /// Platform thread identifier (Slack `thread_ts`, Discord thread ID, a forum-topic id, …).
     /// Callers without a forum topic pass the `chat_id` here so a topic-less group still gets a stable claim.
     /// Empty string is invalid; callers should not invoke the registry without a real thread.
-    pub thread: String,
+    thread: String,
     /// Conversational partner (the individual sender).
     /// Scoping the claim to a peer lets two users in the same thread talk to two different agents without contaminating each other.
     /// `None` => thread-wide claim.
-    pub peer_id: Option<String>,
+    peer_id: Option<String>,
 }
 
 impl ThreadKey {
@@ -88,6 +95,31 @@ impl ThreadKey {
     pub fn with_peer_id(mut self, peer_id: Option<&str>) -> Self {
         self.peer_id = normalize_opt(peer_id);
         self
+    }
+
+    /// Canonical channel slug.
+    pub fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    /// Normalized bot-account scope, when present.
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
+    }
+
+    /// Normalized chat-container scope, when present.
+    pub fn chat_id(&self) -> Option<&str> {
+        self.chat_id.as_deref()
+    }
+
+    /// Canonical platform thread identifier.
+    pub fn thread(&self) -> &str {
+        &self.thread
+    }
+
+    /// Normalized conversational-peer scope, when present.
+    pub fn peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
     }
 }
 
@@ -138,6 +170,7 @@ pub enum DispatchDecision {
 pub struct ThreadOwnershipRegistry {
     claims: Arc<DashMap<ThreadKey, Claim>>,
     default_ttl: Duration,
+    decisions: AtomicU64,
 }
 
 impl ThreadOwnershipRegistry {
@@ -157,6 +190,7 @@ impl ThreadOwnershipRegistry {
         Self {
             claims: Arc::new(DashMap::new()),
             default_ttl: ttl,
+            decisions: AtomicU64::new(0),
         }
     }
 
@@ -217,6 +251,7 @@ impl ThreadOwnershipRegistry {
         } else {
             ttl
         };
+        self.maybe_sweep_expired_at(now);
         let mut entry = self.claims.entry(key).or_insert_with(|| Claim {
             agent_id: candidate,
             claimed_at: now,
@@ -245,7 +280,6 @@ impl ThreadOwnershipRegistry {
         }
 
         if was_mentioned {
-            let _previous = entry.agent_id;
             *entry = Claim {
                 agent_id: candidate,
                 claimed_at: now,
@@ -261,10 +295,20 @@ impl ThreadOwnershipRegistry {
         }
     }
 
-    /// Drop expired claims. Cheap O(n) sweep; intended to be called
-    /// occasionally (e.g. once a minute by the bridge). Not required for
-    /// correctness — `decide` handles expiry inline — but keeps memory bounded
-    /// in long-lived deployments with many ephemeral threads.
+    fn maybe_sweep_expired_at(&self, now: Instant) {
+        let decision = self
+            .decisions
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        if decision.is_multiple_of(SWEEP_EVERY_DECISIONS) {
+            self.sweep_expired_at(now);
+        }
+    }
+
+    /// Drop expired claims with a cheap O(n) sweep.
+    ///
+    /// The registry invokes this automatically every [`SWEEP_EVERY_DECISIONS`] decisions, while this public method also permits explicit maintenance.
+    /// Expiry remains correct between sweeps because `decide` checks the selected claim inline.
     pub fn sweep_expired(&self) -> usize {
         self.sweep_expired_at(Instant::now())
     }
@@ -400,6 +444,28 @@ mod tests {
     }
 
     #[test]
+    fn continued_dispatch_periodically_reclaims_dormant_claims() {
+        let reg = ThreadOwnershipRegistry::with_ttl(Duration::from_secs(10));
+        let alice = fresh_id();
+        let t0 = Instant::now();
+
+        for index in 0..(SWEEP_EVERY_DECISIONS - 1) {
+            let thread = format!("dormant-{index}");
+            let _ = reg.decide_at(key(&thread), alice, false, t0);
+        }
+        assert_eq!(reg.claims.len(), (SWEEP_EVERY_DECISIONS - 1) as usize);
+
+        let after_ttl = t0 + Duration::from_secs(11);
+        let _ = reg.decide_at(key("active"), alice, false, after_ttl);
+        assert_eq!(
+            reg.claims.len(),
+            1,
+            "the scheduled sweep must remove expired one-shot thread claims"
+        );
+        assert_eq!(reg.current_holder(&key("active")), Some(alice));
+    }
+
+    #[test]
     fn ttl_zero_clamps_to_one_second() {
         let reg = ThreadOwnershipRegistry::with_ttl(Duration::ZERO);
         let alice = fresh_id();
@@ -475,6 +541,21 @@ mod tests {
             .with_chat_id(Some(""))
             .with_peer_id(None);
         assert_eq!(bare, blanked);
+    }
+
+    #[test]
+    fn construction_normalizes_every_exposed_key_component() {
+        let key = ThreadKey::new("  slack  ", "  T1  ")
+            .unwrap()
+            .with_account_id(Some("  account  "))
+            .with_chat_id(Some("  chat  "))
+            .with_peer_id(Some("  peer  "));
+
+        assert_eq!(key.channel(), "slack");
+        assert_eq!(key.account_id(), Some("account"));
+        assert_eq!(key.chat_id(), Some("chat"));
+        assert_eq!(key.thread(), "T1");
+        assert_eq!(key.peer_id(), Some("peer"));
     }
 
     #[test]

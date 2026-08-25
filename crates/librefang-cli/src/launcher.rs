@@ -42,15 +42,7 @@ fn detect_provider() -> Option<(&'static str, &'static str)> {
 }
 
 fn is_first_run() -> bool {
-    let of_home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
-        std::path::PathBuf::from(h)
-    } else {
-        match dirs::home_dir() {
-            Some(h) => h.join(".librefang"),
-            None => return true,
-        }
-    };
-    !of_home.join("config.toml").exists()
+    !crate::commands::common::cli_config_path().exists()
 }
 
 fn has_openclaw() -> bool {

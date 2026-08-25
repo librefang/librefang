@@ -472,9 +472,10 @@ class EmailAdapter(SidecarAdapter):
             # Always WARN, never just log on startup — operators forget
             # they enabled this (email.rs:336-337).
             log.warn(
-                "email IMAP TLS validation is DISABLED — "
-                "mailbox is exposed to MITM",
-                host=self.imap_host,
+                "email TLS validation is DISABLED — "
+                "mail traffic is exposed to MITM",
+                imap_host=self.imap_host,
+                smtp_host=self.smtp_host,
             )
             ctx = ssl._create_unverified_context()  # noqa: SLF001 — stdlib API
             return ctx
@@ -640,8 +641,8 @@ class EmailAdapter(SidecarAdapter):
             msg["References"] = in_reply_to
         msg.set_content(body)
 
+        ctx = self._build_ssl_context()
         if self.smtp_port == 465:
-            ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(
                 self.smtp_host, self.smtp_port,
                 context=ctx, timeout=self.net_timeout_secs,
@@ -661,7 +662,7 @@ class EmailAdapter(SidecarAdapter):
                         "credentials in plaintext. Use port 465 for "
                         "implicit TLS.",
                     )
-                smtp.starttls(context=ssl.create_default_context())
+                smtp.starttls(context=ctx)
                 smtp.ehlo()
                 self._smtp_login(smtp)
                 smtp.send_message(msg)

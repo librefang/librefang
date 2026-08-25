@@ -26,11 +26,14 @@ describe("formatTriggerPattern", () => {
     expect(formatTriggerPattern(undefined)).toBeUndefined();
     expect(formatTriggerPattern(null)).toBeUndefined();
     expect(formatTriggerPattern({})).toBeUndefined();
+    expect(formatTriggerPattern({ first: {}, second: {} })).toBeUndefined();
     expect(formatTriggerPattern(42)).toBeUndefined();
   });
 
-  it("returns just the variant name when payload has no string fields", () => {
+  it("includes primitive payload fields and ignores nested values", () => {
     expect(formatTriggerPattern({ weird_variant: {} })).toBe("weird_variant");
-    expect(formatTriggerPattern({ weird_variant: { n: 1 } })).toBe("weird_variant");
+    expect(
+      formatTriggerPattern({ weird_variant: { n: 1, enabled: false, nested: {} } }),
+    ).toBe("weird_variant: 1 false");
   });
 });

@@ -18,8 +18,8 @@ setup(
     version=PROJECT_VERSION.group(1),
     description="Official Python client for the LibreFang Agent OS REST API",
     packages=find_packages(include=("librefang", "librefang.*")),
-    package_data={"librefang": ["sidecar/template/*"]},
-    python_requires=">=3.8",
+    package_data={"librefang": ["sidecar/template/*", "sidecar/template/**/*"]},
+    python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

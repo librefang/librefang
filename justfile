@@ -95,12 +95,38 @@ install: dashboard-build
 # Build release CLI, install binary and fresh dashboard to ~/.librefang
 [unix]
 install-full: dashboard-build
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build --profile release-local -p librefang-cli
-    mkdir -p ~/.librefang/bin
-    cp -f target/release-local/librefang ~/.librefang/bin/librefang
-    rm -rf ~/.librefang/dashboard
-    cp -r crates/librefang-api/static/react ~/.librefang/dashboard
-    cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(next(p['version'] for p in pkgs if p['name']=='librefang-cli'))" > ~/.librefang/dashboard/.version
+    install_root="${HOME}/.librefang"
+    mkdir -p "${install_root}/bin"
+    cp -f target/release-local/librefang "${install_root}/bin/librefang"
+    dashboard_stage=$(mktemp -d "${install_root}/dashboard.stage.XXXXXX")
+    dashboard_backup="${install_root}/dashboard.backup.$$"
+    cleanup_dashboard_install() {
+      [[ -z "${dashboard_stage:-}" ]] || rm -rf "$dashboard_stage"
+      if [[ -n "${dashboard_backup:-}" && -d "$dashboard_backup" && ! -e "${install_root}/dashboard" ]]; then
+        mv "$dashboard_backup" "${install_root}/dashboard"
+      fi
+    }
+    trap cleanup_dashboard_install EXIT
+    cp -R crates/librefang-api/static/react/. "$dashboard_stage/"
+    package_id=$(cargo pkgid -p librefang-cli)
+    version=${package_id##*#}
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._-][0-9A-Za-z.-]+)?$ ]] || {
+      echo "error: could not derive librefang-cli version from '$package_id'" >&2
+      exit 1
+    }
+    printf '%s\n' "$version" > "$dashboard_stage/.version"
+    [[ ! -e "$dashboard_backup" ]] || { echo "error: stale dashboard backup at $dashboard_backup" >&2; exit 1; }
+    if [[ -e "${install_root}/dashboard" ]]; then
+      mv "${install_root}/dashboard" "$dashboard_backup"
+    fi
+    mv "$dashboard_stage" "${install_root}/dashboard"
+    dashboard_stage=""
+    [[ ! -d "$dashboard_backup" ]] || rm -rf "$dashboard_backup"
+    dashboard_backup=""
+    trap - EXIT
 
 # Build release CLI and install to %USERPROFILE%\.librefang\bin (Windows)
 [windows]
@@ -190,41 +216,65 @@ doctor *ARGS:
 # Start dev environment.
 # Native mode (default):   builds librefang-cli on host, starts daemon + dashboard with cargo-watch hot-reload. Requires host Rust toolchain.
 # Docker mode (--docker):  builds daemon + Rust sidecar binaries inside the librefang-rust-dev container, mounts host ~/.librefang/ in, forwards port 4545. Requires NO host Rust toolchain. Pass `--docker --port 4646` to change the port.
+# Intentional exception to the xtask-first rule above: this dispatcher and its
+# Docker helper must work precisely when cargo/xtask is not installed locally.
+[unix]
+[positional-arguments]
 dev *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     # Explicit --docker → docker mode.
-    for arg in {{ARGS}}; do
+    for arg in "$@"; do
       if [ "$arg" = "--docker" ]; then
-        exec just _dev-docker {{ARGS}}
+        exec just _dev-docker "$@"
       fi
     done
     # No --docker but no host cargo either → auto-fall-back to docker mode rather than dying with a confusing `sh: cargo: not found`. Notify so the operator knows what's happening.
     if ! command -v cargo >/dev/null 2>&1; then
       echo "Host has no cargo on PATH; falling back to --docker mode. Run 'mise install rust' to use the native path instead."
-      exec just _dev-docker --docker {{ARGS}}
+      exec just _dev-docker --docker "$@"
     fi
-    exec cargo xtask dev {{ARGS}}
+    exec cargo xtask dev "$@"
+
+[windows]
+dev *ARGS:
+    cargo xtask dev {{ARGS}}
 
 # Pure-shell docker workflow invoked from `just dev --docker`. Not meant to be called directly — use `just dev --docker` so the args parse the same way as the native path.
 # Builds daemon + Rust Telegram sidecar inside librefang-rust-dev:latest, bind-mounts host ~/.librefang/ at /root/.librefang/ for config persistence, forwards port 4545 (or the value of `--port <n>`) to the host. Dashboard / cargo-watch are not started — both belong on the host alongside the editor.
+[unix]
+[positional-arguments]
 _dev-docker *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     PORT=4545
     IMAGE_TAG="librefang-rust-dev:latest"
     # Strip --docker and parse --port <n> / --image <tag> if present.
-    args=({{ARGS}})
+    args=("$@")
     skip_next=0
     for i in "${!args[@]}"; do
       if [ "$skip_next" = "1" ]; then skip_next=0; continue; fi
       case "${args[$i]}" in
         --docker) ;;
-        --port)  PORT="${args[$((i+1))]}"; skip_next=1 ;;
-        --image) IMAGE_TAG="${args[$((i+1))]}"; skip_next=1 ;;
+        --port|--image)
+          if (( i + 1 >= ${#args[@]} )) || [[ -z "${args[$((i+1))]}" || "${args[$((i+1))]}" == --* ]]; then
+            echo "error: ${args[$i]} requires a value" >&2
+            exit 2
+          fi
+          if [[ "${args[$i]}" == --port ]]; then
+            PORT="${args[$((i+1))]}"
+          else
+            IMAGE_TAG="${args[$((i+1))]}"
+          fi
+          skip_next=1
+          ;;
         *) ;;
       esac
     done
+    [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || {
+      echo "error: --port must be an integer from 1 to 65535" >&2
+      exit 2
+    }
     HOME_LIBREFANG="${HOME}/.librefang"
     mkdir -p "$HOME_LIBREFANG"
     REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -249,13 +299,20 @@ _dev-docker *ARGS:
     # Bootstrap ~/.librefang/config.toml if missing.
     if [ ! -f "${HOME_LIBREFANG}/config.toml" ]; then
       echo "Bootstrapping ${HOME_LIBREFANG}/config.toml via 'librefang init --quick'..."
-      docker run --rm \
+      if docker run --rm \
         -v "${REPO_ROOT}:/work" \
         -v "${HOME_LIBREFANG}:/root/.librefang" \
         -v librefang-target:/target \
         -w /work "$IMAGE_TAG" \
-        /target/release/librefang init --quick || \
-        echo "warn: 'librefang init --quick' exited non-zero, continuing"
+        /target/release/librefang init --quick; then
+        [[ -f "${HOME_LIBREFANG}/config.toml" ]] || {
+          echo "error: init succeeded but did not create ${HOME_LIBREFANG}/config.toml" >&2
+          exit 1
+        }
+      else
+        echo "error: 'librefang init --quick' failed" >&2
+        exit 1
+      fi
       cat <<'NOTE'
 
     Edit ~/.librefang/config.toml to add the Rust Telegram sidecar:
@@ -279,9 +336,11 @@ _dev-docker *ARGS:
 
     # Forward provider keys from the host environment if they're set, so the agent inside the container can answer.
     HOST_ENV_ARGS=()
+    FORWARDED_ENV_NAMES=()
     for k in OPENAI_API_KEY ANTHROPIC_API_KEY GROQ_API_KEY GOOGLE_API_KEY GEMINI_API_KEY DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_LOG; do
       if [ -n "${!k:-}" ]; then
         HOST_ENV_ARGS+=(-e "${k}")
+        FORWARDED_ENV_NAMES+=("${k}")
       fi
     done
 
@@ -290,9 +349,8 @@ _dev-docker *ARGS:
     echo "  Host repo    ↔ /work"
     echo "  ~/.librefang ↔ /root/.librefang"
     echo "  binaries     ↔ named volume librefang-target (/target)"
-    if [ ${#HOST_ENV_ARGS[@]} -gt 0 ]; then
-      forwarded=$(printf ' %s' "${HOST_ENV_ARGS[@]}" | tr -s ' ' | sed 's/-e //g')
-      echo "  forwarding host env: ${forwarded}"
+    if [ ${#FORWARDED_ENV_NAMES[@]} -gt 0 ]; then
+      echo "  forwarding host env: ${FORWARDED_ENV_NAMES[*]}"
     fi
     echo
     docker run -it --rm --name librefang-dev \
@@ -300,9 +358,9 @@ _dev-docker *ARGS:
       -v "${HOME_LIBREFANG}:/root/.librefang" \
       -v librefang-cargo:/cargo -v librefang-target:/target \
       -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
-      -e LIBREFANG_PORT=${PORT} \
+      -e LIBREFANG_PORT="${PORT}" \
       "${HOST_ENV_ARGS[@]}" \
-      -p ${PORT}:${PORT} \
+      -p "${PORT}:${PORT}" \
       -w /work "$IMAGE_TAG" \
       /target/release/librefang start --foreground
 
