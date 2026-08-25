@@ -558,7 +558,9 @@ def run(input: dict) -> str:
 librefang skill test ./my-skill --input '{"url": "https://example.com"}'
 ```
 
-5. Submit as a PR to `skills/community/` or publish to FangHub.
+5. Submit as a PR to [`librefang/librefang-registry`](https://github.com/librefang/librefang-registry) under `skills/<name>/`, or publish to FangHub.
+   Skills are registry content, not part of this repository — the daemon syncs the registry into `~/.librefang/registry/` and installs from there.
+   The `skills/community/` path this step used to name was removed in #1212 and is read by nothing.
 
 ### Steps (Prompt template)
 

@@ -314,7 +314,6 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           }
           await updateCron.mutateAsync({
             id,
-            agentId: agent.id,
             data: {
               name: cronName.trim(),
               schedule,
@@ -434,7 +433,6 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
           await updateTrigger.mutateAsync({
             id: triggerModal.trigger.id,
             data: patch,
-            agentId: agent.id,
           });
           addToast(
             t("agents.detail.trigger.updated", { defaultValue: "Trigger updated" }),
@@ -473,7 +471,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
   const confirmDeleteCron = useCallback(
     async (id: string) => {
       try {
-        await deleteCron.mutateAsync({ id, agentId: agent.id });
+        await deleteCron.mutateAsync({ id });
         addToast(
           t("agents.detail.cron.deleted", { defaultValue: "Cron job deleted" }),
           "success",
@@ -484,13 +482,13 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
         addToast(msg || t("common.error", { defaultValue: "Error" }), "error");
       }
     },
-    [deleteCron, agent.id, addToast, t],
+    [deleteCron, addToast, t],
   );
 
   const confirmDeleteTrigger = useCallback(
     async (id: string) => {
       try {
-        await deleteTrigger.mutateAsync({ id, agentId: agent.id });
+        await deleteTrigger.mutateAsync({ id });
         addToast(
           t("agents.detail.trigger.deleted", { defaultValue: "Trigger deleted" }),
           "success",
@@ -501,7 +499,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
         addToast(msg || t("common.error", { defaultValue: "Error" }), "error");
       }
     },
-    [deleteTrigger, agent.id, addToast, t],
+    [deleteTrigger, addToast, t],
   );
 
   // ----- continuous mode toggle / interval edit ----------------------------
@@ -724,7 +722,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
                     className="text-[9px] cursor-pointer"
                     onClick={() =>
                       toggleCron.mutate(
-                        { id, enabled: !enabled, agentId: agent.id },
+                        { id, enabled: !enabled },
                         {
                           onError: (err) =>
                             addToast(
@@ -844,7 +842,7 @@ export function AgentSchedulePanel({ agent }: AgentSchedulePanelProps) {
                   className="text-[9px] cursor-pointer"
                   onClick={() =>
                     updateTrigger.mutate(
-                      { id: tr.id, data: { enabled: !enabled }, agentId: agent.id },
+                      { id: tr.id, data: { enabled: !enabled } },
                       {
                         onError: (err) =>
                           addToast(

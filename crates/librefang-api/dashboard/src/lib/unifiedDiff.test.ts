@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { unifiedLineDiff, hasChanges } from "./unifiedDiff";
+import {
+  unifiedLineDiff,
+  hasChanges,
+  MAX_DIFF_LINES,
+  MAX_LCS_CELLS,
+} from "./unifiedDiff";
 
 describe("unifiedLineDiff", () => {
   it("returns all-context when texts are identical", () => {
@@ -51,5 +56,26 @@ describe("unifiedLineDiff", () => {
       { kind: "context", text: "a" },
       { kind: "add", text: "b" },
     ]);
+  });
+
+  it("falls back to a flat replacement beyond the line-count ceiling", () => {
+    const oldLines = Array.from({ length: MAX_DIFF_LINES + 1 }, (_, i) => `old-${i}`);
+    const diff = unifiedLineDiff(oldLines.join("\n"), "new");
+
+    expect(diff).toHaveLength(MAX_DIFF_LINES + 2);
+    expect(diff.slice(0, MAX_DIFF_LINES + 1).every((line) => line.kind === "remove")).toBe(true);
+    expect(diff[diff.length - 1]).toEqual({ kind: "add", text: "new" });
+  });
+
+  it("falls back before two moderate inputs exceed the LCS cell budget", () => {
+    const side = Math.floor(Math.sqrt(MAX_LCS_CELLS));
+    const oldLines = Array.from({ length: side }, (_, i) => `same-${i}`);
+    const newLines = Array.from({ length: side }, (_, i) => `same-${i}`);
+    const diff = unifiedLineDiff(oldLines.join("\n"), newLines.join("\n"));
+
+    expect((side + 1) * (side + 1)).toBeGreaterThan(MAX_LCS_CELLS);
+    expect(diff).toHaveLength(side * 2);
+    expect(diff.slice(0, side).every((line) => line.kind === "remove")).toBe(true);
+    expect(diff.slice(side).every((line) => line.kind === "add")).toBe(true);
   });
 });

@@ -124,13 +124,8 @@ impl GeminiCliDriver {
     }
 
     /// Build the CLI arguments for a given request.
-    pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
-        let mut args = vec![
-            "-p".to_string(),
-            prompt.to_string(),
-            "--output-format".to_string(),
-            "json".to_string(),
-        ];
+    pub fn build_args(&self, model: &str) -> Vec<String> {
+        let mut args = vec!["--output-format".to_string(), "json".to_string()];
 
         let model_flag = Self::model_flag(model);
         if let Some(ref m) = model_flag {
@@ -262,7 +257,7 @@ impl LlmDriver for GeminiCliDriver {
     )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let prompt = Self::build_prompt(&request);
-        let args = self.build_args(&prompt, &request.model);
+        let args = self.build_args(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
         for arg in &args {
@@ -280,8 +275,9 @@ impl LlmDriver for GeminiCliDriver {
         debug!(cli = %self.cli_path, "Spawning Gemini CLI");
 
         let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
-        let output = match crate::cli_process::output_with_timeout(
+        let output = match crate::cli_process::output_with_input_timeout(
             &mut cmd,
+            prompt.as_bytes(),
             std::time::Duration::from_secs(timeout_secs),
         )
         .await
@@ -485,6 +481,32 @@ printf '%s\n' '{"response":"hello from gemini","stats":{"models":{"gemini-test":
     }
 
     #[cfg(unix)]
+    fn stdin_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+case " $* " in
+  *private-prompt*) exit 8 ;;
+esac
+prompt=$(cat)
+case "$prompt" in
+  *private-prompt*) ;;
+  *) exit 9 ;;
+esac
+printf '%s\n' '{"response":"stdin received","stats":{"models":{"gemini-test":{"tokens":{"prompt":2,"candidates":3}}}}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_honors_request_timeout() {
         let cli = sleeping_cli();
@@ -528,6 +550,26 @@ printf '%s\n' '{"response":"hello from gemini","stats":{"models":{"gemini-test":
         assert_eq!(response.usage.cache_read_input_tokens, 12);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_pipes_prompt_without_putting_it_in_argv() {
+        let cli = stdin_cli();
+        let driver = GeminiCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let response = driver
+            .complete(CompletionRequest {
+                model: "gemini-cli".to_string(),
+                system: Some("private-prompt".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "stdin received"
+        ));
+    }
+
     #[test]
     fn test_new_with_custom_path() {
         let driver = GeminiCliDriver::new(Some("/usr/local/bin/gemini".to_string()), true);
@@ -543,9 +585,8 @@ printf '%s\n' '{"response":"hello from gemini","stats":{"models":{"gemini-test":
     #[test]
     fn test_build_args() {
         let driver = GeminiCliDriver::new(None, false);
-        let args = driver.build_args("test prompt", "gemini-cli/gemini-2.5-pro");
-        assert!(args.contains(&"-p".to_string()));
-        assert!(args.contains(&"test prompt".to_string()));
+        let args = driver.build_args("gemini-cli/gemini-2.5-pro");
+        assert!(!args.contains(&"-p".to_string()));
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gemini-2.5-pro".to_string()));
         assert!(args

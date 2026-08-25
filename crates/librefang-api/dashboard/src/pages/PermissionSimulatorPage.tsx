@@ -7,7 +7,7 @@
 // drift from the runtime gate path. Admins reading this page compose
 // the result mentally; the gate path stays the source of truth.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Shield,
@@ -31,6 +31,7 @@ import type {
   EffectiveToolCategories,
   EffectiveToolPolicy,
 } from "../lib/http/client";
+import { ApiError } from "../lib/http/client";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -45,6 +46,10 @@ import { Skeleton } from "../components/ui/Skeleton";
 // than the per-user-policy slices below.
 const ROLE_ORDER = ["viewer", "user", "admin", "owner"] as const;
 type Role = (typeof ROLE_ORDER)[number];
+
+export function normalizeRole(role: string | undefined): Role {
+  return ROLE_ORDER.includes(role as Role) ? (role as Role) : "user";
+}
 
 type Translate = (key: string, fallback: string) => string;
 
@@ -140,7 +145,12 @@ export function PermissionSimulatorPage() {
     () => users.find(u => u.name === selectedName) ?? users[0],
     [users, selectedName],
   );
-  const role = (selected?.role as Role) ?? "user";
+  const role = normalizeRole(selected?.role);
+
+  useEffect(() => {
+    const nextName = selected?.name ?? "";
+    if (selectedName !== nextName) setSelectedName(nextName);
+  }, [selected?.name, selectedName]);
 
   const effectiveQuery = useEffectivePermissions(selected?.name ?? "");
   const effective = effectiveQuery.data;
@@ -151,7 +161,8 @@ export function PermissionSimulatorPage() {
   // user list.
   const notFound =
     effectiveQuery.isError &&
-    /404|not found/i.test(String(effectiveQuery.error));
+    effectiveQuery.error instanceof ApiError &&
+    effectiveQuery.error.status === 404;
 
   return (
     <div className="flex flex-col gap-6">

@@ -34,6 +34,16 @@ use tracing::{debug, warn};
 /// 5 MB log paste or 200-page report doesn't blow the LLM context.
 pub const MAX_ENRICHED_TEXT_CHARS: usize = 200_000;
 
+/// Maximum PDF input retained for synchronous parsing. Matches the API upload
+/// path's attachment-body ceiling so channel delivery cannot turn an
+/// arbitrarily large saved file into an equally large allocation.
+pub const MAX_PDF_ENRICHMENT_BYTES: usize = 20 * 1024 * 1024;
+
+/// A UTF-8 scalar occupies at most four bytes. Reading this bounded prefix is
+/// enough to retain `MAX_ENRICHED_TEXT_CHARS` complete characters plus a small
+/// boundary probe without slurping the rest of an oversized text file.
+const MAX_TEXT_ENRICHMENT_READ_BYTES: usize = MAX_ENRICHED_TEXT_CHARS * 4 + 4;
+
 const PDF_TRUNCATION_MARKER: &str =
     "\n\n[…PDF truncated at 200K chars; original document is longer…]";
 const TEXT_TRUNCATION_MARKER: &str =
@@ -100,13 +110,38 @@ fn has_pdf_magic_bytes(path: &Path) -> bool {
 }
 
 fn enrich_pdf(path: &Path, filename: &str) -> Vec<ContentBlock> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(e) => {
             warn!(path = %path.display(), error = %e, "Failed to read saved PDF for enrichment");
             return Vec::new();
         }
     };
+
+    let metadata_len = file.metadata().ok().map(|metadata| metadata.len());
+    if let Some(size_bytes) = metadata_len.filter(|size| *size > MAX_PDF_ENRICHMENT_BYTES as u64) {
+        return pdf_too_large_block(path, filename, size_bytes);
+    }
+
+    let mut bytes = Vec::with_capacity(
+        metadata_len
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or_default()
+            .min(MAX_PDF_ENRICHMENT_BYTES + 1),
+    );
+    if let Err(e) = file
+        .take((MAX_PDF_ENRICHMENT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
+        warn!(path = %path.display(), error = %e, "Failed to read saved PDF for enrichment");
+        return Vec::new();
+    }
+    if bytes.len() > MAX_PDF_ENRICHMENT_BYTES {
+        let size_bytes = metadata_len
+            .unwrap_or(bytes.len() as u64)
+            .max(bytes.len() as u64);
+        return pdf_too_large_block(path, filename, size_bytes);
+    }
 
     let header = format!("[Attached PDF: {} ({} bytes)]", filename, bytes.len());
 
@@ -153,36 +188,72 @@ fn enrich_pdf(path: &Path, filename: &str) -> Vec<ContentBlock> {
     }]
 }
 
+fn pdf_too_large_block(path: &Path, filename: &str, size_bytes: u64) -> Vec<ContentBlock> {
+    warn!(
+        path = %path.display(),
+        filename = %filename,
+        size_bytes,
+        max_bytes = MAX_PDF_ENRICHMENT_BYTES,
+        "Skipping oversized PDF enrichment"
+    );
+    vec![ContentBlock::Text {
+        text: format!(
+            "[Attached PDF: {filename} ({size_bytes} bytes)]\n\n\
+             [Could not extract text: PDF exceeds the {} MiB enrichment limit]",
+            MAX_PDF_ENRICHMENT_BYTES / (1024 * 1024)
+        ),
+        provider_metadata: None,
+    }]
+}
+
 fn enrich_text(path: &Path, filename: &str) -> Vec<ContentBlock> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(e) => {
             warn!(path = %path.display(), error = %e, "Failed to read saved text file for enrichment");
             return Vec::new();
         }
     };
 
+    let metadata_len = file.metadata().ok().map(|metadata| metadata.len());
+    let mut bytes = Vec::with_capacity(
+        metadata_len
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or_default()
+            .min(MAX_TEXT_ENRICHMENT_READ_BYTES + 1),
+    );
+    if let Err(e) = file
+        .take((MAX_TEXT_ENRICHMENT_READ_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
+        warn!(path = %path.display(), error = %e, "Failed to read saved text file for enrichment");
+        return Vec::new();
+    }
+    let observed_bytes = bytes.len();
+    let input_truncated = observed_bytes > MAX_TEXT_ENRICHMENT_READ_BYTES
+        || metadata_len.is_some_and(|size| size > observed_bytes as u64);
+    bytes.truncate(MAX_TEXT_ENRICHMENT_READ_BYTES);
+
     let raw = String::from_utf8_lossy(&bytes);
-    let total_chars = raw.chars().count();
-    let (body, truncated) = if total_chars > MAX_ENRICHED_TEXT_CHARS {
-        let mut s: String = raw.chars().take(MAX_ENRICHED_TEXT_CHARS).collect();
-        s.push_str(TEXT_TRUNCATION_MARKER);
-        (s, true)
-    } else {
-        (raw.into_owned(), false)
-    };
+    let mut chars = raw.chars();
+    let mut body: String = chars.by_ref().take(MAX_ENRICHED_TEXT_CHARS).collect();
+    let truncated = input_truncated || chars.next().is_some();
+    if truncated {
+        body.push_str(TEXT_TRUNCATION_MARKER);
+    }
     let suffix = if truncated { ", truncated" } else { "" };
+    let size_bytes = metadata_len
+        .unwrap_or(observed_bytes as u64)
+        .max(observed_bytes as u64);
     let header = format!(
         "[Attached file: {} ({} bytes{})]",
-        filename,
-        bytes.len(),
-        suffix
+        filename, size_bytes, suffix
     );
 
     debug!(
         path = %path.display(),
         filename = %filename,
-        size_bytes = bytes.len(),
+        size_bytes,
         kept_chars = body.chars().count(),
         truncated,
         "Enriched channel text attachment inline"
@@ -397,6 +468,23 @@ mod tests {
     }
 
     #[test]
+    fn sparse_text_file_is_read_as_a_bounded_prefix() {
+        let mut f = write_tmp(b"prefix");
+        let sparse_len = 1024_u64 * 1024 * 1024;
+        f.as_file_mut().set_len(sparse_len).unwrap();
+
+        let out = enrich_saved_file(f.path(), "text/plain", "sparse.txt");
+        let ContentBlock::Text { text, .. } = &out[0] else {
+            panic!("expected Text block");
+        };
+        assert!(text.starts_with(&format!(
+            "[Attached file: sparse.txt ({sparse_len} bytes, truncated)]"
+        )));
+        assert!(text.ends_with("beyond this point…]"));
+        assert!(text.len() < MAX_TEXT_ENRICHMENT_READ_BYTES);
+    }
+
+    #[test]
     fn pdf_garbage_does_not_panic_returns_note() {
         // Non-PDF bytes labeled as PDF must surface a "could not extract"
         // note rather than panic out of the bridge. Mirrors
@@ -411,6 +499,20 @@ mod tests {
             }
             _ => panic!("expected Text block"),
         }
+    }
+
+    #[test]
+    fn oversized_sparse_pdf_is_rejected_before_parser_allocation() {
+        let mut f = write_tmp(b"%PDF-");
+        let oversized = MAX_PDF_ENRICHMENT_BYTES as u64 + 1;
+        f.as_file_mut().set_len(oversized).unwrap();
+
+        let out = enrich_saved_file(f.path(), "application/pdf", "oversized.pdf");
+        let ContentBlock::Text { text, .. } = &out[0] else {
+            panic!("expected Text block");
+        };
+        assert!(text.contains(&format!("oversized.pdf ({oversized} bytes)")));
+        assert!(text.contains("exceeds the 20 MiB enrichment limit"));
     }
 
     #[test]

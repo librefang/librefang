@@ -235,6 +235,8 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "Failed to draw",
         "draw failed",
         "failed to spawn librefang-tui-stream thread",
+        "daemon_client() times out at 120 s; a longer wait can never return 202",
+        "spawn_run_workflow builds a 60 s client; a longer wait can never return 202",
         // Technical format strings
         "%Y-%m-%d %H:%M",
         // Hand CLI command names for require_daemon
@@ -848,7 +850,9 @@ fn is_likely_i18n_key_literal(
     literal: &str,
     known_prefixes: &std::collections::BTreeSet<String>,
 ) -> bool {
-    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload"];
+    // Not i18n keys: literals whose leading segment collides with a real key prefix.
+    // `agent-types` is the operator agent-type directory name (`~/.librefang/agent-types`), not a message id.
+    const TECHNICAL_FALSE_POSITIVES: &[&str] = &["daemon-reload", "agent-types"];
 
     let Some((prefix, _)) = literal.split_once('-') else {
         return false;

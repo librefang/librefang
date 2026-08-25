@@ -1,0 +1,6 @@
+`POST /api/agents/{id}/message` no longer lets an authenticated caller act as somebody else.
+The `sender_id` / `sender_name` / `channel_type` body fields were copied verbatim into the turn's `SenderContext`, and that struct is the `(channel, platform_id)` tuple RBAC resolves users by — it steers per-sender tool authorization, the memory ACL and `peer:{user_id}:KEY` scoping.
+Since any `User`-role bearer is admitted to that route, a request body could name any user the operator had bound in `[[users]] channel_bindings` and inherit that user's role, tool policy and peer memory, reaching the same binding the channel path establishes through `authorize_channel_user` without ever passing through it.
+A caller below `Admin` now gets their own authenticated identity unless the id they asserted resolves back to themselves, so the documented REST-operator recipe still works; `Admin` and above keep the field, because impersonating a user for support or relaying real platform users from a gateway is legitimate.
+The substitution is silent and the request still succeeds — a body that states its own true identity is not an attack, and failing it would leak the role check back to the caller.
+(#7884) (@houko)
