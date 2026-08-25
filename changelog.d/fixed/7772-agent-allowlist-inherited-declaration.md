@@ -4,4 +4,4 @@ A declaration this instance has not installed is a legitimate state rather than 
 An MCP name is now accepted when it is configured in `config.toml`, connected or not, or present in the locally cached MCP catalog, and a skill when it is loaded or is the `[skill].name` of a directory sitting unloaded under the skills directory.
 Accepting one persists the name and nothing else — installing and connecting stay the operator's explicit action.
 Both rejections became `InvalidInput`, so a typo stops being reported as an internal fault; `mcp_servers = ["*"]` is storable again after the old check rejected the documented wildcard as an unknown server name; and a poisoned MCP tool lock no longer skips validation altogether.
-Reported and diagnosed by @DaBlitzStein. (#PR) (@houko)
+Reported and diagnosed by @DaBlitzStein. (#7898) (@houko)
