@@ -561,6 +561,10 @@ fn resolve_config_includes(
         // Recursively resolve includes in the included file
         let include_dir = canonical.parent().unwrap_or(config_dir).to_path_buf();
         resolve_config_includes(&mut include_value, &include_dir, visited, depth + 1)?;
+        // `visited` models the active recursion stack, not every file seen
+        // during the whole traversal. A shared dependency in a diamond graph
+        // is valid once the first branch has unwound.
+        visited.remove(&canonical);
 
         // Remove include field from the included file
         if let toml::Value::Table(ref mut tbl) = include_value {
@@ -658,13 +662,30 @@ pub fn config_mode() -> ConfigMode {
 /// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more.
 /// It is independent of [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the lock from the path would hand that operator a read-only UI they never asked for.
 pub fn default_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var(CONFIG_PATH_ENV) {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    config_path_override().unwrap_or_else(|| librefang_home().join("config.toml"))
+}
+
+/// The `LIBREFANG_CONFIG_PATH` override, or `None` when it is unset, empty, or whitespace.
+///
+/// The single place that reads the variable, so relocation cannot be honoured by one resolver and ignored by another.
+fn config_path_override() -> Option<PathBuf> {
+    let raw = std::env::var(CONFIG_PATH_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
-    librefang_home().join("config.toml")
+}
+
+/// Resolve the `config.toml` that backs an already-loaded [`KernelConfig`].
+///
+/// `LIBREFANG_CONFIG_PATH` wins exactly as it does in [`default_config_path`]; otherwise the file sits in the config's own `home_dir`.
+/// This is the resolver for [`crate::LibreFangKernel::boot_with_config`], where an embedder handed over a `KernelConfig` without saying where it came from — `boot` records the path it actually loaded from instead.
+///
+/// It deliberately reads `home_dir` from the config rather than from `LIBREFANG_HOME`: an embedder that builds a `KernelConfig` in memory and points `home_dir` at a scratch directory means that directory, and resolving to the real user's `~/.librefang/config.toml` would have such a process write over a config it never read.
+pub fn config_path_for(config: &KernelConfig) -> PathBuf {
+    config_path_override().unwrap_or_else(|| config.home_dir.join("config.toml"))
 }
 
 /// Provenance of the effective configuration, for the authenticated status endpoint.
@@ -914,12 +935,46 @@ mod tests {
     }
 
     #[test]
+    fn test_diamond_include_is_not_treated_as_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared.toml");
+        let left = dir.path().join("left.toml");
+        let right = dir.path().join("right.toml");
+        let root = dir.path().join("config.toml");
+
+        std::fs::write(&shared, "network_enabled = true\n").unwrap();
+        std::fs::write(
+            &left,
+            "include = [\"shared.toml\"]\nlog_level = \"debug\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &right,
+            "include = [\"shared.toml\"]\napi_listen = \"127.0.0.1:5555\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "config_version = {CONFIG_VERSION}\ninclude = [\"left.toml\", \"right.toml\"]\n"
+            ),
+        )
+        .unwrap();
+
+        let config = try_load_config(&root).expect("diamond includes must be valid");
+        assert!(config.network_enabled, "shared config must be retained");
+        assert_eq!(config.log_level, "debug");
+        assert_eq!(config.api_listen, "127.0.0.1:5555");
+    }
+
+    #[test]
     fn test_circular_include_detected() {
         let dir = tempfile::tempdir().unwrap();
         let a_path = dir.path().join("a.toml");
         let b_path = dir.path().join("b.toml");
 
         let mut f = std::fs::File::create(&a_path).unwrap();
+        writeln!(f, "config_version = {CONFIG_VERSION}").unwrap();
         writeln!(f, "include = [\"b.toml\"]").unwrap();
         writeln!(f, "log_level = \"info\"").unwrap();
         drop(f);
@@ -931,6 +986,12 @@ mod tests {
         // Include errors are tolerated — the root file still loads with its own fields.
         let config = load_config(Some(&a_path)).unwrap();
         assert!(!config.log_level.is_empty());
+
+        let error = try_load_config(&a_path).expect_err("real cycles must remain invalid");
+        assert!(
+            error.contains("Circular config include detected"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

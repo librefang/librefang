@@ -132,13 +132,21 @@ fn merge_http_compat_secrets(
 /// #6021 motivation), then re-runs the MCP merge so the new row connects
 /// immediately. Returns the reload-status string for the response body, or a
 /// ready-to-return error tuple.
+///
+/// Managed mode (#6695) is enforced **per branch, not per route**.
+/// The `File` branch is refused because it rewrites `config.toml`; the `Db` branch is left writable because it never opens the file, which is exactly what `mcp_runtime_store = "db"` was introduced for in #6021.
+/// Locking the route outright would take the dashboard's whole MCP install surface away from a managed deployment even when that deployment has already moved the persistence off the managed file — over-locking a configuration that is not actually being written.
+/// The refusal therefore doubles as the fix: an operator who hits `423` here sets `mcp_runtime_store = "db"` in the manifest and gets the surface back.
 async fn persist_mcp_upsert(
     state: &Arc<AppState>,
     entry: &librefang_types::config::McpServerConfigEntry,
 ) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
     match state.kernel.config_ref().mcp_runtime_store {
         librefang_types::config::McpRuntimeStore::File => {
-            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+                return Err(locked);
+            }
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = upsert_mcp_server_config(&config_path, entry) {
                 return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
             }
@@ -157,13 +165,18 @@ async fn persist_mcp_upsert(
 
 /// Delete counterpart of [`persist_mcp_upsert`] — removes the entry from the
 /// configured store and re-applies the effective set.
+///
+/// Carries the same per-branch managed-mode split, and for the stronger reason: without it a `DELETE` would strip a `[[mcp_servers]]` entry the manifest declares, and the next rollout would silently bring it back.
 async fn persist_mcp_delete(
     state: &Arc<AppState>,
     name: &str,
 ) -> Result<&'static str, (StatusCode, Json<serde_json::Value>)> {
     match state.kernel.config_ref().mcp_runtime_store {
         librefang_types::config::McpRuntimeStore::File => {
-            let config_path = state.kernel.home_dir().join("config.toml");
+            if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+                return Err(locked);
+            }
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = remove_mcp_server_config(&config_path, name) {
                 return Err(ApiErrorResponse::internal_scrub(e).into_json_tuple());
             }
@@ -1018,7 +1031,7 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
     // add/remove` does this, then POSTs /api/mcp/reload) the reload would
     // otherwise run against the stale snapshot and miss the change.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config before MCP reload: {e}");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     match state.kernel.clone().reload_mcp_servers().await {
@@ -1029,6 +1042,6 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
                 "new_connections": connected,
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }

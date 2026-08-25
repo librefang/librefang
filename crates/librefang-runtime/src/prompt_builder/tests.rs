@@ -172,13 +172,130 @@ fn test_memory_cap_at_10() {
 
 #[test]
 fn test_memory_content_capped() {
+    // A single unbroken token offers neither a sentence nor a word boundary, so this
+    // exercises the bare character-cut fallback — which must still carry the marker.
     let long_content = "x".repeat(1000);
     let memories = vec![("k".to_string(), long_content)];
     let section = build_memory_section(&memories);
-    // Content should be capped at 500 chars + "..."
-    assert!(section.contains("..."));
+    assert!(section.contains(MEMORY_TRUNCATION_MARKER));
     // The section includes the natural-use preamble + capped content
     assert!(section.len() < 2000);
+}
+
+#[test]
+fn memory_bullet_cuts_at_sentence_boundary_with_marker() {
+    // 40 sentences of 20 chars = 800 chars, so the 500-char budget lands mid-sentence.
+    let long_content = "Alpha beta gamma one. ".repeat(40);
+    let memories = vec![(String::new(), long_content)];
+    let ctx = format_memory_items_as_personal_context(&memories);
+
+    let bullet = ctx
+        .lines()
+        .find(|l| l.starts_with("- Alpha"))
+        .expect("bullet rendered");
+    let body = bullet
+        .strip_prefix("- ")
+        .and_then(|b| b.strip_suffix(MEMORY_TRUNCATION_MARKER))
+        .expect("marker present");
+
+    // Cut at a sentence terminator, not mid-word and not mid-sentence.
+    assert!(body.ends_with('.'), "body ended at {body:?}");
+    assert!(body.chars().count() <= MEMORY_BULLET_MAX_CHARS);
+    // The boundary floor keeps the cut from throwing away most of the budget.
+    assert!(body.chars().count() >= MEMORY_BULLET_MAX_CHARS * 60 / 100);
+}
+
+#[test]
+fn memory_bullet_never_cuts_mid_word() {
+    // No sentence terminators at all: the word-boundary fallback must fire, so the
+    // last retained token is whole.
+    let long_content = "supercalifragilistic ".repeat(60);
+    let memories = vec![(String::new(), long_content)];
+    let ctx = format_memory_items_as_personal_context(&memories);
+
+    let bullet = ctx
+        .lines()
+        .find(|l| l.starts_with("- supercalifragilistic"))
+        .expect("bullet rendered");
+    let body = bullet
+        .strip_prefix("- ")
+        .and_then(|b| b.strip_suffix(MEMORY_TRUNCATION_MARKER))
+        .expect("marker present");
+
+    assert!(
+        body.split_whitespace().all(|w| w == "supercalifragilistic"),
+        "a word was severed: {body:?}"
+    );
+    assert!(body.chars().count() <= MEMORY_BULLET_MAX_CHARS);
+}
+
+#[test]
+fn memory_bullet_under_the_limit_is_untouched() {
+    let short = "Prefers concise answers and dark mode.";
+    let memories = vec![(String::new(), short.to_string())];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    assert!(ctx.contains(&format!("- {short}\n")));
+    assert!(!ctx.contains(MEMORY_TRUNCATION_MARKER));
+    assert!(!ctx.contains("not shown here"));
+}
+
+#[test]
+fn memory_bullet_at_exactly_the_limit_is_untouched() {
+    let exact = "y".repeat(MEMORY_BULLET_MAX_CHARS);
+    let memories = vec![(String::new(), exact.clone())];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    assert!(ctx.contains(&format!("- {exact}\n")));
+    assert!(!ctx.contains(MEMORY_TRUNCATION_MARKER));
+}
+
+#[test]
+fn memory_bullet_truncation_handles_scripts_without_spaces() {
+    // No ASCII whitespace and no ASCII terminators; must not panic and must mark.
+    let cjk = "記憶".repeat(600);
+    let memories = vec![(String::new(), cjk)];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    assert!(ctx.contains(MEMORY_TRUNCATION_MARKER));
+}
+
+#[test]
+fn memory_section_total_budget_is_enforced_and_omissions_reported() {
+    // Ten 150-char bullets against a 100-char per-bullet cap and a 250-char section
+    // budget: the budget, not the bullet limit, is what stops rendering, and the
+    // shortfall is reported rather than dropped silently.
+    let memories: Vec<(String, String)> = (0..10)
+        .map(|i| (String::new(), format!("{i} ").repeat(75)))
+        .collect();
+    let ctx = format_memory_items_within_budget(&memories, 10, 100, 250);
+
+    // Content bullets start with a digit; the preamble's own bullets never do.
+    let bodies: Vec<&str> = ctx
+        .lines()
+        .filter_map(|l| l.strip_prefix("- "))
+        .filter(|b| b.starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    assert!(bodies.len() < 10, "budget did not stop rendering");
+    let spent: usize = bodies.iter().map(|b| b.chars().count()).sum();
+    // Each rendered bullet may overshoot by its marker, and by nothing else.
+    let slack = MEMORY_TRUNCATION_MARKER.chars().count() * bodies.len();
+    assert!(spent <= 250 + slack, "section budget blown: {spent}");
+    assert!(ctx.contains(&format!(
+        "({} further remembered details are not shown here.)",
+        10 - bodies.len()
+    )));
+}
+
+#[test]
+fn memory_section_default_budget_admits_ten_full_bullets() {
+    // The default section budget is a ceiling, not a behaviour change: ten bullets at
+    // the full per-bullet cap must all render.
+    let memories: Vec<(String, String)> = (0..MEMORY_BULLET_LIMIT)
+        .map(|i| (format!("k{i}"), "z".repeat(MEMORY_BULLET_MAX_CHARS)))
+        .collect();
+    let ctx = format_memory_items_as_personal_context(&memories);
+    for i in 0..MEMORY_BULLET_LIMIT {
+        assert!(ctx.contains(&format!("[k{i}]")), "bullet k{i} dropped");
+    }
+    assert!(!ctx.contains("not shown here"));
 }
 
 #[test]

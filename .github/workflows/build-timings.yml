@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-timings
+  cancel-in-progress: false
+
 jobs:
   collect:
     name: Collect build timings
@@ -47,11 +51,9 @@ jobs:
       - name: Collect snapshot
         run: cargo xtask build-timings
       - name: Compare against baseline
-        # Soft-fail: regressions are surfaced via an annotation but do NOT
-        # block the workflow — the trend artifact is the primary deliverable.
-        # If the team wants hard gating later, flip this to `false`.
-        continue-on-error: true
-        run: cargo xtask compare-build-timings
+        # Regressions are warnings, while missing/corrupt snapshots and other
+        # comparator failures still fail the job.
+        run: cargo xtask compare-build-timings --warn-only
       - name: Upload timing snapshot
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

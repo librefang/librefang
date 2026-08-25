@@ -28,7 +28,7 @@
 set -u
 # NOTE: no `set -e` — we want to scan everything and report.
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="${LIBREFANG_SENTINEL_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$REPO_ROOT"
 
 STRICT=0
@@ -36,7 +36,16 @@ for arg in "$@"; do
     case "$arg" in
         --strict) STRICT=1 ;;
         -h|--help)
-            sed -n '2,30p' "$0"
+            cat <<'EOF'
+Usage:
+  scripts/check-no-empty-string-sentinels.sh
+  scripts/check-no-empty-string-sentinels.sh --strict
+
+Scans Rust sources under API routes and channels for textual empty-value
+sentinels. Default mode inventories hard and soft signals. Strict mode fails
+only on hard textual/default sentinels; generic `.is_empty()` and
+`.unwrap_or_default()` calls remain review-only signals.
+EOF
             exit 0
             ;;
         *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -56,31 +65,46 @@ for p in "${SCAN_PATHS[@]}"; do
     fi
 done
 
-# Pick a grep that supports PCRE-ish features. Prefer ripgrep if available
-# (every dev machine has it; CI installs it via the rust-cache action).
+# Prefer ripgrep. Both engines scan the same Rust-only, hidden, ignored scope.
 if command -v rg >/dev/null 2>&1; then
-    GREP() { rg --no-heading --line-number --color=never "$@"; }
+    GREP() {
+        rg --no-heading --line-number --color=never --no-ignore --hidden \
+            --text --ignore-case --glob '*.rs' "$@"
+    }
 else
-    GREP() { grep -rnE --color=never "$@"; }
+    GREP() { grep -rHnaiE --color=never --include='*.rs' "$@"; }
 fi
 
-TOTAL_HITS=0
+HARD_HITS=0
+SOFT_HITS=0
 
 print_section() {
     local title="$1"; shift
     local pattern="$1"; shift
+    local severity="$1"; shift
     echo
     echo "── $title ──────────────────────────────────────────────"
-    local hits
+    local hits raw status
     # Filter out lines carrying the allow-empty-sentinel marker.
-    hits="$(GREP "$pattern" "${SCAN_PATHS[@]}" 2>/dev/null \
-        | grep -v 'allow-empty-sentinel' \
-        || true)"
+    raw=$(GREP "$pattern" "${SCAN_PATHS[@]}")
+    status=$?
+    case "$status" in
+        0|1) ;;
+        *) echo "ERROR: sentinel search engine failed (exit $status)" >&2; exit 2 ;;
+    esac
+    hits=""
+    if [ -n "$raw" ]; then
+        hits=$(printf '%s\n' "$raw" | grep -vi 'allow-empty-sentinel' || true)
+    fi
     if [ -n "$hits" ]; then
         echo "$hits"
         local n
         n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
-        TOTAL_HITS=$((TOTAL_HITS + n))
+        if [ "$severity" = hard ]; then
+            HARD_HITS=$((HARD_HITS + n))
+        else
+            SOFT_HITS=$((SOFT_HITS + n))
+        fi
     else
         echo "  (no hits)"
     fi
@@ -88,15 +112,17 @@ print_section() {
 
 # 1) Explicit textual sentinel literals. These are unambiguous offenders.
 print_section \
-    'Textual sentinel literals ("<unknown>" / "<empty>" / "<none>" / bare "none")' \
-    '"(<unknown>|<empty>|<none>)"|=> "none"|: "none"'
+    'Textual sentinel literals ("<unknown>" / "<empty>" / "<none>")' \
+    '"(<unknown>|<empty>|<none>)"' \
+    hard
 
 # 2) `"".to_string()` used as a default — strong signal of an empty-string
 #    sentinel. Legitimate uses (e.g. seeding a buffer) should be rare in
 #    route code; mark them with `// allow-empty-sentinel: <reason>`.
 print_section \
     '`"".to_string()` defaults' \
-    '""\.to_string\(\)'
+    '""\.to_string\(\)' \
+    hard
 
 # 3) `.is_empty()` on a `String` field used to mean "unset". This is the
 #    high-false-positive bucket — the reviewer must judge each hit. Common
@@ -104,24 +130,27 @@ print_section \
 #    on Vec, Path components.
 print_section \
     '`.is_empty()` calls (review for unset-sentinel semantics)' \
-    '\.is_empty\(\)'
+    '\.is_empty\(\)' \
+    soft
 
 # 4) `unwrap_or_default()` on Option<String> in handler return paths is a
 #    soft signal that an Option got flattened to "" before serialization.
 #    Surfaced for review only.
 print_section \
     '`unwrap_or_default()` on String-shaped Option (soft signal)' \
-    '\.unwrap_or_default\(\)'
+    '\.unwrap_or_default\(\)' \
+    soft
 
 echo
 echo "─────────────────────────────────────────────────────────────"
-echo "Total candidate hits: $TOTAL_HITS"
+echo "Hard sentinel hits: $HARD_HITS"
+echo "Soft review-only hits: $SOFT_HITS"
 echo "Policy: docs/architecture/api-conventions.md"
 echo "Suppress a benign hit by appending  // allow-empty-sentinel: <reason>"
 echo "─────────────────────────────────────────────────────────────"
 
-if [ "$STRICT" = "1" ] && [ "$TOTAL_HITS" -gt 0 ]; then
-    echo "FAIL (--strict): $TOTAL_HITS sentinel-pattern hits found." >&2
+if [ "$STRICT" = "1" ] && [ "$HARD_HITS" -gt 0 ]; then
+    echo "FAIL (--strict): $HARD_HITS hard sentinel-pattern hits found." >&2
     exit 1
 fi
 

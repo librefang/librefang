@@ -37,7 +37,7 @@ impl LibreFangKernel {
         // without touching the live config. (Phase 3e/3 of #4713 originally
         // re-introduced the pre-#4664 tolerant path during the mod.rs split;
         // this restores the strict loader.)
-        let config_path = self.home_dir_boot.join("config.toml");
+        let config_path = self.config_path_boot.clone();
         let mut new_config = crate::config::try_load_config(&config_path)
             .map_err(|e| format!("Config reload failed; live config unchanged: {e}"))?;
 
@@ -123,6 +123,21 @@ impl LibreFangKernel {
             let refreshed_raw = load_raw_config_toml(&config_path);
             self.raw_config_toml
                 .store(std::sync::Arc::new(refreshed_raw));
+            // Re-validate `[external_auth.role_map]` target roles on every
+            // reload that actually changed them (#7744). This edit carries no
+            // `HotAction` of its own — the OAuth layer reads `external_auth`
+            // live from the config swap — so without an explicit check here an
+            // operator who introduces a typo at reload time gets no signal at
+            // all, only SSO callers silently falling back to 401.
+            if old_cfg.external_auth.role_map != new_config.external_auth.role_map {
+                let typos = crate::auth::validate_oidc_role_map(&new_config.external_auth.role_map);
+                if typos > 0 {
+                    warn!(
+                        "Hot-reload: external_auth.role_map has {typos} unrecognized \
+                         LibreFang role string(s) — see WARN lines above"
+                    );
+                }
+            }
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits
@@ -239,11 +254,10 @@ impl LibreFangKernel {
                     );
                     // Invalidate cached drivers — the default provider may have changed.
                     self.llm.driver_cache.clear();
-                    let mut guard = self
-                        .llm
-                        .default_model_override
-                        .write()
-                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    let mut guard = write_config_override(
+                        &self.llm.default_model_override,
+                        "default_model_override",
+                    );
                     *guard = Some(new_config.default_model.clone());
                 }
                 HotAction::UpdateToolPolicy => {
@@ -252,10 +266,8 @@ impl LibreFangKernel {
                         new_config.tool_policy.global_rules.len(),
                         new_config.tool_policy.agent_rules.len(),
                     );
-                    let mut guard = self
-                        .tool_policy_override
-                        .write()
-                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    let mut guard =
+                        write_config_override(&self.tool_policy_override, "tool_policy_override");
                     *guard = Some(new_config.tool_policy.clone());
                 }
                 HotAction::UpdateProactiveMemory => {

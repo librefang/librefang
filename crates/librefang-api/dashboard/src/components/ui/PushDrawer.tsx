@@ -146,7 +146,7 @@ export function PushDrawer() {
         className={`hidden lg:flex shrink-0 ${desktopWidth} flex-col border-l border-border-subtle bg-surface overflow-hidden transition-[width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}
         aria-hidden={!isOpen}
       >
-        {content && (
+        {isOpen && content && !isMobile && (
           <div className={`flex flex-col h-full ${minWidth}`}>
             {header}
             <div className="flex-1 overflow-y-auto overscroll-contain scrollbar-thin">
@@ -163,7 +163,7 @@ export function PushDrawer() {
           banner is a daemon-disconnect signal that must remain visible even
           when a drawer is open — and below dropdown menus (z-[90]/z-[100]).
           z-[55] threads the needle. */}
-      {isOpen && content && (
+      {isOpen && content && isMobile && (
         <div
           className="fixed inset-0 z-[55] lg:hidden bg-black/40 backdrop-blur-sm flex items-stretch justify-end"
           onClick={triggerClose}

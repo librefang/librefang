@@ -6,6 +6,7 @@
 
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
+use librefang_types::model_catalog::{ContextWindowSource, LimitSource, ResolvedContextWindow};
 
 /// Convert a manifest's capability declarations into Capability enums.
 ///
@@ -31,10 +32,11 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
             if manifest.capabilities.agent_spawn {
                 merged.agent_spawn = true;
             }
-            if !manifest.capabilities.memory_read.is_empty() {
+            // A declared list wins over the profile's implied one, including when it is empty: `memory_read = []` is the operator saying "grant nothing", which #7605 made expressible and load-bearing for the automatic memorize / retrieve paths.
+            if manifest.capabilities.memory_read.is_some() {
                 merged.memory_read = manifest.capabilities.memory_read.clone();
             }
-            if !manifest.capabilities.memory_write.is_empty() {
+            if manifest.capabilities.memory_write.is_some() {
                 merged.memory_write = manifest.capabilities.memory_write.clone();
             }
             if manifest.capabilities.ofp_discover {
@@ -57,10 +59,10 @@ pub(super) fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capabili
     for tool in &effective_caps.tools {
         caps.push(Capability::ToolInvoke(tool.clone()));
     }
-    for scope in &effective_caps.memory_read {
+    for scope in effective_caps.memory_read.iter().flatten() {
         caps.push(Capability::MemoryRead(scope.clone()));
     }
-    for scope in &effective_caps.memory_write {
+    for scope in effective_caps.memory_write.iter().flatten() {
         caps.push(Capability::MemoryWrite(scope.clone()));
     }
     if effective_caps.agent_spawn {
@@ -100,36 +102,69 @@ pub(super) fn global_thinking_backfill_allowed(
 }
 
 /// Resolve the context window (in tokens) for one turn, honouring the
-/// documented precedence chain (#6568).
+/// documented precedence chain (#6568, extended by #7774).
 ///
-/// 1. `agent.toml: [model] context_window` — an explicit operator override. The
+/// 1. `agent.toml: [model] context_window` — an explicit *per-agent* override. The
 ///    warning the agent loop emits for an unknown model literally tells the
 ///    operator to set this field, so it has to win; before this helper the three
 ///    execution paths never read it and the field was inert.
-/// 2. `ModelCatalog` lookup — provider-aware and prefix-reconciling (#6423), with
+/// 2. `model_overrides.json: context_window` — the *per-model* operator override
+///    (#7774), reached from the API and the dashboard and keyed by
+///    `provider:model_id`. It sits above the catalog because it exists precisely
+///    to correct the catalog: a window the registry never carried, or one a
+///    `/models` discovery pass assumed. Being keyed rather than attached to an
+///    entry, it also applies to a model the catalog does not know at all —
+///    the reported case, a gateway-served model whose window is configured in
+///    the runtime behind it and surfaced by nothing.
+/// 3. `ModelCatalog` lookup — provider-aware and prefix-reconciling (#6423), with
 ///    `0` filtered out so image / audio entries (which carry no context window)
 ///    fall through instead of poisoning the budget math.
-/// 3. `session_hint` — the value persisted on the session, authoritative only
-///    when the catalog has no entry. Callers with no session in hand pass `None`.
+/// 4. `session_hint` — the value persisted on the session, authoritative only
+///    when neither an override nor the catalog resolves. Callers with no session
+///    in hand pass `None`.
 ///
 /// Returns `None` when nothing resolves, leaving the fallback (currently
 /// `UNKNOWN_MODEL_CONTEXT_WINDOW`, 8192) to the agent loop, which also logs it.
+///
+/// The answer carries the layer that produced it ([`ResolvedContextWindow`]),
+/// because the number alone cannot tell an operator whether their model's
+/// window is known or guessed — the distinction #7774 was filed over.
+/// A caller that only needs the size reads `.tokens`.
 pub(super) fn resolve_context_window(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     model: &librefang_types::agent::ModelConfig,
     session_hint: Option<u64>,
-) -> Option<usize> {
-    model
-        .context_window
+) -> Option<ResolvedContextWindow> {
+    if let Some(tokens) = model.context_window.filter(|v| *v > 0) {
+        return Some(ResolvedContextWindow {
+            tokens: tokens as usize,
+            source: ContextWindowSource::AgentOverride,
+        });
+    }
+    // Layers 2 and 3 in one call: `effective_limits_for_manifest`
+    // already ranks the operator override above the catalog entry and
+    // filters both sides' zeros, so the two cannot drift apart here — and it
+    // reports which of the two answered, so neither can this.
+    let limits = catalog.effective_limits_for_manifest(&model.provider, &model.model);
+    if let Some(tokens) = limits.context_window {
+        let source = match limits.context_window_source {
+            LimitSource::Override => ContextWindowSource::ModelOverride,
+            // `Unknown` is unreachable while `context_window` is `Some` —
+            // `rank_limit` sets the two in the same expression — but mapping it
+            // to `Catalog` keeps this total without an unreachable panic.
+            LimitSource::Catalog | LimitSource::Unknown => ContextWindowSource::Catalog,
+        };
+        return Some(ResolvedContextWindow {
+            tokens: tokens as usize,
+            source,
+        });
+    }
+    session_hint
         .filter(|v| *v > 0)
-        .map(|v| v as usize)
-        .or_else(|| {
-            catalog
-                .find_model_for_manifest(&model.provider, &model.model)
-                .map(|m| m.context_window as usize)
-                .filter(|w| *w > 0)
+        .map(|tokens| ResolvedContextWindow {
+            tokens: tokens as usize,
+            source: ContextWindowSource::SessionHint,
         })
-        .or_else(|| session_hint.filter(|v| *v > 0).map(|v| v as usize))
 }
 
 /// Apply a per-call deep-thinking override to a manifest clone.
@@ -638,12 +673,138 @@ pub(super) fn peer_scoped_key(
     }
 }
 
+/// Tag prefixes the kernel owns rather than the operator.
+///
+/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
+/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>` (`backfill_workspace_dir` in `kernel/workspace_setup.rs`), and `hand:` alone marks an agent autonomous for idle-wake purposes (`kernel/messaging.rs`), decides whether a tool call needs an approval gate (`kernel/handles/approval_gate.rs`), and scopes structured memory (`librefang-memory/src/structured.rs`).
+/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so [`merge_agent_tags`] keeps them out of operator reach in both directions.
+const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
+
+/// Whether a tag belongs to the kernel rather than the operator.
+fn is_system_tag(tag: &str) -> bool {
+    SYSTEM_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
+/// Merge an incoming tag list over the tags an agent is currently running with.
+///
+/// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
+/// A submitted system tag is dropped rather than rejected: the round-trip a dashboard performs is GET-manifest / edit-one-field / PUT-manifest, and echoing back the `hand:` tags it was just shown must not fail the write.
+///
+/// Ordering is `live` system tags first, then `incoming` operator tags in submitted order, de-duplicated.
+/// That is deterministic for a given pair of inputs, which matters because `manifest.tags` is stringified into the router's agent summary (`librefang-kernel-router`) and a reordering there would invalidate provider prompt caches for no reason (#3298).
+pub(super) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = live
+        .iter()
+        .filter(|tag| is_system_tag(tag))
+        .cloned()
+        .collect();
+    for tag in incoming.iter().filter(|tag| !is_system_tag(tag)) {
+        if !merged.contains(tag) {
+            merged.push(tag.clone());
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tag_merge_tests {
+    use super::merge_agent_tags;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn operator_tags_are_replaced_wholesale() {
+        assert_eq!(
+            merge_agent_tags(&v(&["research", "beta"]), &v(&["prod"])),
+            v(&["prod"]),
+            "an operator must be able to drop a tag, not just add one"
+        );
+    }
+
+    #[test]
+    fn empty_incoming_clears_operator_tags() {
+        assert_eq!(
+            merge_agent_tags(&v(&["research"]), &[]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn system_tags_survive_an_operator_rewrite() {
+        assert_eq!(
+            merge_agent_tags(
+                &v(&["hand:clipper", "hand_role:editor", "research"]),
+                &v(&["prod"])
+            ),
+            v(&["hand:clipper", "hand_role:editor", "prod"]),
+            "hand membership drives workspace routing and approval gating; an operator tag edit must not move it"
+        );
+    }
+
+    #[test]
+    fn submitted_system_tags_are_dropped_not_honoured() {
+        assert_eq!(
+            merge_agent_tags(
+                &v(&["hand:real"]),
+                &v(&["hand:forged", "hand_role:admin", "ok"])
+            ),
+            v(&["hand:real", "ok"]),
+            "an operator must not be able to forge hand membership through the tags field"
+        );
+    }
+
+    #[test]
+    fn duplicate_operator_tags_collapse() {
+        assert_eq!(
+            merge_agent_tags(&[], &v(&["a", "b", "a"])),
+            v(&["a", "b"]),
+            "tags are stringified into the router prompt, so a duplicate is noise in the cache key"
+        );
+    }
+
+    #[test]
+    fn is_deterministic_and_order_preserving() {
+        let live = v(&["hand:h", "old"]);
+        assert_eq!(
+            merge_agent_tags(&live, &v(&["z", "a"])),
+            v(&["hand:h", "z", "a"]),
+            "submitted order is preserved verbatim so repeated identical writes are byte-identical"
+        );
+    }
+}
+
 #[cfg(test)]
 mod context_window_tests {
     use super::resolve_context_window;
     use librefang_runtime::model_catalog::ModelCatalog;
     use librefang_types::agent::ModelConfig;
-    use librefang_types::model_catalog::{ModelCatalogEntry, ModelTier};
+    use librefang_types::model_catalog::{
+        ContextWindowSource, ModelCatalogEntry, ModelOverrides, ModelTier,
+    };
+
+    /// The resolved size on its own.
+    ///
+    /// The precedence assertions below predate provenance and are about which *number* wins; `source_of` covers which layer is named for it, so each test reads as one claim.
+    fn resolve(
+        catalog: &ModelCatalog,
+        model: &ModelConfig,
+        session_hint: Option<u64>,
+    ) -> Option<usize> {
+        resolve_context_window(catalog, model, session_hint).map(|r| r.tokens)
+    }
+
+    /// The layer that produced the resolved window, or `None` when nothing did.
+    fn source_of(
+        catalog: &ModelCatalog,
+        model: &ModelConfig,
+        session_hint: Option<u64>,
+    ) -> Option<ContextWindowSource> {
+        resolve_context_window(catalog, model, session_hint).map(|r| r.source)
+    }
 
     fn catalog() -> ModelCatalog {
         ModelCatalog::from_entries(
@@ -684,7 +845,7 @@ mod context_window_tests {
     /// them to do — and it was ignored, leaving the 8192 fallback in place.
     #[test]
     fn manifest_override_wins_for_an_unknown_model() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", Some(131_072)),
             None,
@@ -694,7 +855,7 @@ mod context_window_tests {
 
     #[test]
     fn manifest_override_wins_over_the_catalog() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", Some(64_000)),
             None,
@@ -708,7 +869,7 @@ mod context_window_tests {
 
     #[test]
     fn falls_back_to_the_catalog_without_an_override() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", None),
             None,
@@ -718,7 +879,7 @@ mod context_window_tests {
 
     #[test]
     fn a_zero_override_is_ignored() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", Some(0)),
             None,
@@ -730,14 +891,13 @@ mod context_window_tests {
     fn a_zero_catalog_window_falls_through_to_the_session_hint() {
         // Image / audio entries carry 0; feeding that into budget math would
         // divide by an empty window.
-        let resolved =
-            resolve_context_window(&catalog(), &model("openai", "dall-e-3", None), Some(48_000));
+        let resolved = resolve(&catalog(), &model("openai", "dall-e-3", None), Some(48_000));
         assert_eq!(resolved, Some(48_000));
     }
 
     #[test]
     fn session_hint_is_last() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", None),
             Some(48_000),
@@ -751,7 +911,7 @@ mod context_window_tests {
 
     #[test]
     fn a_zero_session_hint_is_ignored() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", None),
             Some(0),
@@ -764,12 +924,147 @@ mod context_window_tests {
 
     #[test]
     fn returns_none_when_nothing_resolves() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", None),
             None,
         );
         assert_eq!(resolved, None);
+    }
+
+    /// Refs #7774. The per-model operator override beats the catalog entry —
+    /// including one whose window came from a discovery probe rather than the
+    /// registry. This is the precedence contract the dashboard, the API and the
+    /// agent loop all rely on: operator override > discovered value > fallback.
+    #[test]
+    fn a_model_level_override_beats_the_catalog_value() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(48_000),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
+        assert_eq!(resolved, Some(48_000));
+    }
+
+    /// Refs #7774. The reported case: a gateway-served model the catalog has
+    /// never heard of. Before this the chain fell straight through to the agent
+    /// loop's 8192 and the agent hit an overflow that did not exist.
+    #[test]
+    fn a_model_level_override_resolves_a_model_the_catalog_does_not_know() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "litellm:sensor-model-generic-high".to_string(),
+            ModelOverrides {
+                context_window: Some(16_384),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve(
+            &cat,
+            &model("litellm", "sensor-model-generic-high", None),
+            None,
+        );
+        assert_eq!(resolved, Some(16_384));
+    }
+
+    /// Refs #7774 / #6568. The per-agent `agent.toml` value stays the most
+    /// specific layer — a model-level correction is inherited by every agent,
+    /// so an agent that states its own window must still win.
+    #[test]
+    fn the_agent_toml_value_still_wins_over_a_model_level_override() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(48_000),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve(
+            &cat,
+            &model("anthropic", "claude-sonnet-4-6", Some(96_000)),
+            None,
+        );
+        assert_eq!(resolved, Some(96_000));
+    }
+
+    /// Refs #7774. An override on some *other* model, and an override that
+    /// carries only inference parameters, both leave the chain exactly where it
+    /// was. This is the backward-compatibility guard: adding the field must not
+    /// move a single existing install's resolved window.
+    #[test]
+    fn an_absent_limit_override_leaves_the_chain_unchanged() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                temperature: Some(0.3),
+                max_tokens: Some(4_096),
+                ..Default::default()
+            },
+        );
+        cat.set_overrides(
+            "openai:some-other-model".to_string(),
+            ModelOverrides {
+                context_window: Some(1_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(200_000),
+            "the catalog value must still be what resolves"
+        );
+        assert_eq!(
+            resolve(
+                &cat,
+                &model("deepseek", "deepseek-v4-flash", None),
+                Some(48_000)
+            ),
+            Some(48_000),
+            "the session hint must still be the last resort"
+        );
+        assert_eq!(
+            resolve(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
+            None,
+            "nothing resolved — the caller's fallback still applies"
+        );
+    }
+
+    /// Refs #7774. An override of `0` — what a cleared dashboard field could
+    /// submit — must not pin the window to zero and poison the budget math.
+    #[test]
+    fn a_zero_model_level_override_falls_through_to_the_catalog() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(0),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
+        assert_eq!(resolved, Some(200_000));
+    }
+
+    /// Refs #7774. An image model carries no window, and an override must be
+    /// able to supply one without the catalog's `0` shadowing it.
+    #[test]
+    fn an_override_supplies_a_window_the_catalog_stores_as_zero() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "openai:dall-e-3".to_string(),
+            ModelOverrides {
+                context_window: Some(4_096),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve(&cat, &model("openai", "dall-e-3", None), None);
+        assert_eq!(resolved, Some(4_096));
     }
 
     /// Guards the `session_hint: None` choice at the compaction gate.
@@ -784,17 +1079,124 @@ mod context_window_tests {
     fn a_stale_session_hint_would_beat_the_compaction_gate_default() {
         let unknown = model("deepseek", "deepseek-v4-flash", None);
         // What the gate must NOT do: rank the stale value above its default.
-        let with_stale_hint = resolve_context_window(&catalog(), &unknown, Some(8192));
+        let with_stale_hint = resolve(&catalog(), &unknown, Some(8192));
         assert_eq!(with_stale_hint, Some(8192));
         // What the gate does: no hint, so its own `unwrap_or(200_000)` applies.
-        let without_hint = resolve_context_window(&catalog(), &unknown, None);
+        let without_hint = resolve(&catalog(), &unknown, None);
         assert_eq!(without_hint, None);
+    }
+
+    /// Refs #7774 item 5. Every layer names itself, so a surface reporting the
+    /// window can say where it came from.
+    ///
+    /// Without this an operator reads one number for four different facts: a
+    /// window they set, a window the registry declared, a window an earlier
+    /// turn happened to persist, and a window nobody knows.
+    /// The reported incident is the last one — 8192 assumed against a real 16K — and it is indistinguishable from the others by size alone.
+    #[test]
+    fn each_layer_names_itself_as_the_source() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "litellm:sensor-model-generic-high".to_string(),
+            ModelOverrides {
+                context_window: Some(16_384),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("anthropic", "claude-sonnet-4-6", Some(96_000)),
+                None
+            ),
+            Some(ContextWindowSource::AgentOverride),
+        );
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("litellm", "sensor-model-generic-high", None),
+                None
+            ),
+            Some(ContextWindowSource::ModelOverride),
+        );
+        assert_eq!(
+            source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(ContextWindowSource::Catalog),
+        );
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("deepseek", "deepseek-v4-flash", None),
+                Some(48_000)
+            ),
+            Some(ContextWindowSource::SessionHint),
+        );
+        assert_eq!(
+            source_of(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
+            None,
+            "nothing resolved — the caller labels its own fallback",
+        );
+    }
+
+    /// A model-level override of a window the catalog also declares reports the
+    /// override, not the catalog.
+    ///
+    /// The two layers are ranked inside one `effective_limits_for_manifest` call, so this is the assertion that keeps the value and its label from being computed by different rules.
+    #[test]
+    fn an_override_shadowing_a_catalog_entry_reports_the_override() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(48_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None)
+                .map(|r| (r.tokens, r.source)),
+            Some((48_000, ContextWindowSource::ModelOverride)),
+        );
+    }
+
+    /// A zero override does not get to claim provenance either: it falls
+    /// through, and the catalog is named as the source of the value that wins.
+    #[test]
+    fn a_zero_override_reports_the_catalog_as_the_source() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(ContextWindowSource::Catalog),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_agent_example_grants_tools_matching_its_scopes() {
+        let source = include_str!("../../../../examples/custom-agent/agent.toml");
+        let manifest: AgentManifest = toml::from_str(source).unwrap();
+        let caps = manifest_to_capabilities(&manifest);
+
+        assert!(caps.contains(&Capability::ToolInvoke("web_fetch".into())));
+        assert!(caps.contains(&Capability::NetConnect("*".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_store".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_recall".into())));
+        assert!(caps.contains(&Capability::MemoryRead("self.*".into())));
+        assert!(caps.contains(&Capability::MemoryWrite("self.*".into())));
+        assert_eq!(manifest.resources.max_cost_per_hour_usd, 1.0);
+    }
 
     const HAND_TOML: &str = r#"
 id = "jarvis"

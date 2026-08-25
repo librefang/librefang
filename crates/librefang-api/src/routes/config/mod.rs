@@ -282,13 +282,17 @@ fn llm_health_snapshot(state: &AppState) -> LlmHealthSnapshot {
 
 /// Strip embedded `user:pass@` credentials from a URL, keeping host/port.
 ///
-/// Used for telemetry / OTLP endpoints that may legitimately contain a
-/// basic-auth tuple in the URL. Returns the input unchanged when no `@`
-/// follows the scheme — i.e. when there is nothing to redact.
+/// Used for configured endpoints, including pairing and OTLP, that may
+/// legitimately contain a basic-auth tuple in the URL. Returns the input
+/// unchanged when the authority has no `@` delimiter.
 fn redact_url_credentials(url: &str) -> String {
     if let Some(scheme_end) = url.find("://") {
         let after_scheme = &url[scheme_end + 3..];
-        if let Some(at_pos) = after_scheme.find('@') {
+        let authority_end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        if let Some(at_pos) = authority.rfind('@') {
             let host_and_rest = &after_scheme[at_pos..]; // includes '@'
             return format!("{}://***{}", &url[..scheme_end], host_and_rest);
         }
@@ -1099,7 +1103,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "memory_used_mb": memory_used_mb,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
-        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "config_exists": state.kernel.config_path().exists(),
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
@@ -1138,9 +1142,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
     static SKILL_COUNT_CACHE: std::sync::Mutex<Option<(usize, std::time::Instant)>> =
         std::sync::Mutex::new(None);
     let skill_count = {
-        let cached = SKILL_COUNT_CACHE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        let cached = lock_skill_count_cache(&SKILL_COUNT_CACHE)
             .as_ref()
             .and_then(|(n, t)| {
                 if t.elapsed() < std::time::Duration::from_secs(30) {
@@ -1162,8 +1164,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
                     .read()
                     .map(|r| r.list().len())
                     .unwrap_or(0);
-                *SKILL_COUNT_CACHE.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some((n, std::time::Instant::now()));
+                *lock_skill_count_cache(&SKILL_COUNT_CACHE) = Some((n, std::time::Instant::now()));
                 n
             }
         }
@@ -1193,6 +1194,41 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "workflowCount": workflow_count,
         "webSearchAvailable": web_search_available,
     })
+}
+
+fn lock_skill_count_cache<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("dashboard skill count cache lock poisoned; recovering cached value");
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+#[cfg(test)]
+mod skill_count_cache_lock_tests {
+    use super::lock_skill_count_cache;
+    use std::sync::Mutex;
+
+    #[test]
+    fn poisoned_cache_lock_recovers_preserved_value_and_remains_usable() {
+        let cache = Mutex::new(Some(7usize));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut value = cache.lock().unwrap();
+                    *value = Some(11);
+                    panic!("poison skill count cache lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(cache.is_poisoned());
+        assert_eq!(*lock_skill_count_cache(&cache), Some(11));
+        assert!(!cache.is_poisoned());
+
+        *lock_skill_count_cache(&cache) = Some(13);
+        assert_eq!(*cache.lock().unwrap(), Some(13));
+    }
 }
 
 #[cfg(test)]
@@ -1480,6 +1516,10 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path(
             "external_auth.require_email_verified"
         ));
+        // #7744: `role_map` is what turns a signed ID token into an API
+        // credential, so a caller who could write it could grant themselves
+        // Owner by naming an IdP group they already hold.
+        assert!(!super::is_writable_config_path("external_auth.role_map"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));
         assert!(!super::is_writable_config_path("audit.retention_days"));

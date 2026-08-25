@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ModelsPage } from "./ModelsPage";
+import {
+  ModelsPage,
+  capabilityOverrideLabel,
+  modelPricingKind,
+  numberInputValue,
+  settingsStateEqual,
+  settingsStateFromOverrides,
+} from "./ModelsPage";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import {
   useAddCustomModel,
@@ -150,11 +157,11 @@ function setMutationDefaults(): {
   return { add, remove, update, del };
 }
 
-function renderPage(): void {
+function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  return render(
     <QueryClientProvider client={qc}>
       <ModelsPage />
     </QueryClientProvider>,
@@ -265,6 +272,22 @@ describe("ModelsPage", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
+  it("treats missing costs as unknown pricing", () => {
+    const model: ModelItem = {
+      id: "missing-costs",
+      display_name: "Missing costs",
+      provider: "custom",
+      context_window: 32_768,
+      available: true,
+    };
+    setLoaded([model]);
+    renderPage();
+
+    expect(modelPricingKind(model)).toBe("unknown");
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.queryByText(/\$—/)).not.toBeInTheDocument();
+  });
+
   it("opens the Add Custom Model drawer when the header button is clicked", () => {
     setLoaded();
     renderPage();
@@ -297,6 +320,122 @@ describe("ModelsPage", () => {
     const payload = muts.add.mutateAsync.mock.calls[0][0];
     expect(payload.id).toBe("new-model");
     expect(payload.provider).toBe("custom-provider");
+  });
+
+  it("keeps cleared numeric fields empty and omits them on submit", () => {
+    setLoaded();
+    const muts = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getByTitle("models.add_model (n)"));
+
+    fireEvent.change(screen.getByPlaceholderText("models.model_id_placeholder"), {
+      target: { value: "minimal-model" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("models.provider_placeholder"), {
+      target: { value: "custom" },
+    });
+    for (const label of [
+      "models.context_window",
+      "models.max_output",
+      "models.input_cost",
+      "models.output_cost",
+    ]) {
+      const input = screen.getByLabelText(label) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "" } });
+      expect(input.value).toBe("");
+    }
+
+    const form = screen
+      .getByPlaceholderText("models.model_id_placeholder")
+      .closest("form");
+    fireEvent.submit(form!);
+    const payload = muts.add.mutateAsync.mock.calls[0][0];
+    expect(payload).not.toHaveProperty("context_window");
+    expect(payload).not.toHaveProperty("max_output_tokens");
+    expect(payload).not.toHaveProperty("input_cost_per_m");
+    expect(payload).not.toHaveProperty("output_cost_per_m");
+  });
+
+  it("does not apply add-model completion effects after unmount", async () => {
+    setLoaded();
+    let resolveAdd: () => void = () => undefined;
+    const mutateAsync = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAdd = resolve;
+        }),
+    );
+    useAddCustomModelMock.mockReturnValue(makeMut({ mutateAsync }));
+    const view = renderPage();
+    fireEvent.click(screen.getByTitle("models.add_model (n)"));
+    fireEvent.change(screen.getByPlaceholderText("models.model_id_placeholder"), {
+      target: { value: "deferred-model" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("models.provider_placeholder"), {
+      target: { value: "custom" },
+    });
+    fireEvent.submit(
+      screen.getByPlaceholderText("models.model_id_placeholder").closest("form")!,
+    );
+
+    view.unmount();
+    resolveAdd();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(useUIStore.getState().toasts).toEqual([]);
+  });
+
+  it("resyncs pristine settings but preserves dirty settings", async () => {
+    let overrides = { temperature: 0.2 };
+    useModelOverridesMock.mockImplementation(() => makeQuery(overrides));
+    setLoaded();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    const temperatureRange = () =>
+      screen
+        .getAllByLabelText("models.temperature")
+        .find(
+          (element): element is HTMLInputElement =>
+            element instanceof HTMLInputElement && element.type === "range",
+        )!;
+    await waitFor(() => expect(temperatureRange().value).toBe("0.2"));
+
+    overrides = { temperature: 0.5 };
+    fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
+      target: { value: "g" },
+    });
+    await waitFor(() => expect(temperatureRange().value).toBe("0.5"));
+
+    fireEvent.change(temperatureRange(), { target: { value: "0.9" } });
+    overrides = { temperature: 0.7 };
+    fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
+      target: { value: "gp" },
+    });
+    await waitFor(() => expect(temperatureRange().value).toBe("0.9"));
+  });
+
+  it("does not apply settings-save effects after the drawer unmounts", async () => {
+    let resolveSave: () => void = () => undefined;
+    const mutateAsync = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    useUpdateModelOverridesMock.mockReturnValue(makeMut({ mutateAsync }));
+    setLoaded();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+
+    resolveSave();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(useUIStore.getState().toasts).toEqual([]);
   });
 
   it("requires double-click to delete a custom model (confirm-then-delete)", () => {
@@ -361,5 +500,36 @@ describe("ModelsPage", () => {
     // hidden-toggle chip with count appears.
     expect(useUIStore.getState().hiddenModelKeys.length).toBe(1);
     expect(screen.getByTitle("models.show_hidden")).toBeInTheDocument();
+  });
+});
+
+describe("ModelsPage helpers", () => {
+  it("parses empty number inputs without coercing them to zero", () => {
+    expect(numberInputValue("")).toBe("");
+    expect(numberInputValue("0")).toBe(0);
+    expect(numberInputValue("12.5")).toBe(12.5);
+  });
+
+  it("builds complete override state and compares it by value", () => {
+    const first = settingsStateFromOverrides({ temperature: 0.4 });
+    const equivalent = settingsStateFromOverrides({ temperature: 0.4 });
+    const changed = settingsStateFromOverrides({ temperature: 0.8 });
+    expect(first.tempEnabled).toBe(true);
+    expect(settingsStateEqual(first, equivalent)).toBe(true);
+    expect(settingsStateEqual(first, changed)).toBe(false);
+  });
+
+  it("formats capability override labels with explicit branches", () => {
+    const labels = {
+      auto: "Auto",
+      on: "On",
+      off: "Off",
+      forceOn: "Force on",
+      forceOff: "Force off",
+    };
+    expect(capabilityOverrideLabel("default", true, labels)).toBe("Auto (On)");
+    expect(capabilityOverrideLabel("default", false, labels)).toBe("Auto (Off)");
+    expect(capabilityOverrideLabel("on", false, labels)).toBe("Force on");
+    expect(capabilityOverrideLabel("off", true, labels)).toBe("Force off");
   });
 });

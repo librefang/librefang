@@ -62,12 +62,25 @@ impl Drop for RouterHarness {
 }
 
 async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
+    boot_router_with_config(api_key, |_| {}).await
+}
+
+/// Same harness, with a hook to adjust the `KernelConfig` before boot.
+///
+/// The extraction-reporting tests need boot itself to resolve a *different*
+/// model than the shared fixture does — reporting is a boot-time resolution
+/// now, so the only way to exercise a different outcome is to boot a kernel
+/// that reaches it.
+async fn boot_router_with_config(
+    api_key: &str,
+    adjust: impl FnOnce(&mut KernelConfig),
+) -> RouterHarness {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // Seed the pinned registry fixture so the kernel boots with content, offline.
     librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
 
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
         api_key: api_key.to_string(),
@@ -82,6 +95,7 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
         },
         ..KernelConfig::default()
     };
+    adjust(&mut config);
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
     let kernel = Arc::new(kernel);
@@ -365,6 +379,14 @@ async fn get_memory_config_returns_documented_shape() {
         "auto_memorize",
         "auto_retrieve",
         "extraction_model",
+        "effective_extraction_model",
+        "effective_extraction_provider",
+        "extraction_model_source",
+        "extraction_status",
+        "extraction_llm_active",
+        "extraction_degraded_reason",
+        "extraction_sidecar_command",
+        "session_scoped_recall",
         "max_retrieve",
     ] {
         assert!(
@@ -374,6 +396,170 @@ async fn get_memory_config_returns_documented_shape() {
     }
     // Default `ProactiveMemoryConfig::default()` has enabled = true.
     assert_eq!(pm["enabled"], serde_json::Value::Bool(true));
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/config — the report is boot's resolution, not a re-derivation
+// ---------------------------------------------------------------------------
+
+/// `extraction_model` unset means "inherit the kernel default". Reporting only
+/// the raw setting therefore answers the wrong question: the caller learns
+/// nobody chose a model, not which model is doing the work.
+///
+/// That gap is not hypothetical. On a live deployment an agent conversing on a
+/// fast model had its memory extraction inheriting a slow reasoning model that
+/// could not finish inside its own 30 s ceiling, so extraction failed on every
+/// turn and each finished reply was held for over two minutes. No surface
+/// could name the culprit, because no surface reported the resolved value.
+///
+/// The inherited spec here carries a provider prefix (`ollama/test-model`),
+/// which is the common real-world shape — `[default_model] model` is routinely
+/// written `provider/model`. Echoing that spec back is not a report of what
+/// runs: it does not say which provider was selected, and it is not the model
+/// name the upstream API is given. Boot splits the two and strips the prefix,
+/// so the route must show both halves as boot resolved them.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_config_names_the_inherited_extraction_model() {
+    let harness = boot_router_with_config(TEST_KEY, |cfg| {
+        cfg.default_model.model = "ollama/test-model".to_string();
+    })
+    .await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    let pm = &body["proactive_memory"];
+
+    // The test harness sets no `extraction_model`, which is the case that
+    // used to be unreportable.
+    assert!(
+        pm["extraction_model"].as_str().unwrap_or("").is_empty(),
+        "fixture was expected to leave extraction_model unset: {body}"
+    );
+    assert_eq!(
+        pm["extraction_model_source"], "inherited_default",
+        "an unset extraction_model must be reported as inherited, not as a choice: {body}"
+    );
+
+    // Split, as boot resolved it — not the `provider/model` spec it started
+    // from. `provider` answers "who is being called", `model` is what the
+    // upstream API receives.
+    assert_eq!(
+        pm["effective_extraction_provider"], "ollama",
+        "the resolved provider must be reported, not left for the caller to parse \
+         out of the spec: {body}"
+    );
+    assert_eq!(
+        pm["effective_extraction_model"], "test-model",
+        "the resolved model must be reported with the provider prefix stripped, \
+         the same form the driver is given: {body}"
+    );
+    assert_ne!(
+        pm["effective_extraction_model"],
+        serde_json::json!(harness._state.kernel.config_ref().default_model.model),
+        "reporting the unsplit `provider/model` spec is the bug: it names neither \
+         the provider nor the model the API is called with: {body}"
+    );
+
+    // An inherited default is the documented behaviour, so a healthy install
+    // must report a live LLM — not a degradation.
+    assert_eq!(
+        pm["extraction_status"], "llm",
+        "a default install extracts with an LLM: {body}"
+    );
+    assert_eq!(
+        pm["extraction_llm_active"],
+        serde_json::Value::Bool(true),
+        "an LLM performs extraction here, so llm_active must say so: {body}"
+    );
+    assert_eq!(
+        pm["extraction_degraded_reason"],
+        serde_json::Value::Null,
+        "nothing is degraded, so no reason may be reported: {body}"
+    );
+}
+
+/// A `build_extraction_driver` failure drops extraction to substring matching
+/// with **no LLM at all** — and the route used to report the configured model
+/// as effective anyway, because it re-derived the answer from `KernelConfig`
+/// and so could not see the failure. That is the worst version of the bug the
+/// reporting exists to fix: the operator reads a model name, believes
+/// extraction is running on it, and never learns that memory quality quietly
+/// collapsed to substring matching.
+///
+/// `arcee-ai` makes the failure deterministic rather than
+/// environment-dependent. It is a provider in the pinned model-catalog fixture
+/// (so boot's `resolve_extraction_model_target` accepts it as the prefix and
+/// picks a provider other than the default), and it is *not* in the LLM driver
+/// registry — for which `create_driver` has no successful path without a
+/// `base_url`: it errors whether or not an `ARCEE_AI_API_KEY` happens to be
+/// exported on the machine running the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_memory_config_reports_a_failed_extraction_driver_as_degraded() {
+    let harness = boot_router_with_config(TEST_KEY, |cfg| {
+        cfg.proactive_memory.extraction_model = Some("arcee-ai:coder-large".to_string());
+    })
+    .await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = read_json(resp).await;
+    let pm = &body["proactive_memory"];
+
+    // The raw setting still reports what the operator wrote — that is a
+    // different question from what runs.
+    assert_eq!(
+        pm["extraction_model"], "arcee-ai:coder-large",
+        "the configured setting must still be echoed: {body}"
+    );
+    assert_eq!(
+        pm["extraction_model_source"], "configured",
+        "an operator did choose this model, even though it failed to build: {body}"
+    );
+
+    // What runs: nothing with a model in it.
+    assert_eq!(
+        pm["extraction_status"], "degraded_substring",
+        "a driver that failed to build must be reported as degraded, not as a \
+         healthy LLM extraction: {body}"
+    );
+    assert_eq!(
+        pm["extraction_llm_active"],
+        serde_json::Value::Bool(false),
+        "no LLM extracts anything after a failed driver build: {body}"
+    );
+    assert_eq!(
+        pm["effective_extraction_model"],
+        serde_json::Value::Null,
+        "no model is effective when the driver failed to build — naming one here \
+         is exactly the misreport under test: {body}"
+    );
+    assert_eq!(
+        pm["effective_extraction_provider"],
+        serde_json::Value::Null,
+        "no provider is being called when the driver failed to build: {body}"
+    );
+
+    // The failure has to be readable, and has to name what was attempted —
+    // otherwise "degraded" is a dead end for whoever is debugging it.
+    let reason = pm["extraction_degraded_reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("arcee-ai") && reason.contains("coder-large"),
+        "the degraded reason must name the provider and model that failed, \
+         got {reason:?}: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +677,106 @@ async fn patch_memory_config_hot_reloads_and_reports_applied() {
     // from the freshly-written TOML, so a client doing
     // `setQueryData(body)` sees the new value without an extra GET.
     assert_eq!(body["proactive_memory"]["auto_memorize"], false);
+}
+
+/// `session_scoped_recall` is the switch that decides whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn (#7605).
+/// It shipped as a `[proactive_memory]` key with a per-agent override, but no HTTP surface read or wrote it, so the only way to see or change it was to open `config.toml` on the host — the one thing an operator running the daemon behind the API cannot do.
+///
+/// This pins the whole loop: GET names it, PATCH persists it, and the value comes back on both the PATCH response and the next GET.
+/// The disk assertion is the load-bearing one — the PATCH response echoes the freshly-written TOML, and a handler that returned the right JSON without inserting the key would still leave the operator's change to evaporate on the next boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_memory_config_round_trips_session_scoped_recall() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let config_path = harness.tmp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "api_key = \"{TEST_KEY}\"\n\
+             \n\
+             [default_model]\n\
+             provider = \"ollama\"\n\
+             model = \"test-model\"\n\
+             api_key_env = \"OLLAMA_API_KEY\"\n\
+             \n\
+             [memory]\n\
+             \n\
+             [proactive_memory]\n\
+             auto_memorize = true\n"
+        ),
+    )
+    .expect("seed config.toml");
+
+    // GET reports the default before anything is written. `true` is the shipped
+    // default: a memory belongs to the conversation that produced it.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    assert_eq!(
+        body["proactive_memory"]["session_scoped_recall"],
+        serde_json::Value::Bool(true),
+        "GET must report the live session_scoped_recall; body: {body}"
+    );
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::PATCH,
+            "/api/memory/config",
+            serde_json::json!({
+                "proactive_memory": {
+                    "session_scoped_recall": false,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let patched = read_json(resp).await;
+    assert_eq!(
+        patched["proactive_memory"]["session_scoped_recall"],
+        serde_json::Value::Bool(false),
+        "PATCH must echo the new session_scoped_recall; body: {patched}"
+    );
+
+    // The operator's change has to survive a restart, so it must be in the file
+    // and not merely in the response.
+    let on_disk: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&config_path).expect("config.toml must still be readable"),
+    )
+    .expect("PATCH must leave config.toml parseable");
+    assert_eq!(
+        on_disk
+            .get("proactive_memory")
+            .and_then(|t| t.get("session_scoped_recall"))
+            .and_then(toml::Value::as_bool),
+        Some(false),
+        "PATCH must persist session_scoped_recall into config.toml; got {on_disk:?}"
+    );
+
+    // A successful hot-reload must also move the live value, which is what the
+    // next GET reads. `partial` means the seeded file failed live validation for
+    // an unrelated reason; the disk assertion above already covers that case.
+    if patched["status"].as_str() == Some("applied") {
+        let resp = harness
+            .app
+            .clone()
+            .oneshot(authed_get("/api/memory/config"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let reread = read_json(resp).await;
+        assert_eq!(
+            reread["proactive_memory"]["session_scoped_recall"],
+            serde_json::Value::Bool(false),
+            "GET after an applied PATCH must report the new value; body: {reread}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -904,4 +1190,130 @@ async fn patch_memory_config_with_non_table_proactive_memory_entry_is_graceful()
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = read_json(resp).await;
     assert!(body.get("error").is_some(), "missing error field: {body}");
+}
+
+// ---------------------------------------------------------------------------
+// #7808 — the duplicate/consolidate pair.
+//
+// `GET .../duplicates` was the one `/api/memory` read with no namespace gate
+// and no PII redaction: it went straight to the unguarded inherent method while
+// every sibling read went through a `*_with_guard` wrapper. Duplicate groups
+// are memory *contents*, so that was a way to read what `list_with_guard`
+// would have redacted, grouped differently.
+//
+// `POST .../consolidate` kept its gate but expressed it inline in the handler,
+// so the route and the agent-callable `memory_semantic_consolidate` tool would
+// have carried two independent opinions about what consolidation costs. Both
+// now resolve through the same wrappers in `librefang-memory`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicates_route_returns_documented_shape_through_the_guarded_read() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get(&format!(
+            "/api/memory/agents/{agent_id}/duplicates"
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an authenticated read must survive the newly-added guard"
+    );
+    let body = read_json(resp).await;
+    assert!(
+        body.get("duplicate_groups").is_some() && body.get("groups").is_some(),
+        "the response shape must be unchanged by the guard: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn consolidate_route_reports_its_merge_count() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::POST,
+            &format!("/api/memory/agents/{agent_id}/consolidate"),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "moving the delete gate into consolidate_with_guard must not refuse an admin caller"
+    );
+    let body = read_json(resp).await;
+    assert_eq!(
+        body["consolidated"],
+        serde_json::json!(true),
+        "body: {body}"
+    );
+    assert_eq!(
+        body["merged_count"],
+        serde_json::json!(0),
+        "an empty store merges nothing: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn consolidate_route_requires_auth() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/memory/agents/some-agent/consolidate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "a destructive maintenance route must never be anonymous"
+    );
+}
+
+/// The similarity floor has to reach an operator without a recompile, so it
+/// must round-trip through the config surface like every other
+/// `[proactive_memory]` key — and appear in the redacted view the dashboard
+/// reads (#7808).
+#[tokio::test(flavor = "multi_thread")]
+async fn min_similarity_is_visible_in_the_memory_config_surface() {
+    let harness = boot_router_with_config(TEST_KEY, |config| {
+        config.proactive_memory.min_similarity = Some(0.3);
+    })
+    .await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let reported = body["proactive_memory"]["min_similarity"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("min_similarity missing from the redacted config: {body}"));
+    assert!(
+        (reported - 0.3).abs() < 1e-6,
+        "the configured floor must be reported verbatim, got {reported}"
+    );
 }

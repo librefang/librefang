@@ -277,3 +277,27 @@ fn test_wiki_access_defaults_return_unavailable_with_method_name() {
         other => panic!("wiki_write: expected Unavailable(\"wiki_write\"), got {other:?}"),
     }
 }
+
+/// `spawn_ephemeral`'s default impl must refuse by name (#6699).
+///
+/// A kernel that has not wired the ephemeral spawn engine has no mission workspace, no budget attribution and no depth counter, so answering with anything other than a refusal would hand the caller a worker that none of the feature's guarantees apply to.
+/// Naming the capability in the error is what lets a tool layer tell the model *which* entry point was missing rather than reporting a generic failure.
+#[tokio::test]
+async fn test_spawn_ephemeral_default_returns_unavailable_with_method_name() {
+    use librefang_kernel_handle::KernelOpError;
+    use librefang_types::ephemeral::EphemeralSpawnRequest;
+
+    let handle = NoopKernelHandle;
+    let request = EphemeralSpawnRequest::new(
+        librefang_types::agent::AgentId::new(),
+        "research",
+        "find the thing",
+    );
+
+    match handle.spawn_ephemeral(request).await {
+        Err(KernelOpError::Unavailable(c)) if c == "spawn_ephemeral" => {}
+        other => {
+            panic!("spawn_ephemeral: expected Unavailable(\"spawn_ephemeral\"), got {other:?}")
+        }
+    }
+}
