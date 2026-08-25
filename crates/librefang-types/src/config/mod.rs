@@ -270,6 +270,65 @@ admin_role = "admin"
     }
 
     #[test]
+    fn default_owner_defaults_to_none_and_is_omitted_from_serialized_config() {
+        let cfg = KernelConfig::default();
+        assert!(cfg.default_owner.is_none());
+        assert!(cfg.default_owner_principal().is_none());
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(!serialized.contains("default_owner"));
+    }
+
+    #[test]
+    fn default_owner_parses_a_group_spec() {
+        let cfg: KernelConfig = toml::from_str("default_owner = \"group:platform\"").unwrap();
+        assert_eq!(
+            cfg.default_owner_principal(),
+            Some(crate::principal::Principal::group_named("platform"))
+        );
+    }
+
+    #[test]
+    fn a_malformed_default_owner_resolves_to_none_rather_than_failing_the_load() {
+        // A typo in this key must leave artifacts unowned — recoverable —
+        // rather than refusing to start the daemon.
+        let cfg: KernelConfig = toml::from_str("default_owner = \"role:admin\"").unwrap();
+        assert_eq!(cfg.default_owner, Some("role:admin".to_string()));
+        assert_eq!(cfg.default_owner_principal(), None);
+    }
+
+    #[test]
+    fn principal_name_resolves_both_arms_back_to_their_declared_name() {
+        use crate::principal::Principal;
+        let cfg = KernelConfig {
+            users: vec![UserConfig {
+                name: "alice".to_string(),
+                ..Default::default()
+            }],
+            groups: vec![crate::config::GroupConfig {
+                name: "oncall".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.principal_name(&Principal::user_named("alice")),
+            Some("alice")
+        );
+        assert_eq!(
+            cfg.principal_name(&Principal::group_named("oncall")),
+            Some("oncall")
+        );
+        // A user and a group sharing a name must not resolve through each
+        // other — the per-kind namespace is what keeps a single owner column
+        // unambiguous.
+        assert_eq!(cfg.principal_name(&Principal::group_named("alice")), None);
+        assert_eq!(cfg.principal_name(&Principal::user_named("oncall")), None);
+        // A principal whose declaration has since been removed is `None`, not
+        // an error: callers render the canonical `kind:uuid` string instead.
+        assert_eq!(cfg.principal_name(&Principal::user_named("carol")), None);
+    }
+
+    #[test]
     fn test_user_config_serde() {
         let uc = UserConfig {
             name: "Alice".to_string(),
@@ -2059,6 +2118,10 @@ admin_role = "admin"
             version,
             description,
             author,
+            // #7744: `owner` is a per-agent identity, not an override of a
+            // global `KernelConfig` section — `default_owner` is a scalar
+            // fallback, not an `[owner]` table an operator could relocate.
+            owner,
             module,
             schedule,
             session_mode,

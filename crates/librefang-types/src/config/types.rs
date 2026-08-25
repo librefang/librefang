@@ -3594,6 +3594,14 @@ pub struct KernelConfig {
     /// already carries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupConfig>,
+    /// Fleet-wide fallback owner for artifacts created by a turn that has neither an authenticated caller nor an `owner` on the agent's manifest (#7744).
+    ///
+    /// An operator spec string — `user:alice`, `group:platform`, or a bare `alice` meaning `user:alice` — parsed by [`crate::principal::Principal::from_spec`].
+    ///
+    /// `None` (the default) means unowned artifacts stay unowned rather than being attributed to a synthetic principal nobody chose.
+    /// The kernel emits one `WARN` per daemon start when an artifact is created with no principal resolvable, naming this key, so the gap is visible without being fatal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_owner: Option<String>,
     /// Maps platform-native channel roles (Telegram admin, Discord guild
     /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
     /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
@@ -6616,6 +6624,7 @@ impl Default for KernelConfig {
             language: "en".to_string(),
             users: Vec::new(),
             groups: Vec::new(),
+            default_owner: None,
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             mcp_runtime_store: McpRuntimeStore::default(),
@@ -6767,6 +6776,46 @@ impl KernelConfig {
     /// Look up a group by exact name.
     pub fn group(&self, name: &str) -> Option<&GroupConfig> {
         self.groups.iter().find(|g| g.name == name)
+    }
+
+    /// The display name of a recorded [`Principal`], or `None` when nothing declared here matches it.
+    ///
+    /// A principal id is a UUIDv5 of a name, so the forward direction is a pure function and needs no index; this is the reverse, and it is a linear scan of `[[users]]` / `[[groups]]` rather than a stored mapping.
+    /// That is deliberate: both lists are operator-authored and small, whereas a persisted id → name table would be a second source of truth that could disagree with `config.toml` after an edit.
+    ///
+    /// `None` is a real answer, not an error — it is what a principal whose user or group has since been deleted or renamed looks like, and the caller should render the canonical `kind:uuid` string rather than inventing a placeholder.
+    pub fn principal_name(&self, principal: &crate::principal::Principal) -> Option<&str> {
+        use crate::principal::{Principal, PrincipalKind};
+        match principal.kind {
+            PrincipalKind::User => self
+                .users
+                .iter()
+                .find(|u| Principal::user_named(&u.name) == *principal)
+                .map(|u| u.name.as_str()),
+            PrincipalKind::Group => self
+                .groups
+                .iter()
+                .find(|g| Principal::group_named(&g.name) == *principal)
+                .map(|g| g.name.as_str()),
+        }
+    }
+
+    /// The fleet-wide fallback owner, parsed from [`KernelConfig::default_owner`].
+    ///
+    /// A malformed spec logs a `WARN` and resolves to `None`: a typo in this key must leave artifacts unowned, which is recoverable, rather than refusing to start the daemon or attributing them to something arbitrary.
+    pub fn default_owner_principal(&self) -> Option<crate::principal::Principal> {
+        let spec = self.default_owner.as_deref()?;
+        match crate::principal::Principal::from_spec(spec) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    default_owner = spec,
+                    error = %e,
+                    "`default_owner` in config.toml is not a valid principal spec (expected `user:<name>` or `group:<name>`); artifacts created without an authenticated caller will stay unowned"
+                );
+                None
+            }
+        }
     }
 
     /// Resolved workspaces root directory.

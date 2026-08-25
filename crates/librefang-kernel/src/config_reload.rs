@@ -529,6 +529,23 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    // `default_owner` (#7744). Read live, once per artifact creation, through
+    // `KernelConfig::default_owner_principal()` on the current config snapshot —
+    // nothing caches the parsed principal, so a swap is immediately in effect for
+    // the next workflow or cron an ownerless turn creates. Declared for the same
+    // `should_store_config` reason as `[[groups]]` above: an edit that classified
+    // as nothing at all would be persisted and then discarded.
+    //
+    // Note that this does **not** retroactively re-own anything: artifacts already
+    // recorded keep the principal stamped at creation, because an owner that moved
+    // when a config key changed would not be an audit answer.
+    if field_changed(&old.default_owner, &new.default_owner) {
+        plan.noop_changes.push(
+            "default_owner changed (effective immediately for newly created artifacts —              already-recorded owners are not rewritten)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
@@ -1030,6 +1047,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "tool_policy",
         "users",
         "groups",
+        "default_owner",
         "proactive_memory",
         "queue",
         "budget",

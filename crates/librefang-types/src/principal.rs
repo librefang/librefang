@@ -286,6 +286,42 @@ impl std::fmt::Display for PrincipalSpecError {
 
 impl std::error::Error for PrincipalSpecError {}
 
+/// Resolve the principal a turn is acting for, in the one place the decision is made (#7744).
+///
+/// # Precedence, and why
+///
+/// 1. **The authenticated caller.** A turn started by a human is acting for that human, so what it creates belongs to them.
+///    This is the value the kernel already threads as `owner: Option<UserId>` from `AuthenticatedApiUser` — the same one that selects the caller's provider credential and bills their budget — so ownership, credential choice and spend attribution all read one identity by construction instead of three that can disagree.
+/// 2. **The agent manifest's `owner`.** Cron fires, event triggers, workflow steps and autonomous ticks have no human on the turn; the kernel hardcodes `owner = None` for every one of them.
+///    The manifest is where an operator says who those turns act for, and it is the arm that makes group ownership reachable: `owner = "group:compliance"` on the agent that runs the quarterly cron.
+/// 3. **`config.toml: default_owner`.** The fleet-wide fallback, for a deployment that wants every artifact attributed rather than auditing per agent.
+/// 4. **`None`.** Stated, not accidental: an artifact created with no resolvable principal is recorded as unowned, and unowned means visible to everyone, because nothing in this increment restricts on ownership.
+///
+/// The manifest deliberately does not *override* the authenticated caller.
+/// An override would mean a support agent configured `owner = "group:support"` silently relabels Alice's workflow as the team's, which is the opposite of "the principal it acted for" and would make the recorded owner unusable as an audit answer.
+///
+/// A malformed spec at step 2 or 3 logs a `WARN` and falls through to the next step rather than failing the turn: an unparseable owner must not take an agent down.
+pub fn resolve_acting_principal(
+    authenticated: Option<UserId>,
+    manifest_owner: Option<&str>,
+    config_default: Option<Principal>,
+) -> Option<Principal> {
+    if let Some(uid) = authenticated {
+        return Some(Principal::user(uid));
+    }
+    if let Some(spec) = manifest_owner {
+        match Principal::from_spec(spec) {
+            Ok(p) => return Some(p),
+            Err(e) => tracing::warn!(
+                manifest_owner = spec,
+                error = %e,
+                "`owner` in agent.toml is not a valid principal spec (expected `user:<name>` or `group:<name>`); falling back to `default_owner`"
+            ),
+        }
+    }
+    config_default
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +468,71 @@ mod tests {
         assert_eq!(Principal::group_named("oncall").as_user_id(), None);
         assert!(Principal::group_named("oncall").is_group());
         assert!(!Principal::user_named("alice").is_group());
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[test]
+    fn the_authenticated_caller_wins_over_every_configured_fallback() {
+        // The load-bearing precedence rule: a manifest `owner` must not
+        // relabel what a real human asked for.
+        let resolved = resolve_acting_principal(
+            Some(UserId::from_name("alice")),
+            Some("group:support"),
+            Some(Principal::group_named("platform")),
+        );
+        assert_eq!(resolved, Some(Principal::user_named("alice")));
+    }
+
+    #[test]
+    fn manifest_owner_covers_the_turns_with_no_human_behind_them() {
+        // Cron / trigger / workflow-step turns arrive with `authenticated =
+        // None`, and this is the arm that makes group ownership reachable.
+        let resolved = resolve_acting_principal(
+            None,
+            Some("group:compliance"),
+            Some(Principal::user_named("root")),
+        );
+        assert_eq!(resolved, Some(Principal::group_named("compliance")));
+    }
+
+    #[test]
+    fn config_default_is_the_last_resort() {
+        let resolved =
+            resolve_acting_principal(None, None, Some(Principal::user_named("operator")));
+        assert_eq!(resolved, Some(Principal::user_named("operator")));
+    }
+
+    #[test]
+    fn nothing_configured_resolves_to_unowned() {
+        // `None` is the stated answer, not a default nobody chose: with no
+        // authenticated caller, no manifest owner and no `default_owner`, an
+        // artifact is recorded as unowned rather than attributed to a
+        // synthetic principal.
+        assert_eq!(resolve_acting_principal(None, None, None), None);
+    }
+
+    #[test]
+    fn a_malformed_manifest_owner_falls_through_instead_of_failing() {
+        let resolved = resolve_acting_principal(
+            None,
+            Some("role:admin"),
+            Some(Principal::user_named("operator")),
+        );
+        assert_eq!(resolved, Some(Principal::user_named("operator")));
+        // …and with nothing to fall through to, unowned rather than a panic.
+        assert_eq!(
+            resolve_acting_principal(None, Some("role:admin"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_bare_manifest_owner_name_means_a_user() {
+        let resolved = resolve_acting_principal(None, Some("alice"), None);
+        assert_eq!(resolved, Some(Principal::user_named("alice")));
     }
 }

@@ -107,6 +107,7 @@ classified differently — the row note spells out which is which.
 | `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
 | `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
+| `default_owner` | N | Fleet-wide fallback owner for artifacts created by a turn with no authenticated caller (#7744) — parsed from the live config at each creation. Changing it does not rewrite owners already recorded. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
