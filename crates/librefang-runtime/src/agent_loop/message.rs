@@ -158,33 +158,23 @@ pub(super) fn sanitize_for_memory(text: &str) -> Option<String> {
     }
 }
 
-/// Marker appended to a side of the exchange that was cut by
-/// [`budget_interaction_halves`]. Kept short and unambiguous so a recalled row
-/// reads as an excerpt rather than as a sentence the user actually stopped
-/// mid-way through.
+/// Marker appended to a side of the exchange that was cut by [`budget_interaction_halves`].
+/// Kept short and unambiguous so a recalled row reads as an excerpt rather than as a sentence the user actually stopped mid-way through.
 pub(super) const MEMORY_TRUNCATION_MARKER: &str = "… [truncated]";
 
-/// Split `max_chars` across the two halves of a `[Past exchange]` row and
-/// return each half cut to its share (#7911).
+/// Split `max_chars` across the two halves of a `[Past exchange]` row and return each half cut to its share (#7911).
 ///
-/// The per-turn episodic writer inlines whatever the turn produced, so a
-/// channel adapter that renders an attachment into the user message — a
-/// transcribed PDF, a pasted log — used to be stored and embedded verbatim.
+/// The per-turn episodic writer inlines whatever the turn produced, so a channel adapter that renders an attachment into the user message — a transcribed PDF, a pasted log — used to be stored and embedded verbatim.
 /// The largest row reported on the issue was 201 765 characters.
 ///
 /// Budgeting rules, in order:
 /// - `max_chars == 0` disables the cap entirely and returns both halves untouched.
-/// - A side that already fits keeps all of its characters, and the characters it
-///   did not need are handed to the other side. This is what stops a huge user
-///   message from truncating the agent's reply away: the reply is usually small,
-///   takes its full length out of the budget, and the attachment absorbs the rest.
+/// - A side that already fits keeps all of its characters, and the characters it did not need are handed to the other side.
+///   This is what stops a huge user message from truncating the agent's reply away: the reply is usually small, takes its full length out of the budget, and the attachment absorbs the rest.
 /// - When both sides are over their half, each gets exactly `max_chars / 2`.
 ///
-/// Lengths are counted in `char`s, and every cut lands on a `char` boundary, so
-/// the result is always valid UTF-8 and never splits a multi-byte grapheme's
-/// code point. The marker is appended on top of the budget rather than inside
-/// it — a caller asking for 8 000 characters gets at most 8 000 characters of
-/// *content*.
+/// Lengths are counted in `char`s, and every cut lands on a `char` boundary, so the result is always valid UTF-8 and never splits a multi-byte grapheme's code point.
+/// The marker is appended on top of the budget rather than inside it — a caller asking for 8 000 characters gets at most 8 000 characters of *content*.
 pub(super) fn budget_interaction_halves(
     user_text: &str,
     response_text: &str,
@@ -206,8 +196,7 @@ pub(super) fn budget_interaction_halves(
     } else if resp_len <= half {
         (max_chars - resp_len, resp_len)
     } else {
-        // `max_chars` may be odd; give the leftover character to the user side
-        // so the two caps still sum to exactly `max_chars`.
+        // `max_chars` may be odd; give the leftover character to the user side so the two caps still sum to exactly `max_chars`.
         (max_chars - half, half)
     };
 
@@ -217,8 +206,7 @@ pub(super) fn budget_interaction_halves(
     )
 }
 
-/// Cut `text` to at most `max_chars` `char`s, appending
-/// [`MEMORY_TRUNCATION_MARKER`] when anything was removed.
+/// Cut `text` to at most `max_chars` `char`s, appending [`MEMORY_TRUNCATION_MARKER`] when anything was removed.
 fn truncate_to_chars(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
         None => text.to_string(),

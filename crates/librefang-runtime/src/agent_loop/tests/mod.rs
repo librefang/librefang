@@ -500,8 +500,7 @@ fn test_is_progress_text_leak() {
     assert!(!is_progress_text_leak(long));
 }
 
-/// #7911: a cap of zero restores the pre-fix behaviour of storing whatever
-/// the turn produced, so an operator who wants the old shape can have it.
+/// #7911: a cap of zero restores the pre-fix behaviour of storing whatever the turn produced, so an operator who wants the old shape can have it.
 #[test]
 fn budget_interaction_halves_zero_cap_is_unbounded() {
     let big = "x".repeat(200_000);
@@ -510,8 +509,7 @@ fn budget_interaction_halves_zero_cap_is_unbounded() {
     assert_eq!(r, "ok");
 }
 
-/// An exchange that already fits is returned byte-for-byte — no marker, no
-/// reallocation of content.
+/// An exchange that already fits is returned byte-for-byte — no marker, no reallocation of content.
 #[test]
 fn budget_interaction_halves_under_budget_is_untouched() {
     let (u, r) = budget_interaction_halves("hello", "hi there", 8_000);
@@ -519,9 +517,8 @@ fn budget_interaction_halves_under_budget_is_untouched() {
     assert_eq!(r, "hi there");
 }
 
-/// The failure the issue reports: a 200 KB attachment inlined into the user
-/// message. The reply is short, so it must survive whole — the attachment
-/// absorbs the entire remaining budget rather than each side losing half.
+/// The failure the issue reports: a 200 KB attachment inlined into the user message.
+/// The reply is short, so it must survive whole — the attachment absorbs the entire remaining budget rather than each side losing half.
 #[test]
 fn budget_interaction_halves_gives_a_short_reply_its_full_length() {
     let attachment = "P".repeat(201_765);
@@ -536,8 +533,7 @@ fn budget_interaction_halves_gives_a_short_reply_its_full_length() {
     assert!(u.ends_with(MEMORY_TRUNCATION_MARKER));
 }
 
-/// When both sides are oversized neither may starve the other: each gets
-/// exactly its half, and the two caps sum to the configured budget.
+/// When both sides are oversized neither may starve the other: each gets exactly its half, and the two caps sum to the configured budget.
 #[test]
 fn budget_interaction_halves_splits_evenly_when_both_sides_are_large() {
     let u_in = "u".repeat(10_000);
@@ -548,8 +544,7 @@ fn budget_interaction_halves_splits_evenly_when_both_sides_are_large() {
     assert_eq!(r.chars().count(), 499 + marker);
 }
 
-/// Every cut lands on a `char` boundary, so a multi-byte script cannot be
-/// sliced into invalid UTF-8 (this would panic on a byte-index slice).
+/// Every cut lands on a `char` boundary, so a multi-byte script cannot be sliced into invalid UTF-8 (this would panic on a byte-index slice).
 #[test]
 fn budget_interaction_halves_cuts_on_char_boundaries() {
     let u_in = "日本語テキスト".repeat(500);

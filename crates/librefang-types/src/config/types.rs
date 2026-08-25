@@ -6992,16 +6992,11 @@ pub struct MemoryConfig {
     /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
     #[serde(default = "default_memory_pool_size")]
     pub pool_size: u32,
-    /// Upper bound, in characters, on the text of a single episodic memory row
-    /// written by the agent loop's per-turn writer (#7911). Zero disables the cap.
+    /// Upper bound, in characters, on the text of a single episodic memory row written by the agent loop's per-turn writer (#7911).
+    /// Zero disables the cap.
     ///
-    /// The per-turn writer composes `[Past exchange]\nThem: …\nYou: …` from the
-    /// raw turn, so an inbound attachment that the channel adapter rendered into
-    /// the user message — a transcribed PDF, a pasted log — was previously stored
-    /// verbatim and embedded verbatim.
-    /// The cap is applied before the embedding call, so it bounds embedding cost
-    /// as well as row size, and it is split across the two halves of the exchange
-    /// so a large user message can never truncate the agent's reply away entirely.
+    /// The per-turn writer composes `[Past exchange]\nThem: …\nYou: …` from the raw turn, so an inbound attachment that the channel adapter rendered into the user message — a transcribed PDF, a pasted log — was previously stored verbatim and embedded verbatim.
+    /// The cap is applied before the embedding call, so it bounds embedding cost as well as row size, and it is split across the two halves of the exchange so a large user message can never truncate the agent's reply away entirely.
     #[serde(default = "default_max_episodic_chars")]
     pub max_episodic_chars: usize,
 }
@@ -7202,13 +7197,8 @@ pub struct MemoryDecayConfig {
     pub agent_ttl_days: u32,
     /// EPISODIC-scope memories expire after this many days of no access. Zero disables expiry.
     ///
-    /// `episodic` is the default scope of the `memories` table and the scope the
-    /// agent loop writes one row into on every non-fork, non-incognito turn, so
-    /// before #7911 it was the only scope with no exit at all: never decayed,
-    /// never distilled, never deleted.
-    /// The TTL is deliberately longer than the AGENT default because an episodic
-    /// row is the only record that a conversation happened, and `accessed_at` is
-    /// refreshed by recall — a row that keeps being retrieved keeps living.
+    /// `episodic` is the default scope of the `memories` table and the scope the agent loop writes one row into on every non-fork, non-incognito turn, so before #7911 it was the only scope with no exit at all: never decayed, never distilled, never deleted.
+    /// The TTL is deliberately longer than the AGENT default because an episodic row is the only record that a conversation happened, and `accessed_at` is refreshed by recall — a row that keeps being retrieved keeps living.
     pub episodic_ttl_days: u32,
     /// How often to run the decay sweep (hours).
     pub decay_interval_hours: u32,

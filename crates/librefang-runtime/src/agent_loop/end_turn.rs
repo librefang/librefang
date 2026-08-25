@@ -265,11 +265,8 @@ pub(super) async fn finalize_successful_end_turn(
             sanitize_for_memory(ctx.user_message),
             sanitize_for_memory(&end_turn.final_response),
         ) {
-            // Bound the row before it is composed, so the cap applies to what
-            // gets embedded as well as to what gets stored (#7911). A channel
-            // adapter that renders an attachment into the user message used to
-            // land here verbatim — the issue reports a single 201 765-character
-            // row that had been retrieved 63 times.
+            // Bound the row before it is composed, so the cap applies to what gets embedded as well as to what gets stored (#7911).
+            // A channel adapter that renders an attachment into the user message used to land here verbatim — the issue reports a single 201 765-character row that had been retrieved 63 times.
             let (user_clean, resp_clean) = budget_interaction_halves(
                 &user_clean,
                 &resp_clean,
