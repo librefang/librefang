@@ -5,6 +5,10 @@ on:
     - cron: '0 6 * * 1'  # Every Monday at 06:00 UTC
   workflow_dispatch:
 
+concurrency:
+  group: stale
+  cancel-in-progress: false
+
 permissions:
   issues: write
   pull-requests: write
@@ -34,4 +38,5 @@ jobs:
           stale-issue-label: stale
           stale-pr-label: stale
           exempt-issue-labels: 'pinned,good first issue,help wanted'
-          exempt-pr-labels: 'pinned,work-in-progress'
+          exempt-pr-labels: 'pinned,work-in-progress,dependencies,security'
+          exempt-draft-pr: true

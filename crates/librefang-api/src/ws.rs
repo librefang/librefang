@@ -1939,11 +1939,7 @@ async fn handle_command(
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
         "a2a" => {
-            let agents = state
-                .kernel
-                .a2a_agents()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
             let msg = if agents.is_empty() {
                 "No external A2A agents discovered.".to_string()
             } else {

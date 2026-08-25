@@ -539,7 +539,10 @@
       "err_label": "błąd",
       "system_prompt_placeholder": "Jesteś pomocnym asystentem AI...",
       "description_placeholder": "Co się zmieniło w tej wersji?",
-      "experiment_name_placeholder": "Mój test A/B"
+      "experiment_name_placeholder": "Mój test A/B",
+      "delete_version_title": "Usuń wersję promptu",
+      "delete_version_message": "Trwale usunąć wersję v{{version}}? Tej operacji nie można cofnąć.",
+      "variant_limit": "Procentowy podział ruchu obsługuje maksymalnie {{count}} wariantów."
     },
     "thinking": "Rozszerzone myślenie",
     "thinking_enabled": "Włączone",
@@ -1190,7 +1193,11 @@
     "pending_approve_failed": "Zatwierdzenie nie powiodło się:",
     "pending_propose_failed": "Propozycja do rejestru nie powiodła się:",
     "pending_pr_opened": "Pull request otwarty:",
+    "pending_source_unknown": "Nieznane źródło",
+    "pending_invalid_update": "Ta aktualizacja nie wskazuje docelowej umiejętności i nie może zostać zatwierdzona.",
     "pending_reject_title": "Odrzucić kandydata?",
+    "pending_reject_message": "Oczekujący kandydat „{{name}}” zostanie usunięty. Tej operacji nie można cofnąć.",
+    "pending_reject_failed": "Odrzucenie nie powiodło się:",
     "pending_rejecting": "Odrzucanie…",
     "pending_title": "Oczekujący warsztat umiejętności",
     "pending_load_failed": "Nie udało się załadować oczekujących kandydatów:",
@@ -1393,6 +1400,10 @@
     "rail_no_match": "Brak pasujących agentów.",
     "auto_dream_on_badge": "Auto-Dream włączony",
     "auto_dream_off_badge": "Auto-Dream wyłączony",
+    "auto_dream_enrolled": "Zapisany",
+    "auto_dream_not_enrolled": "Wyłączone",
+    "auto_dream_last": "Ostatni",
+    "auto_dream_next": "Następny",
     "auto_dream_desc_inline": "Okresowa konsolidacja pamięci dla każdego agenta. Nadpisanie w manifeście > globalna wartość domyślna; przełącz przełącznik globalny tutaj.",
     "auto_dream_global_toggle_title": "Włącz lub wyłącz Auto-Dream globalnie",
     "auto_dream_global_on_ok": "Włączono Auto-Dream globalnie",
@@ -1727,7 +1738,10 @@
       "pending_review_few": "{{count}} uruchomienia przepływu pracy oczekują na weryfikację operatora",
       "pending_review_many": "{{count}} uruchomień przepływu pracy oczekuje na weryfikację operatora",
       "pending_review_other": "{{count}} uruchomień przepływu pracy oczekujących na weryfikację operatora",
-      "empty_artifact": "(pusty artefakt)"
+      "empty_artifact": "(pusty artefakt)",
+      "load_failed": "Nie udało się wczytać oczekujących weryfikacji operatora.",
+      "review_run": "Zweryfikuj {{workflow}} — {{step}}",
+      "more_pending": "+{{count}} oczekujących"
     }
   },
   "scheduler": {
@@ -2065,6 +2079,8 @@
     "totp_recovery_title": "Kody odzyskiwania (zapisz je w bezpiecznym miejscu):",
     "totp_recovery_reveal": "Pokaż kody",
     "totp_recovery_hide": "Ukryj kody",
+    "totp_secret_reveal": "Pokaż sekret",
+    "totp_secret_hide": "Ukryj sekret",
     "totp_reset_placeholder": "Bieżący kod TOTP lub kod odzyskiwania",
     "totp_verify_reset": "Zweryfikuj i zresetuj",
     "totp_revoke_placeholder": "Kod TOTP lub kod odzyskiwania",
@@ -2133,6 +2149,7 @@
     "export_config_btn": "Eksportuj konfigurację",
     "export_config_desc": "Pobierz bieżącą konfigurację jako plik TOML.",
     "export_config_title": "Eksportuj konfigurację",
+    "export_config_failed": "Nie udało się wyeksportować konfiguracji.",
     "totp_qr_alt": "Kod QR TOTP"
   },
   "config": {
@@ -2988,6 +3005,7 @@
     "summary_status": "Status",
     "finish_action": "Uruchom LibreFang",
     "finalize_failed": "Konfiguracja nie powiodła się: {{message}}",
+    "quick_init_failed": "Domyślny dostawca został zapisany, ale inicjalizacja nie powiodła się: {{message}}. Spróbuj ponownie, aby kontynuować.",
     "done_title": "LibreFang jest gotowy",
     "done_desc": "Twój domyślny dostawca został skonfigurowany, a agent startowy został utworzony. Możesz teraz czatować lub przejść do panelu.",
     "go_overview": "Przejdź do Przeglądu",
@@ -3168,7 +3186,8 @@
     "status_submitted": "zgłoszone",
     "status_completed": "ukończone",
     "status_failed": "nieudane",
-    "image_too_large": "Obraz jest zbyt duży, aby go wyświetlić"
+    "image_too_large": "Obraz jest zbyt duży, aby go wyświetlić",
+    "image_unavailable": "Obraz jest niedostępny"
   },
   "auth": {
     "title": "Wymagany klucz API",
@@ -3346,6 +3365,7 @@
       "create_failed": "Nie udało się utworzyć okna",
       "delete_failed": "Nie udało się zamknąć okna",
       "rename_failed": "Nie udało się zmienić nazwy okna",
+      "switch_unavailable": "Nie można przełączać okien, gdy terminal jest rozłączony.",
       "rename_hint": "Kliknij dwukrotnie, aby zmienić nazwę",
       "name_label": "Nazwa okna",
       "name_invalid": "Nazwa musi mieć od 1 do 64 znaków i nie może zawierać znaku | ani znaków kontrolnych.",
@@ -3523,7 +3543,8 @@
     "copied": "Skopiowano do schowka",
     "copy_failed": "Kopiowanie nie powiodło się",
     "download": "Pobierz",
-    "loading": "Ładowanie…"
+    "loading": "Ładowanie…",
+    "source_changed": "Plik TOML zmienił się poza tym edytorem. Anuluj i ponownie otwórz edycję przed zapisaniem."
   },
   "audit": {
     "title": "Ścieżka audytu",
@@ -3739,7 +3760,7 @@
     },
     "errors": {
       "non_negative": "{{field}} musi być skończoną, nieujemną liczbą",
-      "threshold_range": "alert_threshold musi mieścić się w przedziale 0.0..=1.0"
+      "threshold_range": "alert_threshold musi być większy od 0 i nie większy niż 1"
     },
     "toast": {
       "saved": "Zapisano limit wydatków"
@@ -4087,7 +4108,6 @@
     "page_assets_updated": "Zasoby strony zostały zaktualizowane",
     "react_state_reset": "Stan React został zresetowany — ponowne ładowanie",
     "new_version_available": "Dostępna jest nowa wersja. Przeładuj stronę, aby ją pobrać.",
-    "unexpected": "Wystąpił nieoczekiwany błąd.",
     "force_reload_title": "Czyści czas oczekiwania na automatyczne przeładowanie i wymusza świeże ładowanie",
     "force_reload": "Wymuś przeładowanie",
     "stack": "stos",

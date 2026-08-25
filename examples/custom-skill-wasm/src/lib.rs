@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 fn handle(req: Request) -> Result<Value, String> {
     match req.tool.as_str() {
-        "count_words" => {
+        "count_text_stats" => {
             let text = req.input.get("text").and_then(Value::as_str).unwrap_or("");
             let words = text.split_whitespace().count();
             let sentences = text

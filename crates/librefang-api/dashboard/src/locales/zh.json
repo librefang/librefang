@@ -539,7 +539,10 @@
       "err_label": "错误",
       "system_prompt_placeholder": "你是一个有用的 AI 助手...",
       "description_placeholder": "这个版本有什么不同？",
-      "experiment_name_placeholder": "我的 A/B 测试"
+      "experiment_name_placeholder": "我的 A/B 测试",
+      "delete_version_title": "删除提示词版本",
+      "delete_version_message": "永久删除版本 v{{version}}？此操作无法撤销。",
+      "variant_limit": "百分比流量分配最多支持 {{count}} 个变体。"
     },
     "thinking": "扩展思考",
     "thinking_enabled": "已启用",
@@ -1190,7 +1193,11 @@
     "pending_approve_failed": "批准失败:",
     "pending_propose_failed": "提交到注册表失败:",
     "pending_pr_opened": "Pull request 已打开:",
+    "pending_source_unknown": "未知来源",
+    "pending_invalid_update": "此更新缺少目标技能，无法批准。",
     "pending_reject_title": "拒绝候选？",
+    "pending_reject_message": "待处理候选“{{name}}”将被删除。此操作无法撤销。",
+    "pending_reject_failed": "拒绝失败:",
     "pending_rejecting": "正在拒绝…",
     "pending_title": "Skill workshop 待处理",
     "pending_load_failed": "加载待处理候选失败:",
@@ -1393,6 +1400,10 @@
     "rail_no_match": "没有匹配的智能体。",
     "auto_dream_on_badge": "自动梦境：开",
     "auto_dream_off_badge": "自动梦境：关",
+    "auto_dream_enrolled": "已加入",
+    "auto_dream_not_enrolled": "关闭",
+    "auto_dream_last": "上次",
+    "auto_dream_next": "下次",
     "auto_dream_desc_inline": "按 agent 周期性整理记忆。Manifest 覆盖 > 全局默认；在此切换全局开关。",
     "auto_dream_global_toggle_title": "全局启用或停用自动梦境",
     "auto_dream_global_on_ok": "已全局启用自动梦境",
@@ -1725,7 +1736,10 @@
       "submit_action": "提交 {{action}}",
       "pending_review_one": "1 个工作流运行正在等待操作员审查",
       "pending_review_other": "{{count}} 个工作流运行正在等待操作员审查",
-      "empty_artifact": "（空产物）"
+      "empty_artifact": "（空产物）",
+      "load_failed": "无法加载待处理的操作员审查。",
+      "review_run": "审查 {{workflow}} — {{step}}",
+      "more_pending": "另有 {{count}} 项待处理"
     }
   },
   "scheduler": {
@@ -2029,6 +2043,8 @@
     "totp_recovery_title": "恢复码（请保存到安全的地方）：",
     "totp_recovery_reveal": "显示恢复码",
     "totp_recovery_hide": "隐藏恢复码",
+    "totp_secret_reveal": "显示密钥",
+    "totp_secret_hide": "隐藏密钥",
     "totp_reset_placeholder": "当前 TOTP 或恢复码",
     "totp_verify_reset": "验证并重置",
     "totp_revoke_placeholder": "TOTP 或恢复码",
@@ -2097,6 +2113,7 @@
     "export_config_btn": "导出配置",
     "export_config_desc": "将当前配置下载为 TOML 文件。",
     "export_config_title": "导出配置",
+    "export_config_failed": "无法导出配置。",
     "totp_qr_alt": "TOTP 二维码"
   },
   "config": {
@@ -2952,6 +2969,7 @@
     "summary_status": "状态",
     "finish_action": "启动 LibreFang",
     "finalize_failed": "初始化失败：{{message}}",
+    "quick_init_failed": "默认提供商已保存，但初始化失败：{{message}}。请重试以继续。",
     "done_title": "LibreFang 已就绪",
     "done_desc": "默认供应商已配置，入门 Agent 已创建。现在可以开始聊天或进入控制台。",
     "go_overview": "进入总览",
@@ -3132,7 +3150,8 @@
     "status_submitted": "已提交",
     "status_completed": "已完成",
     "status_failed": "失败",
-    "image_too_large": "图片过大，无法显示"
+    "image_too_large": "图片过大，无法显示",
+    "image_unavailable": "图片不可用"
   },
   "auth": {
     "title": "需要 API Key",
@@ -3342,6 +3361,7 @@
       "create_failed": "创建窗口失败",
       "delete_failed": "关闭窗口失败",
       "rename_failed": "重命名窗口失败",
+      "switch_unavailable": "终端断开连接时无法切换窗口。",
       "rename_hint": "双击可重命名",
       "name_label": "窗口名称",
       "name_invalid": "名称须为 1–64 个字符，不能包含 | 或控制字符。",
@@ -3517,7 +3537,8 @@
     "copied": "已复制",
     "copy_failed": "复制失败",
     "download": "下载",
-    "loading": "加载中…"
+    "loading": "加载中…",
+    "source_changed": "TOML 已在此编辑器之外发生更改。请取消并重新打开编辑后再保存。"
   },
   "audit": {
     "title": "审计日志",
@@ -3733,7 +3754,7 @@
     },
     "errors": {
       "non_negative": "{{field}} 必须是有限的非负数",
-      "threshold_range": "alert_threshold 必须在 0.0..=1.0 范围内"
+      "threshold_range": "alert_threshold 必须大于 0 且不大于 1"
     },
     "toast": {
       "saved": "支出上限已保存"
@@ -4079,7 +4100,6 @@
     "page_assets_updated": "页面资源已更新",
     "react_state_reset": "React 状态已重置 — 正在重新加载",
     "new_version_available": "新版本可用。重新加载以获取最新版本。",
-    "unexpected": "发生意外错误。",
     "force_reload_title": "清除自动重新加载冷却并强制重新加载",
     "force_reload": "强制重新加载",
     "stack": "堆栈",

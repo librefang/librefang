@@ -93,32 +93,38 @@ pub trait CronChannelSender: Send + Sync {
 pub struct CronDeliveryEngine {
     /// Sender used to invoke channel adapters (Telegram, Slack, Email, ...).
     channel_sender: Arc<dyn CronChannelSender>,
-    /// Shared HTTP client for webhook delivery.
-    http: reqwest::Client,
+    /// Shared HTTP client for webhook delivery, or the construction error
+    /// that webhook targets should report without blocking other targets.
+    http: Result<reqwest::Client, String>,
 }
 
 impl CronDeliveryEngine {
     /// Build a new engine using the given channel sender and a fresh
-    /// `reqwest::Client`. The HTTP client construction failing would mean
-    /// the daemon is in an unrecoverable state (no TLS backend, no resolver,
-    /// etc.), so we surface it loudly via `expect` rather than silently
-    /// downgrading to `Client::default()` and producing confusing
-    /// per-webhook errors at delivery time.
+    /// `reqwest::Client`. A construction failure is retained and reported
+    /// by webhook targets. Channel, file, and email targets remain usable.
     pub fn new(channel_sender: Arc<dyn CronChannelSender>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
             .build()
-            .expect("HTTP client build failed for cron fan-out engine");
-        Self {
-            channel_sender,
-            http,
-        }
+            .map_err(|error| format!("HTTP client unavailable: {error}"));
+        Self::with_http_client_result(channel_sender, http)
     }
 
     /// Build a new engine with an explicit HTTP client — used by tests.
     pub fn with_http_client(
         channel_sender: Arc<dyn CronChannelSender>,
         http: reqwest::Client,
+    ) -> Self {
+        Self::with_http_client_result(channel_sender, Ok(http))
+    }
+
+    /// Build an engine from a cached HTTP-client construction result.
+    ///
+    /// The kernel uses this to cache both successful construction and a
+    /// failure without panicking from its process-wide lazy initializer.
+    pub(crate) fn with_http_client_result(
+        channel_sender: Arc<dyn CronChannelSender>,
+        http: Result<reqwest::Client, String>,
     ) -> Self {
         Self {
             channel_sender,
@@ -206,9 +212,14 @@ impl CronDeliveryEngine {
             }
             CronDeliveryTarget::Webhook { url, auth_header } => {
                 let desc = format!("webhook:{url}");
-                match deliver_webhook(&self.http, url, auth_header.as_deref(), job_name, output)
-                    .await
-                {
+                let http = match &self.http {
+                    Ok(http) => http,
+                    Err(error) => {
+                        warn!(target = %desc, error = %error, "Cron fan-out: webhook delivery failed");
+                        return DeliveryResult::err(desc, error.clone());
+                    }
+                };
+                match deliver_webhook(http, url, auth_header.as_deref(), job_name, output).await {
                     Ok(()) => {
                         debug!(target = %desc, "Cron fan-out: webhook delivery ok");
                         DeliveryResult::ok(desc)
@@ -727,6 +738,38 @@ mod tests {
         // File was still written even though the other target failed —
         // failure isolation invariant.
         assert_eq!(std::fs::read_to_string(&ok_path).unwrap(), "payload");
+    }
+
+    #[tokio::test]
+    async fn unavailable_http_client_only_fails_webhook_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ok_path = tmp.path().join("ok.txt");
+        let targets = vec![
+            CronDeliveryTarget::Webhook {
+                url: "https://example.invalid/hook".to_string(),
+                auth_header: None,
+            },
+            CronDeliveryTarget::LocalFile {
+                path: ok_path.to_string_lossy().to_string(),
+                append: false,
+            },
+        ];
+        let engine = CronDeliveryEngine::with_http_client_result(
+            MockSender::new(),
+            Err("HTTP client unavailable: simulated build failure".to_string()),
+        );
+
+        let results = engine.deliver(&targets, "job", "payload").await;
+
+        assert_eq!(results.len(), 2);
+        assert!(!results[0].success);
+        assert!(results[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("simulated build failure"));
+        assert!(results[1].success, "error: {:?}", results[1].error);
+        assert_eq!(std::fs::read_to_string(ok_path).unwrap(), "payload");
     }
 
     #[tokio::test]

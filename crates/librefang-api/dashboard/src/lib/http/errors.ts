@@ -7,12 +7,19 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    Object.setPrototypeOf(this, ApiError.prototype);
   }
 
   static async fromResponse(response: Response): Promise<ApiError> {
-    const text = await response.text();
     let message = response.statusText;
     let code = `HTTP_${response.status}`;
+    let text = "";
+
+    try {
+      text = await response.text();
+    } catch {
+      return new ApiError(response.status, code, message || `HTTP ${response.status}`);
+    }
 
     try {
       const json = JSON.parse(text) as Record<string, unknown>;
@@ -40,13 +47,10 @@ export class ApiError extends Error {
         message = json.error;
       }
 
-      if (nested && typeof nested.code === "string") {
-        code = nested.code;
+      if (nested) {
+        if (typeof nested.code === "string") code = nested.code;
       } else if (typeof json.code === "string") {
         code = json.code;
-      } else if (typeof json.error === "string") {
-        // Legacy: flat `error` doubled as both message and code token.
-        code = json.error;
       }
     } catch {
       // ignore parse errors

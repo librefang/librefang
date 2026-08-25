@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -670,8 +671,8 @@ struct SpawnCtx {
 /// operator needs escaped values they should set the env var via
 /// `crate::secrets_env::upsert_secret` (which writes a known shape) or
 /// export it from their shell.
-fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
-    let content = match std::fs::read_to_string(path) {
+async fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
+    let content = match tokio::fs::read_to_string(path).await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -804,7 +805,7 @@ pub fn warn_secret_prefix_collisions(names: &[String]) -> usize {
     collisions.len()
 }
 
-fn build_spawn_env(
+async fn build_spawn_env(
     home_dir: &Path,
     instance_name: &str,
     ctx_env: &HashMap<String, String>,
@@ -813,7 +814,7 @@ fn build_spawn_env(
     let secrets_path = home_dir.join("secrets.env");
     let prefix = format!("{}__", instance_secret_prefix(instance_name));
     let mut instance_scoped: HashMap<String, String> = HashMap::new();
-    for (k, v) in parse_secrets_env(&secrets_path) {
+    for (k, v) in parse_secrets_env(&secrets_path).await {
         if let Some(bare) = k.strip_prefix(prefix.as_str()) {
             // Per-instance secret (`<NAME>__KEY`): scoped to this instance; wins over
             // the global bare key and the parent env so two sidecars can hold their
@@ -827,6 +828,12 @@ fn build_spawn_env(
             // namespaced secret from a global key that merely contains `__`. Both are
             // intentionally withheld from the child: a bare global secret in
             // secrets.env must not contain `__` (see librefang.toml.example).
+            debug!(
+                key = %k,
+                instance = %instance_name,
+                expected_prefix = %prefix,
+                "Withholding namespaced secrets.env key from sidecar instance"
+            );
             continue;
         } else if std::env::var(&k).is_err() {
             // Global secrets.env: parent process env wins (dotenv precedence).
@@ -908,17 +915,34 @@ fn resolve_sidecar_command(command: &str, home_dir: &Path) -> String {
     command.to_string()
 }
 
-/// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
-/// wall clock. Backoff jitter does not need a CSPRNG.
+/// Cheap, dependency-free jitter: 0..=20% of `base`.
+///
+/// A process-local sequence is mixed with the wall clock so adapters that
+/// restart on the same clock tick do not deterministically choose the same
+/// delay. Backoff jitter does not need a CSPRNG.
 fn backoff_with_jitter(attempt: u32, initial_ms: u64, max_ms: u64) -> std::time::Duration {
+    static JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let exp = initial_ms.saturating_mul(1u64 << attempt.min(20));
     let base = exp.min(max_ms);
     let span = base / 5 + 1;
-    let nanos = std::time::SystemTime::now()
+    let clock = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    std::time::Duration::from_millis(base + nanos % span)
+    let sequence = JITTER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mixed = mix_jitter_entropy(clock, sequence);
+    std::time::Duration::from_millis(base.saturating_add(mixed % span))
+}
+
+fn mix_jitter_entropy(clock: u64, sequence: u64) -> u64 {
+    let mut mixed = clock ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    mixed
 }
 
 /// Spawn the child once and wire stdin/stdout/stderr. Returns the
@@ -939,6 +963,7 @@ async fn spawn_once(
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
     let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env)
+        .await
         .into_iter()
         .collect();
     // Embedded-SDK fallback: when the spawn command is a Python
@@ -2537,56 +2562,78 @@ mod tests {
         f
     }
 
-    #[test]
-    fn parse_secrets_env_strips_double_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_strips_double_quotes() {
         let f = write_tmp_secrets("KEY=\"value\"\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_strips_single_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_strips_single_quotes() {
         let f = write_tmp_secrets("KEY='value'\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_keeps_internal_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_keeps_internal_quotes() {
         // Not a paired outer pair — the quote is in the middle of the
         // value, so the contract says leave it verbatim.
         let f = write_tmp_secrets("KEY=a\"b\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "a\"b".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_keeps_mismatched_outer_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_keeps_mismatched_outer_quotes() {
         // `"abc'` — outer pair are different quote types, not a match.
         let f = write_tmp_secrets("KEY=\"abc'\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "\"abc'".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_trims_whitespace() {
+    #[tokio::test]
+    async fn parse_secrets_env_trims_whitespace() {
         let f = write_tmp_secrets("  KEY = value  \n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_handles_empty_quoted_value() {
+    #[tokio::test]
+    async fn parse_secrets_env_handles_empty_quoted_value() {
         let f = write_tmp_secrets("KEY=\"\"\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), String::new())]);
     }
 
-    #[test]
-    fn parse_secrets_env_skips_comments_and_blanks() {
+    #[tokio::test]
+    async fn parse_secrets_env_skips_comments_and_blanks() {
         let f = write_tmp_secrets("# a comment\n\nKEY=value\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn jitter_sequence_decorrelates_equal_clock_samples() {
+        let clock = 123_456_789;
+        let offsets: HashSet<_> = (0..32)
+            .map(|sequence| mix_jitter_entropy(clock, sequence) % 201)
+            .collect();
+        assert!(
+            offsets.len() > 1,
+            "concurrent restarts sampled on one clock tick need distinct jitter candidates"
+        );
+    }
+
+    #[test]
+    fn backoff_jitter_stays_within_twenty_percent() {
+        for attempt in 0..8 {
+            let delay = backoff_with_jitter(attempt, 100, 10_000).as_millis() as u64;
+            let base = 100_u64.saturating_mul(1_u64 << attempt).min(10_000);
+            assert!(delay >= base);
+            assert!(delay <= base.saturating_add(base / 5));
+        }
     }
 
     #[test]
@@ -3977,8 +4024,8 @@ mod tests {
     // private to LibreFang test scope, and the assertions are about
     // presence/absence of *that key alone*.
 
-    #[test]
-    fn build_spawn_env_secrets_env_visible_to_child() {
+    #[tokio::test]
+    async fn build_spawn_env_secrets_env_visible_to_child() {
         // secrets.env is the only source of a key — it must appear.
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -3993,7 +4040,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY")
@@ -4002,8 +4049,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_spawn_env_parent_env_beats_secrets() {
+    #[tokio::test]
+    async fn build_spawn_env_parent_env_beats_secrets() {
         // dotenv precedence: shell-exported value beats secrets.env.
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -4017,7 +4064,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         // The merge skipped the secrets.env entry because the parent
         // env already had the key; the child still inherits the parent
@@ -4034,8 +4081,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_spawn_env_ctx_env_beats_secrets() {
+    #[tokio::test]
+    async fn build_spawn_env_ctx_env_beats_secrets() {
         // config.toml [sidecar_channels.env] explicit overrides win
         // over secrets.env (operator-explicit > file-loaded fallback).
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4054,7 +4101,7 @@ mod tests {
             "LIBREFANG_TEST_BSE_CTX_WINS".to_string(),
             "from_config".to_string(),
         );
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_CTX_WINS").map(|s| s.as_str()),
@@ -4063,19 +4110,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_spawn_env_missing_file_is_not_an_error() {
+    #[tokio::test]
+    async fn build_spawn_env_missing_file_is_not_an_error() {
         // secrets.env does not exist → empty contribution, ctx_env passes through.
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut ctx_env: HashMap<String, String> = HashMap::new();
         ctx_env.insert("FOO".to_string(), "bar".to_string());
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(got.get("FOO").map(|s| s.as_str()), Some("bar"));
     }
 
-    #[test]
-    fn build_spawn_env_per_instance_secret_overrides_global_and_parent() {
+    #[tokio::test]
+    async fn build_spawn_env_per_instance_secret_overrides_global_and_parent() {
         // #6169: a `<NAME>__KEY` secret resolves to bare KEY for this instance and
         // beats both the global bare key and a shell-exported parent value, so two
         // sidecars can each hold their own token from secrets.env.
@@ -4090,7 +4137,7 @@ mod tests {
             std::env::set_var("LIBREFANG_TEST_BSE_PI", "from_parent");
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_PI").map(|s| s.as_str()),
@@ -4103,8 +4150,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
+    #[tokio::test]
+    async fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
         // A different instance's `<NAME>__KEY` secret must not reach this child,
         // neither under the bare name nor under the namespaced name.
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4118,7 +4165,7 @@ mod tests {
             std::env::remove_var("LIBREFANG_TEST_BSE_LEAK");
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert!(
             !got.contains_key("LIBREFANG_TEST_BSE_LEAK")

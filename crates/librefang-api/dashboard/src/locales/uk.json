@@ -539,7 +539,10 @@
       "err_label": "помилка",
       "system_prompt_placeholder": "Ви — корисний ШІ-асистент...",
       "description_placeholder": "Що змінилося в цій версії?",
-      "experiment_name_placeholder": "Мій A/B тест"
+      "experiment_name_placeholder": "Мій A/B тест",
+      "delete_version_title": "Видалити версію промпту",
+      "delete_version_message": "Назавжди видалити версію v{{version}}? Цю дію неможливо скасувати.",
+      "variant_limit": "Відсотковий розподіл трафіку підтримує щонайбільше {{count}} варіантів."
     },
     "thinking": "Розширене мислення",
     "thinking_enabled": "Увімкнено",
@@ -1190,7 +1193,11 @@
     "pending_approve_failed": "Не вдалося схвалити:",
     "pending_propose_failed": "Не вдалося запропонувати до реєстру:",
     "pending_pr_opened": "Pull request відкрито:",
+    "pending_source_unknown": "Невідоме джерело",
+    "pending_invalid_update": "У цьому оновленні не вказано цільовий скіл, тому його не можна схвалити.",
     "pending_reject_title": "Відхилити кандидата?",
+    "pending_reject_message": "Кандидата «{{name}}» буде видалено. Цю дію неможливо скасувати.",
+    "pending_reject_failed": "Не вдалося відхилити:",
     "pending_rejecting": "Відхилення…",
     "pending_title": "Очікує Skill workshop",
     "pending_load_failed": "Не вдалося завантажити кандидатів:",
@@ -1393,6 +1400,10 @@
     "rail_no_match": "Немає відповідних агентів.",
     "auto_dream_on_badge": "Авто-сон увімкнено",
     "auto_dream_off_badge": "Авто-сон вимкнено",
+    "auto_dream_enrolled": "Підключено",
+    "auto_dream_not_enrolled": "Вимкнено",
+    "auto_dream_last": "Останній",
+    "auto_dream_next": "Наступний",
     "auto_dream_desc_inline": "Періодична консолідація пам'яті для кожного агента. Перевизначення в маніфесті > глобальне значення за замовчуванням; перемкніть глобальний вмикач тут.",
     "auto_dream_global_toggle_title": "Увімкнути або вимкнути Авто-сон глобально",
     "auto_dream_global_on_ok": "Авто-сон увімкнено глобально",
@@ -1727,7 +1738,10 @@
       "pending_review_few": "{{count}} запуски воркфлоу очікують перегляду оператором",
       "pending_review_many": "{{count}} запусків воркфлоу очікують перегляду оператором",
       "pending_review_other": "{{count}} запусків воркфлоу очікують перегляду оператором",
-      "empty_artifact": "(порожній артефакт)"
+      "empty_artifact": "(порожній артефакт)",
+      "load_failed": "Не вдалося завантажити очікувані перегляди оператором.",
+      "review_run": "Переглянути {{workflow}} — {{step}}",
+      "more_pending": "+{{count}} очікують"
     }
   },
   "scheduler": {
@@ -2065,6 +2079,8 @@
     "totp_recovery_title": "Коди відновлення (збережіть їх у безпечному місці):",
     "totp_recovery_reveal": "Показати коди",
     "totp_recovery_hide": "Приховати коди",
+    "totp_secret_reveal": "Показати секрет",
+    "totp_secret_hide": "Приховати секрет",
     "totp_reset_placeholder": "Поточний TOTP або код відновлення",
     "totp_verify_reset": "Перевірити та скинути",
     "totp_revoke_placeholder": "TOTP або код відновлення",
@@ -2133,6 +2149,7 @@
     "export_config_btn": "Експортувати конфігурацію",
     "export_config_desc": "Завантажити поточну конфігурацію як TOML-файл.",
     "export_config_title": "Експортувати конфігурацію",
+    "export_config_failed": "Не вдалося експортувати конфігурацію.",
     "totp_qr_alt": "QR-код TOTP"
   },
   "config": {
@@ -2988,6 +3005,7 @@
     "summary_status": "Статус",
     "finish_action": "Запустити LibreFang",
     "finalize_failed": "Налаштування не вдалося: {{message}}",
+    "quick_init_failed": "Типового провайдера збережено, але ініціалізація не вдалася: {{message}}. Повторіть спробу, щоб продовжити.",
     "done_title": "LibreFang готовий",
     "done_desc": "Вашого дефолтного провайдера налаштовано, а стартового агента створено. Тепер ви можете спілкуватися або перейти в панель керування.",
     "go_overview": "Перейти до огляду",
@@ -3168,7 +3186,8 @@
     "status_submitted": "надіслано",
     "status_completed": "завершено",
     "status_failed": "помилка",
-    "image_too_large": "Зображення завелике для показу"
+    "image_too_large": "Зображення завелике для показу",
+    "image_unavailable": "Зображення недоступне"
   },
   "auth": {
     "title": "Потрібен API-ключ",
@@ -3346,6 +3365,7 @@
       "create_failed": "Не вдалося створити вікно",
       "delete_failed": "Не вдалося закрити вікно",
       "rename_failed": "Не вдалося перейменувати вікно",
+      "switch_unavailable": "Неможливо перемикати вікна, доки термінал відключено.",
       "rename_hint": "Двічі клацніть, щоб перейменувати",
       "name_label": "Назва вікна",
       "name_invalid": "Назва має містити від 1 до 64 символів і не може містити | або керуючі символи.",
@@ -3523,7 +3543,8 @@
     "copied": "Скопійовано",
     "copy_failed": "Не вдалося скопіювати",
     "download": "Завантажити",
-    "loading": "Завантаження…"
+    "loading": "Завантаження…",
+    "source_changed": "TOML змінено поза цим редактором. Скасуйте й знову відкрийте редагування перед збереженням."
   },
   "audit": {
     "title": "Журнал аудиту",
@@ -3739,7 +3760,7 @@
     },
     "errors": {
       "non_negative": "{{field}} має бути скінченним невід'ємним числом",
-      "threshold_range": "alert_threshold має бути в межах 0.0..=1.0"
+      "threshold_range": "alert_threshold має бути більше 0 і не більше 1"
     },
     "toast": {
       "saved": "Ліміт витрат збережено"
@@ -4087,7 +4108,6 @@
     "page_assets_updated": "Ресурси сторінки оновлено",
     "react_state_reset": "Стан React скинуто — перезавантаження",
     "new_version_available": "Доступна нова версія. Перезавантажте сторінку, щоб отримати її.",
-    "unexpected": "Сталася неочікувана помилка.",
     "force_reload_title": "Скидає затримку автоперезавантаження і примусово завантажує заново",
     "force_reload": "Примусово перезавантажити",
     "stack": "стек",

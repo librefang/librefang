@@ -13,13 +13,14 @@ name: Kubernetes
 #   kind   — builds the image and actually boots it in a throwaway cluster with
 #            `pod-security.kubernetes.io/enforce=restricted`, then kills the pod
 #            and proves /data survived. ~40 min because of the Rust release
-#            build, so it follows docker-build.yml's precedent and runs on
-#            push-to-main plus manual dispatch rather than on every PR push.
+#            build, so it runs on push-to-main, manual dispatch, and only PRs
+#            that change the image runtime or this workflow.
 on:
   pull_request:
     paths:
       - 'deploy/kubernetes/**'
       - 'deploy/docker-entrypoint.sh'
+      - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
       - '.github/workflows/kubernetes.yml'
   push:
@@ -37,9 +38,44 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Each main commit is a published integration state. Preserve its full gate;
+  # PR runs remain replaceable when a newer revision supersedes them.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: detect image-runtime changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image_runtime: ${{ steps.diff.outputs.image_runtime }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Detect Docker runtime changes
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "$EVENT_NAME" = pull_request ]; then
+            set +e
+            git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+              Dockerfile deploy/docker-entrypoint.sh .github/workflows/kubernetes.yml
+            diff_rc=$?
+            set -e
+            case "$diff_rc" in
+              0) changed=false ;;
+              1) changed=true ;;
+              *) echo "::error::could not compare Kubernetes runtime inputs"; exit "$diff_rc" ;;
+            esac
+          fi
+          echo "image_runtime=$changed" >> "$GITHUB_OUTPUT"
+
   render:
     name: render + validate manifests
     runs-on: ubuntu-latest
@@ -110,9 +146,11 @@ jobs:
 
   kind:
     name: boot in kind (restricted PSS)
-    # Skip on PRs — the Rust release build dominates the runtime. The push-to-main
-    # run is the gate; use workflow_dispatch when a PR needs it pre-merge.
-    if: github.event_name != 'pull_request'
+    # The Rust release build dominates runtime. Run it for every main/manual
+    # invocation and only for PRs that change Dockerfile, the entrypoint, or
+    # this workflow's boot contract.
+    needs: changes
+    if: needs.changes.outputs.image_runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -195,6 +233,10 @@ jobs:
               newName: librefang
               newTag: ci
           EOF
+          kubectl kustomize deploy/kubernetes/ci-overlay >/dev/null || {
+            echo "::error::generated ci-overlay failed to render"
+            exit 1
+          }
           kubectl apply -k deploy/kubernetes/ci-overlay
 
       - name: Wait for rollout
@@ -224,10 +266,18 @@ jobs:
           kubectl -n "$NS" port-forward svc/librefang 4545:4545 &
           pf=$!
           trap 'kill $pf 2>/dev/null || true' EXIT
+          ready=false
           for _ in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:4545/api/ready >/dev/null 2>&1; then break; fi
+            if curl -fsS http://127.0.0.1:4545/api/ready >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
             sleep 2
           done
+          [ "$ready" = true ] || {
+            echo "::error::pod never became ready through the Service within 40s"
+            exit 1
+          }
           echo "--- /api/ready ---"
           curl -fsS http://127.0.0.1:4545/api/ready
           echo
@@ -249,6 +299,7 @@ jobs:
           # config.toml is written by first boot; capture its inode so we can
           # tell "the volume came back" from "init re-ran on a fresh volume".
           before="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
+          before_uid="$(kubectl -n "$NS" get pod librefang-0 -o jsonpath='{.metadata.uid}')"
 
           rm -f /tmp/rollout-done /tmp/too-many
           kubectl -n "$NS" delete pod librefang-0 --wait=false
@@ -260,24 +311,64 @@ jobs:
           (
             while [ ! -f /tmp/rollout-done ]; do
               running="$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=librefang \
-                --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+                --field-selector=status.phase=Running --no-headers | wc -l | tr -d ' ')"
               if [ "${running:-0}" -gt 1 ]; then
                 kubectl -n "$NS" get pods -o wide
                 echo "$running" > /tmp/too-many
-                break
+                exit 2
               fi
-              sleep 1
+              sleep 0.1
             done
           ) &
           watcher=$!
+          cleanup_watcher() {
+            touch /tmp/rollout-done
+            kill "$watcher" 2>/dev/null || true
+            wait "$watcher" 2>/dev/null || true
+          }
+          trap cleanup_watcher EXIT
 
-          kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+          replacement_seen=false
+          for _ in $(seq 1 600); do
+            # A dead watcher means observation already failed. Stop waiting so
+            # its concrete error is surfaced immediately below.
+            kill -0 "$watcher" 2>/dev/null || break
+            current_uid="$(kubectl -n "$NS" get pod librefang-0 \
+              --ignore-not-found -o jsonpath='{.metadata.uid}')"
+            if [ -n "$current_uid" ] && [ "$current_uid" != "$before_uid" ]; then
+              replacement_seen=true
+              break
+            fi
+            sleep 0.5
+          done
+
+          rollout_rc=0
+          if [ "$replacement_seen" = true ]; then
+            set +e
+            kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+            rollout_rc=$?
+            set -e
+          fi
           touch /tmp/rollout-done
-          wait "$watcher" || true
+          watcher_rc=0
+          wait "$watcher" || watcher_rc=$?
+          trap - EXIT
           if [ -f /tmp/too-many ]; then
             echo "::error::$(cat /tmp/too-many) daemons Running simultaneously against one RWO volume"
             exit 1
           fi
+          [ "$watcher_rc" -eq 0 ] || {
+            echo "::error::pod-overlap watcher failed (rc=$watcher_rc)"
+            exit 1
+          }
+          [ "$replacement_seen" = true ] || {
+            echo "::error::replacement pod did not appear within 300s"
+            exit 1
+          }
+          [ "$rollout_rc" -eq 0 ] || {
+            echo "::error::StatefulSet rollout failed (rc=$rollout_rc)"
+            exit "$rollout_rc"
+          }
 
           sentinel="$(kubectl -n "$NS" exec statefulset/librefang -- cat /data/ci-sentinel | tr -d '\r')"
           [ "$sentinel" = "persisted" ] || {
