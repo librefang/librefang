@@ -334,10 +334,20 @@ impl StructuredStore {
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
 
+        // Lineage (#7930, schema v54). `parent_recorded` is written as `1`
+        // unconditionally: reaching this line means a live `AgentEntry` stated
+        // its parentage, so `parent_id IS NULL` on this row from now on means
+        // "no parent", not "never asked". Rows still carrying the migration's
+        // `DEFAULT 0` are the ones written before v54, and only those.
+        //
+        // `entry.children` is deliberately NOT written anywhere — it is derived
+        // from other rows' `parent_id` on read. See `migrate_v54`, decision 2.
+        let parent_id = entry.parent.as_ref().map(|p| p.0.to_string());
+
         conn.execute(
-            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9",
+            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9, parent_id = ?10, parent_recorded = 1",
             rusqlite::params![
                 entry.id.0.to_string(),
                 entry.name,
@@ -348,18 +358,54 @@ impl StructuredStore {
                 entry.session_id.0.to_string(),
                 identity_json,
                 source_toml_path,
+                parent_id,
             ],
         )
         .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
+    /// Agent ids whose `parent_id` is `agent_id`, sorted for a stable snapshot.
+    ///
+    /// This is the derivation behind [`AgentEntry::children`] (#7930): there is no `children`
+    /// column, so the child list is recomputed from the authoritative `parent_id` edges on every
+    /// read. `idx_agents_parent_id` (schema v54) makes it an index lookup rather than the
+    /// full-table blob scan it would be if lineage lived inside the `manifest` msgpack.
+    ///
+    /// Sorted by id text so repeated reads of an unchanged database produce byte-identical
+    /// output — child lists reach LLM prompts via the topology view, and unordered iteration
+    /// there silently invalidates provider prompt caches (#3298).
+    fn child_ids_of(conn: &rusqlite::Connection, agent_id: &str) -> LibreFangResult<Vec<AgentId>> {
+        let mut stmt = conn
+            .prepare("SELECT id FROM agents WHERE parent_id = ?1 ORDER BY id")
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id], |row| row.get::<_, String>(0))
+            .map_err(LibreFangError::memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id_str = row.map_err(LibreFangError::memory)?;
+            if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+                out.push(AgentId(uuid));
+            }
+        }
+        Ok(out)
+    }
+
     /// Load an agent entry from the database.
     pub fn load_agent(&self, agent_id: AgentId) -> LibreFangResult<Option<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
+        // Widest form first, narrowing on prepare failure. `parent_id` /
+        // `parent_recorded` (schema v54, #7930) are the newest pair, so they
+        // head the fallback chain; a database that has not crossed v54 falls
+        // through to the pre-existing 9-column form and reports every agent's
+        // lineage as unknown rather than as root.
         let mut stmt = conn
-            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents WHERE id = ?1")
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents WHERE id = ?1")
                     .or_else(|_| {
@@ -393,6 +439,18 @@ impl StructuredStore {
             } else {
                 None
             };
+            // #7930: absent columns (pre-v54 DB) and a row carrying the
+            // migration's `DEFAULT 0` both mean "lineage never recorded".
+            let parent_id_str: Option<String> = if col_count >= 10 {
+                row.get(9).ok().flatten()
+            } else {
+                None
+            };
+            let parent_recorded: bool = if col_count >= 11 {
+                row.get::<_, i64>(10).unwrap_or(0) != 0
+            } else {
+                false
+            };
             Ok((
                 name,
                 manifest_blob,
@@ -401,6 +459,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             ))
         });
 
@@ -413,6 +473,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             )) => {
                 let mut manifest: librefang_types::agent::AgentManifest =
                     rmp_serde::from_slice(&manifest_blob).map_err(LibreFangError::serialization)?;
@@ -441,6 +503,13 @@ impl StructuredStore {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
                 let is_hand = manifest.is_hand;
+                // #7930: `parent` comes from the column; `children` is derived
+                // from the inverse edges, never stored.
+                let parent = parent_id_str
+                    .as_deref()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(AgentId);
+                let children = Self::child_ids_of(&conn, &agent_id.0.to_string())?;
                 Ok(Some(AgentEntry {
                     id: agent_id,
                     name,
@@ -449,8 +518,9 @@ impl StructuredStore {
                     mode: Default::default(),
                     created_at,
                     last_active: Utc::now(),
-                    parent: None,
-                    children: vec![],
+                    parent,
+                    parent_unknown: !parent_recorded,
+                    children,
                     session_id,
                     source_toml_path: source_toml_path.map(std::path::PathBuf::from),
                     tags: vec![],
@@ -504,11 +574,17 @@ impl StructuredStore {
     pub fn load_all_agents(&self) -> LibreFangResult<Vec<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Try with identity+session_id columns first, fall back gracefully
+        // Try the widest column set first, falling back gracefully. The
+        // `parent_id` / `parent_recorded` pair (schema v54, #7930) is newest and
+        // therefore first; a database that has not crossed v54 falls through and
+        // every agent hydrates with `parent_unknown: true`.
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents",
+                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents",
             )
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents")
             })
@@ -543,6 +619,18 @@ impl StructuredStore {
                 } else {
                     None
                 };
+                // #7930: a missing column (pre-v54 DB) and a `DEFAULT 0` row
+                // both mean "lineage never recorded for this agent".
+                let parent_id_str: Option<String> = if col_count >= 10 {
+                    row.get(9).ok().flatten()
+                } else {
+                    None
+                };
+                let parent_recorded: bool = if col_count >= 11 {
+                    row.get::<_, i64>(10).unwrap_or(0) != 0
+                } else {
+                    false
+                };
                 Ok((
                     id_str,
                     name,
@@ -552,6 +640,8 @@ impl StructuredStore {
                     session_id_str,
                     identity_str,
                     source_toml_path,
+                    parent_id_str,
+                    parent_recorded,
                 ))
             })
             .map_err(LibreFangError::memory)?;
@@ -570,6 +660,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             ) = match row {
                 Ok(r) => r,
                 Err(e) => {
@@ -653,6 +745,13 @@ impl StructuredStore {
                 .unwrap_or_default();
 
             let is_hand = manifest.is_hand;
+            // #7930: `parent` from the column. `children` is filled in below,
+            // once every row has been read, by inverting these edges in memory —
+            // there is no `children` column to disagree with them.
+            let parent = parent_id_str
+                .as_deref()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .map(librefang_types::agent::AgentId);
             agents.push(AgentEntry {
                 id: agent_id,
                 name,
@@ -661,7 +760,8 @@ impl StructuredStore {
                 mode: Default::default(),
                 created_at,
                 last_active: Utc::now(),
-                parent: None,
+                parent,
+                parent_unknown: !parent_recorded,
                 children: vec![],
                 session_id,
                 source_toml_path: source_toml_path.map(std::path::PathBuf::from),
@@ -672,6 +772,37 @@ impl StructuredStore {
                 is_hand,
                 ..Default::default()
             });
+        }
+
+        // Derive `children` by inverting the `parent` edges just read (#7930).
+        //
+        // Doing it here rather than with a per-agent `WHERE parent_id = ?` keeps the whole
+        // rehydration at one table scan, and — more importantly — derives the child lists from
+        // exactly the set of rows that survived the skip-and-continue filters above. A row dropped
+        // for a bad UUID or an undeserialisable manifest therefore cannot appear as somebody's
+        // child, which a second independent query against the table would have let happen.
+        //
+        // `BTreeMap` rather than `HashMap`: child lists reach LLM prompts through the topology
+        // view, and HashMap iteration order varies per process, which invalidates provider prompt
+        // caches on unchanged content (#3298).
+        // Keyed by the inner `Uuid` because `AgentId` is deliberately not `Ord`.
+        let mut children_by_parent: std::collections::BTreeMap<uuid::Uuid, Vec<AgentId>> =
+            std::collections::BTreeMap::new();
+        for agent in &agents {
+            if let Some(parent_id) = agent.parent {
+                children_by_parent
+                    .entry(parent_id.0)
+                    .or_default()
+                    .push(agent.id);
+            }
+        }
+        for list in children_by_parent.values_mut() {
+            list.sort_by_key(|id| id.0);
+        }
+        for agent in &mut agents {
+            if let Some(children) = children_by_parent.get(&agent.id.0) {
+                agent.children = children.clone();
+            }
         }
 
         // Apply queued repairs (re-save upgraded blobs)

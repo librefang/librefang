@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 50;
+const SCHEMA_VERSION: u32 = 54;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -242,6 +242,23 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // provider gets real full-text search instead of a `content LIKE` scan —
     // and so `memory.fts_only` finally has a memories index to fall back to.
     run_step!(50, migrate_v50);
+
+    // NOTE ON THE GAP 51-53: v51 (#7916), v52 (#7919) and v53 (#7904) are
+    // claimed by open PRs that were already in review when this migration was
+    // written. This migration deliberately takes v54 rather than reusing a
+    // contended number, so it must merge AFTER those three.
+    // `migration::tests::test_every_migration_records_audit_row` fails while
+    // the gap is open — that failure is the ladder telling the truth, not a
+    // defect in this migration.
+    //
+    // v54 (#7930): persist agent lineage. `AgentEntry.parent` had no column
+    // at all, so every reload from the store hydrated it as `None` and the
+    // API answered `parent_agent_id: null` for agents that demonstrably had
+    // a parent. Adds `agents.parent_id` plus the index that makes "list this
+    // agent's children" a lookup instead of a full-table scan, and
+    // `agents.parent_recorded` so a row written before this migration is
+    // distinguishable from an agent that genuinely has no parent.
+    run_step!(54, migrate_v54);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1036,6 +1053,108 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v54 (#7930): persist an agent's parent link.
+///
+/// `AgentEntry.parent: Option<AgentId>` records which agent spawned another, but the `agents` table
+/// never had a column for it.
+/// Every hydration site in `structured.rs` therefore hardcoded `parent: None`, and because
+/// `routes/agents/mod.rs` serialises the field as `parent_agent_id`, the API positively asserted
+/// "this agent has no parent" for every agent after any daemon restart.
+/// That is worse than an absent field: `billed_agent_for` in the kernel resolves spend to
+/// `entry.parent.unwrap_or(entry.id)`, so a restarted worker silently started billing itself
+/// instead of its spawner.
+///
+/// # Decision 1 — a real column, not a field inside the `manifest` blob
+///
+/// `parent_id` is a first-class `TEXT` column with `idx_agents_parent_id` over it.
+///
+/// The manifest blob was the cheaper edit (no DDL, no ladder rung) and it is the wrong home twice
+/// over.
+/// Structurally, `manifest` is the operator-authored `AgentManifest` — the thing an `agent.toml`
+/// round-trips to — whereas parentage is runtime lineage the kernel assigns at spawn.
+/// Folding one into the other means `load_all_agents`' auto-repair pass (which re-serialises every
+/// manifest it reads and writes back any blob that differs) starts rewriting rows whenever lineage
+/// moves, and any future manifest export leaks a runtime edge into a config file.
+/// Operationally, a msgpack blob is opaque to SQLite: "list this agent's children" against a blob
+/// is a full-table scan that deserialises every manifest in the database, whereas against an
+/// indexed column it is `WHERE parent_id = ?1`.
+/// That query is the whole reason decision 2 below can be made at all.
+///
+/// # Decision 2 — `children` is derived, never stored
+///
+/// There is no `children` column and there will not be one.
+/// `children` is a pure inverse of `parent`, and storing both invites the two copies to disagree —
+/// which is not hypothetical here: `spawn_agent_inner` already calls
+/// `registry.add_child(parent_id, agent_id)` to push the child onto the parent's in-memory entry
+/// and then persists only the *child* row, so a stored `children` list would have been born stale
+/// on the very first spawn.
+/// The read path reconstructs it from `parent_id` instead — a single indexed lookup for
+/// `load_agent`, and one in-memory grouping pass for `load_all_agents` — so the relationship has
+/// exactly one writer and cannot skew.
+///
+/// # Decision 3 — `NULL` on a pre-migration row means "unknown", not "root"
+///
+/// `ALTER TABLE ... ADD COLUMN parent_id` backfills every existing row with `NULL`, and `NULL` is
+/// also what a genuine top-level agent stores.
+/// Collapsing those two cases would replace one wrong answer with a more confident wrong answer:
+/// every agent that predates this migration would begin claiming, positively, to be a root agent.
+///
+/// So the migration adds a second column, `parent_recorded INTEGER NOT NULL DEFAULT 0`.
+/// The `DEFAULT 0` is doing the real work — it is what stamps every pre-existing row as
+/// "lineage was never recorded for this row".
+/// `save_agent` writes `1` unconditionally from now on, so the three states are distinguishable:
+///
+/// | `parent_recorded` | `parent_id` | meaning                          |
+/// |-------------------|-------------|----------------------------------|
+/// | `0`               | `NULL`      | unknown — row predates v54       |
+/// | `1`               | `NULL`      | known root — no parent           |
+/// | `1`               | id          | child of that agent              |
+///
+/// A separate boolean beats the cheaper alternative of a sentinel value inside `parent_id` (`''`
+/// for "known root", `NULL` for "unknown").
+/// A sentinel makes `WHERE parent_id IS NULL` and any future `JOIN agents parent ON
+/// a.parent_id = parent.id` quietly wrong for every reader who does not know the convention,
+/// and it puts a non-id string in an id column.
+/// One byte per agent row is a fair price for a column that describes itself.
+///
+/// The distinction surfaces on `AgentEntry` as `parent_unknown: bool`.
+/// The polarity is deliberate: `Default` / `#[serde(default)]` yields `false` = "recorded", which
+/// is correct for every entry the kernel constructs in memory (it knows the lineage it just
+/// assigned).
+/// Only the store's hydration path can set it `true`, and only for a row that really was written
+/// before this migration.
+fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "agents", "parent_id")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    // DEFAULT 0 is the load-bearing part: it marks every row that already
+    // existed as "parent was never recorded" (see decision 3 above).
+    if !try_column_exists(conn, "agents", "parent_recorded")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // The index that makes decision 2 (derive `children`) affordable.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agents_parent_id ON agents(parent_id)",
+        [],
+    )?;
+    // Record the audit row under 54 — this migration's OWN number. `migrate_v50`
+    // recorded itself as 49 (#7924/#7925), which desynchronises `user_version`
+    // from the `migrations` table and forces the backfill pass at the bottom of
+    // `run_migrations` to paper over it on every boot.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
         [],
     )?;
     Ok(())
