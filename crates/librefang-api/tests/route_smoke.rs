@@ -232,6 +232,7 @@ const SMOKE_GET_ROUTES: &[&str] = &[
     "/api/usage/summary",
     "/api/usage/by-model",
     "/api/usage/daily",
+    "/api/usage/export",
     "/api/budget/agents",
     "/api/budget/users",
     // ── Audit / authz ────────────────────────────────────────────────────

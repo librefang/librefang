@@ -875,6 +875,10 @@ pub fn build_reload_plan_with_caps(
             old.registry.auto_sync != new.registry.auto_sync,
             "registry.auto_sync",
         );
+        // #7891 — the daily metering sweep reads `usage.retention_days` from
+        // `config_ref()` at the top of each tick, so a swapped value is in
+        // force on the next sweep with no reapply action.
+        noop_if_changed(field_changed(&old.usage, &new.usage), "usage");
         noop_if_changed(field_changed(&old.links, &new.links), "links");
         noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
         noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
@@ -1014,6 +1018,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "users",
         "proactive_memory",
         "queue",
+        "usage",
         "budget",
         "sanitize",
         "provider_api_keys",

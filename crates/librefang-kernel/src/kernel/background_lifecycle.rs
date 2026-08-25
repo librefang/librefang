@@ -450,7 +450,13 @@ impl LibreFangKernel {
             });
         }
 
-        // Periodic usage data cleanup (every 24 hours, retain 90 days)
+        // Periodic usage data cleanup (every 24 hours).
+        //
+        // The horizon comes from `[usage] retention_days` (#7891) and is read
+        // live from the ArcSwap config at the top of each tick rather than
+        // captured at boot, so `POST /api/config/reload` takes effect on the
+        // next sweep instead of requiring a daemon restart. That is what lets
+        // the field be classified as a no-op change in `build_reload_plan`.
         {
             let kernel = Arc::clone(self);
             spawn_logged("metering_cleanup", async move {
@@ -461,9 +467,19 @@ impl LibreFangKernel {
                     if kernel.agents.supervisor.is_shutting_down() {
                         break;
                     }
-                    match kernel.metering.engine.cleanup(90) {
+                    let retention_days = kernel.config_ref().usage.retention_days;
+                    // 0 disables pruning — the operator has taken ownership of
+                    // the table's lifecycle (external archival), so sweeping
+                    // would destroy data they intend to keep.
+                    if retention_days == 0 {
+                        continue;
+                    }
+                    match kernel.metering.engine.cleanup(retention_days) {
                         Ok(removed) if removed > 0 => {
-                            info!("Metering cleanup: removed {removed} old usage records");
+                            info!(
+                                retention_days,
+                                "Metering cleanup: removed {removed} old usage records"
+                            );
                         }
                         Err(e) => {
                             warn!("Metering cleanup failed: {e}");

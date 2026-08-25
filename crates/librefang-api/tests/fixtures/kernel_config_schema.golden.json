@@ -1493,6 +1493,17 @@
         }
       ]
     },
+    "usage": {
+      "description": "Usage/metering retention for the `usage_events` table (#7891).",
+      "default": {
+        "retention_days": 90
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/UsageConfig"
+        }
+      ]
+    },
     "usage_footer": {
       "description": "Usage footer mode (what to show after each response).",
       "default": "full",
@@ -7562,6 +7573,19 @@
         "beta",
         "rc"
       ]
+    },
+    "UsageConfig": {
+      "description": "Usage/metering retention (#7891).\n\nThe daemon runs a daily sweep that hard-deletes `usage_events` rows older than `retention_days`. Before #7891 that horizon was a literal `90` in `background_lifecycle.rs`, so an operator who needed a longer window for quarterly or annual cost reporting had no way to ask for one, and one who wanted a shorter window for data-minimisation reasons had no way to shorten it either.\n\nThis is the retention of the underlying event table, so it bounds every `/api/usage*` endpoint at once — not just the daily breakdown. Raising it grows the table roughly linearly with call volume; the rows are small (a dozen scalar columns) but they are the highest-cardinality table in the substrate, so treat a multi-year horizon as a storage decision rather than a free one.\n\nConfigure in config.toml:\n\n```toml [usage] retention_days = 365 ```",
+      "type": "object",
+      "properties": {
+        "retention_days": {
+          "description": "How many days of `usage_events` the daily retention sweep keeps.\n\nDefault: 90, which is the horizon the sweep has always enforced. Set to 0 to disable pruning entirely — the table then grows without bound, which is the right call only when an external archival job (for example a scheduled `GET /api/usage/export`) owns the lifecycle.",
+          "default": 90,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
     },
     "UsageFooterMode": {
       "description": "Controls what usage info appears in response footers.",

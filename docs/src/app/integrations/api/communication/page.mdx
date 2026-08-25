@@ -387,6 +387,19 @@ Get overall usage statistics.
 }
 ```
 
+### Date-range filtering
+
+Every `/api/usage*` endpoint accepts optional `start_date` and `end_date` query parameters in `YYYY-MM-DD` form, interpreted as UTC calendar days and inclusive at both ends.
+Omit them and the endpoint answers exactly as it always has — lifetime totals for the rollups, the last 7 days for the daily breakdown.
+
+```bash
+curl "http://127.0.0.1:4545/api/usage/by-model?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY"
+```
+
+A bound that is not a valid `YYYY-MM-DD` date, or a range whose `end_date` falls before its `start_date`, returns `400 Bad Request` naming the offending parameter.
+The endpoints deliberately do not treat a mistyped date as "no data": a silent empty result reads as "we spent nothing", which is the wrong answer to hand a finance review.
+
 ### GET /api/usage/summary
 
 Get a high-level usage summary with quota information.
@@ -433,6 +446,42 @@ Get usage breakdown by model.
 ### GET /api/usage/daily
 
 Get per-day usage breakdown for charting and reporting.
+
+Accepts `start_date` / `end_date` like the other usage endpoints, and additionally `days` for a rolling window measured back from now.
+`days` defaults to `7` (the pre-existing behaviour) and is capped at `366`; ask for more than that and the endpoint points you at the export instead.
+`days` and an explicit date range are mutually exclusive — supplying both returns `400` rather than silently honouring one of them.
+
+```bash
+# Last 90 days as a rolling window
+curl "http://127.0.0.1:4545/api/usage/daily?days=90" -H "Authorization: Bearer $LIBREFANG_API_KEY"
+
+# A specific calendar month
+curl "http://127.0.0.1:4545/api/usage/daily?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY"
+```
+
+How far back any of this can reach is bounded by `[usage] retention_days` in `config.toml` (default 90).
+The daily sweep hard-deletes `usage_events` rows older than that horizon, so raise it before you need the history, not after.
+
+### GET /api/usage/export
+
+Stream raw usage events for a date range as CSV, for archival or analysis in Excel / BI tools.
+
+**Query parameters**: `start_date`, `end_date` (as above, both optional), and `format` (only `csv` is supported; omitted means `csv`).
+
+```bash
+curl "http://127.0.0.1:4545/api/usage/export?start_date=2026-01-01&end_date=2026-01-31&format=csv" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY" -o usage-2026-01.csv
+```
+
+The response is `text/csv; charset=utf-8` with a `Content-Disposition` attachment filename derived from the range.
+Rows come out oldest-first and are streamed straight off the SQLite cursor, so exporting a full retention window does not build the whole file in the daemon's memory.
+
+Columns, in order: `timestamp`, `agent_id`, `agent_name`, `billed_agent_id`, `provider`, `model`, `input_tokens`, `output_tokens`, `cost_usd`, `tool_calls`, `latency_ms`, `user_id`, `channel`, `session_id`.
+Appending columns is considered backward compatible; reordering them is not.
+
+Text columns are quoted per RFC 4180, and any value that would otherwise begin with `=`, `+`, `-`, `@`, a tab or a CR is prefixed with a single quote.
+That prefix is a deliberate formula-injection guard: spreadsheets evaluate such a cell as a formula, and agent, model and provider names are free text that can reach this file.
 
 ---
 

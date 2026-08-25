@@ -236,6 +236,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `notification` | N | Notification-engine config for alerts and task state. |
 | `usage_footer` | H | Usage footer mode (what to show after each response). |
+| `usage` | N | Retention horizon for the `usage_events` table; the daily metering sweep reads it live, so a change is in force on the next sweep. |
 | `inbox` | R | File-based input inbox config. |
 | `audit` | R | Audit log config. |
 | `telemetry` | R | OpenTelemetry + Prometheus config. |

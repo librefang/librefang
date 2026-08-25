@@ -2945,6 +2945,53 @@ impl Default for QueueConfig {
     }
 }
 
+/// Usage/metering retention (#7891).
+///
+/// The daemon runs a daily sweep that hard-deletes `usage_events` rows older
+/// than `retention_days`. Before #7891 that horizon was a literal `90` in
+/// `background_lifecycle.rs`, so an operator who needed a longer window for
+/// quarterly or annual cost reporting had no way to ask for one, and one who
+/// wanted a shorter window for data-minimisation reasons had no way to shorten
+/// it either.
+///
+/// This is the retention of the underlying event table, so it bounds every
+/// `/api/usage*` endpoint at once — not just the daily breakdown. Raising it
+/// grows the table roughly linearly with call volume; the rows are small
+/// (a dozen scalar columns) but they are the highest-cardinality table in the
+/// substrate, so treat a multi-year horizon as a storage decision rather than a
+/// free one.
+///
+/// Configure in config.toml:
+///
+/// ```toml
+/// [usage]
+/// retention_days = 365
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// How many days of `usage_events` the daily retention sweep keeps.
+    ///
+    /// Default: 90, which is the horizon the sweep has always enforced.
+    /// Set to 0 to disable pruning entirely — the table then grows without
+    /// bound, which is the right call only when an external archival job
+    /// (for example a scheduled `GET /api/usage/export`) owns the lifecycle.
+    #[serde(default = "default_usage_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_usage_retention_days() -> u32 {
+    90
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_usage_retention_days(),
+        }
+    }
+}
+
 /// Per-lane concurrency limits for the command queue.
 ///
 /// Configure in config.toml:
@@ -3897,6 +3944,9 @@ pub struct KernelConfig {
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
+    /// Usage/metering retention for the `usage_events` table (#7891).
+    #[serde(default)]
+    pub usage: UsageConfig,
     /// Task-board (shared task queue) safety knobs — see [`TaskBoardConfig`].
     #[serde(default)]
     pub task_board: TaskBoardConfig,
@@ -6600,6 +6650,7 @@ impl Default for KernelConfig {
             compaction: CompactionTomlConfig::default(),
             gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
+            usage: UsageConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
