@@ -526,9 +526,7 @@ pub async fn agent_logs(
 
 /// Wire-shape for one ephemeral worker run under a parent agent (refs #7752).
 ///
-/// Mirrors [`librefang_memory::EphemeralRunRow`], defined here as a
-/// `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the
-/// shape without forcing utoipa into the memory crate.
+/// Mirrors [`librefang_memory::EphemeralRunRow`], defined here as a `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the shape without forcing utoipa into the memory crate.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct EphemeralRunView {
     pub id: String,
@@ -600,20 +598,13 @@ pub struct EphemeralRunsResponse {
     pub rollup: EphemeralRunRollupView,
 }
 
-/// GET /api/agents/{id}/ephemeral-runs — what this agent delegated to
-/// ephemeral workers, and what each one cost (refs #7752).
+/// GET /api/agents/{id}/ephemeral-runs — what this agent delegated to ephemeral workers, and what each one cost (refs #7752).
 ///
-/// An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn
-/// under its parent's identity and then vanishes — no registry entry, no
-/// persisted session, and a mission workspace deleted on the way out. Its
-/// spend reached the parent's ledger through `usage_events.billed_agent_id`,
-/// but the *work* behind the spend had no record, so an operator watching an
-/// agent misbehave through workers had nothing to inspect. This endpoint is
-/// that record.
+/// An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.
+/// Its spend reached the parent's ledger through `usage_events.billed_agent_id`, but the *work* behind the spend had no record, so an operator watching an agent misbehave through workers had nothing to inspect.
+/// This endpoint is that record.
 ///
-/// The rollup covers the same retained rows as `runs`, not all time: the store
-/// keeps a bounded number of runs per parent so a path designed to be called
-/// cheaply and often cannot grow the table without limit.
+/// The rollup covers the same retained rows as `runs`, not all time: the store keeps a bounded number of runs per parent so a path designed to be called cheaply and often cannot grow the table without limit.
 #[utoipa::path(
     get,
     path = "/api/agents/{id}/ephemeral-runs",
@@ -654,9 +645,7 @@ pub async fn list_agent_ephemeral_runs(
                 .into_response();
         }
     };
-    // Same owner-scoping as /stats and /events, and for a stronger reason: a
-    // run record carries the delegated task and the worker's answer verbatim,
-    // which is conversation content, not just counters.
+    // Same owner-scoping as /stats and /events, and for a stronger reason: a run record carries the delegated task and the worker's answer verbatim, which is conversation content, not just counters.
     if let Some(ref user) = api_user {
         use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin
@@ -680,10 +669,8 @@ pub async fn list_agent_ephemeral_runs(
     let parent = agent_uuid.0.to_string();
     let runs = match store.list_for_parent(&parent, limit) {
         Ok(r) => r,
-        // `e` carries raw rusqlite error text (column names, constraint
-        // identifiers, "database is locked") from the memory layer
-        // (audit: rusqlite-errors-leak). Scrub the body; the full chain still
-        // lands in `tracing::error!` for ops.
+        // `e` carries raw rusqlite error text (column names, constraint identifiers, "database is locked") from the memory layer (audit: rusqlite-errors-leak).
+        // Scrub the body; the full chain still lands in `tracing::error!` for ops.
         Err(e) => return ApiErrorResponse::internal_scrub(e).into_response(),
     };
     let rollup = match store.rollup_for_parent(&parent) {

@@ -477,11 +477,8 @@ impl LibreFangKernel {
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
 
-        // A run that failed is the run an operator most wants to see. The
-        // record is written before the error is propagated, so a worker that
-        // died on a driver error leaves the same reachable trace as one that
-        // answered — otherwise the only runs visible under a parent would be
-        // the ones that went fine, which inverts the point of the feature.
+        // A run that failed is the run an operator most wants to see.
+        // The record is written before the error is propagated, so a worker that died on a driver error leaves the same reachable trace as one that answered — otherwise the only runs visible under a parent would be the ones that went fine, which inverts the point of the feature.
         let result = match outcome {
             Ok(r) => r,
             Err(e) => {
@@ -564,17 +561,12 @@ impl LibreFangKernel {
         }
 
         // ── The run record, filed under the parent ──────────────────────────
-        // The counterpart to the usage row above: that one says what the run
-        // cost, this one says what the run *was*. Both name `parent_id`, so
-        // the ledger and the run list agree on the owner.
+        // The counterpart to the usage row above: that one says what the run cost, this one says what the run *was*.
+        // Both name `parent_id`, so the ledger and the run list agree on the owner.
         //
-        // Written here, by the kernel, rather than by clearing the loop's
-        // `incognito` flag — see `loop_opts` above. That flag gates the
-        // episodic-memory write, the context-engine advance and the proactive
-        // `auto_memorize` pass as well as the session write, and all four key
-        // on `session.agent_id`, which for a worker *is* the parent. Clearing
-        // it would teach the parent it said things it never said and file the
-        // worker's throwaway session among the parent's real conversations.
+        // Written here, by the kernel, rather than by clearing the loop's `incognito` flag — see `loop_opts` above.
+        // That flag gates the episodic-memory write, the context-engine advance and the proactive `auto_memorize` pass as well as the session write, and all four key on `session.agent_id`, which for a worker *is* the parent.
+        // Clearing it would teach the parent it said things it never said and file the worker's throwaway session among the parent's real conversations.
         self.record_ephemeral_run(librefang_memory::EphemeralRunRow {
             id: uuid::Uuid::new_v4().to_string(),
             parent_agent_id: parent_id.0.to_string(),
@@ -618,17 +610,11 @@ impl LibreFangKernel {
 
     /// Persist one ephemeral run record, best-effort (refs #7752).
     ///
-    /// Best-effort for the same reason the post-call usage record is: the work
-    /// is already done and the tokens are already spent, so failing the call
-    /// because bookkeeping failed would throw away an answer the caller has
-    /// paid for. A warning names the parent and the mission so the gap is
-    /// traceable rather than silent.
+    /// Best-effort for the same reason the post-call usage record is: the work is already done and the tokens are already spent, so failing the call because bookkeeping failed would throw away an answer the caller has paid for.
+    /// A warning names the parent and the mission so the gap is traceable rather than silent.
     ///
-    /// This records the *run*, not the workspace. `MissionWorkspace` still
-    /// deletes the worker's directory on every exit path (#7723) — a run
-    /// record makes the delegation auditable, which is a different question
-    /// from whether the worker's scratch files outlive it, and the answer to
-    /// the second stays "no".
+    /// This records the *run*, not the workspace.
+    /// `MissionWorkspace` still deletes the worker's directory on every exit path (#7723) — a run record makes the delegation auditable, which is a different question from whether the worker's scratch files outlive it, and the answer to the second stays "no".
     pub(crate) fn record_ephemeral_run(&self, row: librefang_memory::EphemeralRunRow) {
         let store = librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool());
         if let Err(e) = store.record_run(&row) {
@@ -643,8 +629,7 @@ impl LibreFangKernel {
 
     /// The ephemeral runs an agent most recently spawned, newest first.
     ///
-    /// Bounded by the store's own per-parent retention cap, so this is the
-    /// retained history rather than all time.
+    /// Bounded by the store's own per-parent retention cap, so this is the retained history rather than all time.
     pub fn ephemeral_runs_for_agent(
         &self,
         parent_id: AgentId,

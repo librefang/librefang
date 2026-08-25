@@ -164,9 +164,7 @@ impl EphemeralRunStore {
         )
         .map_err(|e| LibreFangError::memory_msg(format!("ephemeral run insert failed: {e}")))?;
 
-        // Ordered by `finished_at DESC, rowid DESC` so runs that finished
-        // inside the same clock tick still have a total order and the trim
-        // cannot pick an arbitrary one of them to keep.
+        // Ordered by `finished_at DESC, rowid DESC` so runs that finished inside the same clock tick still have a total order and the trim cannot pick an arbitrary one of them to keep.
         tx.execute(
             "DELETE FROM ephemeral_runs
              WHERE parent_agent_id = ?1
@@ -392,8 +390,7 @@ mod tests {
         );
     }
 
-    /// The cap is what keeps a cheap, frequently-called path from re-creating the
-    /// row-bloat problem the run record exists to replace.
+    /// The cap is what keeps a cheap, frequently-called path from re-creating the row-bloat problem the run record exists to replace.
     #[test]
     fn inserts_trim_the_parent_to_the_retention_cap() {
         let store = setup();
@@ -450,8 +447,7 @@ mod tests {
         assert!((rollup.cost_usd - 0.5).abs() < f64::EPSILON);
     }
 
-    /// An unknown status must be refused by the store rather than reaching the
-    /// table's CHECK constraint as an opaque SQLite error.
+    /// An unknown status must be refused by the store rather than reaching the table's CHECK constraint as an opaque SQLite error.
     #[test]
     fn an_unknown_status_is_rejected_by_name() {
         let store = setup();
@@ -483,8 +479,7 @@ mod tests {
         assert_eq!(store.list_for_parent(&b, 50).unwrap().len(), 1);
     }
 
-    /// A worker's answer is model output of unbounded length; the clip must land on
-    /// a `char` boundary or a non-ASCII answer panics the slice.
+    /// A worker's answer is model output of unbounded length; the clip must land on a `char` boundary or a non-ASCII answer panics the slice.
     #[test]
     fn truncation_lands_on_a_char_boundary() {
         let short = "hello";
@@ -499,8 +494,7 @@ mod tests {
         );
     }
 
-    /// Exactly `MAX_TEXT_LEN` characters is not truncation — the marker would
-    /// otherwise claim content was dropped when none was.
+    /// Exactly `MAX_TEXT_LEN` characters is not truncation — the marker would otherwise claim content was dropped when none was.
     #[test]
     fn text_at_exactly_the_cap_is_not_marked_truncated() {
         let exact = "a".repeat(MAX_TEXT_LEN);

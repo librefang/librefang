@@ -163,9 +163,7 @@ async fn a_completed_ephemeral_run_is_visible_under_its_parent() {
         "the rollup must count the run it returned: {body}"
     );
 
-    // The workspace is a separate guarantee (#7723) and it still holds: a run
-    // record is not a surviving scratch directory, and persisting the first
-    // must not have bought it by keeping the second.
+    // The workspace is a separate guarantee (#7723) and it still holds: a run record is not a surviving scratch directory, and persisting the first must not have bought it by keeping the second.
     assert!(
         transient_entries(&h.home).is_empty(),
         "the mission workspace must still be removed, found: {:?}",
@@ -173,8 +171,7 @@ async fn a_completed_ephemeral_run_is_visible_under_its_parent() {
     );
 }
 
-/// An agent that spawned no workers is unaffected: an empty list and a zero
-/// rollup, not an error and not another agent's runs.
+/// An agent that spawned no workers is unaffected: an empty list and a zero rollup, not an error and not another agent's runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_with_no_ephemeral_runs_gets_an_empty_list() {
     let h = boot().await;
@@ -199,8 +196,7 @@ async fn an_agent_with_no_ephemeral_runs_gets_an_empty_list() {
     assert_eq!(body["rollup"]["runs"], 0);
     assert_eq!(body["rollup"]["cost_usd"], 0.0);
 
-    // …and the busy agent still has its own, so the empty answer above is
-    // scoping rather than a route that returns nothing to everyone.
+    // …and the busy agent still has its own, so the empty answer above is scoping rather than a route that returns nothing to everyone.
     let (status, body) = send(
         h.app.clone(),
         get(&format!("/api/agents/{busy}/ephemeral-runs")),
@@ -242,8 +238,7 @@ async fn the_limit_parameter_caps_rows_without_capping_the_rollup() {
     );
 }
 
-/// Unknown and malformed agent ids are refused the same way the sibling
-/// observability routes refuse them.
+/// Unknown and malformed agent ids are refused the same way the sibling observability routes refuse them.
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_and_invalid_agent_ids_are_refused() {
     let h = boot().await;
@@ -262,8 +257,7 @@ async fn unknown_and_invalid_agent_ids_are_refused() {
 
 /// The route sits behind the same auth layer as the rest of `/api/agents`.
 ///
-/// A run record carries the delegated task and the worker's answer verbatim, so
-/// an unauthenticated read would leak conversation content, not just counters.
+/// A run record carries the delegated task and the worker's answer verbatim, so an unauthenticated read would leak conversation content, not just counters.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_route_requires_authentication() {
     let h = boot().await;
