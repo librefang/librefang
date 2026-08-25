@@ -1,9 +1,59 @@
 import { useTranslation } from "react-i18next";
 import { Moon, Play, Square, XCircle } from "lucide-react";
-import { Badge } from "../../../components/ui/Badge";
+import { Badge, type BadgeVariant } from "../../../components/ui/Badge";
 import { Button } from "../../../components/ui/Button";
-import type { AutoDreamAgentStatus } from "../../../api";
+import type {
+  AutoDreamAgentStatus,
+  AutoDreamProgress,
+  AutoDreamStatusName,
+  AutoDreamTurn,
+  AutoDreamUsage,
+} from "../../../api";
 import { formatRelativeMs, formatHours } from "../formatters";
+
+export function autoDreamStatusVariant(status: AutoDreamStatusName): BadgeVariant {
+  switch (status) {
+    case "running":
+      return "info";
+    case "completed":
+      return "success";
+    case "aborted":
+      return "warning";
+    case "failed":
+      return "error";
+  }
+}
+
+export function autoDreamMoonClassName(optedIn: boolean, running: boolean): string {
+  const tone = optedIn ? "text-purple-400" : "text-text-dim";
+  const animation = optedIn && running ? " animate-pulse" : "";
+  return `w-4 h-4 shrink-0 mt-0.5 ${tone}${animation}`;
+}
+
+export function lastAutoDreamTurn(
+  progress: AutoDreamProgress | null | undefined,
+): AutoDreamTurn | undefined {
+  const turns: unknown = progress?.turns;
+  if (!Array.isArray(turns) || turns.length === 0) return undefined;
+  return turns[turns.length - 1] as AutoDreamTurn;
+}
+
+export interface AutoDreamCacheStats {
+  hitPct: number;
+  totalInputTokens: number;
+}
+
+export function autoDreamCacheStats(
+  usage: AutoDreamUsage | undefined,
+): AutoDreamCacheStats | null {
+  if (!usage || usage.input_tokens <= 0) return null;
+  const totalInputTokens =
+    usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+  const hitPct = totalInputTokens > 0
+    ? Math.round((usage.cache_read_input_tokens / totalInputTokens) * 100)
+    : 0;
+  return { hitPct, totalInputTokens };
+}
 
 interface Props {
   agent: AutoDreamAgentStatus;
@@ -37,7 +87,9 @@ export function AutoDreamAgentRow({
   const now = Date.now();
   const progress = agent.progress;
   const running = progress?.status === "running";
-  const lastTurn = progress?.turns[progress.turns.length - 1];
+  const lastTurn = lastAutoDreamTurn(progress);
+  const usage = progress?.usage;
+  const cacheStats = autoDreamCacheStats(usage);
   const optedIn = agent.auto_dream_enabled;
   const tNever = () => t("common.never", { defaultValue: "never" });
   const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
@@ -53,13 +105,7 @@ export function AutoDreamAgentRow({
       <div className="flex items-center justify-between gap-3 px-3 py-2">
         <div className="flex items-start gap-2 min-w-0 flex-1">
           <Moon
-            className={`w-4 h-4 shrink-0 mt-0.5 ${
-              optedIn
-                ? running
-                  ? "text-purple-400 animate-pulse"
-                  : "text-purple-400"
-                : "text-text-dim"
-            }`}
+            className={autoDreamMoonClassName(optedIn, running)}
           />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
@@ -68,15 +114,7 @@ export function AutoDreamAgentRow({
               )}
               {progress && (
                 <Badge
-                  variant={
-                    progress.status === "running"
-                      ? "info"
-                      : progress.status === "completed"
-                      ? "success"
-                      : progress.status === "aborted"
-                      ? "warning"
-                      : "error"
-                  }
+                  variant={autoDreamStatusVariant(progress.status)}
                 >
                   {t(`settings.auto_dream_status_${progress.status}`, progress.status)}
                 </Badge>
@@ -219,30 +257,21 @@ export function AutoDreamAgentRow({
               lets operators see the actual cost win. Only shown for completed
               dreams (usage is populated then) and only when there actually was
               input (avoids 0/0 noise). */}
-          {progress.usage && progress.usage.input_tokens > 0 && (
+          {usage && cacheStats && (
             <p className="text-[10px] text-text-dim">
               <span className="uppercase tracking-wider">
                 {t("settings.auto_dream_cache", "Cache")}:
               </span>{" "}
-              {(() => {
-                const u = progress.usage!;
-                const totalIn =
-                  u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
-                const hitPct =
-                  totalIn > 0 ? Math.round((u.cache_read_input_tokens / totalIn) * 100) : 0;
-                return (
-                  <span
-                    title={t(
-                      "settings.auto_dream_cache_title",
-                      "Prompt cache hit rate for this dream — higher means more of the prefix came from Anthropic's cache instead of being re-billed.",
-                    )}
-                  >
-                    <span className="font-mono">{hitPct}%</span>{" "}
-                    ({u.cache_read_input_tokens.toLocaleString()}/{totalIn.toLocaleString()} tok)
-                  </span>
-                );
-              })()}
-              {typeof progress.usage.cost_usd === "number" && (
+              <span
+                title={t(
+                  "settings.auto_dream_cache_title",
+                  "Prompt cache hit rate for this dream — higher means more of the prefix came from Anthropic's cache instead of being re-billed.",
+                )}
+              >
+                <span className="font-mono">{cacheStats.hitPct}%</span>{" "}
+                ({usage.cache_read_input_tokens.toLocaleString()}/{cacheStats.totalInputTokens.toLocaleString()} tok)
+              </span>
+              {typeof usage.cost_usd === "number" && (
                 <>
                   {" · "}
                   <span
@@ -251,7 +280,7 @@ export function AutoDreamAgentRow({
                       "Measured provider cost for this dream turn (input + output, cached tokens billed at the reduced rate).",
                     )}
                   >
-                    ${progress.usage.cost_usd.toFixed(5)}
+                    ${usage.cost_usd.toFixed(5)}
                   </span>
                 </>
               )}

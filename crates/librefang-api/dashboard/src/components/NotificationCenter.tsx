@@ -23,6 +23,10 @@ export function NotificationCenter() {
   // currently-focused menuitem index. Drives roving tabindex on render and
   // is the source of truth for ArrowUp/Down navigation.
   const [activeIndex, setActiveIndex] = useState(-1);
+  const actionIdsRef = useRef(new Set<string>());
+  const [actionIds, setActionIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Stable ids so the trigger's aria-controls and the menu's
@@ -91,6 +95,9 @@ export function NotificationCenter() {
       addToast(t("approvals.totpRequired", "TOTP code required. Use the Approvals page."), "info");
       return;
     }
+    if (actionIdsRef.current.has(id)) return;
+    actionIdsRef.current.add(id);
+    setActionIds(new Set(actionIdsRef.current));
     try {
       if (action === "approve") await approveMutation.mutateAsync({ id });
       else await rejectMutation.mutateAsync(id);
@@ -100,6 +107,9 @@ export function NotificationCenter() {
       );
     } catch {
       addToast(t("approvals.action_failed", "Action failed"), "error");
+    } finally {
+      actionIdsRef.current.delete(id);
+      setActionIds(new Set(actionIdsRef.current));
     }
   }, [totpEnforced, approveMutation, rejectMutation, addToast, navigate, t]);
 
@@ -387,11 +397,12 @@ export function NotificationCenter() {
                               <div className="flex gap-1 shrink-0">
                                 <button
                                   tabIndex={-1}
+                                  disabled={actionIds.has(item.id)}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleAction(item.id, "approve");
                                   }}
-                                  className="p-1 rounded hover:bg-success/10 text-success transition-colors"
+                                  className="p-1 rounded hover:bg-success/10 text-success transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                   title={t("approvals.approve")}
                                   aria-label={t("approvals.approve")}
                                 >
@@ -399,11 +410,12 @@ export function NotificationCenter() {
                                 </button>
                                 <button
                                   tabIndex={-1}
+                                  disabled={actionIds.has(item.id)}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     handleAction(item.id, "reject");
                                   }}
-                                  className="p-1 rounded hover:bg-error/10 text-error transition-colors"
+                                  className="p-1 rounded hover:bg-error/10 text-error transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                   title={t("approvals.reject")}
                                   aria-label={t("approvals.reject")}
                                 >

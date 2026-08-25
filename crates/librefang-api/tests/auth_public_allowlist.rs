@@ -25,6 +25,7 @@ use librefang_api::middleware::{
 };
 use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
+use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -42,6 +43,18 @@ struct RouterHarness {
 impl Drop for RouterHarness {
     fn drop(&mut self) {
         self._state.kernel.shutdown();
+    }
+}
+
+struct TestAppRouterHarness {
+    app: axum::Router,
+    state: Arc<librefang_api::routes::AppState>,
+    _test: TestAppState,
+}
+
+impl Drop for TestAppRouterHarness {
+    fn drop(&mut self) {
+        self.state.kernel.shutdown();
     }
 }
 
@@ -467,7 +480,6 @@ async fn authed_routes_require_token() {
         if entry.expect != Expect::Authed {
             continue;
         }
-        // Skip duplicate entries (same path appears more than once in table).
         let status = get_status(harness.app.clone(), entry.path).await;
         if status != StatusCode::UNAUTHORIZED {
             failures.push(format!("{} -> {} (expected 401)", entry.path, status));
@@ -626,62 +638,41 @@ async fn auth_providers_requires_token_in_strict_reads_mode() {
 async fn auth_providers_open_mode_returns_names_only() {
     use librefang_types::config::{ExternalAuthConfig, OidcProvider};
 
-    // external_auth=enabled requires a valid LIBREFANG_STATE_SECRET at boot.
-    // 32 zero bytes, base64-encoded (44 chars) — only used to satisfy the
-    // boot-time shape check; these tests never exercise the OAuth state HMAC.
-    // Process-global env mutation: we only ever SET it (never clear), and the
-    // value is valid for any concurrent kernel boot, so parallel tests are
-    // unaffected.
-    std::env::set_var(
-        "LIBREFANG_STATE_SECRET",
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    // MockKernelBuilder initializes the shared test state secret once before
+    // boot, avoiding a process-global env mutation from this async test.
+    let test = TestAppState::with_builder(
+        MockKernelBuilder::new()
+            .with_registry_fixture()
+            .with_config(|config| {
+                config.api_key = String::new(); // open mode
+                config.external_auth = ExternalAuthConfig {
+                    enabled: true,
+                    providers: vec![OidcProvider {
+                        id: "test".into(),
+                        display_name: "Test".into(),
+                        issuer_url: String::new(),
+                        auth_url: "https://example.invalid/authorize".into(),
+                        token_url: "https://example.invalid/token".into(),
+                        userinfo_url: String::new(),
+                        jwks_uri: String::new(),
+                        client_id: "client-id".into(),
+                        client_secret_env: "LIBREFANG_TEST_OAUTH_SECRET_DOES_NOT_EXIST".into(),
+                        redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),
+                        scopes: vec!["openid".into()],
+                        allowed_domains: vec![],
+                        audience: String::new(),
+                        require_email_verified: None,
+                    }],
+                    ..Default::default()
+                };
+            }),
     );
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: String::new(), // open mode
-        external_auth: ExternalAuthConfig {
-            enabled: true,
-            providers: vec![OidcProvider {
-                id: "test".into(),
-                display_name: "Test".into(),
-                issuer_url: String::new(),
-                auth_url: "https://example.invalid/authorize".into(),
-                token_url: "https://example.invalid/token".into(),
-                userinfo_url: String::new(),
-                jwks_uri: String::new(),
-                client_id: "client-id".into(),
-                client_secret_env: "LIBREFANG_TEST_OAUTH_SECRET_DOES_NOT_EXIST".into(),
-                redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),
-                scopes: vec!["openid".into()],
-                allowed_domains: vec![],
-                audience: String::new(),
-                require_email_verified: None,
-            }],
-            ..Default::default()
-        },
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::BTreeMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("kernel boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
+    let kernel = test.state.kernel.clone();
     let (app, state) = server::build_router(kernel, "127.0.0.1:0".parse().expect("addr")).await;
-    let harness = RouterHarness {
+    let harness = TestAppRouterHarness {
         app,
-        _tmp: tmp,
-        _state: state,
+        state,
+        _test: test,
     };
 
     let (status, body) = get_status_and_body(harness.app.clone(), "/api/auth/providers").await;

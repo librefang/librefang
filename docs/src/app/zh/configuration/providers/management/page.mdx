@@ -63,6 +63,8 @@ discover_models = true
 ```
 
 开启后，该提供商会走内置本地提供商完全相同的路径：周期性探测循环、`POST /api/providers/{name}/test` 刷新（响应中随之带上 `discovered_models`），以及 `GET /api/models` 上的实时模型过滤。
+`GET /api/models` 自己也会去请求一次模型列表，走的是 Dashboard 提供商网格所用的同一个 60 秒探测缓存，因此网关提供的模型在第一次请求时就已经在列表里，而不必等某一次后台探测恰好跑过。
+拉取列表失败并不构成错误：响应会退回到内置目录，失败原因以 `debug` 级别写入日志，因此一个只代理 `/chat/completions`、不暴露 `/models` 的网关，其行为与开启该开关之前完全一致。
 这个开关不会把内置 id 的发现能力关掉——那些由 id 决定而非由开关决定——所以已有安装不受影响。
 
 Dashboard 在「添加提供商」向导和提供商的配置抽屉里提供同一个开关**自动发现模型**；后者调用 `PUT /api/providers/{name}/discovery`，请求体为 `{"discover_models": true}`，并把值写回该提供商自己的 TOML。
@@ -268,6 +270,44 @@ pinned_model = "claude-sonnet-4-20250514"  # 永不自动路由
 ```
 
 当 Agent manifest 设置了 `pinned_model` 时，该 Agent 始终使用指定模型，忽略路由配置。此功能用于**稳定模式**（`KernelMode::Stable`），在该模式下模型被冻结以确保生产可靠性。
+
+---
+
+## 按模型的配置覆盖
+
+模型自身的配置——**包括上下文窗口**——可以随时修改，而不再只能在首次注册时设定。
+覆盖项以 `provider:model_id` 为键，保存在 `~/.librefang/data/model_overrides.json` 中，与目录条目分开存放，因此重写条目的注册表同步不会将其清除。
+
+```
+GET    /api/models/overrides/{provider}:{model_id}
+PUT    /api/models/overrides/{provider}:{model_id}
+DELETE /api/models/overrides/{provider}:{model_id}
+```
+
+`PUT` 接收的是整份文档而非补丁——请求体中省略的字段会被清除。
+
+```json
+{
+  "context_window": 16384,
+  "max_output_tokens": 4096,
+  "temperature": 0.3
+}
+```
+
+这两个容量上限回答的问题与旁边的推理参数并不相同。
+`context_window` 与 `max_output_tokens` 纠正的是模型**本身的事实**——自托管运行时前面的网关常常把它们报成 `null`——而 `max_tokens` 是随请求发送的单次输出上限。
+把输出上限设成模型的窗口大小，等于要求模型把整个上下文都留给回复，而这正是这两个字段要终结的混淆。
+
+### 上下文窗口的优先级
+
+1. `agent.toml` 的 `[model] context_window`：最具体的一层，代表单个智能体声明自己的窗口。
+2. `model_overrides.json` 的 `context_window`：运维人员针对该模型的纠正，使用该模型的每个智能体都会继承。
+3. 目录条目：注册表声明的值，或一次在线 `/models` 发现过程所假定的值。
+4. `8192`：以上都无法解析时智能体循环使用的保守回退值，并会输出一条 `WARN` 说明所假定的数值。
+
+各层中的 `0` 都视为“未知”而非上限，因此清空字段会回落到下一层，而不会把窗口固定为零 Token。
+
+`GET /api/models` 与 `GET /api/models/{id}` 返回的是**生效后**的 `context_window` / `max_output_tokens`，同时在 `limits_catalog` 中保留原始目录值，供“恢复默认”之类的控件作为目标。
 
 ---
 

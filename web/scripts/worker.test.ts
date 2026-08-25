@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — Cloudflare Pages worker, plain .js without types
 import worker from '../public/_worker.js';
 
 type AssetsBinding = { fetch: ReturnType<typeof vi.fn> };
+
+afterEach(() => vi.restoreAllMocks());
 
 // Cloudflare's ASSETS.fetch accepts Request | URL | string. Mock handles all
 // three so we mirror the real binding contract.
@@ -131,5 +133,113 @@ describe('Cloudflare Pages _worker.js — /install UA routing', () => {
     const paths = calledPaths(env.ASSETS.fetch);
     expect(paths).not.toContain('/install.sh');
     expect(paths).toContain('/about');
+  });
+});
+
+describe('Cloudflare Pages _worker.js — fallback contracts', () => {
+  it('returns a sanitized 500 when the SPA index is unavailable', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const env = makeEnv({});
+
+    const res = await worker.fetch(req('/missing-page'), env);
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe('Internal Server Error');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it.each([
+    ['installer rewrite', req('/install', 'curl/8.4.0')],
+    ['static asset', req('/assets/broken.js')],
+  ])('sanitizes thrown asset errors for %s', async (_name, request) => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const env = {
+      ASSETS: {
+        fetch: vi.fn().mockRejectedValue(new Error('private storage detail')),
+      },
+    };
+
+    const res = await worker.fetch(request, env);
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe('Internal Server Error');
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('sanitizes a thrown SPA fallback fetch', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const env = {
+      ASSETS: {
+        fetch: vi
+          .fn()
+          .mockResolvedValueOnce(new Response('not found', { status: 404 }))
+          .mockRejectedValueOnce(new Error('private storage detail')),
+      },
+    };
+
+    const res = await worker.fetch(req('/missing-page'), env);
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).toBe('Internal Server Error');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it('serves the SPA index with security headers after an asset miss', async () => {
+    const env = makeEnv({
+      '/': new Response('<!doctype html>', { status: 200 }),
+    });
+
+    const res = await worker.fetch(req('/client-route'), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('<!doctype html>');
+    expect(res.headers.get('content-security-policy')).toContain("default-src 'self'");
+  });
+
+  it('does not mark SPA fallback HTML as an immutable asset', async () => {
+    const env = makeEnv({
+      '/': new Response('<!doctype html>', { status: 200 }),
+    });
+
+    const res = await worker.fetch(req('/assets/missing.js'), env);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control') ?? '').not.toContain('immutable');
+  });
+});
+
+describe('Cloudflare Pages _worker.js — canonical routes', () => {
+  it.each(['/deploy', '/changelog', '/privacy'])(
+    'redirects %s to its published trailing-slash URL',
+    async (path) => {
+      const env = makeEnv({});
+
+      const res = await worker.fetch(req(`${path}?source=test`), env);
+
+      expect(res.status).toBe(301);
+      expect(res.headers.get('location')).toBe(`https://librefang.ai${path}/?source=test`);
+      expect(env.ASSETS.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/pl', '/uk'])('canonicalizes the supported locale root %s', async (path) => {
+    const env = makeEnv({});
+
+    const res = await worker.fetch(req(path), env);
+
+    expect(res.status).toBe(301);
+    expect(res.headers.get('location')).toBe(`https://librefang.ai${path}/`);
+  });
+
+  it('collapses repeated trailing slashes on published roots', async () => {
+    const env = makeEnv({});
+
+    const res = await worker.fetch(req('/deploy//'), env);
+
+    expect(res.status).toBe(301);
+    expect(res.headers.get('location')).toBe('https://librefang.ai/deploy/');
   });
 });

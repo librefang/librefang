@@ -564,6 +564,16 @@ pub enum MediaCapability {
     TextToSpeech,
     VideoGeneration,
     MusicGeneration,
+    /// Turning speech into text. Understanding, not generation — but it is a
+    /// media capability a provider either has or lacks, and leaving it out
+    /// meant transcription providers could not be discovered from the
+    /// registry like every other one and were picked from a hardcoded env-var
+    /// cascade instead.
+    SpeechToText,
+    /// Describing an image. Same reasoning as `SpeechToText`: this is the
+    /// capability that decides whether an attached image reaches the model
+    /// or gets replaced by a note about a file path.
+    ImageUnderstanding,
 }
 
 impl std::fmt::Display for MediaCapability {
@@ -573,6 +583,8 @@ impl std::fmt::Display for MediaCapability {
             MediaCapability::TextToSpeech => write!(f, "text_to_speech"),
             MediaCapability::VideoGeneration => write!(f, "video_generation"),
             MediaCapability::MusicGeneration => write!(f, "music_generation"),
+            MediaCapability::SpeechToText => write!(f, "speech_to_text"),
+            MediaCapability::ImageUnderstanding => write!(f, "image_understanding"),
         }
     }
 }

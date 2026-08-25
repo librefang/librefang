@@ -98,6 +98,30 @@ describe("WorkflowStepImageGallery", () => {
     expect(screen.getByAltText("a watercolor sunset")).toBeInTheDocument();
   });
 
+  it("does not link data URI images to a blocked top-level navigation", () => {
+    const refs = extractImageRefs(
+      JSON.stringify({ url: "data:image/png;base64,aGVsbG8=" }),
+    );
+    render(<WorkflowStepImageGallery refs={refs} />);
+
+    expect(screen.getByRole("img").closest("a")).toBeNull();
+  });
+
+  it("renders duplicate image refs without duplicate React keys", () => {
+    const onError = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A remote URL keeps this render synchronous: the duplicate-key warning is a render-time console.error, and an authenticated path would resolve its object URL after the assertions.
+    const ref = {
+      kind: "url" as const,
+      src: "https://images.example.test/duplicate.png",
+    };
+
+    render(<WorkflowStepImageGallery refs={[ref, ref]} />);
+
+    expect(screen.getAllByRole("img")).toHaveLength(2);
+    expect(onError).not.toHaveBeenCalled();
+    onError.mockRestore();
+  });
+
   it("does NOT render anything for plain text (falls back to caller)", () => {
     const refs = extractImageRefs("Just a regular workflow result, no image.");
     const { container } = render(<WorkflowStepImageGallery refs={refs} />);

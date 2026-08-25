@@ -13,6 +13,23 @@ export type CanvasNodeData = {
   description?: string;
   agentId?: string;
   agentName?: string;
+  /** Agent *type* binding — the step resolves find-or-spawn from a template of
+   *  this name rather than a pre-registered instance (#7712). Mutually
+   *  exclusive with `agentId` / `agentName`; `stepAgentPayload` sends exactly one. */
+  agentType?: string;
+  /** Which binding the operator chose for this step's agent: a specific
+   *  running instance (`agentId`), a durable agent name (`agentName`), or an
+   *  agent type resolved find-or-spawn from a template (`agentType`).
+   *  Stored explicitly rather than inferred from which field happens to be
+   *  set, so switching between any two of the three is reversible in both
+   *  directions. */
+  agentSource?: "instance" | "name" | "type";
+  /** Per-step `session_mode` override sent to the API: `"persistent"`,
+   *  `"new"`, or absent to defer to the target agent's manifest. */
+  sessionMode?: "persistent" | "new";
+  /** Skill names this step's agent must be able to use (#7721).
+   *  Absent — not `[]` — when the step requires nothing, which is what every step authored before this field existed looks like. */
+  requiredSkills?: string[];
   prompt?: string;
   timeoutSecs?: number;
   maxRetries?: number;
@@ -58,7 +75,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isCanvasNodeData(value: unknown, depth: number): value is CanvasNodeData {
   if (!isRecord(value) || depth > 20) return false;
   const stringFields = [
-    "nodeType", "label", "name", "description", "agentId", "agentName", "prompt",
+    "nodeType", "label", "name", "description", "agentId", "agentName", "agentType",
+    "agentSource", "sessionMode", "prompt",
     "errorMode", "outputVar", "stepMode", "condition", "until", "_runState", "_groupId",
     "_origSource", "_origTarget",
   ];
@@ -71,7 +89,7 @@ function isCanvasNodeData(value: unknown, depth: number): value is CanvasNodeDat
   const booleanFields = ["_expanded"];
   if (booleanFields.some((field) => value[field] !== undefined && typeof value[field] !== "boolean")) return false;
 
-  for (const field of ["dependsOn", "_childIds"]) {
+  for (const field of ["dependsOn", "_childIds", "requiredSkills"]) {
     const fieldValue = value[field];
     if (fieldValue !== undefined
       && (!Array.isArray(fieldValue) || fieldValue.some((item) => typeof item !== "string"))) return false;
@@ -183,7 +201,7 @@ export function parseCanvasImport(value: unknown): CanvasImport {
     }
   }
 
-  const stepNodes = value.nodes.filter((node) => node.data.agentId || node.data.agentName);
+  const stepNodes = value.nodes.filter((node) => stepAgentPayload(node.data) !== null);
   const dependencyOptions = stepNodes.map((node, index) => ({
     id: node.id,
     label: node.data.label || `Step ${index + 1}`,
@@ -234,6 +252,53 @@ export function parseCanvasImport(value: unknown): CanvasImport {
     name: value.name,
     description: value.description,
   };
+}
+
+/** The routing key a workflow step sends to bind its agent. */
+export type StepAgentPayload =
+  | { agent_id: string }
+  | { agent_type: string }
+  | { agent_name: string };
+
+/** A binding field's usable value: the trimmed string, or `""` when the field
+ *  is absent, blank, or a non-string smuggled in through a hand-edited layout. */
+function bindingField(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Pick the single agent routing key a canvas node contributes to a workflow
+ * step payload (#7712).
+ *
+ * A node carries `agentId`, `agentName` and `agentType` together so it can
+ * render a name next to the binding, but the workflow API accepts **exactly
+ * one** of `agent_id` / `agent_name` / `agent_type` per step: a payload with
+ * several is rejected rather than resolved by key precedence, because the step
+ * would otherwise bind to whichever key the server read first while the canvas
+ * kept showing the other one.
+ *
+ * `agentSource` records which of the three the operator actually chose (#7724),
+ * so it decides whenever it is present and its own field is filled. A node
+ * saved before the source was recorded falls back to precedence by specificity
+ * — a concrete instance id, then a type, then a name — which is also the
+ * fallback when an explicit source points at an empty field, so a binding the
+ * card is still displaying can never be silently dropped from the saved
+ * workflow.
+ *
+ * A node with no binding at all yields `null` so the caller can drop it rather
+ * than send a step the API will refuse.
+ */
+export function stepAgentPayload(data: CanvasNodeData): StepAgentPayload | null {
+  const agentId = bindingField(data.agentId);
+  const agentType = bindingField(data.agentType);
+  const agentName = bindingField(data.agentName);
+  if (data.agentSource === "instance" && agentId) return { agent_id: agentId };
+  if (data.agentSource === "type" && agentType) return { agent_type: agentType };
+  if (data.agentSource === "name" && agentName) return { agent_name: agentName };
+  if (agentId) return { agent_id: agentId };
+  if (agentType) return { agent_type: agentType };
+  if (agentName) return { agent_name: agentName };
+  return null;
 }
 
 /** Convert current IDs and unambiguous legacy labels into stable dependency IDs. */
@@ -297,3 +362,13 @@ export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] 
   const nextEdges = edges.filter((edge) => edge.id !== edgeId);
   return nextEdges.length === edges.length ? edges : nextEdges;
 }
+
+/** Tailwind classes for the node config panel's controls.
+ *
+ * Exported so the panel and the step controls extracted out of it
+ * (`components/StepAgentBinding.tsx`) stay visually identical from one
+ * definition instead of two copies that drift.
+ */
+export const CANVAS_INPUT_CLASS =
+  "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
+export const CANVAS_LABEL_CLASS = "text-[10px] font-bold text-text-dim uppercase";

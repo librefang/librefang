@@ -53,12 +53,12 @@
       "keepTime": true
     },
     {
-      "title": "Jaeger UI",
+      "title": "Search Traces (Jaeger)",
       "type": "link",
       "icon": "external link",
-      "tooltip": "Open standalone Jaeger UI for waterfall / span-diff / service-deps views",
-      "url": "http://localhost:16686/search?service=librefang",
-      "targetBlank": true,
+      "tooltip": "Open Grafana Explore on the proxied Jaeger datasource",
+      "url": "/explore?left=[\"now-1h\",\"now\",\"librefang-jaeger\",{}]",
+      "targetBlank": false,
       "tags": [],
       "asDropdown": false,
       "includeVars": false,
@@ -67,7 +67,8 @@
   ],
   "panels": [
     {
-      "title": "Cost Today (USD)",
+      "title": "Global Cost Today (USD)",
+      "description": "Global daily cost gauge; Agent, Provider, and Model filters do not apply.",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -230,7 +231,8 @@
       ]
     },
     {
-      "title": "Cost Trend",
+      "title": "Global Cost Trend",
+      "description": "Global daily cost gauge over time; Agent, Provider, and Model filters do not apply.",
       "description": "Today's estimated cost over time",
       "type": "timeseries",
       "gridPos": {

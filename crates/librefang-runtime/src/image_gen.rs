@@ -57,15 +57,25 @@ pub async fn generate_image(request: &ImageGenRequest) -> Result<ImageGenResult,
         .await
         .map_err(|e| format!("Failed to parse image generation response: {e}"))?;
 
+    parse_image_gen_response(&result, model_str)
+}
+
+fn parse_image_gen_response(
+    result: &serde_json::Value,
+    model: String,
+) -> Result<ImageGenResult, String> {
     let mut images = Vec::new();
     let mut revised_prompt = None;
 
     if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
-        for item in data {
+        for (index, item) in data.iter().enumerate() {
             let b64 = item
                 .get("b64_json")
                 .and_then(|v| v.as_str())
-                .unwrap_or_default()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    format!("Image generation response item {index} is missing non-empty b64_json")
+                })?
                 .to_string();
             let url = item
                 .get("url")
@@ -99,7 +109,7 @@ pub async fn generate_image(request: &ImageGenRequest) -> Result<ImageGenResult,
 
     Ok(ImageGenResult {
         images,
-        model: model_str,
+        model,
         revised_prompt,
     })
 }
@@ -117,6 +127,10 @@ pub fn save_images_to_workspace(
     let mut paths = Vec::new();
 
     for (i, image) in result.images.iter().enumerate() {
+        if image.data_base64.is_empty() {
+            return Err(format!("Generated image {i} has empty base64 data"));
+        }
+
         let filename = if result.images.len() == 1 {
             format!("image_{timestamp}.png")
         } else {
@@ -217,5 +231,43 @@ mod tests {
         let paths = save_images_to_workspace(&result, workspace).unwrap();
         assert_eq!(paths.len(), 1);
         assert!(std::path::Path::new(&paths[0]).exists());
+    }
+
+    #[test]
+    fn test_parse_image_response_rejects_missing_or_empty_base64() {
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(7),
+        ] {
+            let item = if invalid.is_null() {
+                serde_json::json!({"url": "https://example.com/image.png"})
+            } else {
+                serde_json::json!({"b64_json": invalid})
+            };
+            let result = parse_image_gen_response(
+                &serde_json::json!({"data": [item]}),
+                "dall-e-3".to_string(),
+            );
+
+            assert!(result.unwrap_err().contains("missing non-empty b64_json"));
+        }
+    }
+
+    #[test]
+    fn test_save_images_rejects_empty_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = ImageGenResult {
+            images: vec![GeneratedImage {
+                data_base64: String::new(),
+                url: Some("https://example.com/image.png".to_string()),
+            }],
+            model: "dall-e-3".to_string(),
+            revised_prompt: None,
+        };
+
+        assert!(save_images_to_workspace(&result, dir.path())
+            .unwrap_err()
+            .contains("empty base64 data"));
     }
 }

@@ -41,9 +41,18 @@ const SAME_ORIGIN_PREFIXES = [
   "/mcp",
 ];
 
-function isApiPath(path: string): boolean {
-  if (path === "/") return true;
+export function isApiPath(path: string): boolean {
   return SAME_ORIGIN_PREFIXES.some((p) => path.startsWith(p));
+}
+
+export function parseHttpBase(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return raw.replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 function rewritePath(httpBase: string, path: string): string {
@@ -53,6 +62,21 @@ function rewritePath(httpBase: string, path: string): string {
 function maybeStripTauriOrigin(url: string): string | null {
   if (url.startsWith("tauri://localhost")) {
     return url.slice("tauri://localhost".length) || "/";
+  }
+  return null;
+}
+
+function maybeStripHttpLocalhost(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.hostname === "localhost"
+    ) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch {
+    // Relative and malformed URLs are handled by the caller's other paths.
   }
   return null;
 }
@@ -69,16 +93,15 @@ export function setupBundleMode(): void {
     const encoded = hash.slice("#api=".length);
     try {
       const decoded = decodeURIComponent(encoded);
-      if (decoded) {
-        localStorage.setItem(BASE_KEY, decoded);
-      }
+      const validBase = parseHttpBase(decoded);
+      if (validBase) localStorage.setItem(BASE_KEY, validBase);
     } catch {
       // Malformed hash — ignore, fall back to whatever localStorage has.
     }
     history.replaceState(null, "", window.location.pathname + window.location.search);
   }
 
-  const stored = (localStorage.getItem(BASE_KEY) || "").replace(/\/$/, "");
+  const stored = parseHttpBase(localStorage.getItem(BASE_KEY) || "");
   if (!stored) return;
 
   const httpBase = stored;
@@ -102,9 +125,15 @@ export function setupBundleMode(): void {
       if (stripped && isApiPath(stripped)) {
         return ORIG_FETCH(rewritePath(httpBase, stripped), init);
       }
+      const localhostPath = maybeStripHttpLocalhost(url);
+      if (localhostPath && isApiPath(localhostPath)) {
+        return ORIG_FETCH(rewritePath(httpBase, localhostPath), init);
+      }
     }
     return ORIG_FETCH(input as RequestInfo, init);
   }) as typeof window.fetch;
+
+  if (!/^wss?:\/\//i.test(wsBase)) return;
 
   const ORIG_WS = window.WebSocket;
   // Replace the global with a subclass that rewrites relative /
