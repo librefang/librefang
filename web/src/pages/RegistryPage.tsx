@@ -15,6 +15,7 @@ import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
 import { useMarketplace, type MarketplacePkg } from '../lib/useMarketplace'
 import { fmtNum } from '../lib/format'
+import { comparePopularThenName, isPopular } from '../lib/registry-sort'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -46,10 +47,6 @@ function getCategoryLabels(t: Translation, category: RegistryCategory): { title:
   return { title: category, desc: '' }
 }
 
-function isPopular(item: Detail) {
-  return item.tags?.includes('popular') ?? false
-}
-
 type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads' | 'weekly'
 
 const SORT_KEYS: SortKey[] = ['popular', 'nameAsc', 'nameDesc', 'trending', 'downloads', 'weekly']
@@ -74,12 +71,7 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
       return arr.sort((a, b) => (marketplace.get(b.id)?.weekly_downloads ?? 0) - (marketplace.get(a.id)?.weekly_downloads ?? 0))
     case 'popular':
     default:
-      return arr.sort((a, b) => {
-        const ap = isPopular(a) ? 0 : 1
-        const bp = isPopular(b) ? 0 : 1
-        if (ap !== bp) return ap - bp
-        return a.name.localeCompare(b.name)
-      })
+      return arr.sort(comparePopularThenName)
   }
 }
 
@@ -389,7 +381,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
               // { content, path } in this slot — we mirror that shape so
               // the prefetch and the real query share one cache entry.
               const candidates = pathCandidatesFor(category, item.id)
-              const primaryPath = candidates[0]!
+              const primaryPath = candidates[0]
               const prefetch = () => {
                 // Warm the detail page's raw-TOML cache the moment the user
                 // hovers a card. react-query dedupes if the query is already

@@ -1,9 +1,8 @@
-import { useMemo, useEffect } from 'react'
+import { useMemo, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon, Download, Star, TrendingUp } from 'lucide-react'
-import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
-import type { RegistryCategory, Detail } from '../useRegistry'
+import type { RegistryCategory } from '../useRegistry'
 import { getTranslation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
@@ -15,6 +14,8 @@ import RegistryIcon from '../components/RegistryIcon'
 import { fetchRegistryRaw, pathCandidatesFor, fetchFirstAvailable } from '../lib/registry-raw'
 import { useMarketplace } from '../lib/useMarketplace'
 import { fmtNum } from '../lib/format'
+import { isPopular, sortByPopular } from '../lib/registry-sort'
+import { useClipboardCopy } from '../lib/useClipboardCopy'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
@@ -71,23 +72,17 @@ const COMMAND_TEMPLATE: Partial<Record<RegistryCategory, string>> = {
   mcp:          'librefang mcp add {id}',
 }
 
-function isPopular(item: Detail | undefined) {
-  return item?.tags?.includes('popular') ?? false
-}
-
 function AnchorLink({ id, title }: { id: string; title: string }) {
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useClipboardCopy()
   return (
     <a
       href={`#${id}`}
       onClick={(e) => {
         e.preventDefault()
         const url = `${window.location.origin}${window.location.pathname}#${id}`
-        navigator.clipboard.writeText(url)
+        copy(url)
         // Also update history so the hash is visible in the URL bar.
         history.replaceState(null, '', `#${id}`)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
       }}
       aria-label={title}
       title={title}
@@ -99,14 +94,10 @@ function AnchorLink({ id, title }: { id: string; title: string }) {
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useClipboardCopy()
   return (
     <button
-      onClick={() => {
-        navigator.clipboard.writeText(text)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }}
+      onClick={() => copy(text)}
       className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-mono text-gray-500 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors border border-black/10 dark:border-white/10 rounded"
     >
       {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -125,28 +116,12 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
   // Related = same category, excluding self. Popular first, then alphabetical,
   // cap at 6 so the section is a browse surface not a wall of text.
   const related = useMemo(() => {
-    const rest = items.filter(x => x.id !== id)
-    rest.sort((a, b) => {
-      const ap = a.tags?.includes('popular') ? 0 : 1
-      const bp = b.tags?.includes('popular') ? 0 : 1
-      if (ap !== bp) return ap - bp
-      return a.name.localeCompare(b.name)
-    })
-    return rest.slice(0, 6)
+    return sortByPopular(items.filter(x => x.id !== id)).slice(0, 6)
   }, [items, id])
 
   // Prev/next for the bottom-of-page navigation strip. Same sort as the list
   // page so "next" matches what the visitor would expect from the grid.
-  const sortedCategory = useMemo(() => {
-    const sorted = [...items]
-    sorted.sort((a, b) => {
-      const ap = a.tags?.includes('popular') ? 0 : 1
-      const bp = b.tags?.includes('popular') ? 0 : 1
-      if (ap !== bp) return ap - bp
-      return a.name.localeCompare(b.name)
-    })
-    return sorted
-  }, [items])
+  const sortedCategory = useMemo(() => sortByPopular(items), [items])
   const currentIdx = sortedCategory.findIndex(x => x.id === id)
   const prevItem = currentIdx > 0 ? sortedCategory[currentIdx - 1] : undefined
   const nextItem = currentIdx >= 0 && currentIdx < sortedCategory.length - 1 ? sortedCategory[currentIdx + 1] : undefined
@@ -154,7 +129,7 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
   const pathCandidates = pathCandidatesFor(category, id)
   // Cache key is the primary path so the hover-prefetch on the list page
   // (which only knows the preferred layout) warms the same slot.
-  const primaryPath = pathCandidates[0]!
+  const primaryPath = pathCandidates[0]
   const rawQuery = useQuery({
     queryKey: ['registry-raw', primaryPath],
     queryFn: () => fetchFirstAvailable(pathCandidates),
@@ -168,7 +143,12 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
   // Fire-and-forget click tracking so trending can surface on list pages.
   // navigator.sendBeacon is queued by the browser even on unload, and doesn't
   // block the page at all. Some browsers fall back to fetch keepalive.
+  const trackedClickRef = useRef<string | null>(null)
   useEffect(() => {
+    if (!item) return
+    const trackingKey = `${category}/${id}`
+    if (trackedClickRef.current === trackingKey) return
+    trackedClickRef.current = trackingKey
     const body = JSON.stringify({ category, id })
     try {
       if ('sendBeacon' in navigator) {
@@ -183,7 +163,7 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
         }).catch(() => { /* ignore */ })
       }
     } catch { /* ignore */ }
-  }, [category, id])
+  }, [category, id, item])
 
   // Try each candidate README path in order until one 200s. Skills have
   // SKILL.md as canonical, other categories may or may not have a README.
@@ -535,7 +515,7 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                   <ArrowLeft className="w-3 h-3" /> {t.registry?.previous || 'Previous'}
                 </span>
                 <span className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate max-w-full">
-                  {prevItem.name}
+                  {getLocalizedName(prevItem, lang)}
                 </span>
               </a>
             ) : <div />}
@@ -548,7 +528,7 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                   {t.registry?.next || 'Next'} <ArrowRight className="w-3 h-3" />
                 </span>
                 <span className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate max-w-full">
-                  {nextItem.name}
+                  {getLocalizedName(nextItem, lang)}
                 </span>
               </a>
             ) : <div />}

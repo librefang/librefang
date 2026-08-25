@@ -1,0 +1,1 @@
+Run the full Kubernetes boot contract for Docker runtime and workflow PRs, wait for a distinct replacement Pod, and fail closed without leaking the watcher when readiness, observation, or rollout fails. (#7281) (@xiaomo)

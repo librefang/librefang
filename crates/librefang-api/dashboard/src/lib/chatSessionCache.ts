@@ -1,5 +1,5 @@
-const MAX_CACHE_ENTRIES = 50;
-const CACHE_TTL_MS = 30 * 60 * 1000;
+export const MAX_CACHE_ENTRIES = 50;
+export const CACHE_TTL_MS = 30 * 60 * 1000;
 
 const sessionCache = new Map<string, { messages: unknown[]; expiresAt: number }>();
 
@@ -38,7 +38,10 @@ export function getCachedChatMessages<T>(key: string): T[] | undefined {
 }
 
 export function setCachedChatMessages<T>(key: string, messages: T[]) {
-  evictCacheIfNeeded();
+  if (!sessionCache.has(key)) evictCacheIfNeeded();
+  // Map#set does not update insertion order. Reinsert existing entries so
+  // message activity refreshes their LRU position without evicting a slot.
+  sessionCache.delete(key);
   sessionCache.set(key, { messages, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 

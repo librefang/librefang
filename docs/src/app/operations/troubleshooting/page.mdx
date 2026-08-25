@@ -440,15 +440,22 @@ curl -H "Authorization: Bearer your-api-key" http://127.0.0.1:4545/api/agents
 rate_limit_per_second = 20  # Increase if needed
 ```
 
-### CORS errors from browser
+### CORS errors from browser, or a 403 on the agent WebSocket
 
-**Cause**: Trying to access API from a different origin.
+**Cause**: Trying to access the API from an origin the daemon does not recognise.
 
-**Fix**: Add your origin to CORS config:
+**Fix**: Add your origin to `cors_origin`, which is a **top-level** key — not a member of `[api]`, and singular:
 ```toml
-[api]
-cors_origins = ["http://localhost:5173", "https://your-app.com"]
+cors_origin = ["http://localhost:5173", "https://your-app.com"]
 ```
+
+The same list governs the agent-chat WebSocket, which additionally accepts two origins without configuration: loopback on the listen port, and the literal IP address and port the request was itself addressed to (so a daemon on `0.0.0.0:4545` opened at `http://192.168.1.161:4545` serves its own dashboard).
+A daemon reached through a **hostname** — including anything behind a TLS-terminating proxy — has to be listed here, because a hostname that resolves to this address is not evidence that this daemon served the page.
+
+<Note>
+`allowed_origins` is a different setting: it belongs to `[terminal]` and feeds the terminal route only.
+Setting it under `[api]` does nothing at all, because `config.toml` has no `[api]` table.
+</Note>
 
 ### WebSocket disconnects
 

@@ -19,10 +19,13 @@ import { agentKeys, handKeys, overviewKeys } from "../queries/keys";
 // then run the broad invalidation (covers agentKeys / overviewKeys derived
 // state).
 function patchActiveHandsCache(qc: QueryClient, updated: HandInstanceItem) {
+  const definedPatch = Object.fromEntries(
+    Object.entries(updated).filter(([, value]) => value !== undefined),
+  );
   qc.setQueryData<HandInstanceItem[]>(handKeys.active(), (prev) => {
     if (!prev) return prev;
     return prev.map((item) =>
-      item.instance_id === updated.instance_id ? { ...item, ...updated } : item,
+      item.instance_id === updated.instance_id ? { ...item, ...definedPatch } : item,
     );
   });
 }
@@ -116,7 +119,7 @@ export function useSetHandSecret() {
       value: string;
     }) => setHandSecret(handId, key, value),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: handKeys.lists() });
+      invalidateHandAndAgentCaches(qc);
       qc.invalidateQueries({ queryKey: handKeys.detail(variables.handId) });
     },
   });
@@ -173,6 +176,9 @@ export function useSendHandMessage() {
     }) => sendHandMessage(instanceId, message),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: handKeys.session(variables.instanceId) });
+      qc.invalidateQueries({ queryKey: handKeys.stats(variables.instanceId) });
+      qc.invalidateQueries({ queryKey: agentKeys.all });
+      qc.invalidateQueries({ queryKey: overviewKeys.snapshot() });
     },
   });
 }

@@ -215,6 +215,13 @@ pub struct SetAgentToolsRequest {
     /// Glob patterns allowed.
     #[serde(default)]
     pub tool_blocklist: Option<Vec<String>>,
+    /// `agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.
+    /// `None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.
+    ///
+    /// Named `disabled` to match the key `GET /api/agents/{id}/tools` already returns.
+    /// Until #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking.
+    #[serde(default)]
+    pub disabled: Option<bool>,
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
@@ -225,10 +232,10 @@ pub struct SetAgentToolsRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(
         content = SetAgentToolsRequest,
-        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609)."
+        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742)."
     ),
     responses(
-        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.", body = crate::types::JsonObject)
+        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -251,6 +258,7 @@ pub async fn set_agent_tools(
     if body.capabilities_tools.is_none()
         && body.tool_allowlist.is_none()
         && body.tool_blocklist.is_none()
+        && body.disabled.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -281,6 +289,7 @@ pub async fn set_agent_tools(
         body.capabilities_tools,
         body.tool_allowlist,
         body.tool_blocklist,
+        body.disabled,
     ) {
         // Read the agent back so the dashboard can `setQueryData` directly
         // instead of refetching. Returns the same shape as `GET /api/agents/{id}/tools`.
@@ -298,8 +307,9 @@ pub async fn set_agent_tools(
                 // Name any allowlist entry that provably cannot admit a tool (#6609).
                 // Evaluated against the entry read back *after* the write, so both the new declared set and the stored allowlist are the post-write values: a request that sets `capabilities_tools` and `tool_allowlist` together is judged against what it just wrote rather than what it replaced, and a request that only narrows `capabilities_tools` is judged against the allowlist it left in place.
                 //
-                // No `tools_disabled` guard is needed: `update_tool_config` unconditionally clears that flag on every successful write, so on this arm the agent's tools are always enabled.
-                if evaluate_inert_entries {
+                // Gated on `tools_disabled` as well, since #7742: `update_tool_config` no longer force-clears that flag, so an agent can reach this arm with every tool switched off.
+                // Naming an inert allowlist entry there would be advice about the second filter of a pipeline whose first stage already admits nothing — noise, and the same "your own request silenced a tool and the response was a clean 200" failure in reverse.
+                if evaluate_inert_entries && !entry.manifest.tools_disabled {
                     let inert = inert_tool_allowlist_entries(
                         &entry.manifest.capabilities.tools,
                         &entry.manifest.tool_allowlist,
@@ -370,13 +380,22 @@ pub async fn get_agent_skills(
         );
     }
     let available = read_agent_skills_registry(state.kernel.skill_registry_ref()).skill_names();
+    let mode = skill_assignment_mode(&entry.manifest);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.skills,
             "available": available,
-            "mode": skill_assignment_mode(&entry.manifest),
+            "mode": mode,
             "disabled": entry.manifest.skills_disabled,
+            // Declared but not installed — retained in the manifest, activates on the next skills reload (#7713).
+            "pending": pending.skills,
         })),
     )
 }
@@ -493,12 +512,20 @@ pub async fn get_agent_mcp_servers(
         }
     }
     let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.mcp_servers,
             "available": available,
             "mode": mode,
+            // Declared but with no live connection — configured-and-unreachable counts as pending (#7713).
+            "pending": pending.mcp_servers,
         })),
     )
 }
@@ -629,24 +656,51 @@ pub async fn get_agent_channels(
     )
 }
 
+/// Body of `PUT /api/agents/{id}/channels`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentChannelsRequest {
+    /// `channel_type` strings the agent may receive messages from.
+    /// An empty list clears the allowlist, which means "all channels" (`mode = "all"`).
+    pub channels: Vec<String>,
+}
+
 /// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+///
+/// Body shape mirrors the sibling `mcp_servers` route rather than the bare array the OpenAPI
+/// annotation used to advertise (#7742).
+/// The old handler read `body["channels"]` out of an untyped `Value` and fell back to `Vec::new()`
+/// for anything it did not recognise, so the documented bare-array body — and any typo in the key —
+/// silently cleared the allowlist and reopened the agent to every channel.
+/// Widening an allowlist is not a defensible interpretation of a malformed request, so a body that
+/// does not deserialize is now a 400.
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/channels",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of channel_type strings"),
+    request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist"),
     responses(
-        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_channels(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentChannelsRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -656,14 +710,7 @@ pub async fn set_agent_channels(
             )
         }
     };
-    let channels: Vec<String> = body["channels"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let channels = body.channels;
     match state.kernel.set_agent_channels(agent_id, channels.clone()) {
         Ok(()) => (
             StatusCode::OK,

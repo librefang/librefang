@@ -12,6 +12,7 @@ import { useAuditRecent } from "../lib/queries/runtime";
 import type { AuditEntry } from "../api";
 
 const REFRESH_MS = 5000;
+const LOG_LIMIT = 100;
 
 const LOG_LEVELS = {
   info: { color: "text-brand", bg: "bg-brand/10" },
@@ -24,16 +25,47 @@ function logModule(entry: AuditEntry) {
   return entry.action;
 }
 
+type LogLevel = keyof typeof LOG_LEVELS;
+
+export function auditLogLevel(entry: AuditEntry): LogLevel {
+  const outcome = (entry.outcome ?? "").toLowerCase();
+  if (outcome.startsWith("error")) return "error";
+  if (outcome.startsWith("warn")) return "warn";
+  if (outcome.startsWith("debug")) return "debug";
+  return "info";
+}
+
+export function auditLogKey(entry: AuditEntry): string {
+  if (entry.seq !== undefined) return `seq:${entry.seq}`;
+  if (entry.hash) return `hash:${entry.hash}`;
+  return [
+    entry.timestamp ?? "",
+    entry.agent_id ?? "",
+    entry.action ?? "",
+    entry.outcome ?? "",
+    entry.detail ?? "",
+  ].join("\u0000");
+}
+
+export function projectAuditLogExport(entries: AuditEntry[]) {
+  return entries.map((entry) => ({
+    timestamp: entry.timestamp,
+    level: auditLogLevel(entry),
+    module: logModule(entry),
+    message: entry.detail,
+    outcome: entry.outcome,
+  }));
+}
+
 export function LogsPage() {
   const { t } = useTranslation();
-  const LIMIT = 100;
-  const auditQuery = useAuditRecent(LIMIT, {
+  const auditQuery = useAuditRecent(LOG_LIMIT, {
     refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
   });
 
   const logs = useMemo(
     () => auditQuery.data?.items ?? auditQuery.data?.entries ?? [],
-    [auditQuery.data?.entries, auditQuery.data?.items],
+    [auditQuery.data],
   );
   const modules = useMemo(
     () => Array.from(new Set(logs.map(logModule).filter(Boolean))) as string[],
@@ -46,15 +78,20 @@ export function LogsPage() {
 
   const filteredLogs = useMemo(
     () => logs.filter((l: AuditEntry) => {
-      const matchesSearch = !search || (l.detail || l.outcome || "").toLowerCase().includes(searchLower);
+      const matchesSearch =
+        !searchLower ||
+        (l.detail || l.outcome || "").toLowerCase().includes(searchLower);
       const matchesModule = !moduleFilter || logModule(l) === moduleFilter;
       return matchesSearch && matchesModule;
     }),
-    [logs, moduleFilter, search, searchLower],
+    [logs, moduleFilter, searchLower],
   );
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify(filteredLogs, null, 2)], { type: "application/json" });
+    const blob = new Blob(
+      [JSON.stringify(projectAuditLogExport(filteredLogs), null, 2)],
+      { type: "application/json" },
+    );
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -128,17 +165,16 @@ export function LogsPage() {
               message={t("common.no_data")}
             />
           ) : (
-            filteredLogs.map((l: AuditEntry, i: number) => {
-              const outcome = l.outcome || "";
-              const isError = outcome.startsWith("error");
-              const level = isError ? "error" : "info";
-              const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
+            filteredLogs.map((l: AuditEntry) => {
+              const level = auditLogLevel(l);
+              const isError = level === "error";
+              const levelStyle = LOG_LEVELS[level];
               const time = formatTime(l.timestamp);
               const detail = l.detail || "-";
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
               const agentId = l.agent_id ? truncateId(l.agent_id) : "";
               return (
-                <div key={l.seq ?? i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
+                <div key={auditLogKey(l)} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <div className="flex items-center gap-2 sm:contents">
                     <span className="text-text-dim/40 shrink-0 sm:w-16 text-[10px]">{time}</span>
                     <span className="shrink-0 sm:w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
