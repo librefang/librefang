@@ -68,6 +68,21 @@ cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast
 `docs/development/build-and-verify.md` covers the rest: the two CI test lanes and why the nextest filter expression is used instead of `--lib --bins`, the `librefang-desktop` Windows exclusion (#6729), and how to verify **without a native toolchain** via `Dockerfile.rust-dev` and a per-worktree target volume.
 Read it before declaring a change unverified on a host that has no `cargo`.
 
+### One target directory per machine, and it is not yours to choose
+
+A cold build of this workspace is 40-50 GB, and `debug/deps` alone reaches 50 GB before anything prunes it.
+Two of them do not fit on a normal disk.
+
+So when a `CARGO_TARGET_DIR` is handed to you, **use exactly that one**.
+Do not create a second target directory to escape a stale artifact, and do not fall back to the default `target/` — a private target dir is invisible to whoever is watching disk, which is how a machine reaches zero free space while its owner is still pruning the directory they know about.
+
+The reason to want your own is real: a shared target dir is keyed by crate name, so a build from another worktree can leave an artifact that makes your crate fail to compile against a symbol that plainly exists in your files.
+That is cross-worktree poisoning, not a bug in your code.
+The fix is `touch` on that crate's `lib.rs` to force a rebuild — never a new target directory.
+
+`cargo` never garbage-collects `debug/deps`, so artifacts from merged and deleted worktrees accumulate until something removes them.
+`debug/incremental` is pure cache and can be deleted at any time; `debug/deps` costs a cold rebuild, so drop it only when no `cargo` or `rustc` process is running.
+
 ## MANDATORY: Integration Testing (refs #3721)
 
 Primary verification is automated: `#[tokio::test]` coverage in `crates/librefang-api/tests/` exercises every major route domain against a real axum router via `TestServer` (`start_test_server*` in `tests/api_integration_test.rs`).
@@ -199,6 +214,10 @@ The rules you must not break without asking:
 - **Latest maintainer intent wins** in conflict resolution, and preserve both sides' intent — dropping a hunk because "it'll be reapplied later" is how regressions land.
 - **Batch merging is runner-pool bound, not merge bound.** Merging >10 PRs back-to-back saturates the free-plan `ubuntu-latest` pool; merge in batches, cancel *superseded* runs (never a run whose `head_sha` **is** its branch tip — `CI Gate` fails on `cancelled` and does not re-evaluate), and remember a stalled queue is not a CI failure.
 - **Two green PRs can still break `main` together.** The `main` ruleset has no `strict_required_status_checks_policy`, so each PR merges on CI run against its own base. Group a merge sweep by changed file, re-run CI on later PRs in a group, and verify `main` itself after the batch.
+  In a fast sweep this bites within minutes, and file-grouping alone does not catch it: the two PRs need not touch the same file, only the same *type*. A PR adding a field to a struct and a PR adding a constructor of that struct are green apart and `E0063` together; the same pair with a changed return type is `E0308`.
+  Once several PRs are queued, the cheap guard is to merge `origin/main` into each remaining branch and re-run its checks before merging it, rather than merging them all against the base each was cut from.
+  When `main` does break, the alert names the commit CI happened to run on, which is usually not the commit that broke it — read the failing job's log and find the type the two changes share.
+- **A red check is not always a failure.** `CI Gate` treats a `cancelled` job as failed and never re-evaluates it, so `gh pr checks` reports `fail` for a run in which no test failed. Read the job's `conclusion` before diagnosing: `cancelled` means retry the run once it finishes, `failure` means read the log. A `[main red]` alert on a commit that predates the fix is likewise stale — check whether the fix merged after the run started before doing any work.
 
 ## Common Gotchas
 
