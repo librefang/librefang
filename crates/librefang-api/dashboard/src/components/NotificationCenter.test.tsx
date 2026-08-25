@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Keep i18n predictable — return the default value when one is supplied,
@@ -24,6 +24,10 @@ vi.mock("react-i18next", () => ({
 }));
 
 const navigateMock = vi.fn();
+const { approveMutateAsync, rejectMutateAsync } = vi.hoisted(() => ({
+  approveMutateAsync: vi.fn(),
+  rejectMutateAsync: vi.fn(),
+}));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigateMock,
 }));
@@ -52,14 +56,18 @@ vi.mock("../lib/queries/skills", () => ({
 }));
 
 vi.mock("../lib/mutations/approvals", () => ({
-  useApproveApproval: () => ({ mutateAsync: vi.fn() }),
-  useRejectApproval: () => ({ mutateAsync: vi.fn() }),
+  useApproveApproval: () => ({ mutateAsync: approveMutateAsync }),
+  useRejectApproval: () => ({ mutateAsync: rejectMutateAsync }),
 }));
 
 import { NotificationCenter } from "./NotificationCenter";
 
 beforeEach(() => {
   navigateMock.mockReset();
+  approveMutateAsync.mockReset();
+  approveMutateAsync.mockResolvedValue(undefined);
+  rejectMutateAsync.mockReset();
+  rejectMutateAsync.mockResolvedValue(undefined);
   document.body.focus();
 });
 
@@ -210,5 +218,36 @@ describe("NotificationCenter keyboard navigation", () => {
     const zeros = items.filter((el) => el.tabIndex === 0);
     expect(zeros.length).toBe(1);
     expect(zeros[0]).toBe(items[1]);
+  });
+});
+
+describe("NotificationCenter approval actions", () => {
+  it("blocks duplicate or conflicting actions for an approval in flight", async () => {
+    const user = userEvent.setup();
+    let resolveApproval: (() => void) | undefined;
+    approveMutateAsync.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveApproval = resolve;
+      }),
+    );
+    render(<NotificationCenter />);
+    await user.click(getTrigger());
+
+    const approveButtons = screen.getAllByRole("button", { name: "approvals.approve" });
+    const rejectButtons = screen.getAllByRole("button", { name: "approvals.reject" });
+    await user.click(approveButtons[0]);
+
+    expect(approveMutateAsync).toHaveBeenCalledTimes(1);
+    expect(approveButtons[0]).toBeDisabled();
+    expect(rejectButtons[0]).toBeDisabled();
+    expect(approveButtons[1]).not.toBeDisabled();
+
+    await user.click(approveButtons[0]);
+    await user.click(rejectButtons[0]);
+    expect(approveMutateAsync).toHaveBeenCalledTimes(1);
+    expect(rejectMutateAsync).not.toHaveBeenCalled();
+
+    resolveApproval?.();
+    await waitFor(() => expect(approveButtons[0]).not.toBeDisabled());
   });
 });

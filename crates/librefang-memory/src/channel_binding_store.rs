@@ -206,10 +206,21 @@ impl ChannelBindingStore {
         instance: &str,
         conversation_id: &str,
     ) -> LibreFangResult<Option<String>> {
-        if let Some(agent) = self.conversation_binding(instance, conversation_id)? {
-            return Ok(Some(agent));
-        }
-        self.instance_default(instance)
+        // Keep both precedence levels in one statement. Separate helper calls
+        // would use independent pooled connections and could observe two
+        // different commits during a concurrent reset or instance rebind.
+        let c = self.pool.get().map_err(LibreFangError::memory)?;
+        c.query_row(
+            "SELECT COALESCE(
+                (SELECT agent_name FROM conversation_bindings
+                 WHERE instance_name = ?1 AND conversation_id = ?2),
+                (SELECT agent_name FROM channel_instance_defaults
+                 WHERE instance_name = ?1)
+             )",
+            rusqlite::params![instance, conversation_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| LibreFangError::memory_msg(format!("channel binding resolve failed: {e}")))
     }
 }
 

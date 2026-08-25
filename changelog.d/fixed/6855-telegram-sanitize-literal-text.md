@@ -1,1 +1,0 @@
-- Escaped raw HTML metacharacters in Telegram sanitizer text nodes while preserving already-valid HTML entities. (@houko)

@@ -76,9 +76,7 @@ const SCRIPT_EXTENSIONS: &[&str] = &[".py", ".sh", ".bash", ".rb", ".pl", ".js",
 /// - `bash -c ./run.sh`
 /// - `node app.js`
 fn extract_script_path(command: &str) -> Option<String> {
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    for part in &parts[1..] {
-        // skip the command itself
+    for part in command.split_whitespace().skip(1) {
         // Skip flags
         if part.starts_with('-') {
             continue;
@@ -331,6 +329,13 @@ mod tests {
     fn test_scan_non_script_command() {
         let warnings = scan_script_for_shell_bleed("ls -la", None);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_scan_empty_commands() {
+        for command in ["", " \t\n"] {
+            assert!(scan_script_for_shell_bleed(command, None).is_empty());
+        }
     }
 
     #[test]

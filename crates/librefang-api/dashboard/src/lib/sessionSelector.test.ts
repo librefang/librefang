@@ -177,6 +177,14 @@ describe("shouldAutoPinResolvedSession (issue #5199 — WS + HTTP shared gate)",
     ).toBe(false);
   });
 
+  it("treats an empty URL session id as unpinned", () => {
+    // ChatPage normalizes `?sessionId=` to null before invoking the helper.
+    // Preserve the same behavior if another caller passes the raw empty value.
+    expect(
+      shouldAutoPinResolvedSession({ ...base, urlSessionId: "" }),
+    ).toBe(true);
+  });
+
   it("does NOT pin when the server omitted session_id (request was pinned, response carries no body field)", () => {
     expect(
       shouldAutoPinResolvedSession({ ...base, resolvedSessionId: undefined }),
