@@ -142,7 +142,8 @@ async fn boot(
     require_email_verified: bool,
 ) -> (RouterHarness, TestKey) {
     // `external_auth.enabled = true` makes the kernel require a well-formed `LIBREFANG_STATE_SECRET` at boot.
-    // 32 zero bytes, base64. Only ever set, never cleared, and valid for any concurrent boot, so parallel tests in this binary are unaffected.
+    // 32 zero bytes, base64.
+    // Only ever set, never cleared, and valid for any concurrent boot, so parallel tests in this binary are unaffected.
     // These tests never exercise the state HMAC.
     std::env::set_var(
         "LIBREFANG_STATE_SECRET",
