@@ -335,11 +335,16 @@ impl LibreFangKernel {
 
         // ── Driver, model metadata, capability handles ──────────────────────
         let driver = self.resolve_driver_for_owner(&manifest, None)?;
+        // `resolve_context_window` now answers with the layer that produced the
+        // number so a session report can label it (#7774). An ephemeral worker
+        // renders no such report — it only needs the budget — so take the tokens
+        // and drop the provenance here rather than threading it somewhere unused.
         let ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &manifest.model,
             None,
-        );
+        )
+        .map(|resolved| resolved.tokens);
         if let Some(supports) = Some(self.llm.model_catalog.load()).and_then(|cat| {
             cat.find_model_for_manifest(&manifest.model.provider, &manifest.model.model)
                 .map(|m| cat.effective_capabilities(m).supports_tools)

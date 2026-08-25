@@ -1447,6 +1447,10 @@ tui-event-provider-delete-key-failed = Не вдалося видалити кл
 tui-event-provider-connection-ok = З'єднання встановлено
 tui-event-provider-test-failed = Тест не пройшов
 tui-event-provider-test-not-available-in-process = Тестування провайдерів недоступне в інпроцес-режимі
+tui-event-models-load-failed = Не вдалося завантажити каталог моделей
+tui-event-models-not-available-in-process = Налаштування моделей потребує запущеного демона й недоступне в режимі in-process
+tui-event-model-limits-save-failed = Не вдалося зберегти ліміти для { $model }
+tui-event-model-limits-reset-failed = Не вдалося повернути ліміти для { $model }
 tui-event-hand-activation-failed = Не вдалося активувати
 tui-event-hand-activate-failed-error = Не вдалося активувати: { $error }
 tui-event-hand-activation-failed-error = Помилка активації: { $error }
@@ -1534,6 +1538,7 @@ tui-tab-sessions = Сесії
 tui-tab-workflows = Потоки
 tui-tab-triggers = Тригери
 tui-tab-memory = Пам'ять
+tui-tab-models = Моделі
 tui-tab-skills = Скіли
 tui-tab-hands = Hands
 tui-tab-extensions = Ext
@@ -1589,6 +1594,34 @@ tui-sessions-loading = Завантаження сесій…
 tui-sessions-empty = Сесій ще немає. Почніть чат, щоб створити її.
 tui-sessions-delete-confirm = Видалити цю сесію? [y] Так  [будь-яка клавіша] Скасувати
 tui-sessions-hints = ↑↓ Навігація  Enter Відкрити  d Видалити  / Пошук  r Оновити
+
+# models.rs
+tui-models-title = Моделі
+tui-models-count =
+    { $count ->
+        [one] 1 модель
+        [few] { $count } моделі
+       *[other] { $count } моделей
+    }
+tui-models-header-model = Модель
+tui-models-header-provider = Провайдер
+tui-models-header-window = Вікно
+tui-models-header-catalog = Каталог
+tui-models-header-max-output = Макс. вивід
+tui-models-loading = Завантаження каталогу моделей…
+tui-models-empty = Немає моделей. Налаштуйте провайдера в Налаштуваннях або додайте модель через `librefang model add`.
+tui-models-window-unknown = невідоме
+tui-models-hints = ↑↓ Навігація  / Фільтр  e Редагувати ліміти  d Повернути до каталогу  r Оновити
+tui-models-status-no-override = Для цієї моделі немає перевизначення — нічого повертати.
+tui-models-status-saved = Ліміти для { $model } збережено
+tui-models-status-reset = { $model } повернуто до значень каталогу
+tui-models-field-context-window = Контекстне вікно
+tui-models-field-max-output = Макс. токенів виводу
+tui-models-field-cleared = (очищено — використовується каталог)
+tui-models-field-catalog-hint = каталог: { $value }
+tui-models-edit-explainer = Діє для кожного агента на цій моделі та зберігається після синхронізації реєстру.
+tui-models-edit-not-max-tokens = Контекстне вікно — це загальний бюджет моделі, а не ліміт виводу на одну відповідь.
+tui-models-edit-hints = Tab Змінити поле  0-9 Ввід  Enter Зберегти  Esc Скасувати
 
 # peers.rs
 tui-peers-title = Піри

@@ -6,6 +6,7 @@
 
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
+use librefang_types::model_catalog::{ContextWindowSource, LimitSource, ResolvedContextWindow};
 
 /// Convert a manifest's capability declarations into Capability enums.
 ///
@@ -124,25 +125,46 @@ pub(super) fn global_thinking_backfill_allowed(
 ///
 /// Returns `None` when nothing resolves, leaving the fallback (currently
 /// `UNKNOWN_MODEL_CONTEXT_WINDOW`, 8192) to the agent loop, which also logs it.
+///
+/// The answer carries the layer that produced it ([`ResolvedContextWindow`]),
+/// because the number alone cannot tell an operator whether their model's
+/// window is known or guessed — the distinction #7774 was filed over.
+/// A caller that only needs the size reads `.tokens`.
 pub(super) fn resolve_context_window(
     catalog: &librefang_runtime::model_catalog::ModelCatalog,
     model: &librefang_types::agent::ModelConfig,
     session_hint: Option<u64>,
-) -> Option<usize> {
-    model
-        .context_window
+) -> Option<ResolvedContextWindow> {
+    if let Some(tokens) = model.context_window.filter(|v| *v > 0) {
+        return Some(ResolvedContextWindow {
+            tokens: tokens as usize,
+            source: ContextWindowSource::AgentOverride,
+        });
+    }
+    // Layers 2 and 3 in one call: `effective_limits_for_manifest`
+    // already ranks the operator override above the catalog entry and
+    // filters both sides' zeros, so the two cannot drift apart here — and it
+    // reports which of the two answered, so neither can this.
+    let limits = catalog.effective_limits_for_manifest(&model.provider, &model.model);
+    if let Some(tokens) = limits.context_window {
+        let source = match limits.context_window_source {
+            LimitSource::Override => ContextWindowSource::ModelOverride,
+            // `Unknown` is unreachable while `context_window` is `Some` —
+            // `rank_limit` sets the two in the same expression — but mapping it
+            // to `Catalog` keeps this total without an unreachable panic.
+            LimitSource::Catalog | LimitSource::Unknown => ContextWindowSource::Catalog,
+        };
+        return Some(ResolvedContextWindow {
+            tokens: tokens as usize,
+            source,
+        });
+    }
+    session_hint
         .filter(|v| *v > 0)
-        .map(|v| v as usize)
-        .or_else(|| {
-            // Layers 2 and 3 in one call: `effective_limits_for_manifest`
-            // already ranks the operator override above the catalog entry and
-            // filters both sides' zeros, so the two cannot drift apart here.
-            catalog
-                .effective_limits_for_manifest(&model.provider, &model.model)
-                .context_window
-                .map(|w| w as usize)
+        .map(|tokens| ResolvedContextWindow {
+            tokens: tokens as usize,
+            source: ContextWindowSource::SessionHint,
         })
-        .or_else(|| session_hint.filter(|v| *v > 0).map(|v| v as usize))
 }
 
 /// Apply a per-call deep-thinking override to a manifest clone.
@@ -760,7 +782,29 @@ mod context_window_tests {
     use super::resolve_context_window;
     use librefang_runtime::model_catalog::ModelCatalog;
     use librefang_types::agent::ModelConfig;
-    use librefang_types::model_catalog::{ModelCatalogEntry, ModelOverrides, ModelTier};
+    use librefang_types::model_catalog::{
+        ContextWindowSource, ModelCatalogEntry, ModelOverrides, ModelTier,
+    };
+
+    /// The resolved size on its own.
+    ///
+    /// The precedence assertions below predate provenance and are about which *number* wins; `source_of` covers which layer is named for it, so each test reads as one claim.
+    fn resolve(
+        catalog: &ModelCatalog,
+        model: &ModelConfig,
+        session_hint: Option<u64>,
+    ) -> Option<usize> {
+        resolve_context_window(catalog, model, session_hint).map(|r| r.tokens)
+    }
+
+    /// The layer that produced the resolved window, or `None` when nothing did.
+    fn source_of(
+        catalog: &ModelCatalog,
+        model: &ModelConfig,
+        session_hint: Option<u64>,
+    ) -> Option<ContextWindowSource> {
+        resolve_context_window(catalog, model, session_hint).map(|r| r.source)
+    }
 
     fn catalog() -> ModelCatalog {
         ModelCatalog::from_entries(
@@ -801,7 +845,7 @@ mod context_window_tests {
     /// them to do — and it was ignored, leaving the 8192 fallback in place.
     #[test]
     fn manifest_override_wins_for_an_unknown_model() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", Some(131_072)),
             None,
@@ -811,7 +855,7 @@ mod context_window_tests {
 
     #[test]
     fn manifest_override_wins_over_the_catalog() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", Some(64_000)),
             None,
@@ -825,7 +869,7 @@ mod context_window_tests {
 
     #[test]
     fn falls_back_to_the_catalog_without_an_override() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", None),
             None,
@@ -835,7 +879,7 @@ mod context_window_tests {
 
     #[test]
     fn a_zero_override_is_ignored() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", Some(0)),
             None,
@@ -847,14 +891,13 @@ mod context_window_tests {
     fn a_zero_catalog_window_falls_through_to_the_session_hint() {
         // Image / audio entries carry 0; feeding that into budget math would
         // divide by an empty window.
-        let resolved =
-            resolve_context_window(&catalog(), &model("openai", "dall-e-3", None), Some(48_000));
+        let resolved = resolve(&catalog(), &model("openai", "dall-e-3", None), Some(48_000));
         assert_eq!(resolved, Some(48_000));
     }
 
     #[test]
     fn session_hint_is_last() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("anthropic", "claude-sonnet-4-6", None),
             Some(48_000),
@@ -868,7 +911,7 @@ mod context_window_tests {
 
     #[test]
     fn a_zero_session_hint_is_ignored() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", None),
             Some(0),
@@ -881,7 +924,7 @@ mod context_window_tests {
 
     #[test]
     fn returns_none_when_nothing_resolves() {
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &catalog(),
             &model("deepseek", "deepseek-v4-flash", None),
             None,
@@ -903,8 +946,7 @@ mod context_window_tests {
                 ..Default::default()
             },
         );
-        let resolved =
-            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
+        let resolved = resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
         assert_eq!(resolved, Some(48_000));
     }
 
@@ -921,7 +963,7 @@ mod context_window_tests {
                 ..Default::default()
             },
         );
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &cat,
             &model("litellm", "sensor-model-generic-high", None),
             None,
@@ -942,7 +984,7 @@ mod context_window_tests {
                 ..Default::default()
             },
         );
-        let resolved = resolve_context_window(
+        let resolved = resolve(
             &cat,
             &model("anthropic", "claude-sonnet-4-6", Some(96_000)),
             None,
@@ -973,12 +1015,12 @@ mod context_window_tests {
             },
         );
         assert_eq!(
-            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
             Some(200_000),
             "the catalog value must still be what resolves"
         );
         assert_eq!(
-            resolve_context_window(
+            resolve(
                 &cat,
                 &model("deepseek", "deepseek-v4-flash", None),
                 Some(48_000)
@@ -987,7 +1029,7 @@ mod context_window_tests {
             "the session hint must still be the last resort"
         );
         assert_eq!(
-            resolve_context_window(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
+            resolve(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
             None,
             "nothing resolved — the caller's fallback still applies"
         );
@@ -1005,8 +1047,7 @@ mod context_window_tests {
                 ..Default::default()
             },
         );
-        let resolved =
-            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
+        let resolved = resolve(&cat, &model("anthropic", "claude-sonnet-4-6", None), None);
         assert_eq!(resolved, Some(200_000));
     }
 
@@ -1022,7 +1063,7 @@ mod context_window_tests {
                 ..Default::default()
             },
         );
-        let resolved = resolve_context_window(&cat, &model("openai", "dall-e-3", None), None);
+        let resolved = resolve(&cat, &model("openai", "dall-e-3", None), None);
         assert_eq!(resolved, Some(4_096));
     }
 
@@ -1038,11 +1079,103 @@ mod context_window_tests {
     fn a_stale_session_hint_would_beat_the_compaction_gate_default() {
         let unknown = model("deepseek", "deepseek-v4-flash", None);
         // What the gate must NOT do: rank the stale value above its default.
-        let with_stale_hint = resolve_context_window(&catalog(), &unknown, Some(8192));
+        let with_stale_hint = resolve(&catalog(), &unknown, Some(8192));
         assert_eq!(with_stale_hint, Some(8192));
         // What the gate does: no hint, so its own `unwrap_or(200_000)` applies.
-        let without_hint = resolve_context_window(&catalog(), &unknown, None);
+        let without_hint = resolve(&catalog(), &unknown, None);
         assert_eq!(without_hint, None);
+    }
+
+    /// Refs #7774 item 5. Every layer names itself, so a surface reporting the
+    /// window can say where it came from.
+    ///
+    /// Without this an operator reads one number for four different facts: a
+    /// window they set, a window the registry declared, a window an earlier
+    /// turn happened to persist, and a window nobody knows.
+    /// The reported incident is the last one — 8192 assumed against a real 16K — and it is indistinguishable from the others by size alone.
+    #[test]
+    fn each_layer_names_itself_as_the_source() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "litellm:sensor-model-generic-high".to_string(),
+            ModelOverrides {
+                context_window: Some(16_384),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("anthropic", "claude-sonnet-4-6", Some(96_000)),
+                None
+            ),
+            Some(ContextWindowSource::AgentOverride),
+        );
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("litellm", "sensor-model-generic-high", None),
+                None
+            ),
+            Some(ContextWindowSource::ModelOverride),
+        );
+        assert_eq!(
+            source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(ContextWindowSource::Catalog),
+        );
+        assert_eq!(
+            source_of(
+                &cat,
+                &model("deepseek", "deepseek-v4-flash", None),
+                Some(48_000)
+            ),
+            Some(ContextWindowSource::SessionHint),
+        );
+        assert_eq!(
+            source_of(&cat, &model("deepseek", "deepseek-v4-flash", None), None),
+            None,
+            "nothing resolved — the caller labels its own fallback",
+        );
+    }
+
+    /// A model-level override of a window the catalog also declares reports the
+    /// override, not the catalog.
+    ///
+    /// The two layers are ranked inside one `effective_limits_for_manifest` call, so this is the assertion that keeps the value and its label from being computed by different rules.
+    #[test]
+    fn an_override_shadowing_a_catalog_entry_reports_the_override() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(48_000),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_context_window(&cat, &model("anthropic", "claude-sonnet-4-6", None), None)
+                .map(|r| (r.tokens, r.source)),
+            Some((48_000, ContextWindowSource::ModelOverride)),
+        );
+    }
+
+    /// A zero override does not get to claim provenance either: it falls
+    /// through, and the catalog is named as the source of the value that wins.
+    #[test]
+    fn a_zero_override_reports_the_catalog_as_the_source() {
+        let mut cat = catalog();
+        cat.set_overrides(
+            "anthropic:claude-sonnet-4-6".to_string(),
+            ModelOverrides {
+                context_window: Some(0),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            source_of(&cat, &model("anthropic", "claude-sonnet-4-6", None), None),
+            Some(ContextWindowSource::Catalog),
+        );
     }
 }
 

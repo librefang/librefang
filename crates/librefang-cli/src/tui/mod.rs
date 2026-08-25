@@ -1,6 +1,6 @@
 //! Ratatui TUI for LibreFang interactive mode.
 //!
-//! Two-level navigation: Phase::Boot (Welcome/Wizard) → Phase::Main with 16 tabs.
+//! Two-level navigation: Phase::Boot (Welcome/Wizard) → Phase::Main with 19 tabs.
 
 pub mod chat_runner;
 pub mod event;
@@ -16,8 +16,8 @@ use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, hands, logs, memory, peers, security,
-    sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
+    agents, audit, chat, comms, dashboard, extensions, hands, logs, memory, models, peers,
+    security, sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
 };
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -51,6 +51,7 @@ enum Tab {
     Workflows,
     Triggers,
     Memory,
+    Models,
     Skills,
     Hands,
     Extensions,
@@ -72,6 +73,7 @@ const TABS: &[Tab] = &[
     Tab::Workflows,
     Tab::Triggers,
     Tab::Memory,
+    Tab::Models,
     Tab::Skills,
     Tab::Hands,
     Tab::Extensions,
@@ -95,6 +97,7 @@ impl Tab {
             Tab::Workflows => format!("{} {}", "\u{25b7}", crate::i18n::t("tui-tab-workflows")),
             Tab::Triggers => format!("{} {}", "\u{25c9}", crate::i18n::t("tui-tab-triggers")),
             Tab::Memory => format!("{} {}", "\u{25a1}", crate::i18n::t("tui-tab-memory")),
+            Tab::Models => format!("{} {}", "\u{25a4}", crate::i18n::t("tui-tab-models")),
             Tab::Skills => format!("{} {}", "\u{2605}", crate::i18n::t("tui-tab-skills")),
             Tab::Hands => format!("{} {}", "\u{270b}", crate::i18n::t("tui-tab-hands")),
             Tab::Extensions => format!("{} {}", "\u{29c9}", crate::i18n::t("tui-tab-extensions")),
@@ -175,6 +178,7 @@ struct App {
     triggers: triggers::TriggerState,
     sessions: sessions::SessionsState,
     memory: memory::MemoryState,
+    models: models::ModelsState,
     skills: skills::SkillsState,
     hands: hands::HandsState,
     extensions: extensions::ExtensionsState,
@@ -214,6 +218,7 @@ impl App {
             triggers: triggers::TriggerState::new(),
             sessions: sessions::SessionsState::new(),
             memory: memory::MemoryState::new(),
+            models: models::ModelsState::new(),
             skills: skills::SkillsState::new(),
             hands: hands::HandsState::new(),
             extensions: extensions::ExtensionsState::new(),
@@ -434,6 +439,7 @@ impl App {
                     Tab::Triggers => self.triggers.status_msg = err,
                     Tab::Sessions => self.sessions.status_msg = err,
                     Tab::Memory => self.memory.status_msg = err,
+                    Tab::Models => self.models.status_msg = err,
                     Tab::Skills => self.skills.status_msg = err,
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
@@ -607,6 +613,23 @@ impl App {
             }
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
+            }
+            AppEvent::ModelCatalogLoaded(list) => {
+                self.models.models = list;
+                if !self.models.models.is_empty() && self.models.list_state.selected().is_none() {
+                    self.models.list_state.select(Some(0));
+                }
+                self.models.loading = false;
+            }
+            AppEvent::ModelLimitsSaved(key) => {
+                self.models.status_msg =
+                    crate::i18n::t_args("tui-models-status-saved", &[("model", &key)]);
+                self.refresh_models();
+            }
+            AppEvent::ModelLimitsReset(key) => {
+                self.models.status_msg =
+                    crate::i18n::t_args("tui-models-status-reset", &[("model", &key)]);
+                self.refresh_models();
             }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
@@ -829,9 +852,13 @@ impl App {
                     self.switch_tab(Tab::Memory);
                     return;
                 }
-                // F(8) was the `Channels` tab shortcut; the tab is
-                // retired, so the key now falls through to the
-                // default arm rather than being swallowed.
+                // F(8) was the retired `Channels` tab's shortcut, and the
+                // Models screen (#7774) takes the freed slot rather than
+                // pushing every later binding along by one.
+                KeyCode::F(8) => {
+                    self.switch_tab(Tab::Models);
+                    return;
+                }
                 KeyCode::F(9) => {
                     self.switch_tab(Tab::Skills);
                     return;
@@ -918,9 +945,12 @@ impl App {
                         self.switch_tab(Tab::Memory);
                         return;
                     }
-                    // Char('8') was the Alt-8 `Channels` tab shortcut;
-                    // the tab is retired, so the key falls through to
-                    // the default arm rather than being swallowed.
+                    // Char('8') was the retired `Channels` tab's Alt shortcut
+                    // and now reaches Models, matching F8 above.
+                    KeyCode::Char('8') => {
+                        self.switch_tab(Tab::Models);
+                        return;
+                    }
                     KeyCode::Char('9') => {
                         self.switch_tab(Tab::Skills);
                         return;
@@ -986,6 +1016,10 @@ impl App {
                     let action = self.memory.handle_key(key);
                     self.handle_memory_action(action);
                 }
+                Tab::Models => {
+                    let action = self.models.handle_key(key);
+                    self.handle_models_action(action);
+                }
                 Tab::Skills => {
                     let action = self.skills.handle_key(key);
                     self.handle_skills_action(action);
@@ -1047,6 +1081,7 @@ impl App {
         self.triggers.tick();
         self.sessions.tick();
         self.memory.tick();
+        self.models.tick();
         self.skills.tick();
         self.hands.tick();
         self.extensions.tick();
@@ -1104,6 +1139,7 @@ impl App {
             Tab::Triggers => self.refresh_triggers(),
             Tab::Sessions => self.refresh_sessions(),
             Tab::Memory => self.refresh_memory(),
+            Tab::Models => self.refresh_models(),
             Tab::Skills => self.refresh_skills(),
             Tab::Hands => self.refresh_hands(),
             Tab::Extensions => self.refresh_extensions(),
@@ -1253,6 +1289,13 @@ impl App {
     fn refresh_settings_tools(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             event::spawn_fetch_tools(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_models(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.models.loading = true;
+            event::spawn_fetch_model_catalog(backend, self.event_tx.clone());
         }
     }
 
@@ -1853,6 +1896,33 @@ impl App {
             settings::SettingsAction::TestProvider(name) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_test_provider(backend, name, self.event_tx.clone());
+                }
+            }
+        }
+    }
+
+    fn handle_models_action(&mut self, action: models::ModelsAction) {
+        match action {
+            models::ModelsAction::Continue => {}
+            models::ModelsAction::Refresh => self.refresh_models(),
+            models::ModelsAction::SaveLimits {
+                key,
+                context_window,
+                max_output_tokens,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_model_limits(
+                        backend,
+                        key,
+                        context_window,
+                        max_output_tokens,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            models::ModelsAction::ResetLimits { key } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_reset_model_limits(backend, key, self.event_tx.clone());
                 }
             }
         }
@@ -2516,6 +2586,7 @@ impl App {
                     Tab::Triggers => triggers::draw(frame, chunks[1], &mut self.triggers),
                     Tab::Sessions => sessions::draw(frame, chunks[1], &mut self.sessions),
                     Tab::Memory => memory::draw(frame, chunks[1], &mut self.memory),
+                    Tab::Models => models::draw(frame, chunks[1], &mut self.models),
                     Tab::Skills => skills::draw(frame, chunks[1], &mut self.skills),
                     Tab::Hands => hands::draw(frame, chunks[1], &mut self.hands),
                     Tab::Extensions => extensions::draw(frame, chunks[1], &mut self.extensions),

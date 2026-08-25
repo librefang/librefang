@@ -2665,6 +2665,8 @@
     "generating": "生成中...",
     "clear_chat": "清空对话",
     "context_usage": "{{used}} / {{max}} tokens（约 {{pct}}%）",
+    "context_usage_assumed": "推测的窗口",
+    "context_usage_assumed_detail": "没有任何来源知道该模型的上下文窗口，因此 {{max}} tokens 只是推测值。请在提供方页面（或 TUI 模型界面）中设置，避免运行时按未经测量的数字进行压缩。",
     "context_usage_aria": "上下文窗口占用：约 {{pct}}%",
     "session": "会话",
     "session_unpinned": "未固定",

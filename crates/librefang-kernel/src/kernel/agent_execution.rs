@@ -1068,7 +1068,8 @@ impl LibreFangKernel {
             &self.llm.model_catalog.load(),
             &manifest.model,
             Some(session.context_window_tokens),
-        );
+        )
+        .map(|resolved| resolved.tokens);
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.

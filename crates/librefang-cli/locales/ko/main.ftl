@@ -1433,6 +1433,10 @@ tui-event-provider-delete-key-failed = { $name }의 키를 삭제하지 못했�
 tui-event-provider-connection-ok = 연결 정상
 tui-event-provider-test-failed = 테스트 실패
 tui-event-provider-test-not-available-in-process = 인프로세스 모드에서는 공급자 테스트를 사용할 수 없습니다
+tui-event-models-load-failed = 모델 카탈로그를 불러오지 못했습니다
+tui-event-models-not-available-in-process = 모델 설정에는 실행 중인 데몬이 필요하며 인프로세스 모드에서는 사용할 수 없습니다
+tui-event-model-limits-save-failed = { $model }의 한도를 저장하지 못했습니다
+tui-event-model-limits-reset-failed = { $model }의 한도를 되돌리지 못했습니다
 tui-event-hand-activation-failed = 활성화 실패
 tui-event-hand-activate-failed-error = 활성화 실패: { $error }
 tui-event-hand-activation-failed-error = 활성화 실패: { $error }
@@ -1520,6 +1524,7 @@ tui-tab-sessions = 세션
 tui-tab-workflows = 플로우
 tui-tab-triggers = 트리거
 tui-tab-memory = 메모리
+tui-tab-models = 모델
 tui-tab-skills = 스킬
 tui-tab-hands = 핸드
 tui-tab-extensions = 확장
@@ -1572,6 +1577,32 @@ tui-sessions-loading = 세션 로드 중…
 tui-sessions-empty = 아직 세션이 없습니다. 채팅을 시작하여 세션을 생성하십시오.
 tui-sessions-delete-confirm = 이 세션을 삭제하시겠습니까? [y] 예  [any] 취소
 tui-sessions-hints = ↑↓ 탐색  Enter 열기  d 삭제  / 검색  r 새로고침
+
+# models.rs
+tui-models-title = 모델
+tui-models-count =
+    { $count ->
+       *[other] 모델 { $count }개
+    }
+tui-models-header-model = 모델
+tui-models-header-provider = 제공자
+tui-models-header-window = 윈도우
+tui-models-header-catalog = 카탈로그
+tui-models-header-max-output = 최대 출력
+tui-models-loading = 모델 카탈로그 불러오는 중…
+tui-models-empty = 모델이 없습니다. 설정에서 제공자를 구성하거나 `librefang model add`로 추가하세요.
+tui-models-window-unknown = 알 수 없음
+tui-models-hints = ↑↓ 이동  / 필터  e 한도 편집  d 카탈로그로 되돌리기  r 새로고침
+tui-models-status-no-override = 이 모델에는 재정의가 없어 되돌릴 것이 없습니다.
+tui-models-status-saved = { $model }의 한도를 저장했습니다
+tui-models-status-reset = { $model }을(를) 카탈로그 값으로 되돌렸습니다
+tui-models-field-context-window = 컨텍스트 윈도우
+tui-models-field-max-output = 최대 출력 토큰
+tui-models-field-cleared = (해제됨 — 카탈로그 사용)
+tui-models-field-catalog-hint = 카탈로그: { $value }
+tui-models-edit-explainer = 이 모델을 쓰는 모든 에이전트에 적용되며 레지스트리 동기화 후에도 유지됩니다.
+tui-models-edit-not-max-tokens = 컨텍스트 윈도우는 모델의 전체 예산이며 응답당 출력 상한이 아닙니다.
+tui-models-edit-hints = Tab 필드 전환  0-9 입력  Enter 저장  Esc 취소
 
 # peers.rs
 tui-peers-title = 피어
