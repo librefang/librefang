@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 struct Harness {
     app: Router,
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
     _test: TestAppState,
 }
 
@@ -29,7 +29,7 @@ async fn boot() -> Harness {
         .with_state(state.clone());
     Harness {
         app,
-        _state: state,
+        state,
         _test: test,
     }
 }
@@ -65,6 +65,34 @@ async fn json_request(
 const AGENT_UUID: &str = "11111111-1111-1111-1111-111111111111";
 const VERSION_ID: &str = "22222222-2222-2222-2222-222222222222";
 const EXPERIMENT_ID: &str = "33333333-3333-3333-3333-333333333333";
+
+fn seeded_agent_id(h: &Harness) -> String {
+    h.state
+        .kernel
+        .agent_registry()
+        .list()
+        .into_iter()
+        .find(|agent| agent.name == "assistant")
+        .expect("mock kernel must seed the assistant agent")
+        .id
+        .to_string()
+}
+
+async fn create_prompt_version(
+    h: &Harness,
+    agent_id: &str,
+    system_prompt: &str,
+) -> serde_json::Value {
+    let (status, body) = json_request(
+        h,
+        Method::POST,
+        &format!("/api/agents/{agent_id}/prompts/versions"),
+        Some(serde_json::json!({ "system_prompt": system_prompt })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body={body:?}");
+    body
+}
 
 // ----- repository overview -----
 
@@ -238,12 +266,10 @@ async fn delete_prompt_version_for_unknown_id_succeeds_idempotently() {
         )
         .await
         .unwrap();
-    // Either 204 (deleted) or some store-specific success — the contract
-    // is "not 5xx" for an unknown id.
-    assert!(
-        !resp.status().is_server_error(),
-        "delete returned {}",
-        resp.status()
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "idempotent delete must preserve the empty 204 contract"
     );
 }
 
@@ -257,9 +283,11 @@ async fn activate_prompt_version_requires_agent_id_in_body() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
+async fn activate_created_prompt_version_returns_entity() {
     let h = boot().await;
-    let path = format!("/api/prompts/versions/{VERSION_ID}/activate");
+    let created = create_prompt_version(&h, AGENT_UUID, "Activate this prompt.").await;
+    let version_id = created["id"].as_str().expect("created version id");
+    let path = format!("/api/prompts/versions/{version_id}/activate");
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -268,17 +296,9 @@ async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // VERSION_ID is a synthetic constant that was never created in the
-    // (real, SQLite-backed) store, so set_active_version updates zero rows and
-    // the subsequent read-back returns Ok(None). The handler falls back to the
-    // legacy ack envelope. Assert the ack shape explicitly — the entity-return
-    // path from #4365 needs a version that was actually created first (see
-    // delete_active_prompt_version_returns_400).
-    assert_eq!(
-        body["success"],
-        serde_json::json!(true),
-        "expected ack envelope {{success:true}}, got body={body:?}"
-    );
+    assert_eq!(body["id"], version_id, "activated entity: {body:?}");
+    assert_eq!(body["agent_id"], AGENT_UUID, "activated entity: {body:?}");
+    assert_eq!(body["is_active"], true, "activated entity: {body:?}");
 }
 
 /// #6195: deleting the active (bound) prompt version must be refused at the
@@ -487,16 +507,10 @@ async fn create_prompt_version_rejects_oversize_system_prompt_bytes() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_prompt_version_rejects_oversize_system_prompt_chars() {
-    // 17 K of '我' = 51 KB bytes (3 B/glyph), which exceeds the 32 KiB
-    // byte cap and triggers the byte-cap branch first. Use a 1-byte-per-
-    // char filler that still exceeds 16 K chars without exceeding 32 KiB
-    // bytes: impossible — every Unicode scalar value occupies ≥ 1 byte
-    // and we need > 16 K chars but ≤ 32 KiB bytes; that's satisfied by
-    // ASCII at 16 KiB+1 chars, which is ≤ 32 KiB bytes. Build that input.
     let h = boot().await;
     let path = format!("/api/agents/{AGENT_UUID}/prompts/versions");
-    // 16_385 ASCII chars = 16 KiB + 1 bytes — well under the 32 KiB byte
-    // cap, exceeds the 16 K char cap by 1.
+    // 16_385 ASCII chars exceed the 16 KiB character cap by one while
+    // remaining below the independent 32 KiB byte cap.
     let oversize = "a".repeat(16 * 1024 + 1);
     let (status, body) = json_request(
         &h,
@@ -587,26 +601,12 @@ async fn create_experiment_ignores_client_status_and_timestamps() {
     // `status`, `started_at`, `ended_at` — is server-owned and can only
     // advance through /start, /pause, /complete. A client cannot post
     // an already-Running experiment with a backdated `started_at`.
-    //
-    // The test agent has no rows in the prompt store, so the store
-    // rejects the insert with a FK violation (existing test
-    // `create_experiment_with_unknown_agent_surfaces_store_error`
-    // pins the 500 contract). We assert the kernel reached the store
-    // — meaning the input passed the route-level guards — but we
-    // cannot inspect the persisted shape without a wired agent. To
-    // exercise the field-overwrite, mirror the happy-path style and
-    // assert the response body shape on a known-failing insert: the
-    // route serializes the (forcibly-rewritten) experiment back as
-    // part of the 201 path only on success. So instead, lean on
-    // existing structural coverage: this test verifies the route does
-    // not accept the payload as-is and that the deserialized request
-    // would have produced a `Running` status pre-fix. We do this by
-    // posting and asserting the route does not panic — the FK error
-    // surfaces at 500 and the deferred state-machine reset cannot
-    // alter that outcome.
     let h = boot().await;
-    let path = format!("/api/agents/{AGENT_UUID}/prompts/experiments");
-    let (status, _body) = json_request(
+    let agent_id = seeded_agent_id(&h);
+    let control = create_prompt_version(&h, &agent_id, "Control prompt.").await;
+    let treatment = create_prompt_version(&h, &agent_id, "Treatment prompt.").await;
+    let path = format!("/api/agents/{agent_id}/prompts/experiments");
+    let (status, body) = json_request(
         &h,
         Method::POST,
         &path,
@@ -616,19 +616,36 @@ async fn create_experiment_ignores_client_status_and_timestamps() {
             "started_at": "2020-01-01T00:00:00Z",
             "ended_at": "2020-01-02T00:00:00Z",
             "variants": [
-                {"name": "control"},
-                {"name": "treatment"},
+                {"name": "control", "prompt_version_id": control["id"]},
+                {"name": "treatment", "prompt_version_id": treatment["id"]},
             ]
         })),
     )
     .await;
-    // FK violation on unknown agent — same contract as the existing
-    // `create_experiment_with_unknown_agent_surfaces_store_error` test.
-    // The point of this assertion is that the route DID NOT 400 on the
-    // client-supplied state fields (they were silently overwritten to
-    // server defaults), and DID NOT panic. Status-machine field reset
-    // is also unit-tested at the route level by inspection of the
-    // diff: `experiment.status`, `started_at`, `ended_at` are
-    // unconditionally overwritten before reaching the store.
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::CREATED, "body={body:?}");
+    assert_eq!(body["agent_id"], agent_id, "body={body:?}");
+    assert_eq!(body["status"], "draft", "body={body:?}");
+    assert_eq!(body["started_at"], serde_json::Value::Null, "body={body:?}");
+    assert_eq!(body["ended_at"], serde_json::Value::Null, "body={body:?}");
+
+    let experiment_id = body["id"].as_str().expect("created experiment id");
+    let (status, stored) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/prompts/experiments/{experiment_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "stored={stored:?}");
+    assert_eq!(stored["status"], "draft", "stored={stored:?}");
+    assert_eq!(
+        stored["started_at"],
+        serde_json::Value::Null,
+        "stored={stored:?}"
+    );
+    assert_eq!(
+        stored["ended_at"],
+        serde_json::Value::Null,
+        "stored={stored:?}"
+    );
 }

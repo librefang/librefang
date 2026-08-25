@@ -17,7 +17,8 @@
 
 use librefang_llm_drivers::drivers::anthropic::AnthropicDriver;
 use librefang_llm_drivers::drivers::openai::OpenAIDriver;
-use librefang_llm_drivers::llm_driver::{CompletionRequest, LlmDriver};
+use librefang_llm_drivers::llm_driver::{CompletionRequest, LlmDriver, LlmError};
+use librefang_llm_drivers::llm_errors::{self, ProviderErrorCode};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use serde::Deserialize;
 use serde_json::json;
@@ -104,6 +105,47 @@ fn build_messages(sample: &Sample) -> (Vec<Message>, Option<String>) {
         }
     }
     (messages, sample.system.clone())
+}
+
+/// Return whether repeating the same capture request can plausibly succeed.
+///
+/// Provider throttling, temporary server failures, timeouts, and recognizable
+/// transport interruptions are transient. Authentication, billing, malformed
+/// requests, missing models, parse failures, and opaque transport errors must
+/// fail immediately instead of sleeping through the full retry budget.
+fn is_retryable_capture_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::RateLimited { .. } | LlmError::Overloaded { .. } | LlmError::TimedOut { .. } => {
+            true
+        }
+        LlmError::Api { status, code, .. } => {
+            if matches!(*status, 401 | 402 | 404 | 413) {
+                return false;
+            }
+            if *status == 403 {
+                // Some OpenAI-compatible providers use 403 for throttling.
+                // Only an explicit typed rate-limit code makes that otherwise
+                // permanent status safe to retry.
+                return matches!(code, Some(ProviderErrorCode::RateLimit));
+            }
+            match code {
+                Some(
+                    ProviderErrorCode::RateLimit
+                    | ProviderErrorCode::ServerUnavailable
+                    | ProviderErrorCode::ServerError,
+                ) => true,
+                // A typed permanent code is more precise than a contradictory
+                // generic 5xx status and must not consume the retry budget.
+                Some(_) => false,
+                None => matches!(*status, 408 | 429 | 500 | 502 | 503 | 504),
+            }
+        }
+        LlmError::Http(message) => llm_errors::is_transient(message),
+        LlmError::AllProvidersExhausted {
+            cause: Some(cause), ..
+        } => is_retryable_capture_error(cause),
+        _ => false,
+    }
 }
 
 struct Args {
@@ -207,9 +249,9 @@ async fn main() {
             ..Default::default()
         };
 
-        // Free tiers (OpenRouter, …) rate-limit aggressively. Retry on any
-        // error with backoff rather than aborting the whole run, and pace
-        // requests so we stay under per-minute caps.
+        // Free tiers (OpenRouter, …) rate-limit aggressively. Retry transient
+        // failures with backoff, fail fast on permanent errors, and pace
+        // successful requests so we stay under per-minute caps.
         let mut input = None;
         for attempt in 0..MAX_RETRIES {
             match driver.complete(make_request()).await {
@@ -217,7 +259,20 @@ async fn main() {
                     input = Some(resp.usage.input_tokens);
                     break;
                 }
-                Err(e) if attempt + 1 < MAX_RETRIES => {
+                Err(e) => {
+                    if !is_retryable_capture_error(&e) {
+                        panic!(
+                            "sample {} failed with a non-retryable error on attempt {}: {e}",
+                            sample.id,
+                            attempt + 1
+                        );
+                    }
+                    if attempt + 1 == MAX_RETRIES {
+                        panic!(
+                            "sample {} failed after {MAX_RETRIES} attempts: {e}",
+                            sample.id
+                        );
+                    }
                     let backoff = RETRY_BACKOFF_SECS * (attempt + 1) as u64;
                     eprintln!(
                         "  {:<18} attempt {} failed ({e}); retrying in {backoff}s",
@@ -226,10 +281,6 @@ async fn main() {
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                 }
-                Err(e) => panic!(
-                    "sample {} failed after {MAX_RETRIES} attempts: {e}",
-                    sample.id
-                ),
             }
         }
         let input = input.expect("retry loop guarantees a value or panics");
@@ -254,4 +305,68 @@ async fn main() {
     let pretty = serde_json::to_string_pretty(&doc).expect("serialize truth");
     std::fs::write(&args.out, pretty + "\n").unwrap_or_else(|e| panic!("write {}: {e}", args.out));
     eprintln!("\nWrote {} samples to {}", samples.len(), args.out);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_error(status: u16, code: Option<ProviderErrorCode>) -> LlmError {
+        LlmError::Api {
+            status,
+            message: "provider error".to_string(),
+            code,
+        }
+    }
+
+    #[test]
+    fn capture_retries_only_transient_provider_failures() {
+        for error in [
+            LlmError::RateLimited {
+                retry_after_ms: 1,
+                message: None,
+            },
+            LlmError::Overloaded { retry_after_ms: 1 },
+            LlmError::TimedOut {
+                inactivity_secs: 30,
+                partial_text: None,
+                partial_text_len: 0,
+                last_activity: "request sent".to_string(),
+            },
+            api_error(408, None),
+            api_error(429, None),
+            api_error(500, None),
+            api_error(502, None),
+            api_error(503, None),
+            api_error(504, None),
+            api_error(400, Some(ProviderErrorCode::ServerUnavailable)),
+            api_error(400, Some(ProviderErrorCode::ServerError)),
+            api_error(403, Some(ProviderErrorCode::RateLimit)),
+            LlmError::Http("connection reset by peer".to_string()),
+        ] {
+            assert!(is_retryable_capture_error(&error), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn capture_fails_fast_on_permanent_or_opaque_failures() {
+        for error in [
+            LlmError::AuthenticationFailed("bad key".to_string()),
+            LlmError::MissingApiKey("missing".to_string()),
+            LlmError::ModelNotFound("missing-model".to_string()),
+            LlmError::Parse("invalid response".to_string()),
+            api_error(400, None),
+            api_error(401, None),
+            api_error(403, None),
+            api_error(404, None),
+            api_error(501, None),
+            api_error(400, Some(ProviderErrorCode::BadRequest)),
+            api_error(401, Some(ProviderErrorCode::ServerError)),
+            api_error(500, Some(ProviderErrorCode::AuthError)),
+            api_error(503, Some(ProviderErrorCode::BadRequest)),
+            LlmError::Http("invalid base URL".to_string()),
+        ] {
+            assert!(!is_retryable_capture_error(&error), "{error:?}");
+        }
+    }
 }

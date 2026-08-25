@@ -86,6 +86,46 @@ pub async fn create_cron_job(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CronJobErrorClass<'a> {
+    NotFound,
+    BadRequest(&'a str),
+    Internal,
+}
+
+fn classify_cron_job_error<'a>(
+    error: &'a librefang_types::error::LibreFangError,
+    job_id: librefang_types::scheduler::CronJobId,
+) -> CronJobErrorClass<'a> {
+    use librefang_types::error::LibreFangError;
+
+    match error {
+        LibreFangError::ResourceNotFound { kind, id }
+            if kind.eq_ignore_ascii_case("cron job") && id == &job_id.to_string() =>
+        {
+            CronJobErrorClass::NotFound
+        }
+        LibreFangError::Internal(message) if message == &format!("Cron job {job_id} not found") => {
+            CronJobErrorClass::NotFound
+        }
+        LibreFangError::InvalidInput(message) => CronJobErrorClass::BadRequest(message),
+        LibreFangError::Internal(message)
+            if [
+                "Invalid agent_id:",
+                "Invalid schedule:",
+                "Invalid action:",
+                "Invalid delivery:",
+                "Invalid delivery_targets:",
+            ]
+            .iter()
+            .any(|prefix| message.starts_with(prefix)) =>
+        {
+            CronJobErrorClass::BadRequest(message)
+        }
+        _ => CronJobErrorClass::Internal,
+    }
+}
+
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
 ///
 /// Idempotent (RFC 9110 §9.2.2): deleting a cron job that is already gone
@@ -125,7 +165,7 @@ pub async fn delete_cron_job(
                 Json(serde_json::json!({"status": "deleted", "job_id": id})),
             )
         }
-        Err(_) => {
+        Err(error) if classify_cron_job_error(&error, job_id) == CronJobErrorClass::NotFound => {
             // Idempotent DELETE — the cron job is already gone (replayed
             // request, double-click, or removed by another deleter). Treat
             // as success so clients don't have to special-case 404.
@@ -133,6 +173,10 @@ pub async fn delete_cron_job(
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "already-deleted", "job_id": id})),
             )
+        }
+        Err(error) => {
+            tracing::error!(%job_id, error = %error, "Failed to remove cron job");
+            ApiErrorResponse::internal("Failed to delete cron job").into_json_tuple()
         }
     }
 }
@@ -162,15 +206,18 @@ pub async fn update_cron_job(
                         Json(serde_json::to_value(&job).unwrap_or_default()),
                     )
                 }
-                // SSRF / shape rejections from `validate_cron_delivery*`
-                // surface as `InvalidInput` and must map to 400, not the
-                // catch-all 404 (#4732). 404 here would silently mask a
-                // refused webhook host as "schedule not found", letting
-                // attacker-controlled clients confuse the failure mode.
-                Err(librefang_types::error::LibreFangError::InvalidInput(msg)) => {
-                    ApiErrorResponse::bad_request(msg).into_json_tuple()
-                }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                Err(error) => match classify_cron_job_error(&error, job_id) {
+                    CronJobErrorClass::NotFound => {
+                        ApiErrorResponse::not_found("Cron job not found").into_json_tuple()
+                    }
+                    CronJobErrorClass::BadRequest(message) => {
+                        ApiErrorResponse::bad_request(message).into_json_tuple()
+                    }
+                    CronJobErrorClass::Internal => {
+                        tracing::error!(%job_id, error = %error, "Failed to update cron job");
+                        ApiErrorResponse::internal("Failed to update cron job").into_json_tuple()
+                    }
+                },
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -278,5 +325,65 @@ pub async fn cron_job_status(
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::error::LibreFangError;
+
+    #[test]
+    fn cron_job_error_classification_is_narrow() {
+        let job_id = librefang_types::scheduler::CronJobId::new();
+        let missing = LibreFangError::Internal(format!("Cron job {job_id} not found"));
+        assert_eq!(
+            classify_cron_job_error(&missing, job_id),
+            CronJobErrorClass::NotFound
+        );
+
+        let other_id = librefang_types::scheduler::CronJobId::new();
+        assert_eq!(
+            classify_cron_job_error(&missing, other_id),
+            CronJobErrorClass::Internal,
+            "a failure for a different job must not become idempotent success"
+        );
+
+        let storage = LibreFangError::Internal("scheduler storage unavailable".to_string());
+        assert_eq!(
+            classify_cron_job_error(&storage, job_id),
+            CronJobErrorClass::Internal
+        );
+    }
+
+    #[test]
+    fn cron_job_update_parse_errors_are_bad_requests() {
+        let job_id = librefang_types::scheduler::CronJobId::new();
+        for message in [
+            "Invalid agent_id: malformed UUID",
+            "Invalid schedule: missing field",
+            "Invalid action: unknown variant",
+            "Invalid delivery: unknown variant",
+            "Invalid delivery_targets: expected array",
+        ] {
+            let error = LibreFangError::Internal(message.to_string());
+            assert_eq!(
+                classify_cron_job_error(&error, job_id),
+                CronJobErrorClass::BadRequest(message)
+            );
+        }
+    }
+
+    #[test]
+    fn typed_cron_not_found_is_supported() {
+        let job_id = librefang_types::scheduler::CronJobId::new();
+        let missing = LibreFangError::ResourceNotFound {
+            kind: "Cron job".to_string(),
+            id: job_id.to_string(),
+        };
+        assert_eq!(
+            classify_cron_job_error(&missing, job_id),
+            CronJobErrorClass::NotFound
+        );
     }
 }

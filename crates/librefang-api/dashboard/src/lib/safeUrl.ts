@@ -15,9 +15,9 @@
 // else (including parse failures and protocol-relative URLs that the
 // URL parser can't resolve without a base) returns null.
 //
-// Protocol-relative URLs (`//example.com/x`) get a synthetic base so
-// they round-trip through the URL parser; if the result is `http`
-// or `https` they're accepted.
+// Protocol-relative URLs (`//example.com/x`) get a synthetic `https:`
+// scheme so they round-trip through the URL parser. A successful parse
+// is accepted; the resulting scheme is necessarily `https:`.
 //
 // Callers should treat a `null` return as "do not render the link";
 // the canonical pattern is `const safe = safeUrl(input); return safe
@@ -45,10 +45,10 @@ export function safeUrl(input: string | undefined | null): string | null {
   }
   if (trimmed.startsWith("//")) {
     try {
-      const u = new URL(`https:${trimmed}`);
-      if (u.protocol === "https:") {
-        return trimmed;
-      }
+      // Prepending `https:` fixes the scheme, so parse success is the
+      // complete acceptance condition for protocol-relative input.
+      new URL(`https:${trimmed}`);
+      return trimmed;
     } catch {
       // ignore
     }

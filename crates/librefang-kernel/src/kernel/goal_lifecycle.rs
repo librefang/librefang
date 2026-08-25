@@ -24,7 +24,12 @@ impl LibreFangKernel {
     /// complete, the iteration cap (`max_iterations`, default
     /// [`DEFAULT_GOAL_MAX_ITERATIONS`]) is reached, an operator stops it, or the
     /// kernel shuts down.
-    pub fn goal_run_start(&self, goal_id: GoalId, agent_id: AgentId, max_iterations: Option<u32>) {
+    pub fn goal_run_start(
+        &self,
+        goal_id: GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+    ) -> bool {
         let max = max_iterations.unwrap_or(DEFAULT_GOAL_MAX_ITERATIONS).max(1);
         let substrate = self.substrate_ref().clone();
 
@@ -35,7 +40,7 @@ impl LibreFangKernel {
             Some(k) => k,
             None => {
                 tracing::warn!(%goal_id, "Cannot start goal run: kernel self-handle unset");
-                return;
+                return false;
             }
         };
 
@@ -61,7 +66,7 @@ impl LibreFangKernel {
 
         self.workflows
             .goal_runner
-            .start(goal_id, agent_id, max, substrate, send);
+            .start(goal_id, agent_id, max, substrate, send)
     }
 
     /// Stop an active goal run. Returns whether a run was stopped.

@@ -337,6 +337,7 @@ pub struct TriggerEngine {
 fn lock_trigger_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     lock.lock().unwrap_or_else(|poisoned| {
         warn!("trigger persistence lock poisoned; recovering write serialization");
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -1820,11 +1821,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(lock.is_poisoned());
         let recovered = lock_trigger_persistence(&lock);
+        assert!(!lock.is_poisoned());
         assert!(lock.try_lock().is_err());
         drop(recovered);
-        let recovered_again = lock_trigger_persistence(&lock);
-        drop(recovered_again);
+        let ordinary_guard = lock.lock().unwrap();
+        drop(ordinary_guard);
     }
 
     #[test]

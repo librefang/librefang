@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { buildTarget, type DraftState } from "./DeliveryTargetsEditor";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildTarget,
+  DeliveryTargetsEditor,
+  type DraftState,
+} from "./DeliveryTargetsEditor";
+
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: { defaultValue?: string }) =>
+      options?.defaultValue ?? key,
+  }),
+}));
 
 const draft = (overrides: Partial<DraftState>): DraftState => ({
   type: "channel",
@@ -88,6 +101,38 @@ describe("buildTarget — webhook", () => {
     expect(err).toBe("scheduler.delivery.err_url_blocked_host");
   });
 
+  it.each([
+    "http://0.1.2.3/h",
+    "http://10.0.0.1/h",
+    "http://100.64.0.1/h",
+    "http://172.16.0.1/h",
+    "http://192.168.0.1/h",
+  ])("rejects blocked IPv4 range %s", (url) => {
+    const [, err] = buildTarget(draft({ type: "webhook", url }));
+    expect(err).toBe("scheduler.delivery.err_url_blocked_host");
+  });
+
+  it.each([
+    "http://[::]/h",
+    "http://[fd00::1]/h",
+    "http://[fe90::1]/h",
+    "http://[ff02::1]/h",
+    "http://[::ffff:127.0.0.1]/h",
+    "http://[::ffff:10.0.0.1]/h",
+  ])("rejects blocked IPv6 range %s", (url) => {
+    const [, err] = buildTarget(draft({ type: "webhook", url }));
+    expect(err).toBe("scheduler.delivery.err_url_blocked_host");
+  });
+
+  it.each([
+    "http://instance-data/h",
+    "http://api.localhost/h",
+    "http://service.internal/h",
+  ])("rejects blocked internal hostname %s", (url) => {
+    const [, err] = buildTarget(draft({ type: "webhook", url }));
+    expect(err).toBe("scheduler.delivery.err_url_blocked_host");
+  });
+
   it("rejects IPv6 loopback (SSRF)", () => {
     const [, err] = buildTarget(draft({ type: "webhook", url: "http://[::1]:8080/h" }));
     expect(err).toBe("scheduler.delivery.err_url_blocked_host");
@@ -97,6 +142,26 @@ describe("buildTarget — webhook", () => {
     const [t, err] = buildTarget(draft({ type: "webhook", url: "https://example.com/hook" }));
     expect(err).toBeNull();
     expect(t).toEqual({ type: "webhook", url: "https://example.com/hook" });
+  });
+
+  it("accepts a case-mixed HTTP scheme after URL normalization", () => {
+    const [t, err] = buildTarget(
+      draft({ type: "webhook", url: "HTTPS://example.com/hook" }),
+    );
+    expect(err).toBeNull();
+    expect(t).toEqual({ type: "webhook", url: "HTTPS://example.com/hook" });
+  });
+
+  it.each([
+    "http://100.63.255.255/h",
+    "http://100.128.0.1/h",
+    "http://169.253.0.1/h",
+    "http://172.15.255.255/h",
+    "http://172.32.0.1/h",
+  ])("accepts public IPv4 boundary %s", (url) => {
+    const [target, err] = buildTarget(draft({ type: "webhook", url }));
+    expect(err).toBeNull();
+    expect(target).toEqual({ type: "webhook", url });
   });
 
   it("strips empty auth_header", () => {
@@ -137,6 +202,19 @@ describe("buildTarget — local_file", () => {
     const [t, err] = buildTarget(draft({ type: "local_file", path: "logs/out.log", append: false }));
     expect(err).toBeNull();
     expect(t).toEqual({ type: "local_file", path: "logs/out.log", append: false });
+  });
+
+  it("prompts for a workspace-relative path", async () => {
+    const user = userEvent.setup();
+    render(<DeliveryTargetsEditor value={[]} onChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Add target" }));
+    await user.click(screen.getByRole("button", { name: "Local file" }));
+
+    expect(screen.getByPlaceholderText("logs/cron-output.log")).toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("/var/log/cron-output.log"),
+    ).not.toBeInTheDocument();
   });
 });
 

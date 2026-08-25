@@ -15,94 +15,62 @@ import {
 } from "../http/client";
 import { budgetKeys, userBudgetKeys, usageKeys } from "../queries/keys";
 
-export function useGenerateImage(
-  options?: Partial<
-    UseMutationOptions<
-      MediaImageResult,
-      Error,
-      { prompt: string; provider?: string; model?: string; count?: number; aspect_ratio?: string }
-    >
-  >,
+type MediaMutationOptions<TResult, TVariables> = Omit<
+  UseMutationOptions<TResult, Error, TVariables>,
+  "mutationFn"
+>;
+
+function useMediaMutation<TResult, TVariables>(
+  mutationFn: (variables: TVariables) => Promise<TResult>,
+  options?: MediaMutationOptions<TResult, TVariables>,
 ) {
   const queryClient = useQueryClient();
-  return useMutation({
+  return useMutation<TResult, Error, TVariables>({
     ...options,
-    mutationFn: generateImage,
-    onSettled: (...args) => {
-      // Media generation hits both global and per-user budget plus usage tallies.
+    mutationFn,
+    onSettled: (data, error, variables, onMutateResult, context) => {
+      // Media calls affect every aggregate below: provider/global spend,
+      // an unknown current user's budget, and all usage projections.
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
       queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
       queryClient.invalidateQueries({ queryKey: usageKeys.all });
-      options?.onSettled?.(...args);
+      return options?.onSettled?.(data, error, variables, onMutateResult, context);
     },
   });
+}
+
+export function useGenerateImage(
+  options?: MediaMutationOptions<
+    MediaImageResult,
+    { prompt: string; provider?: string; model?: string; count?: number; aspect_ratio?: string }
+  >,
+) {
+  return useMediaMutation(generateImage, options);
 }
 
 export function useSynthesizeSpeech(
-  options?: Partial<
-    UseMutationOptions<
-      SpeechResult,
-      Error,
-      { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }
-    >
+  options?: MediaMutationOptions<
+    SpeechResult,
+    { text: string; provider?: string; model?: string; voice?: string; format?: string; language?: string; speed?: number }
   >,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    ...options,
-    mutationFn: synthesizeSpeech,
-    onSettled: (...args) => {
-      // Media generation hits both global and per-user budget plus usage tallies.
-      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: usageKeys.all });
-      options?.onSettled?.(...args);
-    },
-  });
+  return useMediaMutation(synthesizeSpeech, options);
 }
 
 export function useSubmitVideo(
-  options?: Partial<
-    UseMutationOptions<
-      MediaVideoSubmitResult,
-      Error,
-      { prompt: string; provider?: string; model?: string }
-    >
+  options?: MediaMutationOptions<
+    MediaVideoSubmitResult,
+    { prompt: string; provider?: string; model?: string }
   >,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    ...options,
-    mutationFn: submitVideo,
-    onSettled: (...args) => {
-      // Media generation hits both global and per-user budget plus usage tallies.
-      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: usageKeys.all });
-      options?.onSettled?.(...args);
-    },
-  });
+  return useMediaMutation(submitVideo, options);
 }
 
 export function useGenerateMusic(
-  options?: Partial<
-    UseMutationOptions<
-      MediaMusicResult,
-      Error,
-      { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }
-    >
+  options?: MediaMutationOptions<
+    MediaMusicResult,
+    { prompt?: string; lyrics?: string; provider?: string; model?: string; instrumental?: boolean }
   >,
 ) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    ...options,
-    mutationFn: generateMusic,
-    onSettled: (...args) => {
-      // Media generation hits both global and per-user budget plus usage tallies.
-      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
-      queryClient.invalidateQueries({ queryKey: usageKeys.all });
-      options?.onSettled?.(...args);
-    },
-  });
+  return useMediaMutation(generateMusic, options);
 }
