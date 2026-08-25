@@ -208,14 +208,19 @@ async fn export_to_wandb_with_client(
         urlencoding::encode(&create_json.run_id),
     );
     let bytes_len = export.trajectory_bytes.len() as u64;
-    let trajectory_bytes = export.trajectory_bytes;
+    // Build the Vec-backed request once. Reqwest stores this body as reusable
+    // reference-counted bytes, so `try_clone` below is a cheap handle clone
+    // instead of a full trajectory copy on every retry.
+    let upload_request = client
+        .post(&upload_url)
+        .header(reqwest::header::AUTHORIZATION, &auth_header)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .body(export.trajectory_bytes);
 
     crate::retry::retry_upload("wandb.upload_file", || {
-        let req = client
-            .post(&upload_url)
-            .header(reqwest::header::AUTHORIZATION, &auth_header)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(trajectory_bytes.clone());
+        let req = upload_request
+            .try_clone()
+            .expect("Vec-backed W&B upload request must be reusable");
         async move {
             let resp = req.send().await?;
             let status = resp.status();
@@ -260,8 +265,23 @@ mod tests {
     //! two endpoints, the auth header shape, and the receipt shape.
     use super::*;
     use chrono::TimeZone;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{body_bytes, header, method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct FailFirstUpload {
+        attempts: AtomicUsize,
+    }
+
+    impl Respond for FailFirstUpload {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503).set_body_string("temporary outage")
+            } else {
+                ResponseTemplate::new(200)
+            }
+        }
+    }
 
     fn sample_export(run_id: &str) -> RlTrajectoryExport {
         RlTrajectoryExport {
@@ -324,6 +344,45 @@ mod tests {
             receipt.bytes_uploaded,
             b"opaque-trajectory-bytes".len() as u64,
             "bytes_uploaded must equal payload length",
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_reuses_in_memory_body_across_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run_id": "server-run-id",
+                "url": "https://wandb.ai/entity/project/runs/server-run-id",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/files/entity/project/server-run-id"))
+            .and(body_bytes(b"opaque-trajectory-bytes"))
+            .respond_with(FailFirstUpload {
+                attempts: AtomicUsize::new(0),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let receipt = export_to_wandb_with_base(
+            &server.uri(),
+            "project",
+            "entity",
+            None,
+            "secret-key",
+            sample_export("client-run-id"),
+        )
+        .await
+        .expect("transient upload failure should reuse the request body");
+
+        assert_eq!(
+            receipt.bytes_uploaded,
+            b"opaque-trajectory-bytes".len() as u64
         );
     }
 

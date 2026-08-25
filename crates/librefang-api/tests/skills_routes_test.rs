@@ -795,3 +795,222 @@ async fn skills_propose_without_token_returns_401() {
         "401 error should mention GitHub token: {body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A marketplace that answers 200 with its webpage (#7387)
+// ---------------------------------------------------------------------------
+//
+// The failure this covers is not a hub that is down — a down hub already
+// produced a sensible upstream error. It is a hub whose API host has been
+// retired while the CDN in front of it kept answering, so every path now
+// returns `200 OK` with the marketing single-page-app shell. `serde_json` then
+// complains about the leading `<`, and that complaint used to reach the reader
+// as the whole explanation: a `502` on search and browse, a `404` on detail
+// that falsely said the skill did not exist, and a `500` on install whose body
+// was scrubbed to "Internal server error".
+//
+// Every handler below drives exactly that upstream response and asserts the one
+// answer they now share: `503 Service Unavailable`, with the actionable text
+// intact. The point of testing all of them rather than one is that the previous
+// attempt at this fix mapped only the Skillhub routes, leaving the shared
+// `ClawHubClient`'s eight ClawHub and ClawHub CN handlers translating the new
+// condition into their old, wrong statuses.
+
+/// The shell a dead marketplace serves, complete with the UTF-8 BOM that a
+/// CDN-fronted origin tends to prepend. The BOM is deliberate: it is not ASCII
+/// whitespace, so a markup detector that skips only whitespace before looking
+/// for `<` misses this exact body — the most common real-world shape.
+const MARKETPLACE_SPA_SHELL: &str = "\u{feff}<!doctype html>\n<html><head><title>Skill Hub</title></head>\n<body><div id=\"app\"></div></body></html>\n";
+
+/// Base URL of a process-wide server that answers every request with
+/// [`MARKETPLACE_SPA_SHELL`], with the marketplace URL overrides already
+/// pointed at it.
+///
+/// Process-wide, and initialised exactly once, because the handlers resolve
+/// their hub URLs from the environment and the environment is shared by every
+/// test in this binary. One server started once means those variables are
+/// written a single time, to a single set of values, before any test reads
+/// them. No other test in this file touches a remote hub.
+///
+/// The listener runs on its own thread with its own runtime rather than on the
+/// calling test's. `#[tokio::test]` builds a fresh runtime per test and drops it
+/// at the end of that test, which would take a `tokio::spawn`-ed accept loop
+/// down with it — every later test would then hit a closed port, and a refused
+/// connection is a `Network` error that the client retries with backoff, so the
+/// suite hangs for tens of seconds instead of failing.
+fn dead_marketplace() -> &'static str {
+    use std::io::{Read, Write};
+    use std::sync::OnceLock;
+
+    static SERVER: OnceLock<String> = OnceLock::new();
+
+    SERVER.get_or_init(|| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub marketplace");
+        let address = listener.local_addr().expect("stub marketplace address");
+
+        std::thread::spawn(move || {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                MARKETPLACE_SPA_SHELL.len(),
+                MARKETPLACE_SPA_SHELL
+            );
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let response = response.clone();
+                std::thread::spawn(move || {
+                    // Read only until the blank line that ends the request head;
+                    // reading to EOF would block on a client waiting for us.
+                    let mut request = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while stream.read_exact(&mut byte).is_ok() {
+                        request.push(byte[0]);
+                        if request.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+
+        let base = format!("http://{address}");
+        std::env::set_var("LIBREFANG_CLAWHUB_URL", format!("{base}/api/v1"));
+        std::env::set_var("LIBREFANG_CLAWHUB_CN_URL", format!("{base}/api/v1"));
+        std::env::set_var("LIBREFANG_SKILLHUB_URL", format!("{base}/api/v1"));
+        std::env::set_var(
+            "LIBREFANG_SKILLHUB_INDEX_URL",
+            format!("{base}/skills.json"),
+        );
+        std::env::set_var("LIBREFANG_SKILLHUB_COS_URL", base.clone());
+        base
+    })
+}
+
+/// Drive one route against the dead marketplace and assert the shared answer.
+async fn assert_marketplace_unavailable(
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) {
+    dead_marketplace();
+    let h = boot().await;
+    let (status, json) = json_request(&h, method, path, body).await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{path} should report the hub as unavailable, got {status} with {json}"
+    );
+
+    let error = json["error"].as_str().unwrap_or_default();
+    assert!(
+        error.starts_with("Marketplace unavailable:"),
+        "{path} should name the condition, got {error:?}"
+    );
+    assert!(
+        error.contains("webpage instead of"),
+        "{path} should say what the hub served, got {error:?}"
+    );
+    // The scrub that blanks a 500 body must not swallow the one message an
+    // operator can act on.
+    assert_ne!(
+        error, "Internal server error",
+        "{path} scrubbed its message"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_search_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub/search?q=rust", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_browse_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub/browse?limit=5", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_detail_reports_unavailable_rather_than_not_found() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub/skill/example-skill", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_skill_code_reports_unavailable_rather_than_not_found() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub/skill/example-skill/code", None)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_install_reports_unavailable_rather_than_a_scrubbed_500() {
+    assert_marketplace_unavailable(
+        Method::POST,
+        "/api/clawhub/install",
+        Some(serde_json::json!({"slug": "example-skill"})),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_cn_search_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub-cn/search?q=rust", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_cn_browse_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub-cn/browse?limit=5", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_cn_detail_reports_unavailable_rather_than_not_found() {
+    assert_marketplace_unavailable(Method::GET, "/api/clawhub-cn/skill/example-skill", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_cn_skill_code_reports_unavailable_rather_than_not_found() {
+    assert_marketplace_unavailable(
+        Method::GET,
+        "/api/clawhub-cn/skill/example-skill/code",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clawhub_cn_install_reports_unavailable_rather_than_a_scrubbed_500() {
+    assert_marketplace_unavailable(
+        Method::POST,
+        "/api/clawhub-cn/install",
+        Some(serde_json::json!({"slug": "example-skill"})),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_search_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/skillhub/search?q=rust", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_browse_reports_a_webpage_serving_hub_as_unavailable() {
+    assert_marketplace_unavailable(Method::GET, "/api/skillhub/browse?limit=5", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_detail_reports_unavailable_rather_than_not_found() {
+    assert_marketplace_unavailable(Method::GET, "/api/skillhub/skill/example-skill", None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skillhub_install_reports_unavailable_rather_than_a_scrubbed_500() {
+    assert_marketplace_unavailable(
+        Method::POST,
+        "/api/skillhub/install",
+        Some(serde_json::json!({"slug": "example-skill"})),
+    )
+    .await;
+}

@@ -12,8 +12,22 @@ Session resolution lives in `execute_llm_agent` (`crates/librefang-kernel/src/ke
 
 ## Resolution order
 
-Per-trigger override (`Trigger.session_mode: Option<SessionMode>`) or per-cron override (`CronJob.session_mode: Option<SessionMode>`) wins over the agent manifest default.
+An explicit caller-supplied session id (`session_id_override`) sits above the whole ladder: when present, `execute_llm_agent` uses that session and never consults `session_mode` at all.
+It reaches the kernel from `MessageRequest.session_id` on `POST /api/agents/{id}/message`, from the WebSocket handler's pinned session, from `librefang message --session-id <UUID>` (issue #7605), and from the cron `New` branch described below.
+The only validation is ownership: a session id belonging to a different agent is rejected with `InvalidInput`, so one agent's id can never read another's history.
+
+Below that, a per-trigger override (`Trigger.session_mode: Option<SessionMode>`) or per-cron override (`CronJob.session_mode: Option<SessionMode>`) wins over the agent manifest default.
 With neither set, the historical behaviour is `Persistent`.
+
+## What an explicit session id means per mode
+
+| Manifest `session_mode` | No explicit id | Explicit id |
+|---|---|---|
+| `Persistent` | The agent's canonical registry session — every caller shares one history. | The named session; the canonical session is untouched. |
+| `New` | A freshly minted `SessionId::new()` per invocation, discarded after. | The named session, reused across invocations — continuity is restored for that conversation. |
+
+The asymmetry is deliberate: `session_mode` answers "which session does an *unaddressed* invocation get", and an explicit id means the invocation is addressed.
+A public multi-user front-end therefore does not need `session_mode = "new"` at all — it wants one durable session per end-user, which is exactly `Persistent` plus an explicit id.
 
 ## Which call paths honour it
 

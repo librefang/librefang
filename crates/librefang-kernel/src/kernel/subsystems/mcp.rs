@@ -43,6 +43,8 @@ pub trait McpSubsystemApi: Send + Sync {
 pub struct McpSubsystem {
     /// MCP server connections (lazily initialized at start_background_agents).
     pub(crate) mcp_connections: tokio::sync::Mutex<Vec<McpConnection>>,
+    /// Serializes connection creation so concurrent reload, retry, and reconnect paths cannot publish duplicate servers.
+    pub(crate) mcp_connection_ops: tokio::sync::Mutex<()>,
     /// Per-server MCP OAuth authentication state.
     pub(crate) mcp_auth_states: McpAuthStates,
     /// Pluggable OAuth provider for MCP server authorization flows.
@@ -85,6 +87,7 @@ impl McpSubsystem {
     ) -> Self {
         Self {
             mcp_connections: tokio::sync::Mutex::new(Vec::new()),
+            mcp_connection_ops: tokio::sync::Mutex::new(()),
             mcp_auth_states: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_oauth_provider,
             mcp_tools: std::sync::Mutex::new(Vec::new()),

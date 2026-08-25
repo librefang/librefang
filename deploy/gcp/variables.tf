@@ -1,6 +1,11 @@
 variable "project_id" {
   description = "GCP project ID"
   type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.project_id))
+    error_message = "project_id must be a valid 6-30 character GCP project ID."
+  }
 }
 
 variable "region" {
@@ -45,9 +50,9 @@ variable "librefang_api_key" {
 }
 
 variable "librefang_version" {
-  description = "LibreFang release tag (e.g. v0.4.2-20260314), or 'latest'"
+  description = "LibreFang release tag (e.g. v2026.7.31), or 'latest' to opt into a floating release"
   type        = string
-  default     = "latest"
+  default     = "v2026.7.31"
 }
 
 variable "groq_api_key" {

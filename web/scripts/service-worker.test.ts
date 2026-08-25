@@ -15,6 +15,7 @@ type FetchEventLike = {
 }
 
 type FetchListener = (event: FetchEventLike) => void
+type LifecycleListener = (event: Pick<FetchEventLike, 'waitUntil'>) => void
 
 function cacheKey(input: RequestInfo | URL): string {
   if (typeof input === 'string') return new URL(input, ORIGIN).href
@@ -57,8 +58,14 @@ function loadServiceWorker(fetchImpl: typeof fetch) {
   })
 
   return {
+    cache,
+    cacheStorage,
     entries,
     listener: listeners.get('fetch') as FetchListener,
+    lifecycleListener(type: 'install' | 'activate') {
+      return listeners.get(type) as LifecycleListener
+    },
+    workerGlobal,
   }
 }
 
@@ -112,5 +119,97 @@ describe('public service worker HTML cache', () => {
     )
 
     expect(await fallback.text()).toBe('<html>latest cached shell</html>')
+  })
+})
+
+describe('public service worker static cache', () => {
+  it('stores a successful allowlisted cache miss for later requests', async () => {
+    const online = vi.fn(async () => new Response('logo', { status: 200 }))
+    const loaded = loadServiceWorker(online as typeof fetch)
+    const request = new Request(`${ORIGIN}/logo.png`)
+
+    const first = await dispatchFetch(loaded.listener, request)
+    const second = await dispatchFetch(loaded.listener, request)
+
+    expect(await first.text()).toBe('logo')
+    expect(await second.text()).toBe('logo')
+    expect(online).toHaveBeenCalledTimes(1)
+    expect(loaded.cache.put).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not cache unsuccessful allowlisted responses', async () => {
+    const online = vi.fn(async () => new Response('missing', { status: 404 }))
+    const loaded = loadServiceWorker(online as typeof fetch)
+    const request = new Request(`${ORIGIN}/logo.png`)
+
+    await dispatchFetch(loaded.listener, request)
+    await dispatchFetch(loaded.listener, request)
+
+    expect(online).toHaveBeenCalledTimes(2)
+    expect(loaded.cache.put).not.toHaveBeenCalled()
+  })
+
+  it('returns the network response when a cache refill fails', async () => {
+    const online = vi.fn(async () => new Response('logo', { status: 200 }))
+    const loaded = loadServiceWorker(online as typeof fetch)
+    loaded.cache.put.mockRejectedValueOnce(new Error('quota exceeded'))
+
+    const response = await dispatchFetch(
+      loaded.listener,
+      new Request(`${ORIGIN}/logo.png`),
+    )
+
+    expect(await response.text()).toBe('logo')
+    expect(online).toHaveBeenCalledOnce()
+  })
+})
+
+describe('public service worker lifecycle', () => {
+  it('keeps skipWaiting inside successful install lifetime work', async () => {
+    const loaded = loadServiceWorker(vi.fn() as unknown as typeof fetch)
+    const lifetimeWork: Promise<unknown>[] = []
+
+    loaded.lifecycleListener('install')({
+      waitUntil(work) {
+        lifetimeWork.push(work)
+      },
+    })
+
+    expect(loaded.workerGlobal.skipWaiting).not.toHaveBeenCalled()
+    await Promise.all(lifetimeWork)
+    expect(loaded.workerGlobal.skipWaiting).toHaveBeenCalledOnce()
+  })
+
+  it('does not skip waiting when precaching fails', async () => {
+    const loaded = loadServiceWorker(vi.fn() as unknown as typeof fetch)
+    loaded.cache.addAll.mockRejectedValueOnce(new Error('cache unavailable'))
+    const lifetimeWork: Promise<unknown>[] = []
+
+    loaded.lifecycleListener('install')({
+      waitUntil(work) {
+        lifetimeWork.push(work)
+      },
+    })
+
+    await expect(Promise.all(lifetimeWork)).rejects.toThrow('cache unavailable')
+    expect(loaded.workerGlobal.skipWaiting).not.toHaveBeenCalled()
+  })
+
+  it('claims clients only after old caches are cleaned', async () => {
+    const loaded = loadServiceWorker(vi.fn() as unknown as typeof fetch)
+    loaded.cacheStorage.keys.mockResolvedValueOnce(['librefang-v2', 'librefang-v3'])
+    const lifetimeWork: Promise<unknown>[] = []
+
+    loaded.lifecycleListener('activate')({
+      waitUntil(work) {
+        lifetimeWork.push(work)
+      },
+    })
+
+    expect(loaded.workerGlobal.clients.claim).not.toHaveBeenCalled()
+    await Promise.all(lifetimeWork)
+    expect(loaded.cacheStorage.delete).toHaveBeenCalledWith('librefang-v2')
+    expect(loaded.cacheStorage.delete).not.toHaveBeenCalledWith('librefang-v3')
+    expect(loaded.workerGlobal.clients.claim).toHaveBeenCalledOnce()
   })
 })

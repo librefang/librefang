@@ -24,7 +24,7 @@ pub(crate) fn cmd_init(quick: bool) {
     // upgrade path so user settings (channels, keys, etc.) are preserved.
     // The interactive wizard unconditionally overwrites config.toml, which
     // would silently delete channels and custom configuration (#1862).
-    if !quick && librefang_dir.join("config.toml").exists() {
+    if !quick && cli_config_path().exists() {
         ui::hint(&i18n::t("init-upgrade-existing"));
         ui::hint(&i18n::t("init-upgrade-fresh-hint"));
         cmd_init_upgrade();
@@ -88,7 +88,7 @@ pub(crate) fn cmd_init(quick: bool) {
     }
 
     // Fallback: ensure config.toml exists even if wizard was cancelled/failed
-    let config_path = librefang_dir.join("config.toml");
+    let config_path = cli_config_path();
     if !config_path.exists() {
         let (provider, api_key_env, model) = detect_best_provider();
         write_config_if_missing(&librefang_dir, &provider, &model, &api_key_env);
@@ -98,7 +98,7 @@ pub(crate) fn cmd_init(quick: bool) {
 /// Upgrade an existing LibreFang installation: backup config, sync registry, merge new defaults.
 pub(crate) fn cmd_init_upgrade() {
     let librefang_dir = cli_librefang_home();
-    let config_path = librefang_dir.join("config.toml");
+    let config_path = cli_config_path();
 
     // 1. Must have an existing installation
     if !config_path.exists() {
@@ -441,6 +441,7 @@ const GITIGNORE_ENTRIES: &[&str] = &[
     "registry/",
     "data/",
     "backups/",
+    "transient/",
     "*.db",
     "*.db-shm",
     "*.db-wal",
@@ -720,7 +721,7 @@ pub(crate) fn write_config_if_missing(
     model: &str,
     api_key_env: &str,
 ) {
-    let config_path = librefang_dir.join("config.toml");
+    let config_path = cli_config_path();
     if config_path.exists() {
         ui::check_ok(&i18n::t_args(
             "error-config-exists",
