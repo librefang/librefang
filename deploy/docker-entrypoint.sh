@@ -22,7 +22,10 @@ set -e
 # model rewrites — is identical in both modes.
 
 DATA_DIR="${LIBREFANG_HOME:-/data}"
-CONFIG="$DATA_DIR/config.toml"
+# The daemon resolves its config file through LIBREFANG_CONFIG_PATH first and only then falls back to $LIBREFANG_HOME/config.toml — see `default_config_path` in crates/librefang-kernel/src/config.rs.
+# Deriving it as "$DATA_DIR/config.toml" here made this script test, initialise, and rewrite a file the daemon never reads whenever the config was relocated.
+# The case that matters is a Kubernetes ConfigMap mount (#6695): /data/config.toml is absent on a fresh PVC, so `librefang init` ran, took the upgrade branch because the *mounted* file exists, and exited 1 trying to merge new default sections into a read-only mount — a permanent CrashLoopBackOff.
+CONFIG="${LIBREFANG_CONFIG_PATH:-$DATA_DIR/config.toml}"
 
 if [ "$(id -u)" = "0" ]; then
   ROOTLESS=0
@@ -139,26 +142,45 @@ as_app mkdir -p "$DATA_DIR/logs"
 # and re-running `librefang init` on every boot would accumulate timestamped
 # config backups via the upgrade path.
 if [ ! -f "$CONFIG" ]; then
+  # Managed mode means the deployment owns this file, so a missing one is a broken mount rather than a first boot.
+  # `librefang init` is not gated by managed mode (it is a CLI write, and managed mode governs the API surface), so it would happily author the file the manifest is supposed to supply and the daemon would come up on configuration nobody declared.
+  # Refuse with the path, which is the one fact needed to fix the mount.
+  if [ "${LIBREFANG_CONFIG_MODE-}" = "managed" ]; then
+    echo "ERROR: LIBREFANG_CONFIG_MODE=managed but $CONFIG does not exist." >&2
+    echo "       The deployment owns this file; refusing to generate one." >&2
+    echo "       Check that the ConfigMap volume is mounted at its directory" >&2
+    echo "       and that LIBREFANG_CONFIG_PATH names a key inside it." >&2
+    exit 1
+  fi
   as_app librefang init
 fi
 
-# Railway/Render/Fly inject PORT — reapply on every boot since a rescheduled
-# machine may land on a different port.
-# In Docker, 127.0.0.1 is the container's own loopback and is unreachable from
-# the host. Force wildcard bind unless the user has already customised it.
-if grep -q '^api_listen = "127.0.0.1:' "$CONFIG" 2>/dev/null; then
-  sed -i 's|^api_listen = "127.0.0.1:|api_listen = "0.0.0.0:|' "$CONFIG"
-  own_as_app "$CONFIG"
-fi
+# The three rewrites below edit config.toml in place. `sed -i` writes a temporary file into the config's own directory, so on a read-only mount they fail and take the whole script down with `set -e` — a crash loop caused by a rewrite that usually has nothing to change.
+# A relocated config is frequently read-only (a Kubernetes ConfigMap volume always is), the deployment owns it by definition, and LIBREFANG_LISTEN overrides `api_listen` after load anyway (see `boot_with_config_at` in librefang-kernel), so skipping is the correct behaviour rather than merely the safe one.
+# Test writability rather than the mode: this is about whether the rewrite can succeed, and a mutable deployment that mounts its config read-only wants the same answer.
+if [ -w "$CONFIG" ]; then
+  # Railway/Render/Fly inject PORT — reapply on every boot since a rescheduled machine may land on a different port.
+  # In Docker, 127.0.0.1 is the container's own loopback and is unreachable from the host.
+  # Force wildcard bind unless the user has already customised it.
+  if grep -q '^api_listen = "127.0.0.1:' "$CONFIG" 2>/dev/null; then
+    sed -i 's|^api_listen = "127.0.0.1:|api_listen = "0.0.0.0:|' "$CONFIG"
+    own_as_app "$CONFIG"
+  fi
 
-if [ -n "$PORT" ]; then
-  sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
-  own_as_app "$CONFIG"
-fi
+  if [ -n "$PORT" ]; then
+    sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
+    own_as_app "$CONFIG"
+  fi
 
-if [ -n "$LIBREFANG_MODEL" ]; then
-  sed -i "s|^model = .*|model = \"${LIBREFANG_MODEL}\"|" "$CONFIG"
-  own_as_app "$CONFIG"
+  if [ -n "$LIBREFANG_MODEL" ]; then
+    sed -i "s|^model = .*|model = \"${LIBREFANG_MODEL}\"|" "$CONFIG"
+    own_as_app "$CONFIG"
+  fi
+elif [ -n "$PORT" ] || [ -n "$LIBREFANG_MODEL" ]; then
+  # Silence here would bind the wrong port or run the wrong model with nothing on screen to explain it, so say so even though it is not fatal.
+  echo "WARNING: PORT / LIBREFANG_MODEL are set but $CONFIG is not writable," >&2
+  echo "         so neither was applied. Set api_listen and [default_model] at" >&2
+  echo "         the source that owns the file, or use LIBREFANG_LISTEN." >&2
 fi
 
 if [ "$ROOTLESS" = "1" ]; then

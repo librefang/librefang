@@ -1,4 +1,5 @@
 use super::*;
+use librefang_kernel_handle::KernelOpError;
 
 /// Regression: when the per-user gate returns `NeedsApproval`, the
 /// `DeferredToolExecution.force_human` flag MUST be set so the
@@ -399,6 +400,8 @@ pub(super) struct NamedWsKernel {
     /// Whether `ToolPolicy::deduplicate_file_reads()` should return `true`
     /// (#4971 regression test hook). The stub trait default is `false`.
     pub(super) dedup_enabled: bool,
+    /// ACP filesystem client returned for every test session.
+    pub(super) acp_client: Option<Arc<dyn AcpFsClient>>,
 }
 
 // ---- BEGIN role-trait impls (split from former `impl KernelHandle for NamedWsKernel`, #3746) ----
@@ -618,7 +621,14 @@ impl SessionWriter for NamedWsKernel {
     ) {
     }
 }
-impl AcpFsBridge for NamedWsKernel {}
+impl AcpFsBridge for NamedWsKernel {
+    fn acp_fs_client(
+        &self,
+        _session_id: librefang_types::agent::SessionId,
+    ) -> Option<Arc<dyn AcpFsClient>> {
+        self.acp_client.clone()
+    }
+}
 impl AcpTerminalBridge for NamedWsKernel {}
 
 // ---- END role-trait impls (#3746) ----
@@ -630,6 +640,7 @@ pub(super) fn make_named_ws_kernel(
         named,
         download_dir: None,
         dedup_enabled: false,
+        acp_client: None,
     })
 }
 
@@ -638,7 +649,169 @@ fn make_download_dir_kernel(download_dir: std::path::PathBuf) -> Arc<dyn KernelH
         named: vec![],
         download_dir: Some(download_dir),
         dedup_enabled: false,
+        acp_client: None,
     })
+}
+
+#[derive(Clone, Copy)]
+enum AcpFsFailure {
+    Unavailable,
+    Internal,
+}
+
+struct FailingAcpFsClient {
+    failure: AcpFsFailure,
+}
+
+impl FailingAcpFsClient {
+    fn error(&self) -> KernelOpError {
+        match self.failure {
+            AcpFsFailure::Unavailable => KernelOpError::unavailable("ACP test connection"),
+            AcpFsFailure::Internal => KernelOpError::Internal("ACP test failure".to_string()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AcpFsClient for FailingAcpFsClient {
+    async fn read_text_file(
+        &self,
+        _path: std::path::PathBuf,
+        _line: Option<u32>,
+        _limit: Option<u32>,
+    ) -> Result<String, KernelOpError> {
+        Err(self.error())
+    }
+
+    async fn write_text_file(
+        &self,
+        _path: std::path::PathBuf,
+        _content: String,
+    ) -> Result<(), KernelOpError> {
+        Err(self.error())
+    }
+
+    fn capabilities(&self) -> (bool, bool) {
+        (true, true)
+    }
+}
+
+fn make_failing_acp_kernel(failure: AcpFsFailure) -> Arc<dyn KernelHandle> {
+    Arc::new(NamedWsKernel {
+        named: vec![],
+        download_dir: None,
+        dedup_enabled: false,
+        acp_client: Some(Arc::new(FailingAcpFsClient { failure })),
+    })
+}
+
+async fn run_acp_file_tool(
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: &Arc<dyn KernelHandle>,
+    workspace: &Path,
+) -> ToolResult {
+    execute_tool(
+        "test-id",
+        tool_name,
+        input,
+        Some(kernel),
+        None,
+        Some("00000000-0000-0000-0000-000000000001"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(workspace),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("00000000-0000-0000-0000-000000000042"),
+        None,
+        None,
+        0,
+        0,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn acp_unavailable_file_read_falls_back_to_local_filesystem() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("note.txt"), "local content").unwrap();
+    let kernel = make_failing_acp_kernel(AcpFsFailure::Unavailable);
+
+    let result = run_acp_file_tool(
+        "file_read",
+        &serde_json::json!({"path": "note.txt"}),
+        &kernel,
+        workspace.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(result.content, "local content");
+}
+
+#[tokio::test]
+async fn acp_unavailable_file_write_falls_back_to_local_filesystem() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let kernel = make_failing_acp_kernel(AcpFsFailure::Unavailable);
+
+    let result = run_acp_file_tool(
+        "file_write",
+        &serde_json::json!({"path": "note.txt", "content": "local content"}),
+        &kernel,
+        workspace.path(),
+    )
+    .await;
+
+    assert!(!result.is_error, "got error: {}", result.content);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        "local content"
+    );
+}
+
+#[tokio::test]
+async fn acp_internal_file_errors_do_not_fall_back_to_local_filesystem() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let target = workspace.path().join("note.txt");
+    std::fs::write(&target, "original").unwrap();
+    let kernel = make_failing_acp_kernel(AcpFsFailure::Internal);
+
+    let read = run_acp_file_tool(
+        "file_read",
+        &serde_json::json!({"path": "note.txt"}),
+        &kernel,
+        workspace.path(),
+    )
+    .await;
+    assert!(read.is_error);
+    assert!(read.content.contains("ACP fs/read_text_file failed"));
+    assert!(!read.content.contains("original"));
+
+    let write = run_acp_file_tool(
+        "file_write",
+        &serde_json::json!({"path": "note.txt", "content": "replacement"}),
+        &kernel,
+        workspace.path(),
+    )
+    .await;
+    assert!(write.is_error);
+    assert!(write.content.contains("ACP fs/write_text_file failed"));
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "original");
 }
 
 #[tokio::test]

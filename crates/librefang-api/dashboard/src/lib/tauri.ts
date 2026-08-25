@@ -31,9 +31,16 @@ export interface StoredCredentials {
   api_key: string;
 }
 
+let webCredentials: StoredCredentials | null = null;
+
+function removeLegacyWebCredentials(): void {
+  sessionStorage.removeItem("lf_creds");
+}
+
 export async function storeCredentials(creds: StoredCredentials): Promise<void> {
   if (!isMobileTauri()) {
-    sessionStorage.setItem("lf_creds", JSON.stringify(creds));
+    removeLegacyWebCredentials();
+    webCredentials = { ...creds };
     return;
   }
   await invoke("store_credentials", {
@@ -44,39 +51,40 @@ export async function storeCredentials(creds: StoredCredentials): Promise<void> 
 
 export async function getCredentials(): Promise<StoredCredentials | null> {
   if (!isMobileTauri()) {
-    const raw = sessionStorage.getItem("lf_creds");
-    return raw ? (JSON.parse(raw) as StoredCredentials) : null;
+    removeLegacyWebCredentials();
+    return webCredentials ? { ...webCredentials } : null;
   }
-  try {
-    return await invoke<StoredCredentials | null>("get_credentials");
-  } catch {
-    return null;
-  }
+  return invoke<StoredCredentials | null>("get_credentials");
 }
 
 export async function clearCredentials(): Promise<void> {
   if (!isMobileTauri()) {
-    sessionStorage.removeItem("lf_creds");
+    removeLegacyWebCredentials();
+    webCredentials = null;
     return;
   }
-  try {
-    await invoke("clear_credentials");
-  } catch {
-    // ignore if nothing stored
-  }
+  await invoke("clear_credentials");
 }
 
 // ── Barcode scanner (mobile only) ─────────────────────────────────────────
 
-export async function scanQrCode(): Promise<string | null> {
-  if (!isMobileTauri()) return null;
+export type QrScanResult =
+  | { status: "success"; content: string }
+  | { status: "unsupported" }
+  | { status: "cancelled" }
+  | { status: "error"; error: unknown };
+
+export async function scanQrCode(): Promise<QrScanResult> {
+  if (!isMobileTauri()) return { status: "unsupported" };
   try {
     const result = await invoke<{ content: string }>(
       "plugin:barcode-scanner|scan",
       { formats: ["QR_CODE"] },
     );
-    return result?.content ?? null;
-  } catch {
-    return null;
+    return result?.content
+      ? { status: "success", content: result.content }
+      : { status: "cancelled" };
+  } catch (error) {
+    return { status: "error", error };
   }
 }

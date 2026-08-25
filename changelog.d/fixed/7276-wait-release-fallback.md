@@ -1,0 +1,1 @@
+Remove the orphaned release-fallback action left behind when release workflows were consolidated, eliminating unreachable code that swallowed release-creation failures and could target the wrong commit if reused. (#7276) (@xiaomo)

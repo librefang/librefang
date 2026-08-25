@@ -132,7 +132,7 @@ impl CodexCliDriver {
     }
 
     /// Build the CLI arguments for a given request.
-    pub fn build_args(&self, prompt: &str, model: &str) -> Vec<String> {
+    pub fn build_args(&self, model: &str) -> Vec<String> {
         // LibreFang can run as a desktop app or daemon whose current directory
         // is not a Git repository. Codex otherwise rejects non-interactive
         // execution before processing the prompt.
@@ -152,8 +152,6 @@ impl CodexCliDriver {
             args.push("--model".to_string());
             args.push(m.clone());
         }
-
-        args.push(prompt.to_string());
 
         args
     }
@@ -361,7 +359,7 @@ impl LlmDriver for CodexCliDriver {
     )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let prompt = Self::build_prompt(&request);
-        let args = self.build_args(&prompt, &request.model);
+        let args = self.build_args(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
         for arg in &args {
@@ -379,8 +377,9 @@ impl LlmDriver for CodexCliDriver {
         debug!(cli = %self.cli_path, skip_permissions = self.skip_permissions, "Spawning Codex CLI");
 
         let timeout_secs = request.timeout_secs.unwrap_or(self.message_timeout_secs);
-        let output = match crate::cli_process::output_with_timeout(
+        let output = match crate::cli_process::output_with_input_timeout(
             &mut cmd,
+            prompt.as_bytes(),
             std::time::Duration::from_secs(timeout_secs),
         )
         .await
@@ -552,6 +551,33 @@ printf '%s\n' 'model: gpt-test-codex' >&2
     }
 
     #[cfg(unix)]
+    fn stdin_cli() -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            br##"#!/bin/sh
+case " $* " in
+  *private-prompt*) exit 8 ;;
+esac
+prompt=$(cat)
+case "$prompt" in
+  *private-prompt*) ;;
+  *) exit 9 ;;
+esac
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"stdin received"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":3}}'
+"##,
+        )
+        .unwrap();
+        let mut permissions = file.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        file.as_file().set_permissions(permissions).unwrap();
+        file.into_temp_path()
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_honors_request_timeout() {
         let cli = sleeping_cli();
@@ -596,6 +622,26 @@ printf '%s\n' 'model: gpt-test-codex' >&2
         assert_eq!(response.actual_model.as_deref(), Some("gpt-test-codex"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complete_pipes_prompt_without_putting_it_in_argv() {
+        let cli = stdin_cli();
+        let driver = CodexCliDriver::new(Some(cli.to_string_lossy().into_owned()), false);
+        let response = driver
+            .complete(CompletionRequest {
+                model: "codex-cli".to_string(),
+                system: Some("private-prompt".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "stdin received"
+        ));
+    }
+
     #[test]
     fn is_coding_agent_is_true() {
         assert!(CodexCliDriver::new(None, false).is_coding_agent());
@@ -634,7 +680,7 @@ printf '%s\n' 'model: gpt-test-codex' >&2
     #[test]
     fn test_build_args_with_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, true);
-        let args = driver.build_args("test prompt", "codex-cli/o4-mini");
+        let args = driver.build_args("codex-cli/o4-mini");
         assert_eq!(
             args,
             [
@@ -645,7 +691,6 @@ printf '%s\n' 'model: gpt-test-codex' >&2
                 "workspace-write",
                 "--model",
                 "o4-mini",
-                "test prompt",
             ]
         );
     }
@@ -653,17 +698,10 @@ printf '%s\n' 'model: gpt-test-codex' >&2
     #[test]
     fn test_build_args_without_workspace_write_sandbox() {
         let driver = CodexCliDriver::new(None, false);
-        let args = driver.build_args("test prompt", "codex-cli/o3");
+        let args = driver.build_args("codex-cli/o3");
         assert_eq!(
             args,
-            [
-                "exec",
-                "--json",
-                "--skip-git-repo-check",
-                "--model",
-                "o3",
-                "test prompt",
-            ]
+            ["exec", "--json", "--skip-git-repo-check", "--model", "o3",]
         );
     }
 
@@ -710,8 +748,8 @@ printf '%s\n' 'model: gpt-test-codex' >&2
         // honours its own configured model (regression guard for the override
         // that forced a placeholder onto a DeepSeek-configured Codex CLI).
         let driver = CodexCliDriver::new(None, false);
-        let args = driver.build_args("hello", "codex-cli");
-        assert_eq!(args, ["exec", "--json", "--skip-git-repo-check", "hello"]);
+        let args = driver.build_args("codex-cli");
+        assert_eq!(args, ["exec", "--json", "--skip-git-repo-check"]);
         assert!(!args.iter().any(|a| a == "--model"));
     }
 

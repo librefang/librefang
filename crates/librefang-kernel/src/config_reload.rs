@@ -162,9 +162,10 @@ impl ReloadPlan {
 /// `serde_json::to_string` serializes a `HashMap` in its per-instance iteration order, so two content-identical maps built from separate deserializations (the live config vs the reload candidate) produce different strings and `field_changed` fired spuriously — emitting a needless `ReloadAuth` / `restart_required` on every reload for any multi-entry deployment.
 /// `to_value` normalizes every (possibly nested) map to a `BTreeMap`-backed `Value::Object` (the workspace does not enable serde_json's `preserve_order`), so semantically-equal configs compare equal regardless of map iteration order.
 fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
-    let old_val = serde_json::to_value(old).ok();
-    let new_val = serde_json::to_value(new).ok();
-    old_val != new_val
+    match (serde_json::to_value(old), serde_json::to_value(new)) {
+        (Ok(old_val), Ok(new_val)) => old_val != new_val,
+        _ => true,
+    }
 }
 
 /// Decide whether two `[external_auth]` snapshots disagree on a field
@@ -434,6 +435,13 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.media, &new.media) {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "media config changed (MediaEngine is boot-captured; restart required)".to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -543,7 +551,7 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadExternalAuth);
     } else if field_changed(&old.external_auth, &new.external_auth) {
         // Non-IdP edits only (session_ttl_secs, allowed_domains, redirect_url,
-        // scopes, audience, require_email_verified). The OAuth layer reads
+        // scopes, audience, require_email_verified, role_map). The OAuth layer reads
         // these live from the ArcSwap config on every request (`oauth.rs`:
         // `config_ref()` / `config_snapshot()`), so the bare config swap makes
         // them effective on the next request — no restart, and no cache
@@ -858,7 +866,6 @@ pub fn build_reload_plan_with_caps(
             "notification",
         );
         noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
-        noop_if_changed(field_changed(&old.media, &new.media), "media");
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -1194,6 +1201,25 @@ pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 mod tests {
     use super::*;
     use librefang_types::config::KernelConfig;
+
+    struct SerializationFailure;
+
+    impl serde::Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn field_changed_fails_closed_when_both_values_fail_to_serialize() {
+        assert!(
+            field_changed(&SerializationFailure, &SerializationFailure),
+            "serialization failures must be treated as a change"
+        );
+    }
 
     /// Regression (#6441 follow-up): `field_changed` must not report a change
     /// for two content-identical `HashMap`s that merely iterate in different
@@ -1849,6 +1875,24 @@ mod tests {
         assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn media_config_change_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.media.audio_provider = Some("openai".to_string());
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|reason| reason.contains("media config changed")));
+        assert!(!plan
+            .noop_changes
+            .iter()
+            .any(|change| change.contains("media")));
     }
 
     #[test]

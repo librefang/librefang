@@ -265,6 +265,187 @@ pub(crate) fn cmd_audit_reset(config: Option<PathBuf>, confirm: bool) {
     ui::hint(&i18n::t("monitoring-audit-reset-seed-fresh"));
 }
 
+/// Repair a broken audit chain without destroying the rows past the break.
+///
+/// Where `audit-reset` restores verification by emptying `audit_entries`, this archives every row at or after the break to a JSON Lines file, removes only those rows, and appends a `ChainReanchored` marker linked to the last row that still verified.
+/// The pre-break history keeps its original hashes, the severed rows stay readable on disk, and the archive's SHA-256 is committed into the chain so the preserved copy is tamper-evident too.
+///
+/// The whole command is offline: it refuses to run while a daemon holds the database, including for the dry run, because a diagnosis taken against a live writer describes a state that may no longer exist by the time the operator acts on it.
+pub(crate) fn cmd_audit_reanchor(config: Option<PathBuf>, confirm: bool) {
+    use librefang_runtime::audit::recovery;
+
+    let daemon = daemon_config_context(config.as_deref());
+    // `load_config` already eprintln!s the underlying parse / deserialize
+    // error (see #5186); printing it again here would double the message.
+    let kernel_config = match load_config(config.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => std::process::exit(1),
+    };
+
+    let db_path = kernel_config
+        .memory
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| kernel_config.data_dir.join("librefang.db"));
+
+    // Mirrors `boot.rs: audit_anchor_path` and `cmd_audit_reset`; a divergence
+    // here would repair the chain and then re-anchor a file the daemon never
+    // reads.
+    let anchor_path = match kernel_config.audit.anchor_path.as_ref() {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => kernel_config.data_dir.join(p),
+        None => kernel_config.data_dir.join("audit.anchor"),
+    };
+    let archive_dir = kernel_config.data_dir.join(recovery::ARCHIVE_DIR_NAME);
+
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        ui::error_with_fix(
+            &i18n::t_args("monitoring-daemon-running-error", &[("url", &base)]),
+            &i18n::t("monitoring-daemon-running-error-fix"),
+        );
+        std::process::exit(1);
+    }
+
+    if !db_path.exists() {
+        ui::error(&i18n::t_args(
+            "monitoring-db-not-found",
+            &[("path", &db_path.display().to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    let mut conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-db-open-failed",
+                &[
+                    ("path", &db_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    let plan = match recovery::plan_reanchor(&conn) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => {
+            ui::success(&i18n::t("monitoring-audit-reanchor-verified"));
+            return;
+        }
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-audit-reanchor-diagnose-failed",
+                &[("error", &e)],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    println!(
+        "{}",
+        i18n::t_args(
+            "monitoring-audit-reanchor-break",
+            &[
+                ("seq", &plan.break_point.seq.to_string()),
+                ("kind", plan.break_point.kind.as_str()),
+                ("expected", &plan.break_point.expected),
+                ("found", &plan.break_point.found),
+            ]
+        )
+    );
+    println!(
+        "{}",
+        i18n::t_args(
+            "monitoring-audit-reanchor-counts",
+            &[
+                ("rows_before", &plan.rows_before.to_string()),
+                ("surviving", &plan.surviving_rows.to_string()),
+                ("severed", &plan.severed_rows.to_string()),
+            ]
+        )
+    );
+
+    if !confirm {
+        ui::blank();
+        println!("{}", i18n::t("monitoring-audit-reanchor-would-header"));
+        println!(
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reanchor-would-archive",
+                &[
+                    ("severed", &plan.severed_rows.to_string()),
+                    ("path", &archive_dir.display().to_string()),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reanchor-would-delete",
+                &[
+                    ("severed", &plan.severed_rows.to_string()),
+                    ("path", &db_path.display().to_string()),
+                ]
+            )
+        );
+        println!("{}", i18n::t("monitoring-audit-reanchor-would-marker"));
+        println!(
+            "{}",
+            i18n::t_args(
+                "monitoring-audit-reanchor-would-anchor",
+                &[("path", &anchor_path.display().to_string())]
+            )
+        );
+        ui::blank();
+        ui::error(&i18n::t("monitoring-audit-reanchor-dry-run"));
+        std::process::exit(1);
+    }
+
+    // `plan.break_point` was read outside any write lock. `reanchor_after_break`
+    // re-diagnoses inside its own `BEGIN IMMEDIATE` transaction and refuses to
+    // touch anything unless the break still matches field for field, so a
+    // database that moved between the two calls aborts instead of deleting the
+    // wrong rows.
+    let report = match recovery::reanchor_after_break(
+        &mut conn,
+        &archive_dir,
+        Some(&anchor_path),
+        &plan.break_point,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "monitoring-audit-reanchor-failed",
+                &[("error", &e)],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    ui::success(&i18n::t_args(
+        "monitoring-audit-reanchor-success",
+        &[
+            ("severed", &report.severed_rows.to_string()),
+            ("seq", &report.break_point.seq.to_string()),
+            ("marker", &report.marker_seq.to_string()),
+            ("rows", &report.persisted_rows.to_string()),
+        ],
+    ));
+    println!(
+        "{}",
+        i18n::t_args(
+            "monitoring-audit-reanchor-archive",
+            &[
+                ("path", &report.archive_path.display().to_string()),
+                ("digest", &report.archive_sha256),
+            ]
+        )
+    );
+    ui::hint(&i18n::t("monitoring-audit-reanchor-verify-hint"));
+}
+
 pub(crate) fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
     let agent = resolve_agent_id(&base, agent);

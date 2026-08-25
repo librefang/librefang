@@ -46,6 +46,7 @@
 #   RETAIN               old package versions to keep per pkgname (default 5)
 #   GITHUB_REPOSITORY    owner/repo for the release API (default librefang/librefang)
 #   GH_API_TOKEN         raises the unauthenticated GitHub API rate limit
+#   ARCH_REPO_SOURCE_ROOT repository root containing packaging/aur (default /repo)
 #
 # Usage: publish-arch-repo.sh   (builds every package for every arch; no args)
 set -euo pipefail
@@ -81,30 +82,46 @@ if [[ "$(id -u)" -eq 0 ]]; then
   install -o builder -g builder -m 600 \
     "${GPG_KEY_FILE:?GPG_KEY_FILE is required}" /home/builder/keys/signing.asc
 
-  exec sudo -u builder \
-    env HOME=/home/builder \
-        RELEASE_TAG="$RELEASE_TAG" \
-        GITHUB_REPOSITORY="$REPO" \
-        GH_API_TOKEN="${GH_API_TOKEN:-}" \
-        GPG_KEY_FILE=/home/builder/keys/signing.asc \
-        GPG_KEY_ID="${GPG_KEY_ID:?GPG_KEY_ID is required}" \
-        R2_ACCOUNT_ID="${R2_ACCOUNT_ID:?R2_ACCOUNT_ID is required}" \
-        R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is required}" \
-        R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}" \
-        R2_BUCKET="${R2_BUCKET:?R2_BUCKET is required}" \
-        REPO_NAME="$REPO_NAME" ARCHES="$ARCHES" \
-        REPO_PREFIX_BASE="$REPO_PREFIX_BASE" RETAIN="$RETAIN" \
-        bash "$0"
+  : "${GPG_KEY_ID:?GPG_KEY_ID is required}"
+  : "${R2_ACCOUNT_ID:?R2_ACCOUNT_ID is required}"
+  : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is required}"
+  : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is required}"
+  : "${R2_BUCKET:?R2_BUCKET is required}"
+  export RELEASE_TAG GPG_KEY_ID R2_ACCOUNT_ID R2_ACCESS_KEY_ID
+  export R2_SECRET_ACCESS_KEY R2_BUCKET
+  export GITHUB_REPOSITORY="$REPO" GH_API_TOKEN="${GH_API_TOKEN:-}"
+  export REPO_NAME="$REPO_NAME" ARCHES REPO_PREFIX_BASE RETAIN
+  export ARCH_REPO_SOURCE_ROOT="${ARCH_REPO_SOURCE_ROOT:-/repo}"
+
+  preserved_env=RELEASE_TAG,GITHUB_REPOSITORY,GH_API_TOKEN,GPG_KEY_ID
+  preserved_env+=,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_BUCKET
+  preserved_env+=,REPO_NAME,ARCHES,REPO_PREFIX_BASE,RETAIN,ARCH_REPO_SOURCE_ROOT
+  exec sudo "--preserve-env=$preserved_env" \
+    -u builder env HOME=/home/builder GPG_KEY_FILE=/home/builder/keys/signing.asc bash "$0"
 fi
 
 # ── Builder phase ──────────────────────────────────────────────────────────
 VER_RAW="${RELEASE_TAG#v}"   # 2026.6.26-beta.24  (matches the git tag minus the v)
-VER_PKG="${VER_RAW/-/_}"     # 2026.6.26_beta.24  (Arch pkgver cannot contain '-')
+VER_PKG="${VER_RAW//-/_}"    # 2026.6.26_beta.24  (Arch pkgver cannot contain '-')
+[[ "$VER_RAW" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)*$ ]] || {
+  echo "::error::invalid release tag '$RELEASE_TAG'" >&2
+  exit 1
+}
+[[ "$RETAIN" =~ ^[1-9][0-9]*$ ]] || { echo "::error::RETAIN must be a positive integer" >&2; exit 1; }
+for requested_arch in $ARCHES; do
+  [[ "$requested_arch" == x86_64 || "$requested_arch" == aarch64 ]] || {
+    echo "::error::unsupported architecture '$requested_arch'" >&2
+    exit 1
+  }
+done
 echo "Publishing pacman repo '$REPO_NAME' for release $RELEASE_TAG (pkgver=$VER_PKG); arches: $ARCHES"
 
-STAGING_BASE="$(mktemp -d)/repo"
-BUILDROOT="$(mktemp -d)/build"
-mkdir -p "$STAGING_BASE" "$BUILDROOT"
+TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$TMP_ROOT" /home/builder/keys' EXIT
+STAGING_BASE="$TMP_ROOT/repo"
+BUILDROOT="$TMP_ROOT/build"
+export GNUPGHOME="$TMP_ROOT/gnupg"
+mkdir -m 700 -p "$STAGING_BASE" "$BUILDROOT" "$GNUPGHOME"
 
 # ── GPG: import the signing key, mark it trusted for makepkg + repo-add ────
 gpg --batch --quiet --import "$GPG_KEY_FILE"
@@ -121,7 +138,7 @@ export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
 export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
 export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 export RCLONE_CONFIG_R2_ACL=private
-# R2's S3 API rejects the trailing-checksum header rclone adds by default.
+# Skip rclone's bucket-existence probe; the R2 credentials may be object-scoped.
 export RCLONE_S3_NO_CHECK_BUCKET=true
 
 api_release_json() {
@@ -147,6 +164,15 @@ wait_for_asset() {
   return 1
 }
 
+rewrite_file() {
+  local file="$1" tmp
+  shift
+  tmp="$(mktemp "$TMP_ROOT/rewrite.XXXXXX")"
+  sed "$@" "$file" > "$tmp"
+  cp "$tmp" "$file"
+  rm -f "$tmp"
+}
+
 # Build + sign one package from its committed PKGBUILD for arch $2. On success
 # the signed .pkg.tar.zst (+ .sig) land in $STAGING (the per-arch dir, set by
 # the caller). Returns non-zero on failure so the caller can skip just that
@@ -154,7 +180,7 @@ wait_for_asset() {
 # by the caller before this runs.
 build_pkg() {
   local pkg="$1" arch="$2"
-  local src="/repo/packaging/aur/$pkg"
+  local src="${ARCH_REPO_SOURCE_ROOT:-/repo}/packaging/aur/$pkg"
   [[ -f "$src/PKGBUILD" ]] || { echo "::warning::no PKGBUILD at $src — skipping $pkg"; return 1; }
 
   local work="$BUILDROOT/$arch/$pkg"
@@ -165,8 +191,8 @@ build_pkg() {
   cp -R "$src"/. "$work"/
   cd "$work"
 
-  sed -i "s/^pkgver=.*/pkgver=$VER_PKG/" PKGBUILD
-  sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+  rewrite_file PKGBUILD "s/^pkgver=.*/pkgver=$VER_PKG/"
+  rewrite_file PKGBUILD "s/^pkgrel=.*/pkgrel=1/"
 
   case "$pkg" in
     librefang-bin)
@@ -175,9 +201,10 @@ build_pkg() {
       # and the metadata arch. The host strip can't process foreign binaries —
       # disable it (the release tarball is already stripped upstream anyway).
       if [[ "$arch" != x86_64 ]]; then
-        sed -i "s/x86_64-unknown-linux-gnu/${arch}-unknown-linux-gnu/g" PKGBUILD
-        sed -i "s/^arch=.*/arch=('$arch')/" PKGBUILD
-        sed -i "s/^options=.*/options=('!debug' '!strip')/" PKGBUILD
+        rewrite_file PKGBUILD \
+          "/releases\/download\//s/x86_64-unknown-linux-gnu/${arch}-unknown-linux-gnu/g"
+        rewrite_file PKGBUILD "s/^arch=.*/arch=('$arch')/"
+        rewrite_file PKGBUILD "s/^options=.*/options=('!debug' '!strip')/"
       fi
       wait_for_asset "librefang-${arch}-unknown-linux-gnu.tar.gz" >/dev/null
       ;;
@@ -185,31 +212,60 @@ build_pkg() {
       # The Tauri bundle version differs from the release tag; read it off the
       # actual .deb asset name (LibreFang_<bundle-ver>_amd64.deb).
       local deb dv
-      deb="$(wait_for_asset "_amd64.deb")"
+      deb="$(wait_for_asset "_amd64.deb")" || return 1
       dv="${deb#LibreFang_}"; dv="${dv%_amd64.deb}"
-      [[ -n "$dv" ]] || { echo "::error::could not parse bundle version from '$deb'"; return 1; }
-      sed -i "s/^_desktop_ver=.*/_desktop_ver=$dv/" PKGBUILD
+      [[ "$deb" == LibreFang_*_amd64.deb && "$dv" =~ ^[0-9][0-9A-Za-z._-]*$ ]] || {
+        echo "::error::could not parse safe bundle version from '$deb'"
+        return 1
+      }
+      rewrite_file PKGBUILD "s/^_desktop_ver=.*/_desktop_ver=$dv/"
       echo "Desktop bundle version: $dv"
       ;;
     librefang-docker)
       # No release asset to download — re-pin the embedded image tag in the
       # helper + env (their sha256sums then change and are regenerated below).
       # arch=any; the same package lands in every arch's repo.
-      sed -i -E "s#(ghcr\.io/librefang/librefang:)[A-Za-z0-9._-]+#\1$VER_RAW#g" \
-        librefang-docker librefang-docker.env
+      rewrite_file librefang-docker -E \
+        "s#(ghcr\.io/librefang/librefang:)[A-Za-z0-9._-]+#\1$VER_RAW#g"
+      rewrite_file librefang-docker.env -E \
+        "s#(ghcr\.io/librefang/librefang:)[A-Za-z0-9._-]+#\1$VER_RAW#g"
       ;;
     *)
       echo "::error::unknown package '$pkg'"; return 1 ;;
   esac
 
-  updpkgsums
+  local checksums_updated=false
+  for attempt in 1 2 3; do
+    if updpkgsums; then
+      checksums_updated=true
+      break
+    fi
+    echo "Waiting for release assets to become downloadable ($attempt/3)..." >&2
+    sleep 10
+  done
+  [[ "$checksums_updated" == true ]] || {
+    echo "::error::could not checksum release assets for $pkg after 3 attempts" >&2
+    return 1
+  }
   grep -qx "pkgver=$VER_PKG" PKGBUILD || { echo "::error::pkgver patch did not stick for $pkg"; return 1; }
 
   # --nodeps: these repackage prebuilt release artifacts, so runtime depends
   # need not be installed in the build container. --sign with the imported key.
   makepkg --force --nodeps --nocheck --sign --key "$GPG_KEY_ID" --noconfirm
 
-  cp ./*.pkg.tar.zst ./*.pkg.tar.zst.sig "$STAGING"/
+  local artifacts
+  shopt -s nullglob
+  artifacts=(./*.pkg.tar.zst)
+  shopt -u nullglob
+  [[ ${#artifacts[@]} -eq 1 && -f "${artifacts[0]}" ]] || {
+    echo "::error::expected exactly one built package for $pkg, found ${#artifacts[@]}" >&2
+    return 1
+  }
+  [[ -f "${artifacts[0]}.sig" ]] || {
+    echo "::error::missing signature for ${artifacts[0]}" >&2
+    return 1
+  }
+  cp "${artifacts[0]}" "${artifacts[0]}.sig" "$STAGING"/
 }
 
 # Keep the newest $RETAIN package files per pkgname in $R2_DEST; prune the rest
@@ -279,7 +335,10 @@ for arch in $ARCHES; do
   # .db.sig breaks signed-db verification (SigLevel) on the client.
   for link in "${REPO_NAME}.db" "${REPO_NAME}.db.sig" "${REPO_NAME}.files" "${REPO_NAME}.files.sig"; do
     f="$STAGING/$link"
-    [[ -L "$f" ]] && cp --remove-destination "$(readlink -f "$f")" "$f"
+    [[ -L "$f" ]] || { echo "::error::repo-add did not create $link" >&2; exit 1; }
+    target="$(readlink -f "$f")"
+    [[ -f "$target" ]] || { echo "::error::$link points to missing repository metadata" >&2; exit 1; }
+    cp --remove-destination "$target" "$f"
   done
 
   rclone copy "$STAGING" "$R2_DEST" \

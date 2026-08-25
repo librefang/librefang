@@ -65,18 +65,11 @@ def test_split_message_prefers_newline():
     assert split_message("abc\ndef\nghi", 5) == ["abc", "def", "ghi"]
 
 
-def test_split_message_strips_leading_newline_after_cut():
-    """After a newline-cut, the leftover's leading newlines are
-    stripped so the next chunk doesn't start blank. The first
-    chunk keeps trailing newlines up to (but not including) the
-    chosen cut point — only the leftover gets ``lstrip("\\n")``."""
+def test_split_message_removes_only_the_cut_delimiter_newline():
+    """The delimiter newline is consumed, but adjacent intentional
+    blank lines remain in the neighboring chunks."""
     out = split_message("abc\n\n\ndef", 5)
-    # Second+ chunks never start with a newline.
-    for c in out[1:]:
-        assert not c.startswith("\n")
-    # Joining preserves all original content except the newline(s) we
-    # cut on.
-    assert "".join(out).replace("\n", "") == "abcdef"
+    assert out == ["abc\n", "\ndef"]
 
 
 def test_split_message_empty_input():
@@ -262,6 +255,36 @@ def test_seenset_thread_safety_under_concurrent_marks():
     assert len(s) == 8_000
 
 
+def test_seenset_contains_and_len_take_the_shared_lock():
+    s = SeenSet()
+    s.mark("held")
+    started = threading.Barrier(3)
+    finished = []
+
+    def contains_reader():
+        started.wait()
+        finished.append("contains" if "held" in s else "missing")
+
+    def len_reader():
+        started.wait()
+        finished.append(f"len:{len(s)}")
+
+    s._lock.acquire()
+    threads = [
+        threading.Thread(target=contains_reader),
+        threading.Thread(target=len_reader),
+    ]
+    for thread in threads:
+        thread.start()
+    started.wait()
+    assert finished == []
+    s._lock.release()
+    for thread in threads:
+        thread.join(timeout=1)
+
+    assert sorted(finished) == ["contains", "len:1"]
+
+
 def test_seenset_uses_int_ids():
     """nextcloud uses ``int`` ids (Talk message ids are positive
     integers). SeenSet must work generically — not just for strings."""
@@ -387,6 +410,50 @@ def test_http_request_5xx_surfaces_status(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", fake)
     status, _body, _raw, _hdrs = http_request("https://x.test/")
     assert status == 503
+
+
+@pytest.mark.parametrize("read_error", [OSError("closed"), ConnectionError("gone")])
+def test_http_request_tolerates_http_error_body_io_failure(
+    monkeypatch, read_error,
+):
+    class _BrokenBody:
+        def read(self, *_args):
+            raise read_error
+
+        def close(self):
+            pass
+
+    error = urllib.error.HTTPError(
+        "https://x.test/", 503, "Unavailable", _Hdrs({}), _BrokenBody(),
+    )
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    status, body, raw, _hdrs = http_request("https://x.test/")
+
+    assert (status, body, raw) == (503, None, b"")
+
+
+def test_http_request_does_not_hide_programming_error_from_error_body(monkeypatch):
+    class _BrokenBody:
+        def read(self, *_args):
+            raise ValueError("reader bug")
+
+        def close(self):
+            pass
+
+    error = urllib.error.HTTPError(
+        "https://x.test/", 503, "Unavailable", _Hdrs({}), _BrokenBody(),
+    )
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(ValueError, match="reader bug"):
+        http_request("https://x.test/")
 
 
 def test_http_request_empty_body_returns_none(monkeypatch):

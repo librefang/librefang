@@ -4,8 +4,9 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, ModelCatalogEntry, ModelCatalogFile,
-    ModelOverrides, ModelTier, ProviderInfo,
+    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, LimitSource,
+    ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier, ProviderCatalogToml,
+    ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -262,6 +263,59 @@ impl ModelCatalog {
     }
 }
 
+/// One provider-catalog TOML file as handed to [`ModelCatalog::from_sources`].
+struct CatalogSource {
+    /// Raw file contents.
+    content: String,
+    /// Whether the file is user-added rather than registry-shipped; copied onto
+    /// the resulting [`ProviderInfo`].
+    is_custom: bool,
+    /// Where the content came from, for diagnostics only. A parse failure has
+    /// to name the offending file or the operator is left grepping (#7776).
+    origin: String,
+}
+
+/// Fold a second `[provider]` record for an already-seen id into the first.
+///
+/// The invariant that matters: an absent value never overwrites a present one.
+/// A partial overlay — a file carrying `id` plus one flag — therefore adds its
+/// flag without erasing the `base_url`, `api_key_env` or `display_name` that
+/// the fuller record supplies (#7776). Where both records carry a value the
+/// later file wins, which is arbitrary but no worse than the previous
+/// behaviour of keeping two entries and letting `read_dir` order decide which
+/// one lookups found.
+///
+/// This deliberately operates on [`ProviderCatalogToml`] rather than the
+/// converted [`ProviderInfo`]: conversion back-fills the omitted fields (an
+/// absent `api_key_env` becomes the derived `{ID}_API_KEY`), and after that
+/// step "absent" is indistinguishable from "explicitly set to the default" —
+/// so a partial overlay would silently overwrite the operator's own values.
+fn merge_provider_record(existing: &mut ProviderCatalogToml, incoming: ProviderCatalogToml) {
+    fn take_non_empty(existing: &mut String, incoming: String) {
+        if !incoming.is_empty() {
+            *existing = incoming;
+        }
+    }
+    take_non_empty(&mut existing.display_name, incoming.display_name);
+    take_non_empty(&mut existing.api_key_env, incoming.api_key_env);
+    take_non_empty(&mut existing.base_url, incoming.base_url);
+    if incoming.signup_url.is_some() {
+        existing.signup_url = incoming.signup_url;
+    }
+    if !incoming.regions.is_empty() {
+        existing.regions = incoming.regions;
+    }
+    if !incoming.media_capabilities.is_empty() {
+        existing.media_capabilities = incoming.media_capabilities;
+    }
+    // `key_required` and `discover_models` both default when absent, so neither
+    // can distinguish "omitted" from "explicitly the default". Combine them so
+    // the result does not depend on `read_dir` order: any file declaring the
+    // provider keyless makes it keyless, any file opting in enables discovery.
+    existing.key_required &= incoming.key_required;
+    existing.discover_models |= incoming.discover_models;
+}
+
 impl ModelCatalog {
     /// Create a new catalog by loading providers from `home_dir/providers/`
     /// and aliases from `home_dir/aliases.toml`.
@@ -321,7 +375,7 @@ impl ModelCatalog {
                 })
             });
 
-        let mut sources: Vec<(String, bool)> = Vec::new();
+        let mut sources: Vec<CatalogSource> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(providers_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -331,7 +385,11 @@ impl ModelCatalog {
                             (Some(set), Some(name)) => !set.contains(name),
                             _ => false,
                         };
-                        sources.push((content, is_custom));
+                        sources.push(CatalogSource {
+                            content,
+                            is_custom,
+                            origin: path.display().to_string(),
+                        });
                     }
                 }
             }
@@ -346,24 +404,49 @@ impl ModelCatalog {
     ///
     /// Each source is tagged with an `is_custom` flag that is copied onto
     /// the corresponding [`ProviderInfo`].
-    fn from_sources(sources: &[(String, bool)], aliases_source: Option<&str>) -> Self {
+    fn from_sources(sources: &[CatalogSource], aliases_source: Option<&str>) -> Self {
         let mut models: Vec<ModelCatalogEntry> = Vec::new();
-        let mut providers: Vec<ProviderInfo> = Vec::new();
-        for (source, is_custom) in sources {
-            let file = match toml::from_str::<ModelCatalogFile>(source) {
+        // Accumulated in TOML shape so the merge below can still tell an absent
+        // field from a defaulted one; converted to `ProviderInfo` after the loop.
+        let mut raw_providers: Vec<(ProviderCatalogToml, bool)> = Vec::new();
+        for CatalogSource {
+            content,
+            is_custom,
+            origin,
+        } in sources
+        {
+            let file = match toml::from_str::<ModelCatalogFile>(content) {
                 Ok(f) => f,
                 Err(e) => {
                     // A syntax error here previously reverted to defaults with
                     // no log — a misconfigured custom provider just vanished.
-                    tracing::warn!(%e, "provider catalog TOML ignored: parse failed");
+                    // Name the file: without it the operator has no way to tell
+                    // which of a dozen catalog TOMLs was dropped (#7776).
+                    tracing::warn!(path = %origin, %e, "provider catalog TOML ignored: parse failed");
                     continue;
                 }
             };
             let provider_id = file.provider.as_ref().map(|p| p.id.clone());
             if let Some(p) = file.provider {
-                let mut info: ProviderInfo = p.into();
-                info.is_custom = *is_custom;
-                providers.push(info);
+                match raw_providers
+                    .iter_mut()
+                    .find(|(existing, _)| existing.id == p.id)
+                {
+                    // Two files declaring the same provider id used to produce
+                    // two entries, of which `get_provider` returned whichever
+                    // `read_dir` happened to yield first. Merge instead, and
+                    // never let an absent value win over a present one — a
+                    // partial overlay must be able to flip one flag without
+                    // erasing the endpoint the full record carries (#7776).
+                    Some((existing, existing_is_custom)) => {
+                        merge_provider_record(existing, p);
+                        // Custom only when no contributing file is
+                        // registry-shipped: if one is, the boot-time registry
+                        // sync owns the file and a dashboard delete cannot stick.
+                        *existing_is_custom &= *is_custom;
+                    }
+                    None => raw_providers.push((p, *is_custom)),
+                }
             }
             for mut model in file.models {
                 // Back-fill provider from the [provider] section when
@@ -383,6 +466,15 @@ impl ModelCatalog {
                 models.push(model);
             }
         }
+
+        let mut providers: Vec<ProviderInfo> = raw_providers
+            .into_iter()
+            .map(|(record, is_custom)| {
+                let mut info: ProviderInfo = record.into();
+                info.is_custom = is_custom;
+                info
+            })
+            .collect();
 
         // Builds embed the version-controlled OpenRouter `/models` snapshot.
         // It is a fallback snapshot only: runtime refreshes do not treat it as live-confirmed and replace it after the first successful API fetch.
@@ -1050,6 +1142,83 @@ impl ModelCatalog {
             .map(|m| self.effective_capabilities(m))
     }
 
+    /// Compute the effective capacity limits for a catalog entry, applying any
+    /// operator override on top of the catalog-declared values (refs #7774).
+    ///
+    /// Precedence, per limit: operator override (`model_overrides.json`) >
+    /// catalog entry (registry-declared or probe-discovered) > `None`.
+    /// A zero on either side is "unknown", never a limit — `ModelCatalogEntry`
+    /// documents that rule for its own fields, and an override of `0` gets the
+    /// same treatment so a cleared dashboard field cannot pin a model's window
+    /// to zero tokens.
+    pub fn effective_limits(&self, entry: &ModelCatalogEntry) -> EffectiveLimits {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        let o = self.overrides.get(&key);
+        let (context_window, context_window_source) = rank_limit(
+            o.and_then(|x| x.context_window).filter(|v| *v > 0),
+            known(entry.context_window),
+        );
+        let (max_output_tokens, max_output_tokens_source) = rank_limit(
+            o.and_then(|x| x.max_output_tokens).filter(|v| *v > 0),
+            known(entry.max_output_tokens),
+        );
+        EffectiveLimits {
+            context_window,
+            context_window_source,
+            max_output_tokens,
+            max_output_tokens_source,
+        }
+    }
+
+    /// Resolve a manifest's `(provider, model)` pair to its effective capacity
+    /// limits, **without requiring the model to be in the catalog** (refs #7774).
+    ///
+    /// This is the shape the operator override exists for. The reported case is
+    /// a gateway-served model that no catalog knows: `find_model_for_manifest`
+    /// misses, so an override attached to a catalog *entry* would be
+    /// unreachable — but the override map is keyed by `provider:model_id` and
+    /// needs no entry to exist.
+    ///
+    /// Two keys are consulted, in order: the manifest's own
+    /// `provider:model` (what every surface writes, and the only key available
+    /// for a model with no entry), then the resolved entry's
+    /// `provider:id` when the catalog reconciled the pair to a differently
+    /// spelled id (an OpenRouter manifest naming a bare model resolves to a
+    /// `openrouter/<vendor>/<model>` entry, #6423). The manifest key wins so
+    /// the value the operator typed against the id they see is the one that
+    /// takes effect.
+    pub fn effective_limits_for_manifest(&self, provider: &str, model: &str) -> EffectiveLimits {
+        let entry = self.find_model_for_manifest(provider, model);
+        let manifest_key = format!("{provider}:{model}");
+        let entry_key = entry.map(|e| format!("{}:{}", e.provider, e.id));
+        let mut candidates: Vec<&ModelOverrides> = Vec::with_capacity(2);
+        if let Some(o) = self.overrides.get(&manifest_key) {
+            candidates.push(o);
+        }
+        if let Some(k) = entry_key.filter(|k| *k != manifest_key) {
+            if let Some(o) = self.overrides.get(&k) {
+                candidates.push(o);
+            }
+        }
+        let pick = |f: fn(&ModelOverrides) -> Option<u64>| -> Option<u64> {
+            candidates.iter().filter_map(|o| f(o)).find(|v| *v > 0)
+        };
+        let (context_window, context_window_source) = rank_limit(
+            pick(|o| o.context_window),
+            entry.and_then(|e| known(e.context_window)),
+        );
+        let (max_output_tokens, max_output_tokens_source) = rank_limit(
+            pick(|o| o.max_output_tokens),
+            entry.and_then(|e| known(e.max_output_tokens)),
+        );
+        EffectiveLimits {
+            context_window,
+            context_window_source,
+            max_output_tokens,
+            max_output_tokens_source,
+        }
+    }
+
     /// Load model overrides from a JSON file.
     pub fn load_overrides(&mut self, path: &std::path::Path) {
         let data = match std::fs::read_to_string(path) {
@@ -1100,7 +1269,7 @@ impl ModelCatalog {
             true
         } else {
             // Custom provider — add a new entry so it appears in /api/providers
-            let env_var = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
+            let env_var = librefang_types::model_catalog::default_api_key_env(provider);
             self.providers.push(ProviderInfo {
                 id: provider.to_string(),
                 display_name: provider.to_string(),
@@ -1347,6 +1516,17 @@ impl ModelCatalog {
     /// capabilities (vision via the "clip" family, embeddings, thinking models).
     /// Falls back to conservative defaults when metadata is absent.
     /// Also updates the provider's `model_count`.
+    ///
+    /// # Token limits
+    ///
+    /// Capacity comes from the probe and is never guessed (#7780).
+    /// Until this method stopped hardcoding `context_window: 131_072` / `max_output_tokens: 16_384`, a model behind an OpenAI-compatible gateway entered the catalog with a fabricated ceiling that every surface then presented as discovered fact, and that `manifest_helpers::resolve_context_window` accepted as a real value because its only test is `> 0`.
+    /// The agent loop built that turn's `ContextBudget` from it, so an 8K model reached through a gateway got a 131K budget: compaction never fired, the prompt was packed past what the provider accepts, and the request failed *after* the input tokens were billed.
+    /// The opposite error is just as silent — a 1M model clamped to 131K compacts away prompt content nobody asked to drop.
+    ///
+    /// So an entry gets numbers only when the endpoint supplied them.
+    /// When it did not, both fields stay `0` and `limits_known` is `false`, and the `> 0` guards already present throughout the budget math fall through to `UNKNOWN_MODEL_CONTEXT_WINDOW` — whose warning names `agent.toml: model.context_window` as the operator's fix.
+    /// A conservative window with a loud warning is recoverable; an invented one is not visible from either end.
     pub fn merge_discovered_models(
         &mut self,
         provider: &str,
@@ -1388,6 +1568,9 @@ impl ModelCatalog {
                     info.families.as_deref(),
                     &info.capabilities,
                 );
+            let reported_context = info.context_window.filter(|v| *v > 0);
+            let reported_max_output = info.max_output_tokens.filter(|v| *v > 0);
+            let limits_known = reported_context.is_some() || reported_max_output.is_some();
             // Upgrade the previously-discovered Local entry in place when the
             // current probe reports stronger capabilities. We never downgrade:
             // a transient probe that drops the `capabilities` array (e.g. an
@@ -1407,16 +1590,31 @@ impl ModelCatalog {
                         entry.supports_streaming = true;
                     }
                 }
+                // Capacity follows the same never-downgrade rule as the capability flags, for the same reason: a probe that drops the capacity keys (an older proxy in front of an upgraded gateway) must not erase a number an earlier probe did report.
+                // Only what is still unknown gets filled in.
+                // Assigning `unwrap_or(0)` back onto a field that is already `0` is a no-op, which keeps this to one branch per field instead of a nested `if let`.
+                if entry.context_window == 0 {
+                    entry.context_window = reported_context.unwrap_or(0);
+                }
+                if entry.max_output_tokens == 0 {
+                    entry.max_output_tokens = reported_max_output.unwrap_or(0);
+                }
+                if limits_known {
+                    entry.limits_known = true;
+                }
                 continue;
             }
             let display = format!("{} ({})", info.name, provider);
+            // `0` is the catalog's documented "unknown" encoding for both fields, and `limits_known` records *why* it is zero — so a surface can tell "this model has no token context" (image / audio) apart from "nobody told us this model's context".
+            // See the `# Token limits` section above.
             self.models.push(ModelCatalogEntry {
                 id: info.name.clone(),
                 display_name: display,
                 provider: provider.to_string(),
                 tier: ModelTier::Local,
-                context_window: 131_072,
-                max_output_tokens: 16_384,
+                context_window: reported_context.unwrap_or(0),
+                max_output_tokens: reported_max_output.unwrap_or(0),
+                limits_known,
                 input_cost_per_m: 0.0,
                 output_cost_per_m: 0.0,
                 supports_tools,
@@ -2082,6 +2280,32 @@ fn extract_available_model_ids(body: &serde_json::Value) -> Option<Vec<String>> 
                 })
                 .collect()
         })
+    }
+}
+
+/// A catalog / override capacity limit as `Option`: `0` means "unknown" and
+/// must never reach budget math as a limit (refs #7774, and the rule
+/// `ModelCatalogEntry::context_window` documents for its own fields).
+fn known(value: u64) -> Option<u64> {
+    (value > 0).then_some(value)
+}
+
+/// Rank one capacity limit's two candidate layers and report which answered
+/// (refs #7774).
+///
+/// The operator override outranks the catalog because it exists to correct it.
+/// Value and [`LimitSource`] come out of the same expression so they cannot
+/// disagree: a caller that recomputed the provenance separately would
+/// eventually label an override as a catalog value, which is precisely the
+/// confusion #7774's item 5 is about.
+fn rank_limit(
+    override_value: Option<u64>,
+    catalog_value: Option<u64>,
+) -> (Option<u64>, LimitSource) {
+    match (override_value, catalog_value) {
+        (Some(v), _) => (Some(v), LimitSource::Override),
+        (None, Some(v)) => (Some(v), LimitSource::Catalog),
+        (None, None) => (None, LimitSource::Unknown),
     }
 }
 

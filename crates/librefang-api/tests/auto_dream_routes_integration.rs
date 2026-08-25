@@ -315,10 +315,7 @@ async fn auto_dream_set_enabled_unknown_agent_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
-    assert!(
-        !body["error"].as_str().unwrap_or("").is_empty(),
-        "expected an error string: {body:?}"
-    );
+    assert_eq!(body["error"], "agent not found");
 }
 
 /// Missing `enabled` field in the JSON body is a deserialization failure

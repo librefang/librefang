@@ -1,1 +1,0 @@
-- Read skill supporting files asynchronously with a real 256 KiB buffer limit, and surface canonicalization errors instead of disguising every filesystem failure as a missing file. (@xiaomo)
