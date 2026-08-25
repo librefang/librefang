@@ -1,0 +1,1 @@
+Prompt-injection scanning no longer labels ordinary emoji variation selectors or zero-width joiners as attacks, while prompt sanitizers continue removing those format characters before matching and interpolation (#7750) (@houko)

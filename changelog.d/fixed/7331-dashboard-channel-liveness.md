@@ -1,0 +1,1 @@
+- Classify unconfigured dashboard channels neutrally and fail visibly on unknown liveness states or malformed error payloads. (@xiaomo)

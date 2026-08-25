@@ -5,7 +5,7 @@
 //! `/tasks/{id}/retry`.
 
 use super::AppState;
-use crate::middleware::RequestLanguage;
+use crate::middleware::{AuthenticatedApiUser, RequestLanguage};
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -100,7 +100,13 @@ pub async fn task_queue_status(
                     "in_progress" => in_progress += 1,
                     "completed" => completed += 1,
                     "failed" => failed += 1,
-                    _ => {}
+                    unknown => {
+                        tracing::warn!(
+                            status = unknown,
+                            task_id = t["id"].as_str().unwrap_or(""),
+                            "task queue status summary encountered an unknown status"
+                        );
+                    }
                 }
             }
             (
@@ -162,23 +168,50 @@ pub async fn task_queue_retry(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let err_task_not_retryable = {
+    let (err_task_not_found, err_task_not_retryable) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-        t.t("api-error-task-not-retryable")
+        (
+            t.t("api-error-task-not-found"),
+            t.t("api-error-task-not-retryable"),
+        )
     };
     match state.kernel.task_retry(&id).await {
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "retried", "id": id})),
         ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": err_task_not_retryable
-            })),
-        ),
+        Ok(false) => match state.kernel.task_get(&id).await {
+            Ok(Some(_)) => {
+                retry_not_applied_response(true, err_task_not_found, err_task_not_retryable)
+            }
+            Ok(None) => {
+                retry_not_applied_response(false, err_task_not_found, err_task_not_retryable)
+            }
+            Err(e) => map_kernel_op_err(e).into_json_tuple(),
+        },
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }
+}
+
+fn retry_not_applied_response(
+    task_exists: bool,
+    not_found: String,
+    not_retryable: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if task_exists {
+        ApiErrorResponse::conflict(not_retryable).into_json_tuple()
+    } else {
+        ApiErrorResponse::not_found(not_found).into_json_tuple()
+    }
+}
+
+fn resolve_task_creator(
+    api_user: Option<&AuthenticatedApiUser>,
+    supplied: Option<&str>,
+) -> Option<String> {
+    api_user
+        .map(|user| user.user_id.to_string())
+        .or_else(|| supplied.map(str::to_string))
 }
 
 /// GET /api/tasks — List tasks with optional ?status=, ?assigned_to=, ?limit= filters.
@@ -197,13 +230,7 @@ pub async fn task_queue_list_root(
             if let Some(assignee) = params.get("assigned_to") {
                 tasks.retain(|t| t["assigned_to"].as_str().unwrap_or("") == assignee.as_str());
             }
-            // Apply limit
-            if let Some(limit_str) = params.get("limit") {
-                if let Ok(limit) = limit_str.parse::<usize>() {
-                    tasks.truncate(limit);
-                }
-            }
-            let total = tasks.len();
+            let total = truncate_task_page(&mut tasks, params.get("limit").map(String::as_str));
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
@@ -213,6 +240,14 @@ pub async fn task_queue_list_root(
     }
 }
 
+fn truncate_task_page(tasks: &mut Vec<serde_json::Value>, limit: Option<&str>) -> usize {
+    let total = tasks.len();
+    if let Some(limit) = limit.and_then(|value| value.parse::<usize>().ok()) {
+        tasks.truncate(limit);
+    }
+    total
+}
+
 /// POST /api/tasks — Enqueue a task on behalf of an external caller.
 ///
 /// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
@@ -220,11 +255,13 @@ pub async fn task_queue_list_root(
 /// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
 /// cron scripts, external integrations) can enqueue tasks without a
 /// runtime/agent context. The agent-side `task_post` tool keeps the
-/// caller's agent id automatically; this HTTP form takes `created_by`
-/// as an optional explicit field for provenance.
+/// caller's agent id automatically.
+/// Authenticated HTTP requests use the caller's stable user id for
+/// provenance and ignore a body-supplied `created_by` value.
 pub async fn task_queue_post_root(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let title = match body["title"].as_str() {
@@ -246,10 +283,13 @@ pub async fn task_queue_post_root(
         }
     };
     let assigned_to = body["assigned_to"].as_str();
-    let created_by = body["created_by"].as_str();
+    let created_by = resolve_task_creator(
+        api_user.as_ref().map(|user| &user.0),
+        body["created_by"].as_str(),
+    );
     match state
         .kernel
-        .task_post(title, description, assigned_to, created_by)
+        .task_post(title, description, assigned_to, created_by.as_deref())
         .await
     {
         Ok(task_id) => (
@@ -280,7 +320,8 @@ pub async fn task_queue_get(
 /// PATCH /api/tasks/{id} — Update task status.
 ///
 /// Body: `{"status": "pending"}` or `{"status": "cancelled"}`
-/// - `pending`: resets a failed/in_progress task so it can be re-claimed
+/// - `pending`: resets a failed task so it can be re-claimed; active tasks
+///   must not be re-queued because that can cause duplicate execution
 /// - `cancelled`: cancels a pending/in_progress task
 pub async fn task_queue_patch(
     State(state): State<Arc<AppState>>,
@@ -316,5 +357,51 @@ pub async fn task_queue_patch(
         ),
         Ok(false) => ApiErrorResponse::not_found(err_not_found).into_json_tuple(),
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_task_creator, retry_not_applied_response, truncate_task_page};
+    use crate::middleware::{AuthenticatedApiUser, UserRole};
+    use axum::http::StatusCode;
+    use librefang_types::agent::UserId;
+
+    #[test]
+    fn limited_task_page_preserves_matching_total() {
+        let mut tasks = vec![serde_json::json!({}); 42];
+
+        let total = truncate_task_page(&mut tasks, Some("10"));
+
+        assert_eq!(total, 42);
+        assert_eq!(tasks.len(), 10);
+    }
+
+    #[test]
+    fn retry_false_distinguishes_missing_from_active_task() {
+        let (status, _) =
+            retry_not_applied_response(false, "missing".to_string(), "not retryable".to_string());
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) =
+            retry_not_applied_response(true, "missing".to_string(), "not retryable".to_string());
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn authenticated_creator_overrides_spoofed_body_value() {
+        let user = AuthenticatedApiUser {
+            name: "alice".to_string(),
+            role: UserRole::Admin,
+            user_id: UserId::from_name("alice"),
+        };
+        assert_eq!(
+            resolve_task_creator(Some(&user), Some("spoofed-agent")),
+            Some(user.user_id.to_string())
+        );
+        assert_eq!(
+            resolve_task_creator(None, Some("legacy-agent")),
+            Some("legacy-agent".to_string())
+        );
     }
 }

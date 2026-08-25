@@ -1,52 +1,50 @@
-/**
- * Basic example — create an agent and chat with it.
- *
- * Usage:
- *   node basic.js
- */
+/** Create an isolated agent and chat with it through the LibreFang API. */
+
+"use strict";
 
 const { LibreFang } = require("../index");
 
 async function main() {
-  const client = new LibreFang("http://localhost:4545");
+  const baseUrl = process.env.LIBREFANG_URL || "http://localhost:4545";
+  const client = new LibreFang(baseUrl);
+  let agentId;
+  let activeError;
 
-  // Check server health
-  const health = await client.health();
-  console.log("Server:", health);
+  try {
+    console.log("Server:", await client.system.health());
 
-  // List existing agents
-  const agents = await client.agents.list();
-  console.log("Agents:", agents.length);
-
-  let agent;
-  let shouldDelete = false;
-
-  // Use existing agent or create a new one with unique name
-  if (agents.length > 0) {
-    // Use the first available agent
-    agent = agents[0];
-    console.log("Using existing agent:", agent.id);
-  } else {
-    // Create a new agent with a unique name to avoid conflicts
-    const timestamp = Date.now();
-    agent = await client.agents.create({
+    const agent = await client.agents.spawnAgent({
       template: "assistant",
-      name: `sdk-test-${timestamp}`
+      name: `sdk-test-${Date.now()}`,
     });
-    shouldDelete = true;
-    console.log("Created agent:", agent.id);
-  }
+    if (!agent || typeof agent.agent_id !== "string" || !agent.agent_id) {
+      throw new Error("spawn response is missing a valid agent_id");
+    }
+    agentId = agent.agent_id;
+    console.log("Created agent:", agentId);
 
-  // Send a message and get the full response
-  console.log("\n--- Sending message ---");
-  const reply = await client.agents.message(agent.id, "Say hello in 5 words.");
-  console.log("Reply:", reply);
-
-  // Clean up only if we created it
-  if (shouldDelete) {
-    await client.agents.delete(agent.id);
-    console.log("Agent deleted.");
+    console.log("\n--- Sending message ---");
+    const reply = await client.agents.sendMessage(agentId, {
+      message: "Say hello in 5 words.",
+    });
+    console.log("Reply:", reply);
+  } catch (error) {
+    activeError = error;
+    throw error;
+  } finally {
+    if (agentId) {
+      try {
+        await client.agents.killAgent(agentId, { confirm: true });
+        console.log("Agent deleted.");
+      } catch (cleanupError) {
+        if (!activeError) throw cleanupError;
+        console.error("[Warning] Failed to delete created agent:", cleanupError.message);
+      }
+    }
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error("[Error] Basic example failed:", error.message);
+  process.exitCode = 1;
+});

@@ -5,8 +5,7 @@ import {
   useSwitchAgentSession,
   useDeleteAgentSession,
   usePatchAgent,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useClearHandAgentRuntimeConfig,
   useSpawnAgent,
   useCloneAgent,
@@ -138,19 +137,20 @@ describe("usePatchAgent", () => {
   });
 });
 
-describe("usePatchAgentConfig (non-hand)", () => {
+describe("usePatchAgentRuntimeConfig", () => {
   it("calls patchAgentConfig (→ /api/agents/{id}/config) and invalidates agent lists + detail", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     vi.mocked(http.patchAgentConfig).mockClear();
     vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
 
-    const { result } = renderHook(() => usePatchAgentConfig(), {
+    const { result } = renderHook(() => usePatchAgentRuntimeConfig(), {
       wrapper,
     });
 
     await result.current.mutateAsync({
       agentId: "agent-1",
+      isHand: false,
       config: { max_tokens: 4096 },
     });
 
@@ -173,21 +173,19 @@ describe("usePatchAgentConfig (non-hand)", () => {
       queryKey: handKeys.details(),
     });
   });
-});
-
-describe("usePatchHandAgentRuntimeConfig (hand)", () => {
   it("calls patchHandAgentRuntimeConfig (→ /api/agents/{id}/hand-runtime-config) and invalidates agent lists + detail + handKeys.details()", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     vi.mocked(http.patchAgentConfig).mockClear();
     vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
 
-    const { result } = renderHook(() => usePatchHandAgentRuntimeConfig(), {
+    const { result } = renderHook(() => usePatchAgentRuntimeConfig(), {
       wrapper,
     });
 
     await result.current.mutateAsync({
       agentId: "hand-agent-1",
+      isHand: true,
       // Tri-state payload: api_key_env set, base_url cleared via empty string.
       config: { model: "gpt-4o", api_key_env: "OPENAI_KEY", base_url: "" },
     });
@@ -215,12 +213,13 @@ describe("usePatchHandAgentRuntimeConfig (hand)", () => {
     const { wrapper } = createQueryClientWrapper();
     vi.mocked(http.patchHandAgentRuntimeConfig).mockClear();
 
-    const { result } = renderHook(() => usePatchHandAgentRuntimeConfig(), {
+    const { result } = renderHook(() => usePatchAgentRuntimeConfig(), {
       wrapper,
     });
 
     await result.current.mutateAsync({
       agentId: "hand-agent-1",
+      isHand: true,
       config: {
         model: "gpt-4o",
         api_key_env: "   ",

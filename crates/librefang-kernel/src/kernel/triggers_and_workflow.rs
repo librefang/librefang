@@ -1236,6 +1236,22 @@ impl LibreFangKernel {
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_owned(workflow_id, input, None).await
+    }
+
+    /// [`Self::run_workflow`], recording `owner` as the run's owning agent (#7714).
+    ///
+    /// `owner` is the agent that invoked the `workflow_run` tool. It is
+    /// stamped on the run at creation and never reassigned, so the resume and
+    /// operator-action paths carry it forward rather than re-deriving it from
+    /// whoever resumed. `None` produces an ownerless run, which is what an
+    /// operator-initiated run is.
+    pub async fn run_workflow_owned(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+    ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
 
         // Bound nested workflow runs (refs #6659).
@@ -1264,28 +1280,17 @@ impl LibreFangKernel {
         let run_id = self
             .workflows
             .engine
-            .create_run(workflow_id, input)
+            .create_run_owned(workflow_id, input, owner)
             .await
             .ok_or_else(|| {
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
             })?;
 
-        // Agent resolver: looks up by name or ID in the registry.
+        // Agent resolver: looks up by id or name in the registry, and
+        // find-or-spawns a `type` reference from its template (#7712).
         // Returns (AgentId, agent_name, inherit_parent_context).
         let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
-            match agent_ref {
-                StepAgent::ById { id } => {
-                    let agent_id: AgentId = id.parse().ok()?;
-                    let entry = self.agents.registry.get(agent_id)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Some((agent_id, entry.name.clone(), inherit))
-                }
-                StepAgent::ByName { name } => {
-                    let entry = self.agents.registry.find_by_name(name)?;
-                    let inherit = entry.manifest.inherit_parent_context;
-                    Some((entry.id, entry.name.clone(), inherit))
-                }
-            }
+            self.resolve_step_agent(agent_ref)
         };
 
         // Message sender: sends to agent and returns (output, in_tokens, out_tokens).
@@ -1375,21 +1380,12 @@ impl LibreFangKernel {
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<Vec<DryRunStep>> {
+        // `preview_step_agent`, not `resolve_step_agent`: a dry run is
+        // documented as side-effect free, so a `type` reference reports the
+        // agent the real run would use without spawning it (#7712).
         let resolver =
             |agent_ref: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> {
-                match agent_ref {
-                    StepAgent::ById { id } => {
-                        let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                        let entry = self.agents.registry.get(agent_id)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((agent_id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = self.agents.registry.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                }
+                self.preview_step_agent(agent_ref)
             };
 
         self.workflows
@@ -1489,19 +1485,7 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
         let resolver = {
             let kernel = kernel.clone();
             move |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
-                match agent_ref {
-                    StepAgent::ById { id } => {
-                        let agent_id: AgentId = id.parse().ok()?;
-                        let entry = kernel.agents.registry.get(agent_id)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((agent_id, entry.name.clone(), inherit))
-                    }
-                    StepAgent::ByName { name } => {
-                        let entry = kernel.agents.registry.find_by_name(name)?;
-                        let inherit = entry.manifest.inherit_parent_context;
-                        Some((entry.id, entry.name.clone(), inherit))
-                    }
-                }
+                kernel.resolve_step_agent(agent_ref)
             }
         };
         let send_kernel = kernel.clone();
@@ -1570,6 +1554,33 @@ impl crate::workflow::OperatorResumeDriver for KernelOperatorResumeDriver {
     }
 }
 
+/// Workflow-step required-skills gate (#7721). Same `Weak<LibreFangKernel>` reasoning as [`KernelOperatorBridge`]: the engine stores this behind a `OnceLock`, and a strong handle would cycle through `kernel.workflows.engine`.
+///
+/// A dropped kernel reports every requirement as unknown rather than passing the step — the gate exists to fail closed, and the only way to reach this state is a shutdown racing a run.
+struct KernelStepSkillGate {
+    kernel: Weak<LibreFangKernel>,
+}
+
+#[async_trait::async_trait]
+impl crate::workflow::StepSkillGate for KernelStepSkillGate {
+    async fn check_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> crate::workflow::RequiredSkillReport {
+        let Some(kernel) = self.kernel.upgrade() else {
+            let mut unknown = required.to_vec();
+            unknown.sort();
+            unknown.dedup();
+            return crate::workflow::RequiredSkillReport {
+                unknown,
+                ..Default::default()
+            };
+        };
+        kernel.classify_required_skills(agent_id, required)
+    }
+}
+
 impl LibreFangKernel {
     /// Install the operator-step notifier + timeout-resume driver onto the
     /// workflow engine (#4977 step 2). Called once from `set_self_handle`
@@ -1584,6 +1595,13 @@ impl LibreFangKernel {
                 kernel: Arc::downgrade(self),
             });
         self.workflows.engine.set_operator_hooks(notifier, driver);
+        // #7721: the required-skills gate needs the same kernel handle and the
+        // same once-per-boot install point, so it rides along here rather than
+        // adding a second post-boot hook site that a future caller could miss.
+        let skill_gate: Arc<dyn crate::workflow::StepSkillGate> = Arc::new(KernelStepSkillGate {
+            kernel: Arc::downgrade(self),
+        });
+        self.workflows.engine.set_step_skill_gate(skill_gate);
     }
 }
 

@@ -46,6 +46,7 @@ jobs:
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 345
     environment: release-desktop
     strategy:
       fail-fast: false
@@ -236,6 +237,7 @@ jobs:
     name: Sync Homebrew Cask
     if: ${{ inputs.sync_cask }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release-desktop
     needs: [desktop]
     steps:
