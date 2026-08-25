@@ -8,7 +8,11 @@
 // `EffectivePermissions.budget` from the same `UserConfig` row (#3228
 // follow-up).
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import {
   updateUserBudget,
   deleteUserBudget,
@@ -16,18 +20,24 @@ import {
 } from "../http/client";
 import { authzKeys, userBudgetKeys, userKeys } from "../queries/keys";
 
+function invalidateUserBudgetDependents(qc: QueryClient, name: string) {
+  qc.invalidateQueries({ queryKey: userBudgetKeys.detail(name) });
+  qc.invalidateQueries({ queryKey: userKeys.detail(name) });
+  qc.invalidateQueries({ queryKey: userKeys.lists() });
+  qc.invalidateQueries({ queryKey: authzKeys.effective(name) });
+}
+
+// Error presentation is caller-owned. UserBudgetPage uses mutateAsync and
+// renders the translated failure beside the form; adding a hook-level toast
+// would duplicate that feedback and prevent callers from choosing context.
+
 export function useUpdateUserBudget() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (vars: { name: string; payload: UserBudgetPayload }) =>
       updateUserBudget(vars.name, vars.payload),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: userBudgetKeys.detail(variables.name) });
-      qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
-      qc.invalidateQueries({ queryKey: userKeys.lists() });
-      qc.invalidateQueries({
-        queryKey: authzKeys.effective(variables.name),
-      });
+      invalidateUserBudgetDependents(qc, variables.name);
     },
   });
 }
@@ -37,10 +47,7 @@ export function useDeleteUserBudget() {
   return useMutation({
     mutationFn: (name: string) => deleteUserBudget(name),
     onSuccess: (_data, name) => {
-      qc.invalidateQueries({ queryKey: userBudgetKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: userKeys.detail(name) });
-      qc.invalidateQueries({ queryKey: userKeys.lists() });
-      qc.invalidateQueries({ queryKey: authzKeys.effective(name) });
+      invalidateUserBudgetDependents(qc, name);
     },
   });
 }

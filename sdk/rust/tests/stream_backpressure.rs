@@ -1,5 +1,6 @@
 use librefang::LibreFang;
 use serde_json::json;
+use std::io::ErrorKind;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -73,7 +74,11 @@ async fn dropping_receiver_closes_connection_stalled_between_chunks() {
         headers_sent.send(()).unwrap();
 
         let mut byte = [0_u8; 1];
-        socket.read(&mut byte).await.unwrap()
+        match socket.read(&mut byte).await {
+            Ok(bytes_read) => bytes_read,
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => 0,
+            Err(error) => panic!("unexpected read error after receiver drop: {error}"),
+        }
     });
 
     let client = LibreFang::new(format!("http://{address}"));

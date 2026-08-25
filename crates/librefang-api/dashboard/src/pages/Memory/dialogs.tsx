@@ -176,6 +176,7 @@ interface MemoryConfigForm {
   pm_enabled: boolean;
   pm_auto_memorize: boolean;
   pm_auto_retrieve: boolean;
+  pm_session_scoped_recall: boolean;
   pm_extraction_model: string;
   pm_max_retrieve: string;
 }
@@ -227,6 +228,8 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
       pm_enabled: configQuery.data.proactive_memory?.enabled ?? true,
       pm_auto_memorize: configQuery.data.proactive_memory?.auto_memorize ?? true,
       pm_auto_retrieve: configQuery.data.proactive_memory?.auto_retrieve ?? true,
+      pm_session_scoped_recall:
+        configQuery.data.proactive_memory?.session_scoped_recall ?? true,
       pm_extraction_model: configQuery.data.proactive_memory?.extraction_model || "",
       pm_max_retrieve: String(configQuery.data.proactive_memory?.max_retrieve ?? 10),
     });
@@ -255,6 +258,7 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
           enabled: form.pm_enabled,
           auto_memorize: form.pm_auto_memorize,
           auto_retrieve: form.pm_auto_retrieve,
+          session_scoped_recall: form.pm_session_scoped_recall,
           extraction_model: form.pm_extraction_model || undefined,
           max_retrieve: maxRetrieveParsed,
         },
@@ -437,6 +441,10 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                   { key: "pm_enabled", label: t("memory.proactive_enabled", { defaultValue: "Enabled" }) },
                   { key: "pm_auto_memorize", label: t("memory.auto_memorize", { defaultValue: "Auto Memorize" }) },
                   { key: "pm_auto_retrieve", label: t("memory.auto_retrieve", { defaultValue: "Auto Retrieve" }) },
+                  {
+                    key: "pm_session_scoped_recall",
+                    label: t("memory.session_scoped_recall", { defaultValue: "Session-Scoped Recall" }),
+                  },
                 ].map((opt) => (
                   <label
                     key={opt.key}
@@ -522,6 +530,32 @@ export function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
                       autoFocus
                     />
                   )}
+                  {/* "Use kernel default" names no model, which is exactly the
+                      state that is hard to debug: extraction runs after every
+                      reply, so a slow model inherited here delays every answer
+                      — and until now nothing on this screen said which model
+                      that was. Name it.
+
+                      Guarded on the resolved model being present: it is null
+                      when no model runs at all (the extraction driver failed
+                      to build and extraction fell back to substring matching),
+                      and a hint reading "inherited from: undefined" would be
+                      worse than no hint. */}
+                  {configQuery.data?.proactive_memory
+                    ?.extraction_model_source === "inherited_default" &&
+                    !!configQuery.data?.proactive_memory
+                      ?.effective_extraction_model &&
+                    !form.pm_extraction_model && (
+                      <p className="text-[11px] text-text-dim mt-1.5">
+                        {t("memory.extraction_model_inherited", {
+                          defaultValue:
+                            "Inherited from the system default model: {{model}}. Extraction runs after every reply, so a slow model here delays every answer.",
+                          model:
+                            configQuery.data.proactive_memory
+                              .effective_extraction_model,
+                        })}
+                      </p>
+                    )}
                 </div>
                 <div>
                   <span className={labelCls}>

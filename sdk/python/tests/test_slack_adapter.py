@@ -5,11 +5,14 @@ replaced with a fake. Asserts the sidecar preserves the in-process
 Rust ``librefang-channels::slack`` adapter's behaviour.
 """
 
+import http.client
 import io
 import json
 import os
+import socket
 import urllib.error
 import urllib.parse
+import urllib.request
 
 import pytest
 
@@ -34,6 +37,13 @@ def _adapter(**env):
         "SLACK_REACTIONS": "",
         "SLACK_PROGRESS_CARD": "",
         "SLACK_ACCOUNT_ID": "",
+        "SLACK_FILE_DOWNLOADS": "",
+        "SLACK_FILE_MAX_BYTES": "",
+        "SLACK_FILE_ALLOWED_EXTENSIONS": "",
+        "SLACK_FILE_DOWNLOAD_CHANNELS": "",
+        "SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS": "",
+        "SLACK_RESOLVE_DISPLAY_NAMES": "",
+        "SLACK_DISPLAY_NAME_TTL": "",
     }
     for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
@@ -362,6 +372,415 @@ def test_parse_event_account_id_injected():
     assert ev["params"]["metadata"]["account_id"] == "ws-prod"
 
 
+# ---- inbound attachments (#7087) ----------------------------------
+
+
+_SLACK_IMAGE_URL = (
+    "https://files.slack.com/files-pri/T01-F01/download/campaign.png"
+)
+
+
+def _file(**overrides):
+    base = {
+        "id": "F01",
+        "name": "campaign.png",
+        "title": "campaign.png",
+        "mimetype": "image/png",
+        "filetype": "png",
+        "size": 2048,
+        "url_private": _SLACK_IMAGE_URL.replace("/download/", "/"),
+        "url_private_download": _SLACK_IMAGE_URL,
+    }
+    base.update(overrides)
+    return base
+
+
+def _file_evt(*, files=None, text="Post this to LinkedIn", **overrides):
+    base = {
+        "type": "message",
+        "subtype": "file_share",
+        "user": "U001",
+        "channel": "C01",
+        "text": text,
+        "ts": "1700000000.000001",
+        "files": [_file()] if files is None else files,
+    }
+    base.update(overrides)
+    return base
+
+
+def _policy(**overrides):
+    defaults = {"enabled": True}
+    defaults.update(overrides)
+    return sa.SlackFilePolicy(**defaults)
+
+
+def test_parse_event_file_share_emits_image_content():
+    ev = sa.parse_slack_event(
+        _file_evt(),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert ev is not None
+    assert ev["params"]["content"] == {
+        "Image": {
+            "url": _SLACK_IMAGE_URL,
+            "caption": "Post this to LinkedIn",
+            "mime_type": "image/png",
+        },
+    }
+    # Routing metadata is unchanged by the attachment path.
+    assert ev["params"]["user_id"] == "C01"
+    assert ev["params"]["message_id"] == "1700000000.000001"
+    assert ev["params"]["metadata"]["sender_user_id"] == "U001"
+
+
+def test_parse_event_file_share_dropped_without_a_policy():
+    """Default (no policy) keeps the pre-#7087 behaviour: file_share is discarded."""
+    assert sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+    ) is None
+
+
+def test_parse_event_file_share_with_no_comment_is_still_emitted():
+    ev = sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert ev is not None
+    assert ev["params"]["content"]["Image"]["caption"] is None
+
+
+def test_parse_event_file_share_video_and_audio_and_document_variants():
+    video = sa.parse_slack_event(
+        _file_evt(files=[_file(
+            name="review.mp4", mimetype="video/mp4", filetype="mp4",
+            duration_ms=90_500,
+        )], text="review this"),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert video["params"]["content"] == {
+        "Video": {
+            "url": _SLACK_IMAGE_URL,
+            "caption": "review this",
+            "duration_seconds": 90,
+            "filename": "review.mp4",
+        },
+    }
+
+    audio = sa.parse_slack_event(
+        _file_evt(files=[_file(
+            name="memo.m4a", title="Standup memo", mimetype="audio/mp4",
+            filetype="m4a", duration_ms=12_000,
+        )], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert audio["params"]["content"] == {
+        "Audio": {
+            "url": _SLACK_IMAGE_URL,
+            "caption": None,
+            "duration_seconds": 12,
+            "title": "Standup memo",
+        },
+    }
+
+    document = sa.parse_slack_event(
+        _file_evt(files=[_file(
+            name="brief.pdf", mimetype="application/pdf", filetype="pdf",
+        )], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert document["params"]["content"] == {
+        "File": {"url": _SLACK_IMAGE_URL, "filename": "brief.pdf"},
+    }
+
+
+def test_parse_event_file_share_oversize_is_rejected():
+    ev = sa.parse_slack_event(
+        _file_evt(files=[_file(size=64 * 1024 * 1024)], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(max_bytes=1024),
+    )
+    assert ev is None
+
+
+def test_parse_event_file_share_oversize_keeps_the_companion_text():
+    """A rejected attachment must not swallow the message the user typed with it."""
+    ev = sa.parse_slack_event(
+        _file_evt(files=[_file(size=64 * 1024 * 1024)]),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(max_bytes=1024),
+    )
+    assert ev["params"]["content"] == {"Text": "Post this to LinkedIn"}
+
+
+def test_parse_event_file_share_disallowed_extension_is_rejected():
+    ev = sa.parse_slack_event(
+        _file_evt(files=[_file(name="payload.exe", filetype="exe",
+                               mimetype="application/octet-stream")],
+                  text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(allowed_extensions=frozenset({"png", "pdf"})),
+    )
+    assert ev is None
+
+
+def test_parse_event_file_share_allowed_extension_passes():
+    ev = sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(allowed_extensions=frozenset({"png", "pdf"})),
+    )
+    assert "Image" in ev["params"]["content"]
+
+
+def test_parse_event_file_share_extension_falls_back_to_filetype():
+    ev = sa.parse_slack_event(
+        _file_evt(files=[_file(name="screenshot", title="screenshot",
+                               filetype="png")], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(allowed_extensions=frozenset({"png"})),
+    )
+    assert "Image" in ev["params"]["content"]
+
+
+def test_parse_event_file_share_download_switch_off_drops_the_file():
+    ev = sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(enabled=False),
+    )
+    assert ev is None
+
+
+def test_parse_event_file_share_per_channel_exclude_list():
+    policy = _policy(excluded_channels=("C01",))
+    assert sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=policy,
+    ) is None
+    # A different channel is unaffected by the exclusion.
+    assert sa.parse_slack_event(
+        _file_evt(channel="C02", text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=policy,
+    ) is not None
+
+
+def test_parse_event_file_share_per_channel_allow_list():
+    policy = _policy(channels=("C02",))
+    assert sa.parse_slack_event(
+        _file_evt(text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=policy,
+    ) is None
+    assert sa.parse_slack_event(
+        _file_evt(channel="C02", text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=policy,
+    ) is not None
+
+
+def test_parse_event_file_share_rejects_non_slack_host():
+    """A member-supplied `url_private` off Slack's file hosts is never forwarded."""
+    for url in (
+        "https://evil.example/files-pri/T01-F01/x.png",
+        "https://files.slack.com.evil.example/x.png",
+        "https://files.slack.com@evil.example/x.png",
+        "http://files.slack.com/x.png",
+    ):
+        ev = sa.parse_slack_event(
+            _file_evt(files=[_file(url_private=url,
+                                   url_private_download=url)], text=""),
+            bot_user_id="UBOT", allowed_channels=[], account_id=None,
+            file_policy=_policy(),
+        )
+        assert ev is None, url
+
+
+def test_parse_event_file_share_takes_first_eligible_and_skips_extras():
+    ev = sa.parse_slack_event(
+        _file_evt(files=[
+            _file(name="huge.png", size=99 * 1024 * 1024,
+                  url_private_download=_SLACK_IMAGE_URL + "?f=huge"),
+            _file(name="second.png",
+                  url_private_download=_SLACK_IMAGE_URL + "?f=second"),
+            _file(name="third.png",
+                  url_private_download=_SLACK_IMAGE_URL + "?f=third"),
+        ], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(max_bytes=1024 * 1024),
+    )
+    # The oversize first entry is skipped, the next eligible one is
+    # forwarded, and the third is counted as an ignored extra.
+    assert ev["params"]["content"]["Image"]["url"] == (
+        _SLACK_IMAGE_URL + "?f=second"
+    )
+
+
+def test_parse_event_attachment_outranks_slash_command():
+    ev = sa.parse_slack_event(
+        _file_evt(text="/summarize please"),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    )
+    assert "Image" in ev["params"]["content"]
+    assert ev["params"]["content"]["Image"]["caption"] == "/summarize please"
+
+
+def test_parse_event_file_share_still_honours_self_skip_and_channel_filter():
+    assert sa.parse_slack_event(
+        _file_evt(user="UBOT", text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    ) is None
+    assert sa.parse_slack_event(
+        _file_evt(channel="C99", text=""),
+        bot_user_id="UBOT", allowed_channels=["C01"], account_id=None,
+        file_policy=_policy(),
+    ) is None
+
+
+def test_parse_event_other_subtypes_are_still_dropped():
+    assert sa.parse_slack_event(
+        {"type": "message", "subtype": "channel_join", "user": "U001",
+         "channel": "C01", "text": "joined", "ts": "1.0",
+         "files": [_file()]},
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    ) is None
+
+
+def test_parse_event_file_share_rejects_unfetchable_modes():
+    for mode in ("tombstone", "hidden_by_limit"):
+        assert sa.parse_slack_event(
+            _file_evt(files=[_file(mode=mode)], text=""),
+            bot_user_id="UBOT", allowed_channels=[], account_id=None,
+            file_policy=_policy(),
+        ) is None, mode
+    # A normal hosted file is unaffected by the mode check.
+    assert sa.parse_slack_event(
+        _file_evt(files=[_file(mode="hosted")], text=""),
+        bot_user_id="UBOT", allowed_channels=[], account_id=None,
+        file_policy=_policy(),
+    ) is not None
+
+
+def test_parse_slack_files_ignores_malformed_arrays():
+    for files in (None, {}, "campaign.png", [], [None], [{}], [{"name": "x"}]):
+        assert sa.parse_slack_files(
+            files, channel="C01", companion_text="", policy=_policy(),
+        ) is None
+
+
+def test_inbound_attachment_parsing_performs_no_http():
+    """Parsing hands the daemon a URL; the adapter itself never fetches inbound files."""
+    def _explode(*_a, **_k):
+        raise AssertionError("inbound parsing must not perform HTTP")
+
+    original_public = sa._public_http_request
+    original_request = sa._http_request
+    sa._public_http_request = _explode
+    sa._http_request = _explode
+    try:
+        ev = sa.parse_slack_event(
+            _file_evt(),
+            bot_user_id="UBOT", allowed_channels=[], account_id=None,
+            file_policy=_policy(),
+        )
+        assert "Image" in ev["params"]["content"]
+        assert sa.parse_slack_event(
+            _file_evt(text=""),
+            bot_user_id="UBOT", allowed_channels=[], account_id=None,
+            file_policy=_policy(enabled=False),
+        ) is None
+    finally:
+        sa._public_http_request = original_public
+        sa._http_request = original_request
+
+
+# ---- attachment policy env wiring ---------------------------------
+
+
+def test_file_policy_defaults():
+    a = _adapter()
+    assert a.file_policy.enabled is True
+    assert a.file_policy.max_bytes == sa.DEFAULT_INBOUND_FILE_MAX_BYTES
+    assert a.file_policy.allowed_extensions == frozenset()
+    assert a.file_policy.channels == ()
+    assert a.file_policy.excluded_channels == ()
+
+
+def test_file_policy_env_parsing():
+    a = _adapter(
+        SLACK_FILE_MAX_BYTES="4096",
+        SLACK_FILE_ALLOWED_EXTENSIONS=".PNG, jpg , ,pdf",
+        SLACK_FILE_DOWNLOAD_CHANNELS="C01, C02",
+        SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS="C09",
+    )
+    assert a.file_policy.max_bytes == 4096
+    assert a.file_policy.allowed_extensions == frozenset({"png", "jpg", "pdf"})
+    assert a.file_policy.channels == ("C01", "C02")
+    assert a.file_policy.excluded_channels == ("C09",)
+
+
+def test_file_max_bytes_non_integer_exits_2():
+    with pytest.raises(SystemExit) as e:
+        _adapter(SLACK_FILE_MAX_BYTES="ten megabytes")
+    assert e.value.code == 2
+
+
+def test_file_max_bytes_below_one_falls_back_to_default():
+    a = _adapter(SLACK_FILE_MAX_BYTES="0")
+    assert a.file_policy.max_bytes == sa.DEFAULT_INBOUND_FILE_MAX_BYTES
+
+
+def test_header_rules_pin_the_bot_token_to_slack_file_hosts():
+    a = _adapter()
+    assert a.header_rules == [
+        ("files.slack.com", [["Authorization", "Bearer xoxb-test-bot-token"]]),
+        ("slack-files.com", [["Authorization", "Bearer xoxb-test-bot-token"]]),
+    ]
+    # Every host the token is declared for is a Slack file host, so the
+    # daemon's exact-host `fetch_headers_for` match can never attach it to
+    # an attacker-named URL.
+    hosts = [host for host, _headers in a.header_rules]
+    assert hosts == sorted(sa.SLACK_FILE_HOSTS)
+    for host in hosts:
+        assert host == "slack-files.com" or host.endswith(".slack.com")
+
+
+def test_header_rules_absent_when_downloads_are_disabled():
+    """Switch the feature off and the bot token is not shipped to the daemon at all."""
+    a = _adapter(SLACK_FILE_DOWNLOADS="false")
+    assert a.file_policy.enabled is False
+    assert a.header_rules == []
+    assert "xoxb-test-bot-token" not in json.dumps(a.ready_event())
+
+
+def test_header_rules_surface_in_the_ready_event():
+    a = _adapter()
+    rules = a.ready_event()["params"]["header_rules"]
+    assert rules[0][0] == "files.slack.com"
+    assert rules[0][1] == [["Authorization", "Bearer xoxb-test-bot-token"]]
+
+
+def test_is_slack_file_url_host_pinning():
+    assert sa._is_slack_file_url(_SLACK_IMAGE_URL) is True
+    assert sa._is_slack_file_url("https://FILES.SLACK.COM./x.png") is True
+    assert sa._is_slack_file_url("https://slack-files.com/x.png") is True
+    assert sa._is_slack_file_url("https://evil.example/x.png") is False
+    assert sa._is_slack_file_url("https://slack.com/x.png") is False
+    assert sa._is_slack_file_url("") is False
+    assert sa._is_slack_file_url(None) is False
+
+
 # ---- parse_slack_block_action -------------------------------------
 
 
@@ -652,6 +1071,378 @@ def test_post_message_blocks_payload(monkeypatch):
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["channel"] == "C01"
     assert body["blocks"] == blocks
+
+
+def test_upload_file_bytes_uses_external_upload_flow(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": True, "files": [{"id": "F123"}]}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    uploads = []
+    monkeypatch.setattr(
+        sa,
+        "_public_http_request",
+        lambda url, **kwargs: uploads.append((url, kwargs)) or (200, b""),
+    )
+    a = _adapter()
+
+    assert a._upload_file_bytes(
+        "C01", b"report-bytes", "report.xlsx", thread_ts="1700000000.0",
+    ) is True
+
+    assert [call["url"] for call in fake.calls] == [
+        "https://slack.com/api/files.getUploadURLExternal",
+        "https://slack.com/api/files.completeUploadExternal",
+    ]
+    assert fake.calls[0]["body"] == {
+        "filename": "report.xlsx",
+        "length": len(b"report-bytes"),
+    }
+    assert uploads == [(
+        "https://files.slack.com/upload/v1/TICKET",
+        {
+            "method": "POST",
+            "body": b"report-bytes",
+            "headers": {"Content-Type": "application/octet-stream"},
+            "max_bytes": 200,
+            "require_https": True,
+        },
+    )]
+    assert fake.calls[1]["body"] == {
+        "files": [{"id": "F123", "title": "report.xlsx"}],
+        "channel_id": "C01",
+        "thread_ts": "1700000000.0",
+    }
+
+
+def test_upload_file_bytes_stops_when_ticket_is_rejected(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": False, "error": "missing_scope"}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 1
+
+
+def test_upload_file_bytes_stops_when_byte_upload_fails(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa, "_public_http_request", lambda *_args, **_kwargs: (500, b"upload_failed"))
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 1
+
+
+def test_upload_file_bytes_surfaces_completion_rejection(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": False, "error": "not_in_channel"}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(sa, "_public_http_request", lambda *_args, **_kwargs: (200, b""))
+    a = _adapter()
+
+    assert a._upload_file_bytes("C01", b"x", "x.txt") is False
+    assert len(fake.calls) == 2
+
+
+def test_upload_file_bytes_rejects_oversize_before_network(monkeypatch):
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    a.MAX_UPLOAD_BYTES = 3
+
+    assert a._upload_file_bytes("C01", b"four", "x.txt") is False
+    assert fake.calls == []
+
+
+def test_validate_file_url_rejects_local_and_non_http_targets(monkeypatch):
+    def _addresses(host, port, **_kwargs):
+        address = "127.0.0.1" if host in {"127.0.0.1", "127.1", "localtest.me"} else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(sa.socket, "getaddrinfo", _addresses)
+    assert sa._validate_file_url("https://example.com/report.pdf") is None
+    assert sa._validate_file_url("https://deadbeef/report.pdf") is None
+    assert sa._validate_file_url("file:///etc/passwd") is not None
+    assert sa._validate_file_url("http://127.0.0.1/private") is not None
+    assert sa._validate_file_url("http://127.1/private") is not None
+    assert sa._validate_file_url("http://localtest.me/private") is not None
+    assert sa._validate_file_url("http://metadata.google.internal/latest") is not None
+
+
+def test_validate_file_url_rejects_mixed_public_private_dns(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443)),
+        ],
+    )
+
+    assert sa._validate_file_url("https://mixed.example/file") is not None
+
+
+def test_public_http_request_pins_validated_address(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    opened = []
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda parsed, hostname, target, **kwargs: opened.append(
+            (parsed.hostname, hostname, target, kwargs),
+        ) or (200, b"file", None),
+    )
+
+    assert sa._public_http_request(
+        "https://files.example/report.pdf", method="GET", max_bytes=10,
+    ) == (200, b"file")
+    assert opened[0][2][1][0] == "93.184.216.34"
+
+
+def test_request_pinned_once_classifies_connect_failure_as_pre_send(monkeypatch):
+    request_calls = []
+
+    class _Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def connect(self):
+            raise OSError("no route")
+
+        def request(self, *_args, **_kwargs):
+            request_calls.append(True)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sa.http.client, "HTTPConnection", _Connection)
+
+    with pytest.raises(sa._PreSendConnectionError, match="no route"):
+        sa._request_pinned_once(
+            urllib.parse.urlsplit("http://files.example/upload"),
+            "files.example",
+            (socket.AF_INET, ("93.184.216.34", 80)),
+            method="POST",
+            body=b"payload",
+            headers=None,
+            max_bytes=200,
+        )
+    assert request_calls == []
+
+
+def test_request_pinned_once_preserves_failure_after_request_started(monkeypatch):
+    class _Connection:
+        def __init__(self, *_args, **_kwargs):
+            self.requested = False
+
+        def connect(self):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            self.requested = True
+
+        def getresponse(self):
+            assert self.requested
+            raise http.client.BadStatusLine("response reset")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sa.http.client, "HTTPConnection", _Connection)
+
+    with pytest.raises(http.client.BadStatusLine, match="response reset"):
+        sa._request_pinned_once(
+            urllib.parse.urlsplit("http://files.example/upload"),
+            "files.example",
+            (socket.AF_INET, ("93.184.216.34", 80)),
+            method="POST",
+            body=b"payload",
+            headers=None,
+            max_bytes=200,
+        )
+
+
+def test_public_http_request_post_failover_only_before_send(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        if len(opened) == 1:
+            raise sa._PreSendConnectionError("connect failed")
+        return (200, b"uploaded", None)
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    assert sa._public_http_request(
+        "https://files.slack.com/upload/v1/TICKET",
+        method="POST",
+        body=b"payload",
+        max_bytes=200,
+        require_https=True,
+    ) == (200, b"uploaded")
+    assert len(opened) == 2
+
+
+def test_public_http_request_does_not_replay_post_after_uncertain_failure(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        raise http.client.BadStatusLine("response reset")
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    with pytest.raises(RuntimeError, match="refusing to retry POST"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+    assert len(opened) == 1
+
+
+def test_public_http_request_get_can_failover_after_response_failure(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+        ],
+    )
+    opened = []
+
+    def _request(_parsed, _hostname, target, **_kwargs):
+        opened.append(target)
+        if len(opened) == 1:
+            raise http.client.BadStatusLine("response reset")
+        return (200, b"file", None)
+
+    monkeypatch.setattr(sa, "_request_pinned_once", _request)
+
+    assert sa._public_http_request(
+        "https://files.example/report.pdf",
+        method="GET",
+        max_bytes=200,
+    ) == (200, b"file")
+    assert len(opened) == 2
+
+
+def test_public_http_request_rejects_upload_redirect_downgrade(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (307, b"", "http://example.com/upload-next"),
+    )
+
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+
+
+def test_public_http_request_normalizes_malformed_redirect(monkeypatch):
+    monkeypatch.setattr(
+        sa.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (307, b"", "https://["),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid URL"):
+        sa._public_http_request(
+            "https://files.slack.com/upload/v1/TICKET",
+            method="POST",
+            body=b"payload",
+            max_bytes=200,
+            require_https=True,
+        )
+
+
+def test_public_http_request_revalidates_redirect_dns(monkeypatch):
+    def _addresses(host, port, **_kwargs):
+        address = "169.254.169.254" if host == "redirected.example" else "93.184.216.34"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    monkeypatch.setattr(sa.socket, "getaddrinfo", _addresses)
+    monkeypatch.setattr(
+        sa,
+        "_request_pinned_once",
+        lambda *_args, **_kwargs: (302, b"", "https://redirected.example/private"),
+    )
+
+    with pytest.raises(RuntimeError, match="non-public IP"):
+        sa._public_http_request(
+            "https://public.example/file",
+            method="GET",
+            max_bytes=200,
+        )
+
+
+def test_fetch_file_url_enforces_streamed_size_cap(monkeypatch):
+    with pytest.raises(RuntimeError, match="upload cap"):
+        sa._read_bounded_response(_FakeResp(200, b"four", _HdrShim({})), 3)
 
 
 # ---- _build_block_kit ----------------------------------------------
@@ -1044,6 +1835,106 @@ async def test_on_send_interactive_uses_blocks(monkeypatch):
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["text"] == "Pick one"
     assert any(b["type"] == "actions" for b in body["blocks"])
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_data_uploads_to_requested_thread(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {
+            "ok": True,
+            "upload_url": "https://files.slack.com/upload/v1/TICKET",
+            "file_id": "F123",
+        }),
+        (200, {"ok": True, "files": [{"id": "F123"}]}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    uploads = []
+    monkeypatch.setattr(
+        sa,
+        "_public_http_request",
+        lambda url, **kwargs: uploads.append((url, kwargs)) or (200, b""),
+    )
+    a = _adapter()
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "FileData": {
+                "data": [0x50, 0x4B, 0x03, 0x04],
+                "filename": "report.xlsx",
+                "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            },
+        }
+        thread_id = "1700000000.0"
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert uploads[0][1]["body"] == b"PK\x03\x04"
+    complete = fake.calls[1]["body"]
+    assert complete["channel_id"] == "C01"
+    assert complete["thread_ts"] == "1700000000.0"
+
+
+@pytest.mark.asyncio
+async def test_on_send_file_url_fetches_then_uploads(monkeypatch):
+    a = _adapter()
+    fetched = []
+    uploaded = []
+    monkeypatch.setattr(
+        a,
+        "_fetch_file_url",
+        lambda url: fetched.append(url) or b"downloaded",
+    )
+    monkeypatch.setattr(
+        a,
+        "_upload_file_bytes",
+        lambda channel, data, filename, *, thread_ts=None: uploaded.append(
+            (channel, data, filename, thread_ts)
+        ) or True,
+    )
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "File": {
+                "url": "https://example.com/generated/report.docx",
+                "filename": "report.docx",
+            },
+        }
+        thread_id = None
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert fetched == ["https://example.com/generated/report.docx"]
+    assert uploaded == [("C01", b"downloaded", "report.docx", None)]
+
+
+@pytest.mark.asyncio
+async def test_on_send_invalid_file_data_does_not_call_slack(monkeypatch):
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+
+    class _Cmd:
+        channel_id = "C01"
+        text = ""
+        content = {
+            "FileData": {
+                "data": [0, 256],
+                "filename": "broken.bin",
+                "mime_type": "application/octet-stream",
+            },
+        }
+        thread_id = None
+        user = {}
+
+    await a.on_send(_Cmd())
+
+    assert fake.calls == []
 
 
 @pytest.mark.asyncio
@@ -1704,3 +2595,219 @@ async def test_on_command_send_still_routes_to_on_send(monkeypatch):
     await a.on_command(cmd)
     body = json.loads(fake.calls[0]["body_raw"])
     assert body["channel"] == "C01" and body["text"] == "hi"
+
+
+# ---- display-name resolution (#7086) -------------------------------
+
+
+def _group_event(user="U1", text="hello"):
+    """One inbound group message, parsed the way the envelope handler parses it."""
+    return sa.parse_slack_event(
+        {"type": "message", "channel": "C0DESIGN", "user": user,
+         "text": text, "ts": "1.0"},
+        bot_user_id="UBOT",
+        allowed_channels=[],
+        account_id=None,
+        file_policy=sa.SlackFilePolicy(),
+    )
+
+
+def test_users_identity_prefers_the_chosen_display_name():
+    identity, err = sa.parse_users_identity({
+        "ok": True,
+        "user": {"name": "ana", "real_name": "Ana Legal Name",
+                 "profile": {"display_name": "Ana", "real_name": "Ana Legal Name"}},
+    })
+    assert err is None
+    assert identity.display_name == "Ana"
+    assert identity.username == "ana"
+
+
+def test_users_identity_walks_the_fallback_ladder():
+    # `profile.display_name` is blank for a large share of real accounts, so the
+    # ladder is the difference between a name and a regression to the raw id.
+    blank_display, _ = sa.parse_users_identity({
+        "ok": True,
+        "user": {"name": "ana", "real_name": "Ana Legal Name",
+                 "profile": {"display_name": "   "}},
+    })
+    assert blank_display.display_name == "Ana Legal Name"
+
+    handle_only, _ = sa.parse_users_identity({"ok": True, "user": {"name": "ana"}})
+    assert handle_only.display_name == "ana"
+    assert handle_only.username == "ana"
+
+
+def test_users_identity_returns_nothing_when_every_name_is_blank():
+    identity, err = sa.parse_users_identity({"ok": True, "user": {"profile": {}}})
+    assert identity is None
+    assert err is None
+
+
+def test_users_identity_separates_a_definitive_absence_from_a_transient_error():
+    # A user who does not exist is an answer worth caching for the full TTL;
+    # a rate limit is not.
+    absent, err = sa.parse_users_identity({"ok": False, "error": "user_not_found"})
+    assert absent is None and err is None
+    transient, err = sa.parse_users_identity({"ok": False, "error": "ratelimited"})
+    assert transient is None and err == "ratelimited"
+    scope, err = sa.parse_users_identity({"ok": False, "error": "missing_scope"})
+    assert scope is None and err == "missing_scope"
+
+
+def test_identity_cache_hit_miss_and_expiry():
+    cache = sa._IdentityCache(ttl_secs=3600, max_entries=8)
+    assert cache.get("U1") == (False, None)
+    cache.put("U1", sa.SlackIdentity(display_name="Ana"))
+    hit, identity = cache.get("U1")
+    assert hit is True and identity.display_name == "Ana"
+
+    # A cached absence is a hit carrying `None` — that is what stops one doomed
+    # lookup per message for a deleted user.
+    cache.put("U2", None)
+    assert cache.get("U2") == (True, None)
+
+    # An expired entry is indistinguishable from never having been cached.
+    cache.put("U3", sa.SlackIdentity(display_name="Bo"), ttl_secs=0)
+    assert cache.get("U3") == (False, None)
+
+
+def test_identity_cache_evicts_oldest_first_at_the_cap():
+    cache = sa._IdentityCache(ttl_secs=3600, max_entries=2)
+    cache.put("U1", sa.SlackIdentity(display_name="Ana"))
+    cache.put("U2", sa.SlackIdentity(display_name="Bo"))
+    cache.put("U3", sa.SlackIdentity(display_name="Cy"))
+    assert cache.get("U1") == (False, None)
+    assert cache.get("U2")[0] is True
+    assert cache.get("U3")[0] is True
+
+
+def test_display_names_are_not_resolved_unless_the_operator_opts_in(monkeypatch):
+    # Default OFF: the feature needs the `users:read` scope a pre-#7086 install
+    # does not have, and switching it on changes what the daemon persists about
+    # real people, not just what it renders.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    assert a.resolve_display_names is False
+
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "U1"
+    assert fake.calls == []
+
+
+def test_display_name_replaces_the_raw_id_when_enabled(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "Ana"
+    # The same request already answered for the handle, and the roster has a
+    # column waiting for it.
+    assert ev["params"]["metadata"]["sender_username"] == "ana"
+    # The user id itself is untouched — DM routing and the `[users]` mapping run
+    # on the id, not the name.
+    assert ev["params"]["metadata"]["sender_user_id"] == "U1"
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/users.info")
+    assert fake.calls[0]["params"]["user"] == "U1"
+
+
+def test_repeated_ids_cost_exactly_one_users_info_call(monkeypatch):
+    # The whole reason the cache exists: `users.info` sits in a tiered per-method
+    # rate limit, and a busy channel produces one message per member per minute.
+    # The script holds a single response, so a second lookup would fail loudly.
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    names = [
+        a._apply_identity(_group_event(text=f"msg {i}"))["params"]["user_name"]
+        for i in range(5)
+    ]
+    assert names == ["Ana"] * 5
+    assert len(fake.calls) == 1
+
+
+def test_distinct_ids_are_resolved_independently(monkeypatch):
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+        (200, {"ok": True, "user": {"name": "bo", "profile": {"display_name": "Bo"}}}),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    assert a._apply_identity(_group_event(user="U1"))["params"]["user_name"] == "Ana"
+    assert a._apply_identity(_group_event(user="U2"))["params"]["user_name"] == "Bo"
+    # And neither one is re-fetched.
+    assert a._apply_identity(_group_event(user="U1"))["params"]["user_name"] == "Ana"
+    assert len(fake.calls) == 2
+
+
+def test_unresolvable_user_keeps_the_raw_id_and_is_not_re_fetched(monkeypatch):
+    # Slack has nothing to say about this user. The raw id is a worse label than
+    # a real name but a better one than an empty string, and it is exactly what
+    # every pre-#7086 deployment already shows — so the path degrades to the old
+    # behaviour rather than to a blank sender.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "user_not_found"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    for _ in range(3):
+        ev = a._apply_identity(_group_event())
+        assert ev["params"]["user_name"] == "U1"
+        assert "sender_username" not in ev["params"]["metadata"]
+    assert len(fake.calls) == 1
+
+
+def test_missing_scope_does_not_repeat_the_doomed_lookup(monkeypatch):
+    # The feature switched on without `users:read` granted: one warning, one
+    # request, then the adapter goes back to reporting ids until the cooldown.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "missing_scope"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    assert a._apply_identity(_group_event())["params"]["user_name"] == "U1"
+    assert a._apply_identity(_group_event())["params"]["user_name"] == "U1"
+    assert len(fake.calls) == 1
+
+
+def test_transient_failure_uses_the_short_cooldown_not_the_full_ttl(monkeypatch):
+    # A rate limit that has passed must not keep the whole workspace anonymous
+    # for six hours.
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "ratelimited"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+    a._apply_identity(_group_event())
+
+    expires_at, identity = a._identity_cache._entries["U1"]
+    assert identity is None
+    remaining = expires_at - sa.time.monotonic()
+    assert 0 < remaining <= sa.NEGATIVE_TTL_SECS
+    assert remaining < a.display_name_ttl
+
+
+def test_transport_failure_falls_back_to_the_raw_id(monkeypatch):
+    def _boom(_req, timeout=None):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(sa.urllib.request, "urlopen", _boom)
+    a = _adapter(SLACK_RESOLVE_DISPLAY_NAMES="true")
+    ev = a._apply_identity(_group_event())
+    assert ev["params"]["user_name"] == "U1"
+
+
+def test_display_name_ttl_env_is_validated():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(SLACK_DISPLAY_NAME_TTL="soon")
+    assert exc.value.code == 2
+    # A non-positive TTL would make the cache useless; fall back to the default.
+    a = _adapter(SLACK_DISPLAY_NAME_TTL="0")
+    assert a.display_name_ttl == float(sa.DEFAULT_DISPLAY_NAME_TTL_SECS)
+    a2 = _adapter(SLACK_DISPLAY_NAME_TTL="60")
+    assert a2.display_name_ttl == 60.0

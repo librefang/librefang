@@ -489,9 +489,9 @@ pub fn is_channel_command(name: &str) -> bool {
 /// `blocked_commands` (blacklist). When no overrides are configured,
 /// everything is allowed.
 ///
-/// Config entries may be written with or without a leading `/`
-/// (`"agent"` and `"/agent"` both match the dispatcher's bare token).
+/// Command names and config entries may be written with or without a leading `/`.
 pub fn is_command_allowed(cmd: &str, overrides: Option<&ChannelOverrides>) -> bool {
+    let cmd = cmd.strip_prefix('/').unwrap_or(cmd);
     let Some(ov) = overrides else { return true };
     if ov.disable_commands {
         return false;
@@ -550,8 +550,7 @@ pub fn channel_help_text(overrides: Option<&ChannelOverrides>) -> String {
                 out.push_str(&format!("/{} {} - {}", c.name, sub.args, sub.description));
                 first_in_section = false;
             }
-            // Defer setting first_in_section=false to common path below
-            // — already handled inside loop.
+            // The loop already updated `first_in_section`, so intentionally skip the common assignment below.
             continue;
         }
 
@@ -749,8 +748,11 @@ mod tests {
         };
         // Whitelist wins over blacklist.
         assert!(is_command_allowed("help", Some(&ov)));
+        assert!(is_command_allowed("/help", Some(&ov)));
         assert!(is_command_allowed("start", Some(&ov)));
+        assert!(is_command_allowed("/start", Some(&ov)));
         assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("/agent", Some(&ov)));
     }
 
     #[test]
@@ -760,8 +762,11 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_command_allowed("agent", Some(&ov)));
+        assert!(!is_command_allowed("/agent", Some(&ov)));
         assert!(!is_command_allowed("new", Some(&ov)));
+        assert!(!is_command_allowed("/new", Some(&ov)));
         assert!(is_command_allowed("help", Some(&ov)));
+        assert!(is_command_allowed("/help", Some(&ov)));
     }
 
     #[test]

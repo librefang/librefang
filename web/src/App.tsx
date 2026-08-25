@@ -270,7 +270,7 @@ function Architecture({ t }: SectionProps) {
     <section id="architecture" className="py-28 px-6 scroll-mt-20">
       <div className="max-w-6xl mx-auto">
         <FadeIn>
-          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.architecture.label}</div>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.architecture.label}</div>
           <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.architecture.title}</h2>
           <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.architecture.desc}</p>
         </FadeIn>
@@ -380,13 +380,11 @@ function Hands({ t }: SectionProps) {
   const lang = useAppStore((s) => s.lang)
   const rawHands = registry?.hands && registry.hands.length > 0 ? registry.hands : []
   const hands = sortByPopularity(rawHands)
-  const scrollRef = useRef<HTMLDivElement>(null)
-
   return (
     <section id="hands" className="py-28 scroll-mt-20">
       <div className="max-w-6xl mx-auto px-6">
         <FadeIn>
-          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.hands.label}</div>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.hands.label}</div>
           <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.hands.title}</h2>
           <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.hands.desc}</p>
         </FadeIn>
@@ -394,10 +392,7 @@ function Hands({ t }: SectionProps) {
 
       <div className="max-w-6xl mx-auto px-6">
         <FadeIn>
-          <div
-            ref={scrollRef}
-            className="overflow-x-auto scrollbar-hide -mr-6 pr-6 pb-4 touch-pan-x"
-          >
+          <div className="overflow-x-auto scrollbar-hide -mr-6 pr-6 pb-4 touch-pan-x">
             <div className="grid grid-rows-2 grid-flow-col gap-3 w-max">
               {hands.map((hand) => {
                 const colorClass = categoryColors[hand.category] ?? 'text-gray-600 dark:text-gray-400/60'
@@ -433,7 +428,7 @@ function Performance({ t }: SectionProps) {
     <section id="performance" className="py-28 px-6 scroll-mt-20">
       <div className="max-w-6xl mx-auto">
         <FadeIn>
-          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.performance.label}</div>
+          <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">{t.performance.label}</div>
           <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{t.performance.title}</h2>
           <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{t.performance.desc}</p>
         </FadeIn>
@@ -669,8 +664,9 @@ interface DownloadItem {
   assets: { name: string; url: string; size: string }[]
 }
 
-function formatSize(bytes: number): string {
-  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(0)}MB`
+export function formatSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(0)}MB`
   return `${(bytes / 1024).toFixed(0)}KB`
 }
 
@@ -733,17 +729,30 @@ function categorizeAssets(assets: ReleaseAsset[]): DownloadItem[] {
 // Need to import Monitor at the top - it's used in Downloads
 // Adding it via the LucideIcon type already imported
 
-function Downloads(_props: SectionProps) {
-  const lang = useAppStore((s) => s.lang)
-  const common = getTranslation(lang).common!
+interface ReleaseInfo {
+  tag_name: string
+  assets: ReleaseAsset[]
+  html_url: string
+}
+
+export async function fetchLatestRelease(): Promise<ReleaseInfo> {
+  const res = await fetch('https://stats.librefang.ai/api/releases')
+  if (!res.ok) throw new Error('Failed to load releases')
+  const releases = await res.json() as ReleaseInfo[]
+  const release = releases[0]
+  if (!release) throw new Error('No releases available')
+  return release
+}
+
+export function Downloads({ t }: SectionProps) {
+  const common = t.common!
+  const labels = t.downloads ?? getTranslation('en').downloads!
+  const [copiedPackage, setCopiedPackage] = useState<string | null>(null)
+  const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyRequestRef = useRef(0)
   const { data: release, isLoading } = useQuery({
     queryKey: ['latestRelease'],
-    queryFn: async () => {
-      const res = await fetch('https://stats.librefang.ai/api/releases')
-      if (!res.ok) throw new Error('Failed')
-      const releases = await res.json() as { tag_name: string; assets: ReleaseAsset[]; html_url: string }[]
-      return releases[0]
-    },
+    queryFn: fetchLatestRelease,
     staleTime: 1000 * 60 * 60,
     retry: 2,
   })
@@ -751,24 +760,35 @@ function Downloads(_props: SectionProps) {
   const categories = release ? categorizeAssets(release.assets) : []
   const version = release?.tag_name ?? ''
 
-  const labels: Record<string, Record<string, string>> = {
-    title: { en: 'Downloads', zh: '下载', 'zh-TW': '下載', ja: 'ダウンロード', ko: '다운로드', de: 'Downloads', es: 'Descargas', pl: 'Pobieranie' },
-    desc: {
-      en: 'Desktop app, CLI binaries, and deployment options.',
-      zh: '桌面应用、CLI 二进制文件和部署选项。',
-      'zh-TW': '桌面應用、CLI 二進位檔和部署選項。',
-      ja: 'デスクトップアプリ、CLIバイナリ、デプロイオプション。',
-      ko: '데스크톱 앱, CLI 바이너리, 배포 옵션.',
-      de: 'Desktop-App, CLI-Binaries und Deployment-Optionen.',
-      es: 'App de escritorio, binarios CLI y opciones de despliegue.',
-      pl: 'Aplikacja komputerowa, pliki binarne CLI i opcje wdrażania.',
-    },
-    onlineDeply: { en: 'One-Click Deploy', zh: '一键部署', 'zh-TW': '一鍵部署', ja: 'ワンクリックデプロイ', ko: '원클릭 배포', de: 'Ein-Klick-Deploy', es: 'Despliegue en un clic', pl: 'Wdrożenie jednym kliknięciem' },
-    allReleases: { en: 'All Releases', zh: '所有版本', 'zh-TW': '所有版本', ja: '全リリース', ko: '모든 릴리스', de: 'Alle Releases', es: 'Todas las versiones', pl: 'Wszystkie wydania' },
-    sdk: { en: 'SDK & Packages', zh: 'SDK 和包', 'zh-TW': 'SDK 和套件', ja: 'SDK & パッケージ', ko: 'SDK & 패키지', de: 'SDK & Pakete', es: 'SDK y paquetes', pl: 'SDK i pakiety' },
-  }
+  useEffect(() => () => {
+    copyRequestRef.current += 1
+    if (copyResetRef.current !== null) clearTimeout(copyResetRef.current)
+    copyResetRef.current = null
+  }, [])
 
-  const l = (key: string) => labels[key]?.[lang] ?? labels[key]?.['en'] ?? key
+  const copyPackage = (key: string, text: string) => {
+    const request = ++copyRequestRef.current
+    if (copyResetRef.current !== null) {
+      clearTimeout(copyResetRef.current)
+      copyResetRef.current = null
+    }
+    setCopiedPackage(null)
+    void Promise.resolve()
+      .then(() => navigator.clipboard.writeText(text))
+      .then(
+        () => {
+          if (request !== copyRequestRef.current) return
+          setCopiedPackage(key)
+          copyResetRef.current = setTimeout(() => {
+            if (request === copyRequestRef.current) setCopiedPackage(null)
+            copyResetRef.current = null
+          }, 1500)
+        },
+        () => {
+          if (request === copyRequestRef.current) setCopiedPackage(null)
+        },
+      )
+  }
 
   return (
     <section id="downloads" className="py-28 px-6 scroll-mt-20">
@@ -776,10 +796,10 @@ function Downloads(_props: SectionProps) {
         <FadeIn>
           <div className="text-xs font-mono text-cyan-600 dark:text-cyan-500 uppercase tracking-widest mb-3">
             {version && <span className="text-gray-400 dark:text-gray-600 mr-2">{version}</span>}
-            {l('title')}
+            {labels.title}
           </div>
-          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{l('title')}</h2>
-          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{l('desc')}</p>
+          <h2 className="text-3xl md:text-5xl font-black text-slate-900 dark:text-white tracking-tight mb-4">{labels.title}</h2>
+          <p className="text-gray-600 dark:text-gray-400 text-lg max-w-2xl mb-16">{labels.desc}</p>
         </FadeIn>
 
         {/* Desktop & CLI */}
@@ -814,7 +834,7 @@ function Downloads(_props: SectionProps) {
                 <div className="flex items-center gap-3 mb-4">
                   <Globe className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
                   <div>
-                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('onlineDeply')}</h3>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">{labels.onlineDeploy}</h3>
                     <span className="text-xs text-gray-500">deploy.librefang.ai</span>
                   </div>
                 </div>
@@ -844,7 +864,7 @@ function Downloads(_props: SectionProps) {
             <div className="bg-surface-100 border border-black/10 dark:border-white/5 p-5">
               <div className="flex items-center gap-3 mb-4">
                 <Box className="w-5 h-5 text-cyan-600 dark:text-cyan-500" />
-                <h3 className="text-base font-bold text-slate-900 dark:text-white">{l('sdk')}</h3>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">{labels.sdk}</h3>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 {[
@@ -853,22 +873,30 @@ function Downloads(_props: SectionProps) {
                   { cmd: 'cargo add librefang', copy: 'cargo add librefang', label: 'Rust' },
                   { cmd: 'go get librefang/sdk', copy: 'go get github.com/librefang/librefang/sdk/go', label: 'Go' },
                 ].map((pkg) => (
-                  <button key={pkg.label} className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group" onClick={(e) => {
-                    navigator.clipboard.writeText(pkg.copy)
-                    const el = e.currentTarget.querySelector('.copy-tip') as HTMLElement
-                    if (el) { el.classList.remove('opacity-0'); setTimeout(() => el.classList.add('opacity-0'), 1500) }
-                  }}>
+                  <button
+                    key={pkg.label}
+                    className="bg-surface-200 px-3 py-2.5 text-left hover:bg-surface-300 transition-colors relative group"
+                    onClick={() => copyPackage(pkg.label, pkg.copy)}
+                    aria-label={`${common.copy} ${pkg.label}`}
+                  >
                     <div className="text-xs text-gray-500 mb-1">{pkg.label}</div>
                     <code className="text-[11px] text-gray-700 dark:text-gray-300 font-mono">{pkg.cmd}</code>
                     <Copy className="absolute top-2 right-2 w-3 h-3 text-gray-400 dark:text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
-                    <span className="copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 opacity-0 transition-opacity">{common.copied}</span>
+                    <span
+                      className={cn(
+                        'copy-tip absolute top-1 right-1 text-[9px] text-cyan-600 dark:text-cyan-400 transition-opacity',
+                        copiedPackage === pkg.label ? 'opacity-100' : 'opacity-0',
+                      )}
+                    >
+                      {common.copied}
+                    </span>
                   </button>
                 ))}
               </div>
             </div>
             <a href="https://github.com/librefang/librefang/releases" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center bg-surface-100 border border-black/10 dark:border-white/5 hover:border-cyan-500/20 p-6 transition-all group">
               <Github className="w-8 h-8 text-gray-400 dark:text-gray-600 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors mb-3" />
-              <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{l('allReleases')}</span>
+              <span className="text-sm font-semibold text-gray-700 dark:text-gray-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">{labels.allReleases}</span>
               <span className="text-xs text-gray-500 mt-1">{version}</span>
             </a>
           </div>
@@ -1315,8 +1343,8 @@ function Footer({ t }: SectionProps) {
 
 // ─── GA event tracking ───
 function trackEvent(action: string, label: string) {
-  if (typeof window !== 'undefined' && 'gtag' in window) {
-    (window as any).gtag('event', action, { event_category: 'engagement', event_label: label })
+  if (typeof window !== 'undefined' && typeof window.gtag === 'function') {
+    window.gtag('event', action, { event_category: 'engagement', event_label: label })
   }
 }
 

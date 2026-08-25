@@ -65,7 +65,9 @@ pub use governance::{GovernanceSubsystem, GovernanceSubsystemApi};
 pub use llm::{CredentialPoolSummary, LlmSubsystem, LlmSubsystemApi};
 pub use mcp::{McpSubsystem, McpSubsystemApi};
 pub use media::{MediaSubsystem, MediaSubsystemApi};
-pub use memory::{MemorySubsystem, MemorySubsystemApi};
+pub use memory::{
+    MemoryExtractionResolution, MemoryExtractionTarget, MemorySubsystem, MemorySubsystemApi,
+};
 pub use mesh::{MeshSubsystem, MeshSubsystemApi};
 pub use metering::{MeteringSubsystem, MeteringSubsystemApi};
 pub use processes::{ProcessSubsystem, ProcessSubsystemApi};

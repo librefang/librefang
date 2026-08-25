@@ -125,6 +125,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn goal_update_uses_stored_id_representation_verbatim() {
+        let goal_id = "B5264016-E9CC-4FD1-83C6-D13626B404DC";
+        let goals = vec![serde_json::json!({
+            "id": goal_id,
+            "status": "pending",
+            "progress": 0,
+        })];
+
+        let (_, updated) =
+            apply_goal_update(goals, goal_id, Some("in_progress"), Some(25)).unwrap();
+
+        assert_eq!(updated["id"], goal_id);
+        assert_eq!(updated["status"], "in_progress");
+        assert_eq!(updated["progress"], 25);
+    }
+
+    #[test]
     fn absent_goal_store_is_typed_not_found() {
         let error = decode_goal_store(None, "goal-123").unwrap_err();
 

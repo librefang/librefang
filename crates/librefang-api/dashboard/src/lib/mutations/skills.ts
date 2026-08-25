@@ -85,14 +85,7 @@ export function useSkillHubInstall() {
   });
 }
 
-export function useFangHubInstall() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ name, hand }: { name: string; hand?: string }) =>
-      installSkill(name, hand),
-    onSuccess: () => invalidateAllSkillSurfaces(qc),
-  });
-}
+export const useFangHubInstall = useInstallSkill;
 
 export function useCreateSkill() {
   const qc = useQueryClient();
@@ -108,7 +101,7 @@ export function useCreateSkill() {
       const { signal, ...params } = vars;
       return createSkill(params, signal);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.lists() }),
+    onSuccess: () => invalidateAllSkillSurfaces(qc),
   });
 }
 
@@ -122,6 +115,15 @@ export function useReloadSkills() {
   });
 }
 
+function invalidateEvolvedSkill(
+  qc: ReturnType<typeof useQueryClient>,
+  name: string,
+) {
+  qc.invalidateQueries({ queryKey: skillKeys.detail(name) });
+  qc.invalidateQueries({ queryKey: skillKeys.lists() });
+  qc.invalidateQueries({ queryKey: skillKeys.supportingFiles(name) });
+}
+
 export function useEvolveUpdateSkill() {
   const qc = useQueryClient();
   return useMutation({
@@ -133,8 +135,7 @@ export function useEvolveUpdateSkill() {
       params: { prompt_context: string; changelog: string };
     }) => evolveUpdateSkill(name, params),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
-      qc.invalidateQueries({ queryKey: skillKeys.lists() });
+      invalidateEvolvedSkill(qc, variables.name);
     },
   });
 }
@@ -155,8 +156,7 @@ export function useEvolvePatchSkill() {
       };
     }) => evolvePatchSkill(name, params),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
-      qc.invalidateQueries({ queryKey: skillKeys.lists() });
+      invalidateEvolvedSkill(qc, variables.name);
     },
   });
 }
@@ -195,8 +195,7 @@ export function useEvolveRollbackSkill() {
   return useMutation({
     mutationFn: ({ name }: { name: string }) => evolveRollbackSkill(name),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
-      qc.invalidateQueries({ queryKey: skillKeys.lists() });
+      invalidateEvolvedSkill(qc, variables.name);
     },
   });
 }
@@ -225,6 +224,7 @@ export function useEvolveWriteFile() {
     }) => evolveWriteFile(name, params),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
+      qc.invalidateQueries({ queryKey: skillKeys.supportingFiles(variables.name) });
       qc.invalidateQueries({ queryKey: skillKeys.supportingFile(variables.name, variables.params.path) });
     },
   });
@@ -237,6 +237,7 @@ export function useEvolveRemoveFile() {
       evolveRemoveFile(name, path),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: skillKeys.detail(variables.name) });
+      qc.invalidateQueries({ queryKey: skillKeys.supportingFiles(variables.name) });
       qc.removeQueries({ queryKey: skillKeys.supportingFile(variables.name, variables.path) });
     },
   });

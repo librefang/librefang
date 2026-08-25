@@ -95,7 +95,7 @@ pub fn recover_from_overflow(
             let removed = drain_unpinned_from_front(messages, target_remove);
             // Re-check after trim
             let new_est = estimate_tokens(messages, system_prompt, tools);
-            if new_est <= threshold_70 {
+            if removed > 0 && new_est <= threshold_90 {
                 return RecoveryStage::AutoCompaction { removed };
             }
         }
@@ -122,7 +122,7 @@ pub fn recover_from_overflow(
             }
 
             let new_est = estimate_tokens(messages, system_prompt, tools);
-            if new_est <= threshold_90 {
+            if removed > 0 && new_est <= threshold_90 {
                 return RecoveryStage::OverflowCompaction { removed };
             }
         }
@@ -132,6 +132,9 @@ pub fn recover_from_overflow(
     let tool_truncation_limit = 2000;
     let mut truncated = 0;
     for msg in messages.iter_mut() {
+        if msg.pinned {
+            continue;
+        }
         if let MessageContent::Blocks(blocks) = &mut msg.content {
             for block in blocks.iter_mut() {
                 if let ContentBlock::ToolResult { content, .. } = block {
@@ -230,6 +233,42 @@ mod tests {
     }
 
     #[test]
+    fn test_stage1_stops_when_trim_returns_below_action_threshold() {
+        let system_prompt = "system";
+        let mut msgs = make_messages(11, 300);
+        let estimated = estimate_tokens(&msgs, system_prompt, &[]);
+        let context_window = (estimated as f64 / 0.80).ceil() as usize;
+
+        let stage = recover_from_overflow(&mut msgs, system_prompt, &[], context_window);
+
+        assert_eq!(stage, RecoveryStage::AutoCompaction { removed: 1 });
+        assert_eq!(msgs.len(), 10);
+        let new_est = estimate_tokens(&msgs, system_prompt, &[]);
+        assert!(new_est > (context_window as f64 * 0.70) as usize);
+        assert!(new_est <= (context_window as f64 * 0.90) as usize);
+    }
+
+    #[test]
+    fn trim_stages_do_not_report_success_without_mutation() {
+        let system_prompt = "system";
+        let mut msgs = make_messages(11, 300);
+        for msg in &mut msgs {
+            msg.pinned = true;
+        }
+        let original = serde_json::to_value(&msgs).expect("serialize original messages");
+        let estimated = estimate_tokens(&msgs, system_prompt, &[]);
+        let context_window = (estimated as f64 / 0.80).ceil() as usize;
+
+        let stage = recover_from_overflow(&mut msgs, system_prompt, &[], context_window);
+
+        assert_eq!(stage, RecoveryStage::FinalError);
+        assert_eq!(
+            serde_json::to_value(&msgs).expect("serialize recovered messages"),
+            original
+        );
+    }
+
+    #[test]
     fn test_stage2_aggressive_trim() {
         // Push past 90%: 1000 tokens = 4000 chars, 90% = 3600 chars
         let mut msgs = make_messages(30, 200); // ~6000 chars
@@ -321,6 +360,38 @@ mod tests {
         let stage = recover_from_overflow(&mut msgs, "system", &[], 500);
         // Must not panic — the truncation at byte boundaries could split a 3-byte char
         assert_ne!(stage, RecoveryStage::None);
+    }
+
+    #[test]
+    fn test_stage3_preserves_pinned_tool_results() {
+        let original = "protected".repeat(1_000);
+        let pinned_result = Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "pinned-tool".to_string(),
+                tool_name: String::new(),
+                content: original.clone(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: true,
+            timestamp: None,
+        };
+        let mut msgs = vec![pinned_result];
+
+        let stage = recover_from_overflow(&mut msgs, "system", &[], 100);
+
+        assert_eq!(stage, RecoveryStage::FinalError);
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].pinned);
+        let MessageContent::Blocks(blocks) = &msgs[0].content else {
+            panic!("expected block content");
+        };
+        let ContentBlock::ToolResult { content, .. } = &blocks[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(content, &original);
     }
 
     #[test]

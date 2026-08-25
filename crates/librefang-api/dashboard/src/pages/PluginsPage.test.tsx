@@ -405,7 +405,7 @@ describe("PluginsPage", () => {
     const [payload] = scaffoldMutate.mock.calls[0];
     expect(payload).toEqual({
       name: "my-plugin",
-      desc: "scaffold from test",
+      description: "scaffold from test",
       runtime: "python",
     });
   });

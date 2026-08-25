@@ -20,6 +20,8 @@ const DetailSchema = z.object({
   i18n: z.record(z.string(), I18nEntrySchema).optional(),
 })
 
+const CountSchema = z.number().nullable().transform(value => value ?? undefined).optional()
+
 // All 8 category arrays are optional on the wire — a stale worker response
 // (or the older registry.json shape) may be missing newer ones like skills/mcp.
 // The hook normalizes missing arrays to [].
@@ -32,19 +34,20 @@ const RegistryDataSchema = z.object({
   plugins: z.array(DetailSchema).optional().default([]),
   skills: z.array(DetailSchema).optional().default([]),
   mcp: z.array(DetailSchema).optional().default([]),
-  // Keep the count fields nullable (no `.default(0)`) so missing keys in
-  // a partial/stale API response stay `undefined`. The merge step below
+  // Keep the count fields nullish (no `.default(0)`) so missing or explicit
+  // unknown values in a partial API response do not invalidate its items.
+  // The merge step below
   // uses `apiData.*Count ?? localData.*Count` to prefer local counts
   // when the API omits them — defaulting here to 0 would shadow that
   // fallback and clobber valid local counts with zeros.
-  handsCount: z.number().optional(),
-  channelsCount: z.number().optional(),
-  providersCount: z.number().optional(),
-  workflowsCount: z.number().optional(),
-  agentsCount: z.number().optional(),
-  pluginsCount: z.number().optional(),
-  skillsCount: z.number().optional(),
-  mcpCount: z.number().optional(),
+  handsCount: CountSchema,
+  channelsCount: CountSchema,
+  providersCount: CountSchema,
+  workflowsCount: CountSchema,
+  agentsCount: CountSchema,
+  pluginsCount: CountSchema,
+  skillsCount: CountSchema,
+  mcpCount: CountSchema,
 })
 
 export type Detail = z.infer<typeof DetailSchema>
@@ -56,12 +59,29 @@ export type RegistryCategory =
   | 'hands' | 'channels' | 'providers'
   | 'workflows' | 'agents' | 'plugins' | 'skills' | 'mcp'
 
+const COUNT_FIELDS = {
+  hands: 'handsCount',
+  channels: 'channelsCount',
+  providers: 'providersCount',
+  workflows: 'workflowsCount',
+  agents: 'agentsCount',
+  plugins: 'pluginsCount',
+  skills: 'skillsCount',
+  mcp: 'mcpCount',
+} as const satisfies Record<RegistryCategory, `${RegistryCategory}Count`>
+
+function languagePrefix(lang: string): string | undefined {
+  return lang.split('-')[0] || undefined
+}
+
 /** Get localized description for a Detail item */
 export function getLocalizedDesc(item: Detail, lang: string): string {
   if (lang === 'en') return item.description
   // Try exact match first (zh-TW), then prefix (zh)
-  const desc = item.i18n?.[lang]?.description ?? item.i18n?.[lang.split('-')[0]!]?.description
-  return desc || item.description
+  const prefix = languagePrefix(lang)
+  const description = item.i18n?.[lang]?.description
+    ?? (prefix ? item.i18n?.[prefix]?.description : undefined)
+  return description || item.description
 }
 
 /** Get localized name for a Detail item — falls back to English if the
@@ -69,27 +89,30 @@ export function getLocalizedDesc(item: Detail, lang: string): string {
  * description helper. */
 export function getLocalizedName(item: Detail, lang: string): string {
   if (lang === 'en') return item.name
-  const name = item.i18n?.[lang]?.name ?? item.i18n?.[lang.split('-')[0]!]?.name
+  const prefix = languagePrefix(lang)
+  const name = item.i18n?.[lang]?.name
+    ?? (prefix ? item.i18n?.[prefix]?.name : undefined)
   return name || item.name
 }
 
-async function fetchRegistryData(): Promise<RegistryData> {
-  // 1. Load local registry.json (has full descriptions from build time)
-  const localRes = await fetch(LOCAL_JSON)
-  const local = localRes.ok ? RegistryDataSchema.safeParse(await localRes.json()) : null
-  const localData = local?.success ? local.data : null
-
-  // 2. Load API for latest counts (descriptions may be empty)
-  let apiData: RegistryData | null = null
+async function fetchRegistrySource(url: string, fetcher: typeof fetch): Promise<RegistryData | null> {
   try {
-    const apiRes = await fetch(REGISTRY_API)
-    if (apiRes.ok) {
-      const parsed = RegistryDataSchema.safeParse(await apiRes.json())
-      if (parsed.success) apiData = parsed.data
-    }
-  } catch { /* API unavailable, use local only */ }
+    const response = await fetcher(url)
+    if (!response.ok) return null
+    const parsed = RegistryDataSchema.safeParse(await response.json())
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
+}
 
-  // 3. Merge: prefer local details (have descriptions), append new items from API
+export async function fetchRegistryData(fetcher: typeof fetch = fetch): Promise<RegistryData> {
+  const [localData, apiData] = await Promise.all([
+    fetchRegistrySource(LOCAL_JSON, fetcher),
+    fetchRegistrySource(REGISTRY_API, fetcher),
+  ])
+
+  // Prefer local details (have descriptions), append new items from API.
   if (localData && apiData) {
     return {
       hands: mergeDetails(localData.hands, apiData.hands),
@@ -133,7 +156,7 @@ function mergeDetails(local: Detail[], api: Detail[]): Detail[] {
 export function useRegistry() {
   return useQuery<RegistryData>({
     queryKey: ['registry'],
-    queryFn: fetchRegistryData,
+    queryFn: () => fetchRegistryData(),
     staleTime: 1000 * 60 * 60,
     retry: 2,
   })
@@ -143,6 +166,6 @@ export function useRegistry() {
 export function getCategoryItems(data: RegistryData | undefined, category: RegistryCategory): { items: Detail[]; count: number } {
   if (!data) return { items: [], count: 0 }
   const items = data[category] ?? []
-  const count = (data[`${category}Count` as keyof RegistryData] as number | undefined) ?? items.length
+  const count = data[COUNT_FIELDS[category]] ?? items.length
   return { items, count }
 }

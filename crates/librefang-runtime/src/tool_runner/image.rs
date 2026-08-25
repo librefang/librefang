@@ -14,6 +14,8 @@ use super::resolve_file_path_ext;
 use std::path::Path;
 
 const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
+const INLINE_PREVIEW_LIMIT: usize = 512 * 1024;
+const TRUNCATED_PREVIEW_SIZE: usize = 64 * 1024;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tif", "svg",
@@ -84,18 +86,13 @@ pub(super) async fn tool_image_analyze(
 
     let dimensions = extract_image_dimensions(&data, &format);
 
-    let base64_preview = if file_size <= 512 * 1024 {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(&data)
+    let (preview_bytes, preview_truncated) = if file_size <= INLINE_PREVIEW_LIMIT {
+        (data.as_slice(), false)
     } else {
-        use base64::Engine;
-        let preview_bytes = &data[..64 * 1024];
-        format!(
-            "{}... [truncated, {} total bytes]",
-            base64::engine::general_purpose::STANDARD.encode(preview_bytes),
-            file_size
-        )
+        (&data[..TRUNCATED_PREVIEW_SIZE], true)
     };
+    use base64::Engine;
+    let base64_preview = base64::engine::general_purpose::STANDARD.encode(preview_bytes);
 
     let mut result = serde_json::json!({
         "path": raw_path,
@@ -117,6 +114,8 @@ pub(super) async fn tool_image_analyze(
     }
 
     result["base64_preview"] = serde_json::json!(base64_preview);
+    result["base64_preview_bytes"] = serde_json::json!(preview_bytes.len());
+    result["base64_preview_truncated"] = serde_json::json!(preview_truncated);
 
     Ok(serde_json::to_string_pretty(&result)?)
 }
@@ -270,6 +269,36 @@ mod tests {
             r,
             Err(ToolError::InvalidParameter { name: "path", .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn image_analyze_large_preview_remains_valid_base64() {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = vec![0; INLINE_PREVIEW_LIMIT + 1];
+        data[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        std::fs::write(dir.path().join("large.png"), &data).unwrap();
+
+        let output = tool_image_analyze(
+            &serde_json::json!({"path": "large.png"}),
+            Some(dir.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let preview = result["base64_preview"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(preview)
+            .unwrap();
+
+        assert_eq!(decoded, data[..TRUNCATED_PREVIEW_SIZE]);
+        assert_eq!(
+            result["base64_preview_bytes"].as_u64(),
+            Some(TRUNCATED_PREVIEW_SIZE as u64)
+        );
+        assert_eq!(result["base64_preview_truncated"].as_bool(), Some(true));
     }
 
     #[test]

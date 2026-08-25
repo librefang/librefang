@@ -45,6 +45,29 @@ pub struct UsageRecord {
     /// and for pre-v30 records that pre-date this column.
     #[serde(default)]
     pub session_id: Option<SessionId>,
+    /// #7714: the agent this call's cost rolls up to, when it differs from
+    /// the agent that made it.
+    ///
+    /// A worker spawned by another agent spends on its spawner's behalf, so
+    /// the spawner needs that cost on its own budget line rather than
+    /// scattered across throwaway children it cannot enumerate.
+    /// Call sites set it to `entry.parent.unwrap_or(agent_id)`, so a
+    /// top-level agent bills to itself.
+    ///
+    /// This is deliberately a *separate* column from [`Self::agent_id`]
+    /// rather than a rewrite of it. `agent_id` stays the quota subject: the
+    /// pre-call `check_quota` and the post-call `check_all_and_record` both
+    /// evaluate the executing agent against that agent's own
+    /// `manifest.resources`, so the two checks keep asking the same question
+    /// about the same agent. Re-pointing `agent_id` at the parent would have
+    /// made the pre-call check read the child's spend and the post-call check
+    /// read the parent's, both against the child's ceiling — the attribution
+    /// dimension and the enforcement dimension have to stay independent.
+    ///
+    /// `None` on pre-v49 records, which the read path treats as "bills to
+    /// `agent_id`".
+    #[serde(default)]
+    pub billed_agent_id: Option<AgentId>,
 }
 
 impl UsageRecord {
@@ -80,6 +103,7 @@ impl UsageRecord {
             user_id: None,
             channel: None,
             session_id: None,
+            billed_agent_id: None,
         }
     }
 }
@@ -238,8 +262,8 @@ impl UsageStore {
         // v30 added session_id — all are NULL-able so missing attribution
         // round-trips as NULL.
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id, billed_agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -254,6 +278,7 @@ impl UsageStore {
                 record.user_id.map(|u| u.to_string()),
                 record.channel.as_deref(),
                 record.session_id.map(|s| s.0.to_string()),
+                record.billed_agent_id.map(|a| a.0.to_string()),
             ],
         )
         .map_err(LibreFangError::memory)?;
@@ -1075,6 +1100,34 @@ impl UsageStore {
         Ok(summary)
     }
 
+    /// Query the usage that rolls up to one agent's budget line (#7714).
+    ///
+    /// "Bills to `agent_id`" means `COALESCE(billed_agent_id, agent_id) = agent_id`: a call the agent made for itself (no `billed_agent_id`, or one pointing at itself) plus every call a worker it spawned made on its behalf.
+    /// This is the query that gives a spawner the budget visibility it loses when its children each spend under their own id.
+    ///
+    /// Distinct from [`Self::query_summary`], which answers "what did this agent execute" and stays the right question for quota enforcement.
+    pub fn query_billed_summary(&self, agent_id: AgentId) -> LibreFangResult<UsageSummary> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let summary = conn
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
+                 FROM usage_events WHERE COALESCE(billed_agent_id, agent_id) = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| {
+                    Ok(UsageSummary {
+                        total_input_tokens: row.get::<_, i64>(0)? as u64,
+                        total_output_tokens: row.get::<_, i64>(1)? as u64,
+                        total_cost_usd: row.get(2)?,
+                        call_count: row.get::<_, i64>(3)? as u64,
+                        total_tool_calls: row.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .map_err(LibreFangError::memory)?;
+        Ok(summary)
+    }
+
     /// Query usage grouped by model.
     pub fn query_by_model(&self) -> LibreFangResult<Vec<ModelUsage>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
@@ -1399,6 +1452,90 @@ mod tests {
         assert_eq!(summary.total_output_tokens, 250);
         assert!((summary.total_cost_usd - 0.011).abs() < 0.0001);
         assert_eq!(summary.total_tool_calls, 3);
+    }
+
+    #[test]
+    fn spawned_worker_spend_rolls_up_to_the_parent_budget_line() {
+        // #7714: a worker spawned by another agent spends on its spawner's
+        // behalf. The spawner must be able to see that cost on its own budget
+        // line, which is what `query_billed_summary` answers.
+        let store = setup();
+        let parent = AgentId::new();
+        let worker = AgentId::new();
+
+        // The parent's own turn: no `billed_agent_id`, so it bills to itself.
+        store
+            .record(&UsageRecord {
+                agent_id: parent,
+                cost_usd: 1.0,
+                input_tokens: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        // The worker's turn, billed to the parent.
+        store
+            .record(&UsageRecord {
+                agent_id: worker,
+                billed_agent_id: Some(parent),
+                cost_usd: 0.25,
+                input_tokens: 5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(parent).unwrap();
+        assert_eq!(
+            billed.call_count, 2,
+            "the parent's budget line must include the worker's call"
+        );
+        assert!(
+            (billed.total_cost_usd - 1.25).abs() < 1e-9,
+            "expected 1.25 rolled up, got {}",
+            billed.total_cost_usd
+        );
+        assert_eq!(billed.total_input_tokens, 15);
+
+        // The worker bills nothing to itself — its spend belongs to the parent.
+        let worker_billed = store.query_billed_summary(worker).unwrap();
+        assert_eq!(
+            worker_billed.call_count, 0,
+            "a worker whose spend rolls up must not also carry it itself"
+        );
+
+        // Enforcement is a separate dimension: `agent_id` is untouched, so the
+        // quota subject each call is checked against is still the agent that
+        // actually made it. This is what keeps the pre-call and post-call
+        // quota checks asking about the same agent.
+        assert_eq!(
+            store.query_summary(Some(worker)).unwrap().call_count,
+            1,
+            "the executing agent must remain the quota subject for its own call"
+        );
+        assert_eq!(
+            store.query_summary(Some(parent)).unwrap().call_count,
+            1,
+            "attribution must not retroactively move the child's call onto the parent's quota"
+        );
+    }
+
+    #[test]
+    fn usage_record_without_billed_agent_bills_to_itself() {
+        // Every pre-#7714 call site leaves `billed_agent_id` unset. Those rows
+        // must keep rolling up to `agent_id`, or the migration would silently
+        // drop historical spend out of every budget view.
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .record(&UsageRecord {
+                agent_id,
+                cost_usd: 0.5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(agent_id).unwrap();
+        assert_eq!(billed.call_count, 1);
+        assert!((billed.total_cost_usd - 0.5).abs() < 1e-9);
     }
 
     #[test]

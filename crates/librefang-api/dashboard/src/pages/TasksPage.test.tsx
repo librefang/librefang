@@ -250,6 +250,7 @@ describe("TasksPage", () => {
       fireEvent.drop(pendingColumn as Element, { dataTransfer: dt });
       expect(mutate).toHaveBeenCalledWith(
         expect.objectContaining({ id: "task-cancelled-1", status: "pending" }),
+        expect.objectContaining({ onError: expect.any(Function) }),
       );
     });
   });
@@ -260,6 +261,20 @@ describe("TasksPage", () => {
       expect(screen.getByText("tasks.status_total")).toBeInTheDocument();
       expect(screen.getByText("tasks.status_pending")).toBeInTheDocument();
       expect(screen.getByText("tasks.status_failed")).toBeInTheDocument();
+    });
+
+    it("derives counters from the same task list as the columns", () => {
+      useTaskQueueStatusMock.mockReturnValue(
+        makeQuery({ total: 999, pending: 999, in_progress: 999, completed: 999, failed: 999 }),
+      );
+      renderPage();
+      const totalLabel = screen.getByText("tasks.status_total");
+      expect(totalLabel.previousElementSibling).toHaveTextContent("4");
+    });
+
+    it("gives the icon-only refresh control an accessible name", () => {
+      renderPage();
+      expect(screen.getAllByRole("button", { name: "common.refresh" }).length).toBeGreaterThan(0);
     });
   });
 
@@ -326,6 +341,7 @@ describe("TasksPage", () => {
       await waitFor(() => {
         expect(mutate).toHaveBeenCalledWith(
           expect.objectContaining({ id: "task-pending-1", status: "cancelled" }),
+          expect.objectContaining({ onError: expect.any(Function) }),
         );
       });
     });
@@ -340,8 +356,19 @@ describe("TasksPage", () => {
       fireEvent.click(retryBtn);
 
       await waitFor(() => {
-        expect(mutate).toHaveBeenCalledWith("task-failed-1");
+        expect(mutate).toHaveBeenCalledWith(
+          "task-failed-1",
+          expect.objectContaining({ onError: expect.any(Function) }),
+        );
       });
+    });
+
+    it("does not render malformed task records without an id", () => {
+      useTaskQueueMock.mockReturnValue(
+        makeQuery({ tasks: [{ status: "pending", title: "Missing id" }], total: 1 }),
+      );
+      renderPage();
+      expect(screen.queryByText("Missing id")).not.toBeInTheDocument();
     });
 
     it("shows Delete button for completed tasks and calls deleteTask mutation", async () => {
