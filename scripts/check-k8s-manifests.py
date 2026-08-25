@@ -93,6 +93,14 @@ SECRET_ASSIGNMENT = re.compile(
 # exists to steer people towards rather than away from.
 SECRET_INDIRECTIONS = ("vault:", "env:")
 
+# `include = [...]` pulls further TOML files into the effective configuration,
+# but the checksum on `GET /api/config/status` is computed over the primary
+# file's raw bytes alone. Editing an included file would therefore leave the
+# checksum unchanged, and an operator using it to confirm a rollout landed gets
+# a false negative — so the annotation this overlay is built around would stop
+# meaning what it says.
+INCLUDE_DIRECTIVE = re.compile(r"^\s*include\s*=", re.MULTILINE)
+
 
 class Failures:
     """Collects every failure so one run reports all of them."""
@@ -493,6 +501,7 @@ def check_managed_config(
         return
 
     check_no_secret_values(cm_name, config_key, contents, failures)
+    check_no_include(cm_name, config_key, contents, failures)
     check_checksum_annotation(template, contents, failures)
 
 
@@ -528,6 +537,31 @@ def check_no_secret_values(
             "with `get configmaps` in the namespace, and this copy is in "
             "version control. Supply it from a Secret through the pod "
             "environment instead — see deploy/kubernetes/secrets.example.yaml."
+        )
+
+
+def check_no_include(
+    cm_name: str, key: str, contents: str, failures: Failures
+) -> None:
+    """A managed config must be one file, because its checksum only covers one.
+
+    Of the three ways to reconcile `include` with the checksum — hash the
+    transitive closure, refuse `include`, or document primary-file-only and
+    tell operators not to key rollouts on it — this overlay takes the second,
+    and only within its own scope. It is the option that keeps the annotation
+    honest without changing what the daemon computes, and a managed deployment
+    loses nothing by it: the file is generated from a manifest, so composing it
+    is the manifest's job rather than the config loader's.
+    """
+    if INCLUDE_DIRECTIVE.search(contents):
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} uses `include = [...]`. The "
+            "checksum on GET /api/config/status covers this file's bytes only, "
+            "so an edit to an included file would leave it unchanged and the "
+            "checksum annotation would report a rollout that never happened. "
+            "Compose the configuration in the manifest — a kustomize patch, or "
+            "one ConfigMap key — so the file the daemon hashes is the whole of "
+            "what it reads."
         )
 
 

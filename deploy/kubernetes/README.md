@@ -195,6 +195,42 @@ Two consequences of the lock worth knowing before you enable it:
 The overlay also sets `mcp_runtime_store = "db"`, which keeps the dashboard's MCP install surface working by persisting those writes to SQLite on the PVC instead of to the managed file (#6021).
 Leaving it at the default `file` is supported; it just means `POST /api/mcp/servers` answers `423` too.
 
+### OAuth / OIDC
+
+`[external_auth]` follows the same reference pattern: the config names an environment variable and the value comes from a Secret.
+
+```toml
+[external_auth]
+enabled = true
+provider = "google"
+client_id = "…"                                    # not a secret
+client_secret_env = "GOOGLE_OAUTH_CLIENT_SECRET"   # a reference, not a value
+```
+
+```yaml
+- name: GOOGLE_OAUTH_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: librefang-auth
+      key: oauth-client-secret
+```
+
+Add `LIBREFANG_STATE_SECRET` at the same time.
+It is `optional: true` in the base manifests only while external auth is off, where an absent value means each boot derives a random per-process key and an in-flight login fails across a pod replacement.
+With external auth on the daemon **refuses to boot** without it, so the `state-secret` key in `librefang-auth` stops being optional in practice.
+
+Managed mode does not add a restriction here — `external_auth.*` was never writable through `/api/config/set` even in mutable mode, because flipping an endpoint or the verification gate post-authentication is the #3703 impersonation vector.
+Managed mode only makes the file it lives in match that.
+
+### One file, no `include`
+
+The config in the ConfigMap must not use `include = [...]`.
+
+`GET /api/config/status` computes its checksum over the primary file's raw bytes, so an edit to an included file leaves the checksum unchanged — and the whole rollout story here rests on that checksum meaning what it says.
+`scripts/check-k8s-manifests.py` fails the build on an `include` directive in a managed ConfigMap rather than leaving the annotation quietly untrustworthy.
+
+This is a constraint on the overlay, not on the daemon: `include` works normally in a mutable deployment. A managed config is generated from a manifest anyway, so composing it is kustomize's job rather than the config loader's.
+
 ### Updating a managed configuration
 
 **Rollout, not in-place reload.** Edit the config, re-hash it, apply:

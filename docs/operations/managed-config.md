@@ -174,6 +174,8 @@ Change the ConfigMap, roll the StatefulSet — a checksum annotation on the pod 
 `deploy/kubernetes/overlays/managed-config/` is that shape as a working kustomize overlay: `config.toml` rendered into a ConfigMap, mounted read-only at `/etc/librefang/` outside the PVC, both environment variables set, and a `checksum/config` annotation carrying the same `sha256:` string this endpoint reports.
 Pinning the annotation to the file's own digest rather than to kustomize's name-suffix hash makes the value that causes the rollout and the value that confirms it landed the same value, so `GET /api/config/status` answers "did my change reach the daemon?" with one string comparison.
 `scripts/check-k8s-manifests.py` recomputes the digest from the rendered ConfigMap and fails when the annotation is stale, because a stale annotation applies cleanly and rolls nothing.
+It also rejects `include = [...]` inside a managed ConfigMap: the checksum covers the primary file's bytes only, so an included file could change with the checksum unmoved, and the annotation this overlay is built around would stop meaning what it says.
+That settles the `include` question for the overlay's own scope without changing what the daemon computes — `include` is unaffected in a mutable deployment.
 The deployment procedure, the update procedure and the rollback procedure are in [`deploy/kubernetes/README.md`](../../deploy/kubernetes/README.md#managed-configuration).
 
 This is the only supported update path today, and it is chosen deliberately.
