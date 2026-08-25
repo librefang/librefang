@@ -1048,7 +1048,7 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
         [],
     )?;
     Ok(())
