@@ -30,7 +30,10 @@ export async function fetchRegistryRaw(path: string): Promise<string> {
 // First element is the preferred layout; callers fall through to later ones
 // on 404. MCP in particular supports both `mcp/<id>.toml` (flat) and
 // `mcp/<id>/MCP.toml` (dir-backed) — matches `web/scripts/fetch-registry.ts`.
-export function pathCandidatesFor(category: RegistryCategory, id: string): string[] {
+export function pathCandidatesFor(
+  category: RegistryCategory,
+  id: string,
+): [string, ...string[]] {
   switch (category) {
     case 'hands':   return [`hands/${id}/HAND.toml`]
     case 'agents':  return [`agents/${id}/agent.toml`]

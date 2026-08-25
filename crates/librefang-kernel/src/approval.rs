@@ -124,6 +124,7 @@ impl ApprovalManager {
     fn read_policy(&self) -> RwLockReadGuard<'_, ApprovalPolicy> {
         self.policy.read().unwrap_or_else(|poisoned| {
             warn!("approval policy read lock poisoned; recovering inner state");
+            self.policy.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -131,6 +132,7 @@ impl ApprovalManager {
     fn write_policy(&self) -> RwLockWriteGuard<'_, ApprovalPolicy> {
         self.policy.write().unwrap_or_else(|poisoned| {
             warn!("approval policy write lock poisoned; recovering inner state");
+            self.policy.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -141,6 +143,7 @@ impl ApprovalManager {
                 state,
                 "approval state lock poisoned; recovering inner state"
             );
+            mutex.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -2285,9 +2288,23 @@ mod tests {
                 .join()
         });
         assert!(policy_poison.is_err());
+        assert!(manager.policy.is_poisoned());
         assert!(manager.policy().require_approval.is_empty());
+        assert!(!manager.policy.is_poisoned());
+
+        let policy_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _policy = manager.policy.write().unwrap();
+                    panic!("poison approval policy before write recovery");
+                })
+                .join()
+        });
+        assert!(policy_poison.is_err());
+        assert!(manager.policy.is_poisoned());
 
         manager.update_policy(ApprovalPolicy::default());
+        assert!(!manager.policy.is_poisoned());
         assert!(!manager.policy().require_approval.is_empty());
 
         let recent_poison = std::thread::scope(|scope| {
@@ -2299,7 +2316,9 @@ mod tests {
                 .join()
         });
         assert!(recent_poison.is_err());
+        assert!(manager.recent.is_poisoned());
         assert!(manager.list_recent(1).is_empty());
+        assert!(!manager.recent.is_poisoned());
     }
 
     fn make_deferred(agent_id: &str) -> DeferredToolExecution {

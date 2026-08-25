@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryKey } from "@tanstack/react-query";
 import {
   approveApproval,
   rejectApproval,
@@ -10,61 +10,69 @@ import {
 } from "../../api";
 import { approvalKeys, totpKeys } from "../queries/keys";
 
-export function useApproveApproval() {
+function useInvalidatingMutation<TVariables, TResult>(
+  mutationFn: (variables: TVariables) => Promise<TResult>,
+  queryKey: QueryKey,
+) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, totpCode }: { id: string; totpCode?: string }) =>
-      approveApproval(id, totpCode),
-    onSuccess: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
+    mutationFn,
+    onSuccess: () => qc.invalidateQueries({ queryKey }),
   });
 }
 
+export class BatchApprovalError extends Error {
+  readonly failures: Array<{ id: string; status: string; message?: string }>;
+
+  constructor(failures: Array<{ id: string; status: string; message?: string }>) {
+    super(`${failures.length} approval${failures.length === 1 ? "" : "s"} failed`);
+    this.name = "BatchApprovalError";
+    this.failures = failures;
+    Object.setPrototypeOf(this, BatchApprovalError.prototype);
+  }
+}
+
+export function useApproveApproval() {
+  return useInvalidatingMutation(
+    ({ id, totpCode }: { id: string; totpCode?: string }) => approveApproval(id, totpCode),
+    approvalKeys.all,
+  );
+}
+
 export function useRejectApproval() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: rejectApproval,
-    onSuccess: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
-  });
+  return useInvalidatingMutation(rejectApproval, approvalKeys.all);
 }
 
 export function useBatchResolveApprovals() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ ids, decision }: { ids: string[]; decision: "approve" | "reject" }) =>
-      batchResolveApprovals(ids, decision),
-    onSuccess: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
+      batchResolveApprovals(ids, decision).then((data) => {
+        const failures = data.results.filter((result) => result.status === "error");
+        if (failures.length > 0) throw new BatchApprovalError(failures);
+        return data;
+      }),
+    // A partial failure may still have resolved other approvals.
+    onSettled: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
   });
 }
 
 export function useModifyAndRetryApproval() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, feedback }: { id: string; feedback: string }) =>
+  return useInvalidatingMutation(
+    ({ id, feedback }: { id: string; feedback: string }) =>
       modifyAndRetryApproval(id, feedback),
-    onSuccess: () => qc.invalidateQueries({ queryKey: approvalKeys.all }),
-  });
+    approvalKeys.all,
+  );
 }
 
 export function useTotpSetup() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: totpSetup,
-    onSuccess: () => qc.invalidateQueries({ queryKey: totpKeys.all }),
-  });
+  return useInvalidatingMutation(totpSetup, totpKeys.all);
 }
 
 export function useTotpConfirm() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: totpConfirm,
-    onSuccess: () => qc.invalidateQueries({ queryKey: totpKeys.all }),
-  });
+  return useInvalidatingMutation(totpConfirm, totpKeys.all);
 }
 
 export function useTotpRevoke() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: totpRevoke,
-    onSuccess: () => qc.invalidateQueries({ queryKey: totpKeys.all }),
-  });
+  return useInvalidatingMutation(totpRevoke, totpKeys.all);
 }

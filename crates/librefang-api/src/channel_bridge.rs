@@ -2314,11 +2314,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn a2a_agents_text(&self) -> String {
-        let agents = self
-            .kernel
-            .a2a_agents()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let agents = crate::lock_a2a_agents(self.kernel.a2a_agents());
         if agents.is_empty() {
             return "No external A2A agents discovered.\nUse the dashboard or API to discover agents.".to_string();
         }

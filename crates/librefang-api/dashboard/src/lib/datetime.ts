@@ -53,7 +53,10 @@ export function formatRelativeTime(value: string | number | Date | undefined | n
   const diff = now - date.getTime();
   const direction = diff >= 0 ? -1 : 1;
   const seconds = Math.floor(Math.abs(diff) / 1000);
-  const rtf = getRtf(locale ?? "en");
+  const defaultLocale = typeof navigator !== "undefined" && navigator.language
+    ? navigator.language
+    : "en";
+  const rtf = getRtf(locale ?? defaultLocale);
   if (seconds < 60) return rtf.format(direction * seconds, "second");
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return rtf.format(direction * minutes, "minute");

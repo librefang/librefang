@@ -9,6 +9,8 @@
 //
 // All arrays use `as const` for structural stability.
 
+import type { AuditQueryFilters } from "../http/client";
+
 export const autoDreamKeys = {
   all: ["autoDream"] as const,
   status: () => [...autoDreamKeys.all, "status"] as const,
@@ -416,15 +418,8 @@ export const auditKeys = {
   // dashboard data layer is ready; the daemon endpoint becomes real once
   // M5 lands.
   queries: () => [...auditKeys.all, "query"] as const,
-  query: (filters: {
-    limit?: number;
-    offset?: number;
-    user?: string;
-    action?: string;
-    status?: string;
-    since?: string;
-    until?: string;
-  } = {}) => [...auditKeys.queries(), filters] as const,
+  query: (filters: AuditQueryFilters = {}) =>
+    [...auditKeys.queries(), filters] as const,
 };
 
 export const userKeys = {
@@ -469,12 +464,6 @@ export const mediaKeys = {
   videoTasks: () => [...mediaKeys.all, "videoTasks"] as const,
   videoTask: (taskId: string, provider: string) =>
     [...mediaKeys.videoTasks(), taskId, provider] as const,
-  // Stable key for the disabled state of useVideoTask — paired with skipToken
-  // so every not-yet-submitted render shares the same (unused) cache slot.
-  // Shape mirrors `videoTask(taskId, provider)` (4 segments) so both branches
-  // of the query are type-compatible under useQuery's generic inference.
-  videoTaskDisabled: () =>
-    [...mediaKeys.videoTasks(), "__disabled__", "__disabled__"] as const,
 };
 
 export const mcpKeys = {

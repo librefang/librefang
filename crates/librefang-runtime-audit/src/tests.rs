@@ -192,6 +192,61 @@ fn test_record_with_context_persists_user_and_channel() {
 }
 
 #[test]
+fn agent_queries_use_complete_persisted_history_and_page_newest_first() {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    {
+        let conn = pool.get().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            CREATE INDEX idx_audit_agent_timestamp
+                ON audit_entries(agent_id, timestamp);",
+        )
+        .unwrap();
+    }
+
+    let log = AuditLog::with_db(pool);
+    log.record("agent-a", AuditAction::AgentSpawn, "first", "ok");
+    log.record("agent-b", AuditAction::AgentSpawn, "other", "error");
+    log.record("agent-a", AuditAction::ToolInvoke, "second", "ERROR");
+    log.record("agent-a", AuditAction::ShellExec, "third", "failed");
+    log.record("agent-a", AuditAction::AgentMessage, "fourth", "success");
+
+    // Simulate a bounded in-memory window that no longer contains the rows.
+    // Persistent queries must still use the complete indexed ledger.
+    lock_audit_recover(&log.entries, "entries").clear();
+
+    assert_eq!(log.count_agent_errors("agent-a").unwrap(), 2);
+    assert_eq!(log.count_agent_errors("agent-b").unwrap(), 1);
+
+    let page = log.recent_for_agent("agent-a", None, 1, 2).unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|entry| entry.detail.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "second"]
+    );
+    let filtered = log
+        .recent_for_agent("agent-a", Some("error"), 0, 10)
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].detail, "second");
+}
+
+#[test]
 fn malformed_persisted_row_fails_integrity_verification() {
     let pool = Pool::builder()
         .max_size(1)

@@ -18,6 +18,13 @@ redirect_url = "http://127.0.0.1:4545/api/auth/callback"
 scopes = ["openid", "profile", "email"]
 allowed_domains = ["example.com"]
 session_ttl_secs = 86400
+
+# Which IdP groups may call the API, and at what privilege.
+# Empty by default: without it an OIDC bearer authenticates nothing.
+[external_auth.role_map]
+"librefang-owners" = "owner"
+"librefang-operators" = "admin"
+"engineering" = "user"
 ```
 
 | Field | Type | Default | Description |
@@ -31,7 +38,28 @@ session_ttl_secs = 86400
 | `allowed_domains` | list of strings | `[]` | Restrict login to these email domains. Empty = allow all. |
 | `audience` | string | `""` | JWT audience claim to validate. Defaults to `client_id` if empty. |
 | `session_ttl_secs` | u64 | `86400` | Session token lifetime in seconds (24 hours default). |
+| `require_email_verified` | bool | `true` | Reject logins whose ID token does not carry `email_verified = true`. Set to `false` only for a provider that does not issue the claim. |
 | `providers` | list of objects | `[]` | Multiple OIDC/OAuth2 providers. When configured, takes precedence over the single-provider fields above. |
+| `role_map` | table of string → string | `{}` | IdP role/group claim value → LibreFang role (`owner` / `admin` / `user` / `viewer` / `guest`). See below. |
+
+#### `role_map`: turning an ID token into an API credential
+
+Until an entry exists here, a validated OIDC bearer authorizes nothing — the daemon verifies the token against the provider's JWKS and the caller still gets the same 401 they would get with no token at all.
+Declaring a mapping is what grants privilege, so the grant is always something an operator wrote down rather than something the identity provider decided on its own.
+
+The keys are values of the token's `roles` claim, and the values are LibreFang roles in the same `viewer` < `user` < `admin` < `owner` ladder that `[[users]] role` and `[channel_role_mapping]` use.
+A caller holding several mapped groups gets the **highest-privilege** match, so claim ordering — which is the provider's business, not yours — cannot decide the effective role.
+
+Three things deliberately grant nothing rather than falling back to a default:
+
+- a claim value absent from the map,
+- a claim value present but mapped to an unrecognised role string (a typo like `"admn"`, which is reported as a `WARN` at boot and on config reload),
+- a token from a provider with neither `audience` nor `client_id` configured, because JWT audience validation is disabled in that case and any token signed by the issuer's keys would otherwise validate.
+
+`require_email_verified` applies here too: a token whose email the provider did not verify carries no role.
+
+The mapping is read live from the config swap, so `POST /api/config/reload` applies an edit on the next request with no restart.
+It is deliberately **not** writable through `POST /api/config/set` — a caller who could edit it could grant themselves `owner` by naming a group they already hold — but `GET /api/config` reads it back so you can confirm which groups currently carry privilege.
 
 For multi-provider setups, use `[[external_auth.providers]]` with fields: `id`, `display_name`, `issuer_url`, `auth_url`, `token_url`, `userinfo_url`, `jwks_uri`, `client_id`, `client_secret_env`, `redirect_url`, `scopes`, `allowed_domains`, `audience`.
 

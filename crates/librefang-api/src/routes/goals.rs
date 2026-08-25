@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::AgentId;
+use librefang_types::goal::GoalId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -42,6 +43,15 @@ const GOALS_KEY: &str = librefang_types::goal::GOALS_STORAGE_KEY;
 /// Shared agent ID for goals KV storage.
 fn goals_shared_agent_id() -> AgentId {
     librefang_types::goal::goals_storage_agent_id()
+}
+
+type JsonResponse = (StatusCode, Json<serde_json::Value>);
+
+fn parse_goal_id(id: &str) -> Result<(GoalId, String), JsonResponse> {
+    let goal_id = id
+        .parse::<GoalId>()
+        .map_err(|_| ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple())?;
+    Ok((goal_id, goal_id.to_string()))
 }
 
 /// GET /api/goals — List all goals.
@@ -81,6 +91,10 @@ pub async fn get_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let (_, id) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
+    };
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -111,6 +125,10 @@ pub async fn get_goal_children(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let (_, id) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
     let agent_id = goals_shared_agent_id();
     match state
         .kernel
@@ -138,9 +156,9 @@ pub async fn get_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
-        Ok(g) => g,
-        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    let (goal_id, _) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
     };
     match state.kernel.goal_run_state(goal_id) {
         Some(run) => {
@@ -170,9 +188,9 @@ pub async fn start_goal_run(
     Path(id): Path<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
-        Ok(g) => g,
-        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    let (goal_id, id) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
     };
 
     // Same swallow as #6654/#6653 on a start rather than a read: the old catch-all `_ => Vec::new()` folded a substrate failure into the empty array, so an unreadable store answered `404 Goal '<id>' not found` for a goal that exists — sending the operator to re-create it instead of to the host.
@@ -215,11 +233,25 @@ pub async fn start_goal_run(
         }
     };
 
-    let max_iterations = body
-        .as_ref()
-        .and_then(|b| b.0.get("max_iterations"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let max_iterations = match body.as_ref().and_then(|body| body.0.get("max_iterations")) {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(0) | None => {
+                return ApiErrorResponse::bad_request(
+                    "max_iterations must be an integer between 1 and 4294967295",
+                )
+                .into_json_tuple();
+            }
+            Some(value) => Some(value),
+        },
+    };
+
+    let started = state
+        .kernel
+        .start_goal_run(goal_id, agent_id, max_iterations);
+    if !started {
+        return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
+    }
 
     // Flip the goal to in_progress so the dashboard reflects the active run.
     //
@@ -255,14 +287,13 @@ pub async fn start_goal_run(
         );
     }
 
-    state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
-    let run = state.kernel.goal_run_state(goal_id);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "run": run })),
-    )
+    match state.kernel.goal_run_state(goal_id) {
+        Some(run) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "run": run })),
+        ),
+        None => ApiErrorResponse::internal("Failed to start goal run").into_json_tuple(),
+    }
 }
 
 /// POST /api/goals/{id}/stop — Stop an active autonomous run for a goal.
@@ -270,9 +301,9 @@ pub async fn stop_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let goal_id = match id.parse::<librefang_types::goal::GoalId>() {
-        Ok(g) => g,
-        Err(_) => return ApiErrorResponse::bad_request("Invalid goal id").into_json_tuple(),
+    let (goal_id, _) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
     };
     let stopped = state.kernel.stop_goal_run(goal_id);
     (
@@ -281,24 +312,34 @@ pub async fn stop_goal_run(
     )
 }
 
-/// Read an optional id-like string field, treating blank as absent (#6562).
-///
-/// HTML form controls submit `""` for an unselected `<select>` / untouched `<input>`, so a create payload routinely carries `parent_id: ""` / `agent_id: ""` meaning "no parent" / "no agent".
-/// Reading those with a bare `as_str()` yielded `Some("")`, which then failed the parent-existence check with `404 Parent goal '' not found` and persisted an unparsable empty `agent_id` that later made `POST /api/goals/{id}/start` claim the goal had no agent assigned.
-/// Normalising at the boundary is the right layer: the stored document only ever carries a real id or omits the key entirely.
-fn optional_id_field(req: &serde_json::Value, key: &str) -> Option<String> {
-    req[key]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
 /// Whether an update payload's `parent_id` / `agent_id` means "clear it".
 ///
 /// `null` is the explicit clear signal; a blank string is the same intent arriving from a form control that was reset rather than omitted (#6562).
 fn is_clear_signal(value: &serde_json::Value) -> bool {
     value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())
+}
+
+/// Parse an optional UUID link field.
+///
+/// The outer option distinguishes an omitted update field from a present one.
+/// The inner option distinguishes clear (`null` or blank string) from set.
+fn optional_uuid_field(req: &serde_json::Value, key: &str) -> Result<Option<Option<String>>, ()> {
+    let Some(value) = req.get(key) else {
+        return Ok(None);
+    };
+    if is_clear_signal(value) {
+        return Ok(Some(None));
+    }
+    let raw = value.as_str().ok_or(())?.trim();
+    let parsed = raw.parse::<uuid::Uuid>().map_err(|_| ())?;
+    Ok(Some(Some(parsed.to_string())))
+}
+
+fn optional_u64_field(req: &serde_json::Value, key: &str) -> Result<Option<u64>, ()> {
+    match req.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_u64().map(Some).ok_or(()),
+    }
 }
 
 /// POST /api/goals — Create a new goal.
@@ -324,7 +365,12 @@ pub async fn create_goal(
             .into_json_tuple();
     }
 
-    let parent_id = optional_id_field(&req, "parent_id");
+    let parent_id = match optional_uuid_field(&req, "parent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid parent_id").into_json_tuple();
+        }
+    };
 
     let status = req["status"].as_str().unwrap_or("pending").to_string();
     if !["pending", "in_progress", "completed", "cancelled"].contains(&status.as_str()) {
@@ -334,17 +380,23 @@ pub async fn create_goal(
         .into_json_tuple();
     }
 
-    let progress = req["progress"].as_u64().unwrap_or(0);
+    let progress = match optional_u64_field(&req, "progress") {
+        Ok(value) => value.unwrap_or(0),
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Progress must be an integer from 0-100")
+                .into_json_tuple();
+        }
+    };
     if progress > 100 {
         return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
     }
 
-    let agent_id_str = optional_id_field(&req, "agent_id");
-    if let Some(ref aid) = agent_id_str {
-        if aid.parse::<uuid::Uuid>().is_err() {
+    let agent_id_str = match optional_uuid_field(&req, "agent_id") {
+        Ok(value) => value.flatten(),
+        Err(()) => {
             return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
-    }
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
@@ -414,6 +466,10 @@ pub async fn update_goal_by_id(
     Path(id): Path<String>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let (_, id) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error,
+    };
     let shared_id = goals_shared_agent_id();
 
     // --- Stateless validation (no goals snapshot needed) ---
@@ -441,38 +497,35 @@ pub async fn update_goal_by_id(
         }
     }
 
-    if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
+    let progress = match optional_u64_field(&req, "progress") {
+        Ok(progress) => progress,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Progress must be an integer from 0-100")
+                .into_json_tuple();
+        }
+    };
+    if let Some(progress) = progress {
         if progress > 100 {
             return ApiErrorResponse::bad_request("Progress must be 0-100").into_json_tuple();
         }
     }
 
-    if let Some(parent_id) = req.get("parent_id") {
-        if let Some(pid) = parent_id.as_str() {
-            if pid.trim() == id {
-                return ApiErrorResponse::bad_request("A goal cannot be its own parent")
-                    .into_json_tuple();
-            }
+    let parent_update = match optional_uuid_field(&req, "parent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid parent_id").into_json_tuple();
         }
+    };
+    if parent_update.as_ref().and_then(Option::as_ref) == Some(&id) {
+        return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
-    // `""` is treated exactly like `null` — "clear this link" (#6562).
-    // Resolved once here so the validation below and the mutation inside the transaction cannot drift apart on what a blank string means.
-    let parent_clear = req.get("parent_id").is_some_and(is_clear_signal);
-    let agent_clear = req.get("agent_id").is_some_and(is_clear_signal);
-
-    // A non-blank agent_id must be a real UUID: `start_goal_run` parses it
-    // with `uuid::Uuid` and otherwise reports the misleading "Assign an
-    // agent to this goal before starting a run" on a goal that *was*
-    // assigned, just with an unparsable id (mirrors the same check in
-    // `create_goal` and the existing convention in `triggers.rs` / `cron.rs`).
-    if !agent_clear {
-        if let Some(aid) = req.get("agent_id").and_then(|v| v.as_str()) {
-            if aid.trim().parse::<uuid::Uuid>().is_err() {
-                return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
-            }
+    let agent_update = match optional_uuid_field(&req, "agent_id") {
+        Ok(value) => value,
+        Err(()) => {
+            return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
-    }
+    };
 
     // --- Atomic validate-then-mutate under BEGIN IMMEDIATE (#5138) ---
     //
@@ -497,38 +550,32 @@ pub async fn update_goal_by_id(
             };
 
             // Parent existence + indirect-cycle detection on the live snapshot.
-            if let Some(parent_id) = req.get("parent_id") {
-                if !parent_clear {
-                    if let Some(pid) = parent_id.as_str() {
-                        // Trim before comparing (#6562): the mutation below persists `pid.trim()`, so validating against the untrimmed string would either false-404 a whitespace-padded but otherwise valid parent id, or let a whitespace-padded self-reference slip past the cycle check and land trimmed (i.e. equal to `id`) once persisted.
-                        let pid = pid.trim();
-                        if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
-                            return Err(LibreFangError::InvalidInput(format!(
-                                "{PARENT_MISSING}{pid}"
-                            )));
+            if let Some(Some(pid)) = parent_update.as_ref() {
+                if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
+                    return Err(LibreFangError::InvalidInput(format!(
+                        "{PARENT_MISSING}{pid}"
+                    )));
+                }
+                let mut ancestor = Some(pid.to_string());
+                let mut seen = HashSet::new();
+                seen.insert(id.clone());
+                while let Some(ref anc_id) = ancestor {
+                    if !seen.insert(anc_id.clone()) {
+                        break;
+                    }
+                    let anc_parent = goals.iter().find_map(|gg| {
+                        if gg["id"].as_str() == Some(anc_id) {
+                            gg["parent_id"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
                         }
-                        let mut ancestor = Some(pid.to_string());
-                        let mut seen = HashSet::new();
-                        seen.insert(id.clone());
-                        while let Some(ref anc_id) = ancestor {
-                            if !seen.insert(anc_id.clone()) {
-                                break;
-                            }
-                            let anc_parent = goals.iter().find_map(|gg| {
-                                if gg["id"].as_str() == Some(anc_id) {
-                                    gg["parent_id"].as_str().map(|s| s.to_string())
-                                } else {
-                                    None
-                                }
-                            });
-                            match anc_parent {
-                                Some(ref ap) if ap == &id => {
-                                    return Err(LibreFangError::InvalidInput(CIRCULAR.to_string()));
-                                }
-                                Some(ap) => ancestor = Some(ap),
-                                None => break,
-                            }
+                    });
+                    match anc_parent {
+                        Some(ref ap) if ap == &id => {
+                            return Err(LibreFangError::InvalidInput(CIRCULAR.to_string()));
                         }
+                        Some(ap) => ancestor = Some(ap),
+                        None => break,
                     }
                 }
             }
@@ -545,21 +592,21 @@ pub async fn update_goal_by_id(
                     if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
                         g["status"] = serde_json::Value::String(status.to_string());
                     }
-                    if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
+                    if let Some(progress) = progress {
                         g["progress"] = serde_json::json!(progress);
                     }
-                    if let Some(parent_id) = req.get("parent_id") {
-                        if parent_clear {
+                    if let Some(parent_id) = parent_update.as_ref() {
+                        if let Some(pid) = parent_id {
+                            g["parent_id"] = serde_json::Value::String(pid.clone());
+                        } else {
                             g.as_object_mut().map(|obj| obj.remove("parent_id"));
-                        } else if let Some(pid) = parent_id.as_str() {
-                            g["parent_id"] = serde_json::Value::String(pid.trim().to_string());
                         }
                     }
-                    if let Some(agent_id) = req.get("agent_id") {
-                        if agent_clear {
+                    if let Some(agent_id) = agent_update.as_ref() {
+                        if let Some(aid) = agent_id {
+                            g["agent_id"] = serde_json::Value::String(aid.clone());
+                        } else {
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
-                        } else if let Some(aid) = agent_id.as_str() {
-                            g["agent_id"] = serde_json::Value::String(aid.trim().to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
@@ -604,6 +651,10 @@ pub async fn delete_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
+    let (_, id) = match parse_goal_id(&id) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
     let shared_id = goals_shared_agent_id();
     // Atomic cascade-delete under BEGIN IMMEDIATE (#5138): collecting
     // descendants and the retain must see the same snapshot the write
@@ -611,7 +662,7 @@ pub async fn delete_goal(
     const NOT_FOUND: &str = "__goal_not_found__";
     use librefang_types::error::LibreFangError;
 
-    let modify_result: Result<(), LibreFangError> = state
+    let modify_result: Result<Vec<GoalId>, LibreFangError> = state
         .kernel
         .memory_substrate()
         .structured_modify(shared_id, GOALS_KEY, |current| {
@@ -620,7 +671,9 @@ pub async fn delete_goal(
                 _ => Vec::new(),
             };
 
-            let before = goals.len();
+            if !goals.iter().any(|goal| goal["id"].as_str() == Some(&id)) {
+                return Err(LibreFangError::InvalidInput(NOT_FOUND.to_string()));
+            }
 
             // Collect all IDs to remove: the target goal + all descendants
             let mut ids_to_remove: HashSet<String> = HashSet::new();
@@ -638,6 +691,13 @@ pub async fn delete_goal(
                 }
             }
 
+            let removed_run_ids: Vec<GoalId> = goals
+                .iter()
+                .filter_map(|goal| goal["id"].as_str())
+                .filter(|goal_id| ids_to_remove.contains(*goal_id))
+                .filter_map(|goal_id| goal_id.parse().ok())
+                .collect();
+
             goals.retain(|g| {
                 g["id"]
                     .as_str()
@@ -645,24 +705,31 @@ pub async fn delete_goal(
                     .unwrap_or(true)
             });
 
-            if goals.len() == before {
-                return Err(LibreFangError::InvalidInput(NOT_FOUND.to_string()));
-            }
-
-            Ok((serde_json::Value::Array(goals), ()))
+            Ok((serde_json::Value::Array(goals), removed_run_ids))
         });
 
-    if let Err(e) = modify_result {
-        if let LibreFangError::InvalidInput(ref msg) = e {
-            if msg == NOT_FOUND {
-                return ApiErrorResponse::not_found("Goal not found")
-                    .into_json_tuple()
-                    .into_response();
+    let removed_run_ids = match modify_result {
+        Ok(ids) => ids,
+        Err(e) => {
+            if let LibreFangError::InvalidInput(ref msg) = e {
+                if msg == NOT_FOUND {
+                    return ApiErrorResponse::not_found("Goal not found")
+                        .into_json_tuple()
+                        .into_response();
+                }
             }
+            return ApiErrorResponse::internal_scrub(e)
+                .into_json_tuple()
+                .into_response();
         }
-        return ApiErrorResponse::internal_scrub(e)
-            .into_json_tuple()
-            .into_response();
+    };
+
+    // Deletion is also the lifecycle boundary for the target and every
+    // descendant. `GoalRunner::stop` serializes with startup, so a start that
+    // observed the goal before this transaction either gets removed here or,
+    // if it starts afterwards, rejects the now-missing goal.
+    for &removed_goal_id in &removed_run_ids {
+        state.kernel.stop_goal_run(removed_goal_id);
     }
 
     // Issue #3832: 204 No Content per RFC 9110 §15.3.5 — no body. The previous

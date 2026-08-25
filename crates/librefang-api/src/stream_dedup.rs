@@ -86,7 +86,7 @@ fn normalize(text: &str) -> String {
                 last_was_space = true;
             }
         } else {
-            result.push(ch.to_lowercase().next().unwrap_or(ch));
+            result.extend(ch.to_lowercase());
             last_was_space = false;
         }
     }
@@ -156,5 +156,6 @@ mod tests {
         assert_eq!(normalize("Hello  World"), "hello world");
         assert_eq!(normalize("  spaced  out  "), "spaced out");
         assert_eq!(normalize("UPPER case"), "upper case");
+        assert_eq!(normalize("İSTANBUL"), "i\u{307}stanbul");
     }
 }

@@ -44,6 +44,33 @@ jobs:
       - name: Check registry public keys
         run: bash scripts/check-pubkey-lockstep.sh
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify toolchain versions agree
+        id: msrv
+        run: |
+          set -euo pipefail
+          version=$(scripts/check-toolchain-versions.sh --print)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
+      - name: Install workspace system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf
+      - name: Check workspace libraries at MSRV
+        run: cargo check --workspace --lib
+
   # ── Detect changes + compute affected crate subset ─────────────────────────────
   # PR lane: Linux only. Selective by default (test just the crates the PR
   #   touches — no downstream fan-out, main catches cross-crate breakage on
@@ -122,7 +149,7 @@ jobs:
           # `openapi-drift` job still gates direct edits.
           RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
-          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)' && CI=true
+          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$)' && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
           # The WASM-skill guest SDK and its example are independent
           # workspaces (own `[workspace]` roots), so the main RUST lane —
@@ -366,6 +393,8 @@ jobs:
       # in API response code (refs #3302). Runs in warn mode — never fails
       # the build until the existing inventory is cleared and the script is
       # flipped to --strict. See docs/architecture/api-conventions.md.
+      - name: Test sentinel-pattern lint
+        run: bash scripts/tests/check-no-empty-string-sentinels.sh
       - name: Sentinel-pattern lint (warn-only)
         run: scripts/check-no-empty-string-sentinels.sh
 
@@ -490,6 +519,8 @@ jobs:
       # Self-skips when sha256sum is absent, so it is safe anywhere.
       - name: pre-commit sha256sum fallback
         run: bash scripts/tests/pre-commit-sha-fallback.sh
+      - name: commit wrapper index transaction
+        run: bash scripts/tests/commit-wrapper-index.sh
 
   # ── Container vulnerability gate self-test ─────────────────────────────────────
   # `scripts/check-image-vulns.py` decides whether a release digest is allowed to be promoted to the :latest / :VERSION tags (#6694).
@@ -508,6 +539,8 @@ jobs:
           python-version: '3.11'
       - name: Fixture corpus — the gate fails at the configured threshold
         run: python3 scripts/check-image-vulns.py --self-test
+      - name: Docker startup probe helper corpus
+        run: sh .github/scripts/tests/docker-smoke.test.sh
 
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
@@ -924,7 +957,7 @@ jobs:
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
             echo "Running workspace unit tests (lib+bin, full run)…"
-            cargo nextest run --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast --no-tests=pass
+            cargo nextest run --profile ci --workspace -E 'kind(lib) | kind(bin)' --no-fail-fast --no-tests=pass
           else
             if [ -z "$CRATES" ]; then
               echo "No crates affected — nothing to run."
@@ -933,7 +966,7 @@ jobs:
             echo "Running unit tests for: $CRATES"
             PFLAGS=""
             for c in $CRATES; do PFLAGS="$PFLAGS -p $c"; done
-            cargo nextest run $PFLAGS -E 'kind(lib) | kind(bin)' --no-fail-fast --no-tests=pass
+            cargo nextest run --profile ci $PFLAGS -E 'kind(lib) | kind(bin)' --no-fail-fast --no-tests=pass
           fi
 
   # ── Ubuntu tests: selective on PR, full on main ────────────────────────────────
@@ -1026,7 +1059,7 @@ jobs:
             # one of M shards by the hash of its name. Adding tests doesn't
             # reshuffle the others; deleting tests doesn't either. Stable
             # buckets are critical for cache hit rates across runs.
-            cargo nextest run --workspace --no-fail-fast \
+            cargo nextest run --profile ci --workspace --no-fail-fast \
               --partition hash:${{ matrix.shard }}/4
           else
             if [ -z "$CRATES" ]; then
@@ -1039,7 +1072,7 @@ jobs:
             # `--no-tests=pass` keeps PRs that only touch a crate without
             # tests from failing the selective lane — nextest defaults to
             # exit-4 when -p X resolves to zero tests.
-            cargo nextest run $PFLAGS --no-fail-fast --no-tests=pass
+            cargo nextest run --profile ci $PFLAGS --no-fail-fast --no-tests=pass
           fi
 
   # ── Windows tests: main-push only, 2-way shard ─────────────────────────────────
@@ -1099,7 +1132,7 @@ jobs:
           # Cargo's package-level `--exclude` is what keeps it out of the selected set entirely, and since nothing in the workspace depends on librefang-desktop (it is a leaf) it is then never built here.
           # Its 11 tests are platform-independent URL/scheme logic and still run on the Ubuntu shards, the unit-fast lane and macOS; the separate link-only step below keeps the Windows compile+link coverage.
           # Remove both once the missing DLL export is identified.
-          cargo nextest run --workspace --exclude librefang-desktop --no-fail-fast \
+          cargo nextest run --profile ci --workspace --exclude librefang-desktop --no-fail-fast \
             --partition hash:${{ matrix.shard }}/2
       # Restores the Windows compile+link coverage that `--exclude` above drops.
       # This is the only Windows build of librefang-desktop in CI (release-desktop.yml is workflow_dispatch-only, mobile-smoke.yml is ubuntu/macOS), so without this a Windows-only break in the crate would reach a release tag unseen.
@@ -1141,7 +1174,7 @@ jobs:
           # GitHub-hosted macOS runners resolve crates.io but consistently fail to resolve github.com for this clone ("Could not resolve host: github.com" -> "expected at least 15 hands, got 0"), so the set fails deterministically on macOS while passing on Linux/Windows where the clone succeeds.
           # The logic under test is platform-independent and fully covered by those lanes, so skip just this network-dependent module on macOS rather than red-flagging every main push (#6240).
           # The deeper fix — offline fixtures so the tests don't live-clone — is tracked as a follow-up.
-          cargo nextest run --workspace --no-fail-fast \
+          cargo nextest run --profile ci --workspace --no-fail-fast \
             -E 'not (package(librefang-hands) and test(/registry::tests::/))'
       # Mach-port abort guard — deliberately `cargo test`, not nextest.
       #

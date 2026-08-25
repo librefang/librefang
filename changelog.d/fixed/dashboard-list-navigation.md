@@ -1,0 +1,1 @@
+- Preserve native interactive controls and stabilize keyboard/listener behavior in dashboard list navigation. (@xiaomo)

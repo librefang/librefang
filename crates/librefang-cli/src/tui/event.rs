@@ -24,7 +24,7 @@ use super::screens::{
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
-    settings::{ModelInfo, ProviderInfo, TestResult, ToolInfo},
+    settings::{BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo},
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
@@ -192,6 +192,18 @@ pub enum AppEvent {
     ModelLimitsSaved(String),
     /// One model's operator capacity limits were dropped back to the catalog.
     ModelLimitsReset(String),
+    /// Backup archives listed.
+    BackupsLoaded(Vec<BackupInfo>),
+    /// A new archive was written.
+    BackupCreated(String),
+    /// An archive was deleted.
+    BackupDeleted(String),
+    /// A restore finished. `errors` counts entries the daemon could not write.
+    BackupRestored {
+        filename: String,
+        restored_files: u64,
+        errors: usize,
+    },
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
@@ -2819,6 +2831,186 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
     });
 }
 
+/// Fetch the backup archives the daemon holds.
+pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/backups")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let _ = tx.send(AppEvent::BackupsLoaded(parse_backup_list(&body)));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backups-list-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Read `GET /api/backups` into the rows the settings screen draws.
+///
+/// `created_at` and `components` are both `null` when the archive's
+/// `manifest.json` could not be read, so the file's own `modified_at` is the
+/// fallback timestamp and the component list stays empty — which the restore
+/// form reads as "restore everything", matching the endpoint's own default.
+fn parse_backup_list(body: &serde_json::Value) -> Vec<BackupInfo> {
+    body["backups"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|b| BackupInfo {
+                    filename: b["filename"].as_str().unwrap_or_default().to_string(),
+                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
+                    created_at: b["created_at"]
+                        .as_str()
+                        .or_else(|| b["modified_at"].as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    components: b["components"]
+                        .as_array()
+                        .map(|c| {
+                            c.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Create a new backup archive.
+pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            // A backup walks the whole home directory, so it outlives the
+            // default client timeout on any non-trivial install.
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+            match client.post(format!("{base_url}/api/backup")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let filename = body["filename"].as_str().unwrap_or_default().to_string();
+                    let _ = tx.send(AppEvent::BackupCreated(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backup-create-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Delete one backup archive.
+pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/backups/{filename}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::BackupDeleted(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-backup-delete-failed",
+                        &[("filename", &filename)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Restore one backup archive.
+///
+/// `body` is built by `settings::restore_request_body`, which is what decides
+/// whether `components` is present at all — the endpoint reads an absent field
+/// as "everything" and rejects `[]`, so the shape must not be reassembled here.
+pub fn spawn_restore_backup(
+    backend: BackendRef,
+    body: serde_json::Value,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let filename = body["filename"].as_str().unwrap_or_default().to_string();
+        match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                // Restoring decompresses and writes the whole archive, so it
+                // gets the same generous timeout the create side does.
+                let client =
+                    make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+                match client
+                    .post(format!("{base_url}/api/restore"))
+                    .json(&body)
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let _ = tx.send(AppEvent::BackupRestored {
+                            filename,
+                            restored_files: payload["restored_files"].as_u64().unwrap_or(0),
+                            errors: payload["errors"].as_array().map_or(0, |e| e.len()),
+                        });
+                    }
+                    // The daemon's own message carries why (an unknown
+                    // component name, a missing manifest), so it is preferred
+                    // over the generic failure line.
+                    Ok(resp) => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let message = payload["error"]["message"]
+                            .as_str()
+                            .or_else(|| payload["message"].as_str())
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|| {
+                                crate::i18n::t_args(
+                                    "tui-event-backup-restore-failed",
+                                    &[("filename", &filename)],
+                                )
+                            });
+                        let _ = tx.send(AppEvent::FetchError(message));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-backup-restore-failed",
+                            &[("filename", &filename)],
+                        )));
+                    }
+                }
+            }
+            BackendRef::InProcess(_) => {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-backups-need-daemon",
+                )));
+            }
+        }
+    });
+}
+
 /// Test a provider connection.
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
@@ -3759,6 +3951,61 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// `GET /api/backups` nests its rows under `backups`, and the settings
+    /// screen reads `created_at` and `components` straight out of each one.
+    #[test]
+    fn backup_rows_parse_out_of_the_listing_envelope() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "librefang-backup-20260101-000000.zip",
+                "path": "/home/u/.librefang/backups/librefang-backup-20260101-000000.zip",
+                "size_bytes": 8192,
+                "modified_at": "2026-01-02T00:00:00Z",
+                "components": ["config", "skills"],
+                "librefang_version": "2026.8.19",
+                "created_at": "2026-01-01T00:00:00Z"
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "librefang-backup-20260101-000000.zip");
+        assert_eq!(rows[0].size_bytes, 8192);
+        assert_eq!(
+            rows[0].created_at, "2026-01-01T00:00:00Z",
+            "the manifest timestamp must win over the file's mtime"
+        );
+        assert_eq!(rows[0].components, vec!["config", "skills"]);
+    }
+
+    /// An archive whose `manifest.json` could not be read reports `created_at`
+    /// and `components` as `null`. Falling back to the file's own mtime keeps
+    /// the row dated, and the empty component list is what makes the restore
+    /// form omit `components` — the endpoint's own "restore everything".
+    #[test]
+    fn a_manifestless_row_falls_back_to_the_file_mtime() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "hand-rolled.zip",
+                "size_bytes": 10,
+                "modified_at": "2026-03-04T05:06:07Z",
+                "components": null,
+                "librefang_version": null,
+                "created_at": null
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows[0].created_at, "2026-03-04T05:06:07Z");
+        assert!(rows[0].components.is_empty());
+    }
+
+    #[test]
+    fn an_empty_listing_parses_to_no_rows() {
+        let rows = parse_backup_list(&serde_json::json!({"backups": [], "total": 0}));
+        assert!(rows.is_empty());
+    }
 
     /// The workflow creator's raw `steps` field must reach the API as a JSON
     /// array. It used to be forwarded as a JSON string, which

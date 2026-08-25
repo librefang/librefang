@@ -7,8 +7,8 @@
 //! `cargo xtask compare-build-timings` diffs the latest snapshot against
 //! `bench-results/build-timings/baseline.json` and exits non-zero when any
 //! crate's compile time has regressed by more than the configured threshold
-//! (default 10%). The non-zero exit is intended to be wired into a weekly
-//! CI job as a soft alert (`continue-on-error: true`), not a blocking gate.
+//! (default 10%). CI uses `--warn-only` to emit annotations for regressions
+//! while preserving non-zero exits for malformed or missing timing data.
 
 use crate::common::repo_root;
 use clap::Parser;
@@ -45,6 +45,11 @@ pub struct CompareBuildTimingsArgs {
     /// Regression threshold as a fraction (0.10 = 10%).
     #[arg(long, default_value_t = 0.10)]
     pub threshold: f64,
+
+    /// Emit GitHub Actions warnings and exit successfully for regressions.
+    /// Operational failures still return an error.
+    #[arg(long)]
+    pub warn_only: bool,
 }
 
 /// Parsed snapshot we persist to disk. Map ordered for deterministic diffs
@@ -151,6 +156,15 @@ pub fn run_compare(args: CompareBuildTimingsArgs) -> Result<(), Box<dyn std::err
             "  {name:<40} {base:>7.2}s -> {cur:>7.2}s  ({:+.1}%)",
             pct * 100.0
         );
+        if args.warn_only {
+            println!(
+                "::warning title=Build-time regression::{name}: {base:.2}s -> {cur:.2}s ({:+.1}%)",
+                pct * 100.0
+            );
+        }
+    }
+    if args.warn_only {
+        return Ok(());
     }
     Err(format!(
         "{} crate(s) regressed by more than {:.0}%",
@@ -417,6 +431,33 @@ mod tests {
         let back = read_snapshot(&path).unwrap();
         assert!((back.crates["librefang-kernel"] - 12.345).abs() < 0.01);
         assert!((back.crates["librefang-api"] - 7.89).abs() < 0.01);
+    }
+
+    #[test]
+    fn warn_only_softens_regressions_but_not_invalid_snapshots() {
+        let dir = tempdir().join("warn-only");
+        fs::create_dir_all(&dir).unwrap();
+        let baseline = dir.join("baseline.json");
+        let current = dir.join("current.json");
+        fs::write(&baseline, "{\"slow-crate\": 10.0}\n").unwrap();
+        fs::write(&current, "{\"slow-crate\": 12.0}\n").unwrap();
+
+        assert!(run_compare(CompareBuildTimingsArgs {
+            baseline: Some(baseline.clone()),
+            current: Some(current.clone()),
+            threshold: 0.10,
+            warn_only: true,
+        })
+        .is_ok());
+
+        fs::write(&current, "not json\n").unwrap();
+        assert!(run_compare(CompareBuildTimingsArgs {
+            baseline: Some(baseline),
+            current: Some(current),
+            threshold: 0.10,
+            warn_only: true,
+        })
+        .is_err());
     }
 
     fn tempdir() -> PathBuf {

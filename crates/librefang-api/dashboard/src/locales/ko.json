@@ -538,7 +538,10 @@
       "err_label": "오류",
       "system_prompt_placeholder": "당신은 유용한 AI 비서입니다 ...",
       "description_placeholder": "이 버전에서는 무엇이 다른가요?",
-      "experiment_name_placeholder": "내 A/B 테스트"
+      "experiment_name_placeholder": "내 A/B 테스트",
+      "delete_version_title": "프롬프트 버전 삭제",
+      "delete_version_message": "v{{version}}을(를) 영구적으로 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.",
+      "variant_limit": "백분율 트래픽 분할은 최대 {{count}}개의 변형을 지원합니다."
     },
     "thinking": "확장된 사고",
     "thinking_enabled": "활성화됨",
@@ -1189,7 +1192,11 @@
     "pending_approve_failed": "승인 실패:",
     "pending_propose_failed": "레지스트리에 제안 실패:",
     "pending_pr_opened": "끌어오기 요청이 열렸습니다:",
+    "pending_source_unknown": "알 수 없는 출처",
+    "pending_invalid_update": "이 업데이트에는 대상 기술이 없어 승인할 수 없습니다.",
     "pending_reject_title": "후보자를 거부하시겠습니까?",
+    "pending_reject_message": "대기 중인 후보 '{{name}}'이(가) 삭제됩니다. 이 작업은 실행 취소할 수 없습니다.",
+    "pending_reject_failed": "거부 실패:",
     "pending_rejecting": "거부 중…",
     "pending_title": "기술 워크샵 진행 중",
     "pending_load_failed": "대기 중인 후보를 로드하지 못했습니다.",
@@ -1392,6 +1399,10 @@
     "rail_no_match": "일치하는 에이전트가 없습니다.",
     "auto_dream_on_badge": "자동 드림 켜짐",
     "auto_dream_off_badge": "자동 드림 꺼짐",
+    "auto_dream_enrolled": "등록됨",
+    "auto_dream_not_enrolled": "끄다",
+    "auto_dream_last": "마지막",
+    "auto_dream_next": "다음",
     "auto_dream_desc_inline": "에이전트당 주기적인 메모리 통합. 매니페스트 재정의 > 전역 기본값; 여기에서 전역 스위치를 전환하세요.",
     "auto_dream_global_toggle_title": "Auto-Dream을 전역적으로 활성화 또는 비활성화합니다.",
     "auto_dream_global_on_ok": "Auto-Dream이 전역적으로 활성화됨",
@@ -1724,7 +1735,10 @@
       "submit_action": "{{action}} 제출",
       "pending_review_one": "운영자 검토를 기다리는 워크플로 실행 1개",
       "pending_review_other": "운영자 검토를 기다리는 워크플로 실행 {{count}}개",
-      "empty_artifact": "(빈 인공물)"
+      "empty_artifact": "(빈 인공물)",
+      "load_failed": "대기 중인 운영자 검토를 불러오지 못했습니다.",
+      "review_run": "{{workflow}} — {{step}} 검토",
+      "more_pending": "대기 중 {{count}}개 더 있음"
     }
   },
   "scheduler": {
@@ -2062,6 +2076,8 @@
     "totp_recovery_title": "복구 코드(안전한 곳에 저장하세요):",
     "totp_recovery_reveal": "코드 공개",
     "totp_recovery_hide": "코드 숨기기",
+    "totp_secret_reveal": "비밀 키 공개",
+    "totp_secret_hide": "비밀 키 숨기기",
     "totp_reset_placeholder": "현재 TOTP 또는 복구 코드",
     "totp_verify_reset": "확인 및 재설정",
     "totp_revoke_placeholder": "TOTP 또는 복구 코드",
@@ -2130,6 +2146,7 @@
     "export_config_btn": "구성 내보내기",
     "export_config_desc": "현재 구성을 TOML 파일로 다운로드합니다.",
     "export_config_title": "구성 내보내기",
+    "export_config_failed": "구성을 내보낼 수 없습니다.",
     "totp_qr_alt": "TOTP QR 코드"
   },
   "config": {
@@ -2985,6 +3002,7 @@
     "summary_status": "상태",
     "finish_action": "LibreFang 실행",
     "finalize_failed": "설정 실패: {{message}}",
+    "quick_init_failed": "기본 제공자는 저장되었지만 초기화에 실패했습니다: {{message}}. 계속하려면 다시 시도하세요.",
     "done_title": "LibreFang이 준비되었습니다",
     "done_desc": "기본 공급자가 구성되었으며 스타터 에이전트가 생성되었습니다. 이제 채팅을 하거나 대시보드로 이동할 수 있습니다.",
     "go_overview": "개요로 이동",
@@ -3165,7 +3183,8 @@
     "status_submitted": "제출됨",
     "status_completed": "완료됨",
     "status_failed": "실패",
-    "image_too_large": "이미지가 너무 커서 표시할 수 없습니다."
+    "image_too_large": "이미지가 너무 커서 표시할 수 없습니다.",
+    "image_unavailable": "이미지를 사용할 수 없습니다."
   },
   "auth": {
     "title": "API 키 필요",
@@ -3341,6 +3360,7 @@
       "create_failed": "창을 생성하지 못했습니다.",
       "delete_failed": "창을 닫지 못했습니다.",
       "rename_failed": "창 이름을 바꾸지 못했습니다.",
+      "switch_unavailable": "터미널 연결이 끊어진 동안에는 창을 전환할 수 없습니다.",
       "rename_hint": "이름을 바꾸려면 두 번 클릭하세요.",
       "name_label": "창 이름",
       "name_invalid": "이름은 1~64자여야 하며 | 또는 제어 문자를 포함할 수 없습니다.",
@@ -3516,7 +3536,8 @@
     "copied": "클립보드에 복사됨",
     "copy_failed": "복사하지 못했습니다.",
     "download": "다운로드",
-    "loading": "로드 중…"
+    "loading": "로드 중…",
+    "source_changed": "이 편집기 외부에서 TOML이 변경되었습니다. 저장하기 전에 취소하고 편집을 다시 여세요."
   },
   "audit": {
     "title": "감사 추적",
@@ -3698,7 +3719,7 @@
     },
     "errors": {
       "non_negative": "{{field}}는 음수가 아닌 유한한 숫자여야 합니다.",
-      "threshold_range": "alert_threshold는 0.0..=1.0이어야 합니다."
+      "threshold_range": "alert_threshold는 0보다 크고 1 이하여야 합니다."
     },
     "toast": {
       "saved": "지출 한도가 저장되었습니다."
@@ -4044,7 +4065,6 @@
     "page_assets_updated": "페이지 자산이 업데이트되었습니다.",
     "react_state_reset": "React 상태 재설정 — 다시 불러오는 중",
     "new_version_available": "새 버전이 있습니다. 최신 버전을 받으려면 다시 불러오세요.",
-    "unexpected": "예상치 못한 오류가 발생했습니다.",
     "force_reload_title": "자동 새로고침 쿨타임을 지우고 새로 불러옵니다.",
     "force_reload": "강제 새로고침",
     "stack": "스택",

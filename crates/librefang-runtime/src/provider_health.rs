@@ -709,6 +709,55 @@ pub async fn probe_provider_cached(
 /// circuit breaker to re-test a provider during cooldown.
 ///
 /// Returns `Ok(latency_ms)` if the model responds, or `Err(error_message)` if it fails.
+fn build_model_probe_request(
+    client: &reqwest::Client,
+    provider: &str,
+    base_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    let normalized_provider = provider.to_ascii_lowercase();
+    let is_anthropic = matches!(
+        librefang_llm_drivers::drivers::provider_api_format(&normalized_provider),
+        Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic)
+    );
+    let path = if is_anthropic {
+        "/v1/messages"
+    } else {
+        "/chat/completions"
+    };
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let body = if is_anthropic {
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1,
+            "temperature": 0.0
+        })
+    };
+
+    let mut req = client.post(url).json(&body);
+    if is_anthropic {
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+    if let Some(key) = api_key {
+        req = if is_anthropic {
+            req.header("x-api-key", key)
+        } else if provider.eq_ignore_ascii_case("gemini") {
+            req.header("x-goog-api-key", key)
+        } else {
+            req.header("Authorization", format!("Bearer {key}"))
+        };
+    }
+    req
+}
+
 pub async fn probe_model(
     provider: &str,
     base_url: &str,
@@ -722,27 +771,10 @@ pub async fn probe_model(
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": 1,
-        "temperature": 0.0
-    });
-
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = api_key {
-        // Detect provider to set correct auth header
-        let lower = provider.to_lowercase();
-        if lower == "gemini" {
-            req = req.header("x-goog-api-key", key);
-        } else {
-            req = req.header("Authorization", format!("Bearer {key}"));
-        }
-    }
-
-    let resp = req.send().await.map_err(|e| format!("{e}"))?;
+    let resp = build_model_probe_request(&client, provider, base_url, model, api_key)
+        .send()
+        .await
+        .map_err(|e| format!("{e}"))?;
     let latency = start.elapsed().as_millis() as u64;
 
     if resp.status().is_success() {
@@ -898,19 +930,64 @@ mod tests {
     }
 
     #[test]
-    fn test_probe_model_url_construction() {
-        // Verify the URL format logic used inside probe_model.
-        let url = format!(
-            "{}/chat/completions",
-            "http://localhost:8000/v1".trim_end_matches('/')
-        );
-        assert_eq!(url, "http://localhost:8000/v1/chat/completions");
+    fn test_openai_model_probe_request() {
+        let request = build_model_probe_request(
+            &reqwest::Client::new(),
+            "openai",
+            "http://localhost:8000/v1/",
+            "test-model",
+            Some("secret"),
+        )
+        .build()
+        .expect("request should build");
 
-        let url2 = format!(
-            "{}/chat/completions",
-            "http://localhost:8000/v1/".trim_end_matches('/')
+        assert_eq!(
+            request.url().as_str(),
+            "http://localhost:8000/v1/chat/completions"
         );
-        assert_eq!(url2, "http://localhost:8000/v1/chat/completions");
+        assert_eq!(request.headers()["authorization"], "Bearer secret");
+        assert!(!request.headers().contains_key("x-api-key"));
+        let body: serde_json::Value = serde_json::from_slice(
+            request
+                .body()
+                .and_then(reqwest::Body::as_bytes)
+                .expect("JSON body should be buffered"),
+        )
+        .expect("body should be JSON");
+        assert_eq!(body["temperature"], 0.0);
+    }
+
+    #[test]
+    fn test_anthropic_model_probe_request() {
+        for provider in ["anthropic", "Anthropic", "kimi_coding", "byteplus_coding"] {
+            let request = build_model_probe_request(
+                &reqwest::Client::new(),
+                provider,
+                "https://api.example.com/",
+                "test-model",
+                Some("secret"),
+            )
+            .build()
+            .expect("request should build");
+
+            assert_eq!(
+                request.url().as_str(),
+                "https://api.example.com/v1/messages"
+            );
+            assert_eq!(request.headers()["x-api-key"], "secret");
+            assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
+            assert!(!request.headers().contains_key("authorization"));
+            let body: serde_json::Value = serde_json::from_slice(
+                request
+                    .body()
+                    .and_then(reqwest::Body::as_bytes)
+                    .expect("JSON body should be buffered"),
+            )
+            .expect("body should be JSON");
+            assert_eq!(body["model"], "test-model");
+            assert_eq!(body["max_tokens"], 1);
+            assert!(body.get("temperature").is_none());
+        }
     }
 
     #[tokio::test]

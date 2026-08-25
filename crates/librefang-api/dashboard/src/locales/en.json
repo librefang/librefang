@@ -538,7 +538,10 @@
       "err_label": "err",
       "system_prompt_placeholder": "You are a helpful AI assistant...",
       "description_placeholder": "What's different in this version?",
-      "experiment_name_placeholder": "My A/B Test"
+      "experiment_name_placeholder": "My A/B Test",
+      "delete_version_title": "Delete prompt version",
+      "delete_version_message": "Permanently delete v{{version}}? This cannot be undone.",
+      "variant_limit": "A percentage split supports at most {{count}} variants."
     },
     "thinking": "Extended Thinking",
     "thinking_enabled": "Enabled",
@@ -1189,7 +1192,11 @@
     "pending_approve_failed": "Approve failed:",
     "pending_propose_failed": "Propose to registry failed:",
     "pending_pr_opened": "Pull request opened:",
+    "pending_source_unknown": "Unknown source",
+    "pending_invalid_update": "This update is missing its target skill and cannot be approved.",
     "pending_reject_title": "Reject candidate?",
+    "pending_reject_message": "The pending candidate '{{name}}' will be deleted. This cannot be undone.",
+    "pending_reject_failed": "Reject failed:",
     "pending_rejecting": "Rejecting…",
     "pending_title": "Skill workshop pending",
     "pending_load_failed": "Failed to load pending candidates:",
@@ -1392,6 +1399,10 @@
     "rail_no_match": "No matching agents.",
     "auto_dream_on_badge": "Auto-Dream on",
     "auto_dream_off_badge": "Auto-Dream off",
+    "auto_dream_enrolled": "Enrolled",
+    "auto_dream_not_enrolled": "Off",
+    "auto_dream_last": "Last",
+    "auto_dream_next": "Next",
     "auto_dream_desc_inline": "Periodic memory consolidation per agent. Manifest override > global default; toggle the global switch here.",
     "auto_dream_global_toggle_title": "Enable or disable Auto-Dream globally",
     "auto_dream_global_on_ok": "Auto-Dream enabled globally",
@@ -1724,7 +1735,10 @@
       "submit_action": "Submit {{action}}",
       "pending_review_one": "1 workflow run awaiting operator review",
       "pending_review_other": "{{count}} workflow runs awaiting operator review",
-      "empty_artifact": "(empty artifact)"
+      "empty_artifact": "(empty artifact)",
+      "load_failed": "Failed to load pending operator reviews.",
+      "review_run": "Review {{workflow}} — {{step}}",
+      "more_pending": "+{{count}} more pending"
     }
   },
   "scheduler": {
@@ -2062,6 +2076,8 @@
     "totp_recovery_title": "Recovery Codes (save these somewhere safe):",
     "totp_recovery_reveal": "Reveal codes",
     "totp_recovery_hide": "Hide codes",
+    "totp_secret_reveal": "Reveal secret",
+    "totp_secret_hide": "Hide secret",
     "totp_reset_placeholder": "Current TOTP or recovery code",
     "totp_verify_reset": "Verify & Reset",
     "totp_revoke_placeholder": "TOTP or recovery code",
@@ -2130,6 +2146,7 @@
     "export_config_btn": "Export Config",
     "export_config_desc": "Download your current configuration as a TOML file.",
     "export_config_title": "Export Configuration",
+    "export_config_failed": "Could not export config.",
     "totp_qr_alt": "TOTP QR Code"
   },
   "config": {
@@ -2985,6 +3002,7 @@
     "summary_status": "Status",
     "finish_action": "Launch LibreFang",
     "finalize_failed": "Setup failed: {{message}}",
+    "quick_init_failed": "The default provider was saved, but initialization failed: {{message}}. Retry to continue.",
     "done_title": "LibreFang is ready",
     "done_desc": "Your default provider is configured and a starter agent has been created. You can now chat or jump into the dashboard.",
     "go_overview": "Go to Overview",
@@ -3165,7 +3183,8 @@
     "status_submitted": "submitted",
     "status_completed": "completed",
     "status_failed": "failed",
-    "image_too_large": "Image too large to display"
+    "image_too_large": "Image too large to display",
+    "image_unavailable": "Image unavailable"
   },
   "auth": {
     "title": "API Key Required",
@@ -3341,6 +3360,7 @@
       "create_failed": "Failed to create window",
       "delete_failed": "Failed to close window",
       "rename_failed": "Failed to rename window",
+      "switch_unavailable": "Cannot switch windows while the terminal is disconnected.",
       "rename_hint": "Double-click to rename",
       "name_label": "Window name",
       "name_invalid": "Name must be 1–64 characters and cannot contain | or control characters.",
@@ -3516,7 +3536,8 @@
     "copied": "Copied to clipboard",
     "copy_failed": "Failed to copy",
     "download": "Download",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "source_changed": "The TOML changed outside this editor. Cancel and reopen editing before saving."
   },
   "audit": {
     "title": "Audit trail",
@@ -3698,7 +3719,7 @@
     },
     "errors": {
       "non_negative": "{{field}} must be a finite, non-negative number",
-      "threshold_range": "alert_threshold must be in 0.0..=1.0"
+      "threshold_range": "alert_threshold must be greater than 0 and at most 1"
     },
     "toast": {
       "saved": "Spend cap saved"
@@ -4044,7 +4065,6 @@
     "page_assets_updated": "Page assets have been updated",
     "react_state_reset": "React state reset — reloading",
     "new_version_available": "A new version is available. Reload to get the latest.",
-    "unexpected": "An unexpected error occurred.",
     "force_reload_title": "Clears the auto-reload cooldown and forces a fresh load",
     "force_reload": "Force reload",
     "stack": "stack",
