@@ -376,12 +376,16 @@ pub trait KernelApi: KernelHandle + Send + Sync {
         agent_id: AgentId,
         schedule: librefang_types::agent::ScheduleMode,
     ) -> KernelResult<()>;
+    /// Update tool filters.
+    /// Every argument is a tri-state: `None` leaves the stored value alone, `Some(_)` writes it.
+    /// `disabled` is the `tools_disabled` master switch (#7742).
     fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
         capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
+        disabled: Option<bool>,
     ) -> KernelResult<()>;
     fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot>;
     fn running_session_ids(&self) -> std::collections::HashSet<SessionId>;
@@ -1212,8 +1216,16 @@ impl KernelApi for LibreFangKernel {
         capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
+        disabled: Option<bool>,
     ) -> KernelResult<()> {
-        Self::set_agent_tool_filters(self, agent_id, capabilities_tools, allowlist, blocklist)
+        Self::set_agent_tool_filters(
+            self,
+            agent_id,
+            capabilities_tools,
+            allowlist,
+            blocklist,
+            disabled,
+        )
     }
     fn list_running_sessions(&self, agent_id: AgentId) -> Vec<RunningSessionSnapshot> {
         Self::list_running_sessions(self, agent_id)

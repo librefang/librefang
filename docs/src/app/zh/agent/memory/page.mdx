@@ -15,7 +15,7 @@ LibreFang 的内存系统提供持久化存储、语义搜索和知识图谱功�
 - [知识图谱](#knowledge-graph)
 - [会话压缩](#session-compaction)
 - [后台整固（梦境模式）](#background-consolidation-auto-dream)
-- [内存提供者插件 API](#memory-provider-plugin-api)
+- [外部向量后端](#external-vector-backend)
 - [使用追踪](#usage-tracking)
 - [API 端点](#api-endpoints)
 - [最佳实践](#best-practices)
@@ -325,77 +325,76 @@ auto_dream_min_sessions = 1     # 每个会话之后都触发，适合高频 age
 
 ---
 
-## 内存提供者插件 API
+## 外部向量后端
 
-`MemoryProvider` trait 允许把外部记忆后端（向量数据库、知识图谱、远程存储服务等）和 LibreFang 内置的 SQLite 内存并排接入。
+近似最近邻检索是目前记忆子系统中唯一接受外部实现的部分，接缝就是 `VectorStore` trait。
+LibreFang 仍然拥有 SQLite 行存储、抽取流水线和全部隔离守卫；你接入的后端只决定哪些记忆 ID 距离查询向量最近。
 
-### 架构
+### 启用 HTTP 后端
 
-- 永远存在 **一个内置 provider**（默认的 SQLite 后端存储）。它不能被移除。
-- 同时最多注册 **一个外部 provider**。外部 provider 只是补充内置存储，不替换它。
-- 外部 provider 失败时，内置 provider 继续正常工作。外部 provider 的错误会被捕获、以 `WARN` 级别记录，不会传播到 agent loop。
+```toml
+[memory]
+vector_backend = "http"                                        # "sqlite"（默认）表示全部在进程内完成
+vector_store_url = "http://127.0.0.1:6333/collections/memories"
+```
 
-### Trait 接口
+`vector_backend = "http"` 而没有 `vector_store_url` 会让启动失败，而不是静默回退到 SQLite；除 `"http"` / `"sqlite"` 以外的取值会被按名字拒绝。
+base URL 会去掉尾部斜杠后原样使用，路径直接拼接在它后面。
+
+### HTTP 契约
+
+你的服务需要在该 base URL 下提供四个端点。
+响应体上限 64 MiB，连接超时 10 秒，单次请求总超时 30 秒。
+
+| 方法 | 路径 | 请求体 | 响应体 |
+|---|---|---|---|
+| POST | `/insert` | `{ id, embedding, payload, metadata }` | 忽略；任意 2xx 即视为写入成功 |
+| POST | `/search` | `{ query_embedding, limit, filter? }` | `[{ id, payload, score, metadata }]` |
+| DELETE | `/delete` | `{ id }` | 忽略；任意 2xx 即视为删除成功 |
+| POST | `/get_embeddings` | `{ ids }` | `{ "<id>": [f32, …], … }` |
+
+`filter` 是调用方的 `MemoryFilter` 原样序列化的结果——agent、source、scope、最低置信度、创建时间上下界、metadata 等值对以及 peer。
+遵守它可以让后端在排序前先剪枝，这正是它被发送过去的原因。
+
+### 后端无权决定的部分
+
+`/search` 返回的一切都被当作不可信数据，因为搜索结果是一个来自 LibreFang 无法控制的进程的 ID 列表。
+
+- **ID 从 SQLite 水合，绝不从后端的 payload 水合。** 后端返回的 `payload` 和 `metadata` 不会进入 prompt，进入 prompt 的是 LibreFang 本地那条 ID 对应的行。
+- **水合之后会重新应用调用方的 `MemoryFilter`。** 忽略了所收到 filter 的后端无法扩大调用方的范围：agent、scope、source、置信度下限、创建时间上下界和 metadata 等值都会在水合后的行上重新校验，而 `peer_id` 因为不由 `MemoryFragment` 承载，会在水合查询中作为 SQL 谓词强制执行。
+- **跨会话（`chat_scope`）与跨 session（`session_scope`）隔离在其之后运行**，走的是与进程内后端相同的 recall 后置路径，所以接入后端不会重新打开这两道守卫中的任何一道。
+
+### 失败行为
+
+- 不是 UUID 的 ID 会被丢弃并打 `WARN`，结果集中的其余部分照常水合。一条畸形记录只损失它自己，而不是整次 recall。
+- 水合不到任何行的 ID——已删除、未知、或属于另一个 peer——以同样方式被丢弃。
+- 传输层失败（连接被拒、超时、非 2xx、无法解析的响应体）会作为该次 recall 的错误返回。不同调用方的处理不同：prompt 组装路径会记录日志并用手上已有的内容继续，而直接的 API 搜索会把错误返回给调用者。
+
+### 在进程内实现该 trait
+
+`vector_backend = "http"` 覆盖了任何你能放到一个小 HTTP 服务背后的后端，这是受支持的路径。
+如果你更希望直接链接原生客户端，可以实现 `VectorStore` 并在启动时挂到 substrate 上：
 
 ```rust
+use librefang_types::memory::{MemoryFilter, VectorSearchResult, VectorStore};
+
 #[async_trait]
-pub trait MemoryProvider: Send + Sync {
-    /// A short, unique name for this provider (e.g. "pinecone", "weaviate").
-    fn name(&self) -> &str;
+impl VectorStore for QdrantVectorStore {
+    async fn insert(&self, id: &str, embedding: &[f32], payload: &str,
+                    metadata: HashMap<String, serde_json::Value>) -> LibreFangResult<()> { … }
 
-    /// Returns `true` for the built-in provider, `false` for all external providers.
-    fn is_builtin(&self) -> bool;
+    async fn search(&self, query_embedding: &[f32], limit: usize,
+                    filter: Option<MemoryFilter>) -> LibreFangResult<Vec<VectorSearchResult>> { … }
 
-    /// Returns a text block to inject into the agent system prompt at session start,
-    /// or `None` if there is nothing to inject for this session.
-    async fn system_prompt_block(&self, session_id: &str) -> Option<String>;
+    async fn delete(&self, id: &str) -> LibreFangResult<()> { … }
 
-    /// Fetches relevant context for the given query string before an LLM call.
-    /// The returned string is appended to the context window.
-    async fn prefetch(&self, query: &str, session_id: &str) -> Result<String, MemoryError>;
+    async fn get_embeddings(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> { … }
 
-    /// Called after each agent turn completes. Use this hook to index new content,
-    /// synchronize state, or flush write buffers to the external backend.
-    async fn on_turn_complete(&self, session_id: &str, turn_summary: &str) -> Result<(), MemoryError>;
+    fn backend_name(&self) -> &str { "qdrant" }
 }
 ```
 
-### 注册外部 provider
-
-在初始化阶段把你的实现传给 kernel 的内存子系统：
-
-```rust
-use librefang_memory::{MemoryManager, MemoryProvider};
-
-// Build your custom provider
-let my_provider: Arc<dyn MemoryProvider> = Arc::new(MyVectorDbProvider::new(config));
-
-// Register it with the memory manager
-memory_manager.set_external_provider(my_provider).await;
-```
-
-同时只能注册一个外部 provider。再次调用 `set_external_provider` 会替换之前注册的 provider。
-
-### 用 `prefetch_all` 聚合上下文
-
-内存管理器暴露 `prefetch_all(query, session_id)`，它会调用每个已注册 provider 的 `prefetch` 并把结果拼接：
-
-```rust
-// Called internally by the agent loop before each LLM request
-let context = memory_manager.prefetch_all(&user_query, &session_id).await;
-```
-
-各 provider 的结果之间用空行分隔，并带上 provider 名作为标签前缀。任一 provider 返回错误时，该 provider 的结果会被跳过（同时打 `WARN` 日志），其余 provider 继续被查询。
-
-### 错误隔离
-
-外部 provider 的错误从不向 agent 或用户暴露：
-
-1. `prefetch` 错误 → 打 `WARN` 日志，该 provider 的贡献用空字符串代替。
-2. `on_turn_complete` 错误 → 打 `WARN` 日志，静默丢弃。
-3. `system_prompt_block` 错误（panic）→ 在调用点捕获，返回 `None`。
-
-这种设计确保配错的或暂时不可用的外部后端无法干扰 agent loop。
+`search` 是在 recall 路径上通过阻塞桥接调用的，因此它不能长时间阻塞执行器——上面那些超时正是为此存在的，原生客户端需要自备一套。
 
 ---
 

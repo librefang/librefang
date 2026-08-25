@@ -1295,7 +1295,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         msg
     }
 
-    async fn run_workflow_text(&self, name: &str, input: &str) -> String {
+    async fn run_workflow_text(&self, name: &str, input: &str, owner: Option<AgentId>) -> String {
         let workflows = self.kernel.workflow_engine().list_workflows().await;
         let wf = match workflows.iter().find(|w| w.name.eq_ignore_ascii_case(name)) {
             Some(w) => w.clone(),
@@ -1305,7 +1305,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let run_id = match self
             .kernel
             .workflow_engine()
-            .create_run(wf.id, input.to_string())
+            .create_run_owned(wf.id, input.to_string(), owner)
             .await
         {
             Some(id) => id,

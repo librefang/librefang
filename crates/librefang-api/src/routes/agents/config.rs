@@ -215,6 +215,13 @@ pub struct SetAgentToolsRequest {
     /// Glob patterns allowed.
     #[serde(default)]
     pub tool_blocklist: Option<Vec<String>>,
+    /// `agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.
+    /// `None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.
+    ///
+    /// Named `disabled` to match the key `GET /api/agents/{id}/tools` already returns.
+    /// Until #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking.
+    #[serde(default)]
+    pub disabled: Option<bool>,
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
@@ -225,10 +232,10 @@ pub struct SetAgentToolsRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(
         content = SetAgentToolsRequest,
-        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609)."
+        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742)."
     ),
     responses(
-        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.", body = crate::types::JsonObject)
+        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -251,6 +258,7 @@ pub async fn set_agent_tools(
     if body.capabilities_tools.is_none()
         && body.tool_allowlist.is_none()
         && body.tool_blocklist.is_none()
+        && body.disabled.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -281,6 +289,7 @@ pub async fn set_agent_tools(
         body.capabilities_tools,
         body.tool_allowlist,
         body.tool_blocklist,
+        body.disabled,
     ) {
         // Read the agent back so the dashboard can `setQueryData` directly
         // instead of refetching. Returns the same shape as `GET /api/agents/{id}/tools`.
@@ -298,8 +307,9 @@ pub async fn set_agent_tools(
                 // Name any allowlist entry that provably cannot admit a tool (#6609).
                 // Evaluated against the entry read back *after* the write, so both the new declared set and the stored allowlist are the post-write values: a request that sets `capabilities_tools` and `tool_allowlist` together is judged against what it just wrote rather than what it replaced, and a request that only narrows `capabilities_tools` is judged against the allowlist it left in place.
                 //
-                // No `tools_disabled` guard is needed: `update_tool_config` unconditionally clears that flag on every successful write, so on this arm the agent's tools are always enabled.
-                if evaluate_inert_entries {
+                // Gated on `tools_disabled` as well, since #7742: `update_tool_config` no longer force-clears that flag, so an agent can reach this arm with every tool switched off.
+                // Naming an inert allowlist entry there would be advice about the second filter of a pipeline whose first stage already admits nothing — noise, and the same "your own request silenced a tool and the response was a clean 200" failure in reverse.
+                if evaluate_inert_entries && !entry.manifest.tools_disabled {
                     let inert = inert_tool_allowlist_entries(
                         &entry.manifest.capabilities.tools,
                         &entry.manifest.tool_allowlist,

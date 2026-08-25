@@ -651,6 +651,110 @@ pub(super) fn peer_scoped_key(
     }
 }
 
+/// Tag prefixes the kernel owns rather than the operator.
+///
+/// These three are written by hand-role activation (`kernel/hands_lifecycle.rs`) and are the only tags any code branches on.
+/// `hand:` and `hand_role:` route the agent's workspace under `hands/<hand>/<role>` instead of `agents/<name>` (`backfill_workspace_dir` in `kernel/workspace_setup.rs`), and `hand:` alone marks an agent autonomous for idle-wake purposes (`kernel/messaging.rs`), decides whether a tool call needs an approval gate (`kernel/handles/approval_gate.rs`), and scopes structured memory (`librefang-memory/src/structured.rs`).
+/// An operator who could add or drop one would be relocating a workspace and re-deciding an approval boundary through a field that reads like free-form metadata, so [`merge_agent_tags`] keeps them out of operator reach in both directions.
+const SYSTEM_TAG_PREFIXES: [&str; 3] = ["hand:", "hand_instance:", "hand_role:"];
+
+/// Whether a tag belongs to the kernel rather than the operator.
+fn is_system_tag(tag: &str) -> bool {
+    SYSTEM_TAG_PREFIXES
+        .iter()
+        .any(|prefix| tag.starts_with(prefix))
+}
+
+/// Merge an incoming tag list over the tags an agent is currently running with.
+///
+/// System-owned tags are taken from `live` and operator-owned tags from `incoming`, so a caller that submits a whole manifest can freely rewrite the operator half without being able to forge, drop or preserve-by-accident the kernel half.
+/// A submitted system tag is dropped rather than rejected: the round-trip a dashboard performs is GET-manifest / edit-one-field / PUT-manifest, and echoing back the `hand:` tags it was just shown must not fail the write.
+///
+/// Ordering is `live` system tags first, then `incoming` operator tags in submitted order, de-duplicated.
+/// That is deterministic for a given pair of inputs, which matters because `manifest.tags` is stringified into the router's agent summary (`librefang-kernel-router`) and a reordering there would invalidate provider prompt caches for no reason (#3298).
+pub(super) fn merge_agent_tags(live: &[String], incoming: &[String]) -> Vec<String> {
+    let mut merged: Vec<String> = live
+        .iter()
+        .filter(|tag| is_system_tag(tag))
+        .cloned()
+        .collect();
+    for tag in incoming.iter().filter(|tag| !is_system_tag(tag)) {
+        if !merged.contains(tag) {
+            merged.push(tag.clone());
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod tag_merge_tests {
+    use super::merge_agent_tags;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn operator_tags_are_replaced_wholesale() {
+        assert_eq!(
+            merge_agent_tags(&v(&["research", "beta"]), &v(&["prod"])),
+            v(&["prod"]),
+            "an operator must be able to drop a tag, not just add one"
+        );
+    }
+
+    #[test]
+    fn empty_incoming_clears_operator_tags() {
+        assert_eq!(
+            merge_agent_tags(&v(&["research"]), &[]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn system_tags_survive_an_operator_rewrite() {
+        assert_eq!(
+            merge_agent_tags(
+                &v(&["hand:clipper", "hand_role:editor", "research"]),
+                &v(&["prod"])
+            ),
+            v(&["hand:clipper", "hand_role:editor", "prod"]),
+            "hand membership drives workspace routing and approval gating; an operator tag edit must not move it"
+        );
+    }
+
+    #[test]
+    fn submitted_system_tags_are_dropped_not_honoured() {
+        assert_eq!(
+            merge_agent_tags(
+                &v(&["hand:real"]),
+                &v(&["hand:forged", "hand_role:admin", "ok"])
+            ),
+            v(&["hand:real", "ok"]),
+            "an operator must not be able to forge hand membership through the tags field"
+        );
+    }
+
+    #[test]
+    fn duplicate_operator_tags_collapse() {
+        assert_eq!(
+            merge_agent_tags(&[], &v(&["a", "b", "a"])),
+            v(&["a", "b"]),
+            "tags are stringified into the router prompt, so a duplicate is noise in the cache key"
+        );
+    }
+
+    #[test]
+    fn is_deterministic_and_order_preserving() {
+        let live = v(&["hand:h", "old"]);
+        assert_eq!(
+            merge_agent_tags(&live, &v(&["z", "a"])),
+            v(&["hand:h", "z", "a"]),
+            "submitted order is preserved verbatim so repeated identical writes are byte-identical"
+        );
+    }
+}
+
 #[cfg(test)]
 mod context_window_tests {
     use super::resolve_context_window;

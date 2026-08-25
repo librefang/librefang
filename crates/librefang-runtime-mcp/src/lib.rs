@@ -2678,7 +2678,7 @@ impl McpConnection {
                     unreachable!()
                 };
                 let params = rmcp::model::ReadResourceRequestParams::new(uri.to_string());
-                let result = tokio::time::timeout(timeout, client.read_resource(params))
+                let result = tokio::time::timeout(timeout, client.read_resource_once(params))
                     .await
                     .map_err(|_| {
                         format!(
@@ -2687,6 +2687,21 @@ impl McpConnection {
                         )
                     })?
                     .map_err(|e| format!("MCP resources/read failed: {e}"))?;
+                // `read_resource_once` rather than `read_resource`: the latter drives up to
+                // `DEFAULT_MRTR_MAX_ROUNDS` SEP-2322 `input_required` rounds inside the
+                // `tokio::time::timeout` above, silently turning one round trip into ten under a
+                // budget sized for one.
+                // We advertise only `roots` in `ClientCapabilities`, so a compliant server cannot
+                // send `input_required` at all, and `_once` preserves the single-round semantics
+                // rmcp 2.2.0 had.
+                let result = match result {
+                    rmcp::model::ReadResourceResponse::Complete(r) => r,
+                    other => {
+                        return Err(format!(
+                            "MCP resources/read returned an unsupported response: {other:?}"
+                        ));
+                    }
+                };
                 Ok(result
                     .contents
                     .iter()
@@ -2970,7 +2985,7 @@ impl McpConnection {
                 // than escalate. See #5965.
                 if let Some(c) = caller {
                     if let Some(v) = caller_context_meta_value(c) {
-                        let mut meta = rmcp::model::Meta::new();
+                        let mut meta = rmcp::model::RequestMetaObject::new();
                         meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
                         params.meta = Some(meta);
                     }
@@ -2983,7 +2998,9 @@ impl McpConnection {
                         .into_iter()
                         .map(|(k, v)| (k, serde_json::Value::String(v)))
                         .collect();
-                    let meta = params.meta.get_or_insert_with(rmcp::model::Meta::new);
+                    let meta = params
+                        .meta
+                        .get_or_insert_with(rmcp::model::RequestMetaObject::new);
                     meta.insert(
                         crate::trace_context::TRACE_CONTEXT_META_KEY.to_string(),
                         serde_json::Value::Object(trace_obj),
@@ -2991,8 +3008,8 @@ impl McpConnection {
                 }
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
-                let result: rmcp::model::CallToolResult =
-                    tokio::time::timeout(timeout, client.call_tool(params))
+                let response: rmcp::model::CallToolResponse =
+                    tokio::time::timeout(timeout, client.call_tool_once(params))
                         .await
                         .map_err(|_| {
                             format!(
@@ -3001,6 +3018,17 @@ impl McpConnection {
                             )
                         })?
                         .map_err(|e| format!("MCP tool call failed: {e}"))?;
+                // `call_tool_once` rather than `call_tool`, for the reason given at the
+                // `read_resource_once` call site above: `call_tool` would drive MRTR follow-up
+                // rounds inside a timeout budget sized for a single request.
+                let result: rmcp::model::CallToolResult = match response {
+                    rmcp::model::CallToolResponse::Complete(r) => r,
+                    other => {
+                        return Err(format!(
+                            "MCP tool call returned an unsupported response: {other:?}"
+                        ));
+                    }
+                };
 
                 // Extract renderable content from the response: text passes
                 // through, a `resource_link` becomes a first-class line, and an
@@ -6366,7 +6394,7 @@ mod tests {
         let mut params = rmcp::model::CallToolRequestParams::new("some_tool");
         params.arguments = Some(strip_caller_from_arguments(&agent_payload));
         let v = caller_context_meta_value(&kernel_caller).expect("CallerContext must serialise");
-        let mut meta = rmcp::model::Meta::new();
+        let mut meta = rmcp::model::RequestMetaObject::new();
         meta.insert(CALLER_CONTEXT_META_KEY.to_string(), v);
         params.meta = Some(meta);
 
