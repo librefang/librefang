@@ -2183,17 +2183,11 @@ mod tests {
 
     /// Companion to `test_every_migration_records_audit_row`, and the guard that test could not be (#7924).
     ///
-    /// That test asserts every applied version *has* an audit row, but the #3538 backfill at the end of
-    /// `run_migrations` creates any missing row before the assertion runs — so a migration that stamps the
-    /// wrong version number passes it, rescued by the repair path.
-    /// `migrate_v50` did exactly that: it recorded under version 49, where `INSERT OR IGNORE` silently
-    /// dropped it against `migrate_v49`'s row, and every fresh database then warned about historical drift
-    /// on its first boot.
+    /// That test asserts every applied version *has* an audit row, but the #3538 backfill at the end of `run_migrations` creates any missing row before the assertion runs — so a migration that stamps the wrong version number passes it, rescued by the repair path.
+    /// `migrate_v50` did exactly that: it recorded under version 49, where `INSERT OR IGNORE` silently dropped it against `migrate_v49`'s row, and every fresh database then warned about historical drift on its first boot.
     ///
-    /// The invariant the backfill's own doc comment already claims is the stronger one and is what this
-    /// pins: on a clean database the backfill inserts nothing, because every migration recorded itself.
-    /// A placeholder description surviving a fresh `run_migrations` means some migration is stamping a
-    /// version that is not its own.
+    /// The invariant the backfill's own doc comment already claims is the stronger one and is what this pins: on a clean database the backfill inserts nothing, because every migration recorded itself.
+    /// A placeholder description surviving a fresh `run_migrations` means some migration is stamping a version that is not its own.
     #[test]
     fn no_migration_relies_on_the_audit_backfill() {
         let conn = Connection::open_in_memory().unwrap();
@@ -2221,8 +2215,8 @@ mod tests {
 
     /// The specific collision from #7924, pinned by description rather than by presence.
     ///
-    /// Both rows existing is not enough — that was already true, because the backfill supplied the missing
-    /// one. What has to hold is that each version's description names the DDL that version actually applied.
+    /// Both rows existing is not enough — that was already true, because the backfill supplied the missing one.
+    /// What has to hold is that each version's description names the DDL that version actually applied.
     #[test]
     fn v49_and_v50_each_describe_their_own_ddl() {
         let conn = Connection::open_in_memory().unwrap();
