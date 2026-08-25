@@ -329,6 +329,21 @@ impl LibreFangKernel {
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
 
+        // A template can name skills and MCP servers that nothing on this
+        // instance provides. The declaration is kept verbatim and activates on
+        // the next skills reload / MCP connect, so this is not an error — but
+        // without a line in the log the operator's only clue is a step that
+        // quietly behaves differently than the template promised (#7713).
+        let unresolved = self.unresolved_declarations_at_spawn(&entry.manifest);
+        if !unresolved.skills.is_empty() || !unresolved.mcp_servers.is_empty() {
+            warn!(
+                agent = %name,
+                pending_skills = ?unresolved.skills,
+                pending_mcp_servers = ?unresolved.mcp_servers,
+                "Agent declares skills/MCP servers that are not installed or configured here — the declarations are retained and activate on the next skills reload / MCP connect"
+            );
+        }
+
         // Inject reset/context prompts only after the agent is registered so
         // agent-scoped injections and tag-gated global injections are visible.
         self.inject_reset_prompt(&mut session, agent_id);

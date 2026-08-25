@@ -46,11 +46,13 @@ import {
   SkillHubBar,
   SkillHubHeadline,
   HubBadge,
+  hubHealthFrom,
   type HubFilter,
   type HubCounts,
   type HubHealthMap,
 } from "../components/SkillHubBar";
-import { getSkillHub } from "../lib/skillHubs";
+import { getSkillHub, SKILL_HUBS } from "../lib/skillHubs";
+import { isMarketplaceUnavailable } from "../lib/http/errors";
 import {
   Wrench,
   Search,
@@ -82,6 +84,8 @@ import {
   Tag,
   Edit as EditIcon,
   Upload,
+  AlertCircle,
+  CloudOff,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1776,16 +1780,32 @@ export function SkillsPage() {
     [fanghubItems.length, clawhubItems.length, clawhubCnItems.length, skillhubItems.length],
   );
 
-  const hubHealth: HubHealthMap = useMemo(() => {
-    const flag = (q: { isFetching: boolean; isError: boolean }) =>
-      q.isError ? ("down" as const) : q.isFetching ? ("checking" as const) : ("live" as const);
-    return {
-      fanghub: flag(fanghubQuery),
-      clawhub: flag(clawhubQuery),
-      "clawhub-cn": flag(clawhubCnQuery),
-      skillhub: flag(activeSkillhubQuery),
-    };
-  }, [fanghubQuery, clawhubQuery, clawhubCnQuery, activeSkillhubQuery]);
+  /**
+   * Wire health per hub, straight off the query results.
+   *
+   * `hubHealthFrom` reports `"unknown"` rather than `"live"` for a query that has never run, which is the normal state for every hub the filter is not pointing at.
+   * The old inline mapping had no such state, so a disabled query — `isError: false`, `isFetching: false` — collapsed to `"live"` and lit a green dot on a marketplace nobody had contacted (#7387).
+   */
+  const hubHealth: HubHealthMap = useMemo(
+    () => ({
+      fanghub: hubHealthFrom(fanghubQuery),
+      clawhub: hubHealthFrom(clawhubQuery),
+      "clawhub-cn": hubHealthFrom(clawhubCnQuery),
+      skillhub: hubHealthFrom(activeSkillhubQuery),
+    }),
+    [fanghubQuery, clawhubQuery, clawhubCnQuery, activeSkillhubQuery],
+  );
+
+  /**
+   * Hubs whose last query failed, in `SKILL_HUBS` order.
+   *
+   * Under "All hubs" a failing hub contributes no entries and no error — `activeQuery` is `null` there, so the grid used to be indistinguishable from a hub that simply matched nothing.
+   */
+  const unavailableHubs = useMemo(
+    () =>
+      SKILL_HUBS.filter((hub) => hubHealth[hub.id] === "down").map((hub) => hub.name),
+    [hubHealth],
+  );
 
   const isAnyFetching =
     skillsQuery.isFetching ||
@@ -2085,9 +2105,49 @@ export function SkillsPage() {
           ? activeQuery.isLoading
           : fanghubQuery.isLoading && browseItems.length === 0;
         const queryError = activeQuery?.error ?? null;
+        const activeHubName =
+          hubFilter === "all"
+            ? t("skills.all_hubs")
+            : (getSkillHub(hubFilter)?.name ?? hubFilter);
 
-        return isLoading ? (
+        // Under "All hubs" nothing below renders an error, because `activeQuery` is null there, so a dead hub silently drops out of the merged grid.
+        // This banner is the only place that says otherwise.
+        const unavailableNotice =
+          hubFilter === "all" && unavailableHubs.length > 0 ? (
+            <div
+              role="status"
+              className="flex items-start gap-2 rounded-lg border border-dashed border-border-subtle px-3 py-2 mb-3 text-[12px] text-text-dim"
+            >
+              <AlertCircle
+                className="w-3.5 h-3.5 mt-[1px] shrink-0"
+                style={{ color: "var(--color-error, #ef4444)" }}
+                aria-hidden="true"
+              />
+              <span>
+                {t("skills.hub_unavailable_all", {
+                  hubs: unavailableHubs.join(", "),
+                })}
+              </span>
+            </div>
+          ) : null;
+
+        const body = isLoading ? (
           <SkillGridSkeleton count={hubFilter === "fanghub" ? 4 : 6} />
+        ) : queryError && isMarketplaceUnavailable(queryError) ? (
+          // Checked ahead of the rate-limit branch on purpose: `isRateLimitError` matches the bare substring "rate", which any hub URL containing "accelerate" satisfies, and a dead marketplace would otherwise be reported as throttling.
+          <EmptyState
+            title={t("skills.hub_unavailable")}
+            description={t("skills.hub_unavailable_desc", { hub: activeHubName })}
+            icon={<CloudOff className="h-6 w-6" />}
+            action={
+              <Button
+                variant="secondary"
+                onClick={() => void activeQuery?.refetch()}
+              >
+                {t("common.retry")}
+              </Button>
+            }
+          />
         ) : queryError && isRateLimitError(queryError) ? (
           <EmptyState
             title={t("skills.rate_limited")}
@@ -2154,6 +2214,13 @@ export function SkillsPage() {
               ),
             )}
           </div>
+        );
+
+        return (
+          <>
+            {unavailableNotice}
+            {body}
+          </>
         );
       })()}
 

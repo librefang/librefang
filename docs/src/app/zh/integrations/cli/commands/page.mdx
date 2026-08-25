@@ -149,6 +149,70 @@ librefang agent kill a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 ---
 
+### librefang message
+
+向 Agent 发送一条消息并打印回复。
+与 `agent chat` 不同，这是单次请求，适用于脚本和自动化。
+
+```
+librefang message <AGENT> <TEXT> [--json] [--incognito] [--session-id <UUID>]
+```
+
+**参数：**
+
+| 参数 | 说明 |
+|---|---|
+| `<AGENT>` | Agent 名称或 UUID。 |
+| `<TEXT>` | 要发送的消息。 |
+
+**选项：**
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--json` | 关闭 | 打印原始 JSON 响应，而不仅是回复文本。 |
+| `--incognito` | 关闭 | 本轮不写入会话与记忆；记忆读取仍然生效。 |
+| `--session-id <UUID>` | *（规范会话）* | 指定要对话的具体会话。也可写作 `--session`。 |
+
+**会话定向：**
+
+不传 `--session-id` 时，守护进程解析到该 Agent 的*规范*会话——每个 Agent 只有一个对话。
+这对个人 Agent 没有问题，但对同时服务多个互不相关的用户的 Agent 就是错的：所有调用者的对话都落在同一段历史里，于是每位访客的文本都会出现在下一位访客那一轮的模型上下文中，而这段共享记录会在每一轮被重新发送并计费，直到撞上上下文上限。
+
+传入按对话区分的 UUID，每个对话就拥有各自的历史。
+相同的 UUID 继续同一个对话，不同的 UUID 开启一个隔离的对话。
+这与 `POST /api/agents/{id}/message` 的 `session_id` 字段等价。
+
+`--incognito` 不能替代它：它会完全抑制会话写入，因此单个对话*内部*的连续性也会丢失。
+
+**与 `session_mode` 的关系：**
+
+显式的 `--session-id` 位于内核会话解析阶梯的最顶端，因此在两个方向上都优先于 `agent.toml` 中的 `session_mode`：
+
+| `session_mode` | 不传 `--session-id` | 传 `--session-id` |
+|---|---|---|
+| `persistent`（默认） | 每次调用都复用该 Agent 唯一的规范会话。 | 改用指定的会话；规范会话不受影响。 |
+| `new` | 每次调用都新建一个一次性会话。 | 指定的会话会在多次调用间复用，从而为该对话恢复连续性。 |
+
+会话必须属于被寻址的 Agent。
+属于其他 Agent 的 UUID 会被拒绝而不会被读取，因此一个 Agent 的 id 永远无法暴露另一个 Agent 的历史。
+格式非法的 UUID 会在发出请求之前由 CLI 拒绝。
+
+**示例：**
+
+```bash
+# 规范会话——行为与以往一致
+librefang message coder "Fix the bug in main.rs"
+
+# 与同一个 Agent 的两个隔离对话
+librefang message sales "My customer code is PINE-77." --session-id 11111111-1111-4111-8111-111111111111
+librefang message sales "What is my customer code?"    --session-id 22222222-2222-4222-8222-222222222222
+
+# 继续第一个对话
+librefang message sales "And how many licences does that cover?" --session-id 11111111-1111-4111-8111-111111111111
+```
+
+---
+
 ## Hand 管理
 
 Hand 是自主执行模块，赋予 Agent 在真实世界中执行操作的能力 -- 浏览网页、管理文件、调用 API 等。所有 Hand 命令需要守护进程正在运行。
@@ -1204,7 +1268,7 @@ channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、
 | `librefang spawn <template>` | `agent spawn` | 从模板/manifest spawn agent。`--name`、`--dry-run` |
 | `librefang agents` | `agent list` | 列出 agent。`--json` |
 | `librefang kill <agent_id>` | `agent kill` | 杀掉运行中的 agent。 |
-| `librefang message <agent> <text>` | — | 发一次性消息,打印回复。`--json` |
+| `librefang message <agent> <text>` | — | 发一次性消息,打印回复。`--json`、`--incognito`、`--session-id <UUID>` — 见 [librefang message](#librefang-message)。 |
 
 ### 脚手架
 

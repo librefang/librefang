@@ -1,0 +1,4 @@
+A workflow with no saved canvas layout no longer loads into the Canvas as an empty graph.
+The editor read each step's agent from `step.agent.id` / `step.agent.name`, but the API names those fields `agent_id` / `agent_name`, so every hydrated node came back unbound, rendered as "click to assign", and was dropped again on the next save.
+Steps bound by name are no longer stripped either: the config panel rebuilt the binding from the running-agent dropdown alone, so opening a name-bound step and pressing save silently unbound it.
+The TUI's workflow creator could not create anything at all — it posted the steps field as a JSON string rather than the array the API parses, and then reported the resulting rejection as a success — so it now parses the field first, names the mistake when the text is not a JSON array, and surfaces a non-2xx response as the failure it is (#7862) (@houko)

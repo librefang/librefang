@@ -88,12 +88,7 @@ relying on these workflows for real releases. Recommended settings:
       `@librefang/cli`, and the per-arch binary packages emitted by
       `cargo xtask publish-npm-binaries`. Workflow filename is the
       split file; environment name is `release-npm`.
-- [ ] Confirm `cargo xtask publish-npm-binaries` propagates
-      `--provenance` to its underlying `npm publish` calls. If it does
-      not, add the flag in `xtask/src/publish_npm_binaries.rs` (or
-      whichever module owns it) before any cutover PR — otherwise the
-      OIDC-equipped split workflow still publishes without provenance
-      attestations.
+- [x] The split workflow passes `--provenance` to `cargo xtask publish-npm-binaries`, which propagates it to every underlying `npm publish` call. The unified PAT path omits the opt-in flag and remains unchanged.
 - [ ] Smoke-test each split workflow on a real tag that already
       shipped. The split jobs use `gh release upload --clobber`, so
       re-uploading identical artifacts is a no-op as far as

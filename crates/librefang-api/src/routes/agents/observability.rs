@@ -307,7 +307,7 @@ pub async fn agent_metrics(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -315,7 +315,8 @@ pub async fn agent_metrics(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -325,14 +326,16 @@ pub async fn agent_metrics(
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            )
+                .into_response();
         }
     };
     if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        )
+            .into_response();
     }
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
@@ -361,18 +364,11 @@ pub async fn agent_metrics(
         .map(|s| s.messages.len() as u64)
         .unwrap_or(0);
 
-    // Error count from the audit log (count entries with non-"ok" outcome for this agent).
-    // NOTE: This scans the most recent 100k audit entries. Agents with errors beyond
-    // this window will have under-reported error counts. A dedicated per-agent error
-    // counter or index would eliminate this limitation.
     let agent_id_str = agent_id.to_string();
-    let error_count: u64 = state
-        .kernel
-        .audit()
-        .recent(100_000)
-        .iter()
-        .filter(|e| e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success")
-        .count() as u64;
+    let error_count = match state.kernel.audit().count_agent_errors(&agent_id_str) {
+        Ok(count) => count,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
 
     // Uptime since the agent was created.
     let uptime_secs = (chrono::Utc::now() - entry.created_at).num_seconds().max(0) as u64;
@@ -418,6 +414,7 @@ pub async fn agent_metrics(
             "avg_response_time_ms": avg_response_time_ms,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/agents/{id}/logs — Returns structured execution logs for an agent.
@@ -448,7 +445,7 @@ pub async fn agent_logs(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -456,7 +453,8 @@ pub async fn agent_logs(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -465,7 +463,8 @@ pub async fn agent_logs(
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        )
+            .into_response();
     }
 
     let max_entries: usize = params
@@ -487,21 +486,18 @@ pub async fn agent_logs(
 
     let agent_id_str = agent_id.to_string();
 
-    // Filter audit log entries belonging to this agent.
-    let entries: Vec<serde_json::Value> = state
-        .kernel
-        .audit()
-        .recent(100_000)
+    let outcome = (!level_filter.is_empty()).then_some(level_filter.as_str());
+    let audit_entries =
+        match state
+            .kernel
+            .audit()
+            .recent_for_agent(&agent_id_str, outcome, offset, max_entries)
+        {
+            Ok(entries) => entries,
+            Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+        };
+    let entries: Vec<serde_json::Value> = audit_entries
         .iter()
-        .filter(|e| e.agent_id == agent_id_str)
-        .filter(|e| {
-            if level_filter.is_empty() {
-                return true;
-            }
-            e.outcome.eq_ignore_ascii_case(&level_filter)
-        })
-        .skip(offset)
-        .take(max_entries)
         .map(|e| {
             serde_json::json!({
                 "seq": e.seq,
@@ -522,4 +518,5 @@ pub async fn agent_logs(
             "logs": entries,
         })),
     )
+        .into_response()
 }

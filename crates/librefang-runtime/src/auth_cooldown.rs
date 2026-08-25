@@ -384,22 +384,19 @@ impl ProviderCooldown {
             .collect()
     }
 
-    /// Clear expired cooldowns (call periodically, e.g. every 60s).
+    /// Clear closed cooldown entries (call periodically, e.g. every 60s).
+    ///
+    /// A failed entry whose cooldown duration elapsed is still `HalfOpen` and
+    /// retains the error count needed for the next backoff step. Only a
+    /// successful, fully reset entry is safe to discard.
     pub fn clear_expired(&self) {
-        let mut to_remove = Vec::new();
-        for entry in self.states.iter() {
-            if let Some(start) = entry.value().cooldown_start {
-                if start.elapsed() >= entry.value().cooldown_duration
-                    && entry.value().error_count == 0
-                {
-                    to_remove.push(entry.key().clone());
-                }
+        self.states.retain(|provider, state| {
+            let closed = state.error_count == 0 && state.cooldown_start.is_none();
+            if closed {
+                debug!(provider, "circuit breaker: cleared closed entry");
             }
-        }
-        for key in to_remove {
-            self.states.remove(&key);
-            debug!(provider = %key, "circuit breaker: cleared expired entry");
-        }
+            !closed
+        });
     }
 
     /// Force-reset a specific provider (admin action).
@@ -427,7 +424,7 @@ impl ProviderCooldown {
         let mut sorted: Vec<_> = profiles.iter().collect();
         sorted.sort_by_key(|p| p.priority);
 
-        for profile in sorted {
+        for profile in &sorted {
             let key = format!("{}::{}", provider, profile.name);
             let state = self.states.get(&key);
 
@@ -448,7 +445,7 @@ impl ProviderCooldown {
         }
 
         // All profiles in cooldown — return the first one anyway (least bad)
-        let first = &profiles[0];
+        let first = sorted[0];
         Some((first.name.clone(), first.api_key_env.clone()))
     }
 
@@ -675,22 +672,60 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_expired() {
+    fn test_clear_expired_removes_closed_entries() {
         let mut config = fast_config();
         config.base_cooldown_secs = 0;
         let cb = ProviderCooldown::new(config);
 
         cb.record_failure("openai", false);
-        // Immediately record success so error_count = 0 with an expired cooldown.
         cb.record_success("openai");
-
-        // The entry still exists in the map.
+        assert_eq!(cb.states.get("openai").unwrap().error_count, 0);
         assert!(cb.states.contains_key("openai"));
 
-        // After success the cooldown_start is None, so clear_expired won't match.
-        // Instead, let's test with a scenario where cooldown expired naturally:
-        cb.force_reset("openai");
+        cb.clear_expired();
+
         assert!(!cb.states.contains_key("openai"));
+    }
+
+    #[test]
+    fn test_clear_expired_preserves_half_open_failure_state() {
+        let mut config = fast_config();
+        config.base_cooldown_secs = 0;
+        let cb = ProviderCooldown::new(config);
+
+        cb.record_failure("openai", false);
+        cb.clear_expired();
+
+        assert_eq!(cb.states.get("openai").unwrap().error_count, 1);
+        assert_eq!(cb.get_state("openai"), CircuitState::HalfOpen);
+        assert_eq!(cb.check("openai"), CooldownVerdict::AllowProbe);
+    }
+
+    #[test]
+    fn test_all_cooled_profiles_fall_back_to_highest_priority() {
+        let mut config = fast_config();
+        config.base_cooldown_secs = 100;
+        let cb = ProviderCooldown::new(config);
+        let profiles = vec![
+            librefang_types::config::AuthProfile {
+                name: "secondary".to_string(),
+                api_key_env: "SECONDARY_KEY".to_string(),
+                priority: 10,
+            },
+            librefang_types::config::AuthProfile {
+                name: "primary".to_string(),
+                api_key_env: "PRIMARY_KEY".to_string(),
+                priority: 0,
+            },
+        ];
+
+        cb.advance_profile("openai", "secondary", false);
+        cb.advance_profile("openai", "primary", false);
+
+        assert_eq!(
+            cb.select_profile("openai", &profiles),
+            Some(("primary".to_string(), "PRIMARY_KEY".to_string()))
+        );
     }
 
     #[test]

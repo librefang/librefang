@@ -73,13 +73,14 @@ impl StreamingDirectiveAccumulator {
                     // Look for closing ]]
                     if let Some(end) = after_open.find("]]") {
                         let tag_content = &after_open[..end];
-                        let tag_len = 2 + end + 2; // [[ + content + ]]
+                        let tag_byte_len = 2 + end + 2; // [[ + content + ]]
+                        let tag_char_len = remaining[..tag_byte_len].chars().count();
 
                         // Parse the directive
                         self.parse_tag(tag_content);
 
                         // Advance past the full tag
-                        for _ in 0..tag_len {
+                        for _ in 0..tag_char_len {
                             chars.next();
                         }
                         continue;
@@ -145,6 +146,14 @@ mod tests {
         let (text, dirs) = parse_directives("[[reply:msg_123]] Hello!");
         assert_eq!(text, "Hello!");
         assert_eq!(dirs.reply_to.as_deref(), Some("msg_123"));
+    }
+
+    #[test]
+    fn test_reply_directive_with_unicode_id_preserves_following_text() {
+        let (text, dirs) = parse_directives("[[reply:café]]Visible");
+
+        assert_eq!(text, "Visible");
+        assert_eq!(dirs.reply_to.as_deref(), Some("café"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { useCommsEvents } from "./channels";
+import { commsQueries, useCommsEvents } from "./channels";
 import { useModels, useModelOverrides } from "./models";
 import * as httpClient from "../http/client";
 import { commsKeys, modelKeys } from "./keys";
@@ -17,6 +17,14 @@ beforeEach(() => {
 });
 
 describe("useCommsEvents", () => {
+  it("defines foreground polling in the reusable query factory", () => {
+    const options = commsQueries.events(50);
+
+    expect(options.staleTime).toBe(10_000);
+    expect(options.refetchInterval).toBe(30_000);
+    expect(options.refetchIntervalInBackground).toBe(false);
+  });
+
   it("should fetch when enabled is undefined (default)", async () => {
     const mockEvents = [{ id: "evt-1", kind: "message" }];
     vi.mocked(httpClient.listCommsEvents).mockResolvedValue(mockEvents);

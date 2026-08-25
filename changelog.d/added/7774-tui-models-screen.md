@@ -1,0 +1,3 @@
+A Models screen in the TUI, on F8, listing the catalogue with each model's context window and maximum output tokens editable in place.
+The value in force sits next to the value the catalog declares, so a corrected model is distinguishable from an untouched one at a glance and a model nothing knows a window for is called out rather than shown as a plausible-looking number.
+Editing writes the same `model_overrides.json` the dashboard and the API write, keyed by `provider:model_id`, so the correction survives a registry sync and applies to every agent on that model — an operator working over SSH no longer has to set the wrong per-agent field on each of them in turn (#7881) (@houko)
