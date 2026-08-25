@@ -15,12 +15,8 @@ Jobs that only call a reusable workflow (``uses:`` at job level) are skipped, be
 GitHub rejects ``timeout-minutes`` on those -- the cap belongs to the called workflow.
 
 The same pass also rejects a duplicate key anywhere in a workflow file.
-``yaml.safe_load`` silently keeps the last of two identical keys, so a file that YAML
-accepts can still be one GitHub Actions refuses to start -- and a refused workflow
-reports as a red run with no jobs, which reads like a test failure rather than a
-malformed file. That is not hypothetical: resolving a merge where ``main`` and a branch
-had each added ``timeout-minutes`` to the same job by keeping *both* lines produced
-exactly that, passed every YAML check, and reached ``main``.
+``yaml.safe_load`` silently keeps the last of two identical keys, so a file that YAML accepts can still be one GitHub Actions refuses to start -- and a refused workflow reports as a red run with no jobs, which reads like a test failure rather than a malformed file.
+That is not hypothetical: resolving a merge where ``main`` and a branch had each added ``timeout-minutes`` to the same job by keeping *both* lines produced exactly that, passed every YAML check, and reached ``main``.
 """
 
 from __future__ import annotations
