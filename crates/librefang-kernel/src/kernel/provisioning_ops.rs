@@ -144,26 +144,39 @@ impl LibreFangKernel {
                     }
                 }
                 Action::Prune { .. } => {
-                    report.pruned += 1;
-                    if let Some(name) = key.strip_prefix("agent/") {
-                        match self.agents.registry.find_by_name(name) {
-                            Some(entry) => {
-                                if let Err(e) = self.kill_agent(entry.id) {
-                                    tracing::warn!(
-                                        agent = %name,
-                                        "Failed to prune provisioned agent: {e}"
-                                    );
-                                } else {
-                                    info!(
-                                        agent = %name,
-                                        "Pruned provisioned agent — its declaration left the tree"
-                                    );
+                    let name = key.strip_prefix("agent/").unwrap_or(&key).to_string();
+                    match self.agents.registry.find_by_name(&name) {
+                        Some(entry) => match self.kill_agent(entry.id) {
+                            Ok(()) => {
+                                report.pruned += 1;
+                                info!(
+                                    agent = %name,
+                                    "Pruned provisioned agent — its declaration left the tree"
+                                );
+                            }
+                            Err(e) => {
+                                // Keep the provenance so the next boot retries. Dropping it here
+                                // would silently release a still-running agent that the deployment
+                                // asked to have deleted — the outcome `keep` produces, reached by
+                                // a failure rather than by the operator's choice.
+                                report.failed += 1;
+                                let error = format!("failed to prune the agent: {e}");
+                                tracing::error!(agent = %name, "{error}");
+                                if let Some(prev) = previous.resources.get(&key) {
+                                    failures.push(ProvisioningFailure {
+                                        source: prev.source.clone(),
+                                        error,
+                                    });
+                                    next.resources.insert(key, prev.clone());
                                 }
                             }
-                            None => tracing::debug!(
+                        },
+                        None => {
+                            report.pruned += 1;
+                            tracing::debug!(
                                 agent = %name,
                                 "Provisioned agent already gone; nothing to prune"
-                            ),
+                            );
                         }
                     }
                 }
