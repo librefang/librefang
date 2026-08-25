@@ -221,6 +221,8 @@ async fn get_config_exposes_writable_fields_that_used_to_be_write_only() {
         "browser.enabled",
         "media.image_model",
         "media.custom_stt",
+        "media.transcription_timeout_secs",
+        "media.ffmpeg_timeout_secs",
         "tts.custom",
         "channels.file_download_dir",
         // Found alongside them while auditing every writable section.

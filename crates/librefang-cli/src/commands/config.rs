@@ -10,8 +10,7 @@ use crate::commands::prelude::*;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn cmd_config_show() {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     if !config_path.exists() {
         println!(
@@ -38,8 +37,7 @@ pub(crate) fn cmd_config_show() {
 }
 
 pub(crate) fn cmd_config_edit() {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
@@ -77,8 +75,7 @@ pub(crate) fn cmd_config_edit() {
 }
 
 pub(crate) fn cmd_config_get(key: &str) {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     if !config_path.exists() {
         ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
@@ -143,8 +140,7 @@ pub(crate) fn parse_toml_integer(raw: &str) -> Result<toml::Value, String> {
 }
 
 pub(crate) fn cmd_config_set(key: &str, value: &str) {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     if !config_path.exists() {
         ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
@@ -276,8 +272,7 @@ pub(crate) fn cmd_config_set(key: &str, value: &str) {
 }
 
 pub(crate) fn cmd_config_unset(key: &str) {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     if !config_path.exists() {
         ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));

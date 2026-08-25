@@ -266,12 +266,17 @@ fn lookup_hardcoded(model_id: &str) -> Option<u64> {
 }
 
 /// Build a synthetic `ModelCatalogEntry` for a layer that doesn't have a
-/// registry-backed entry to borrow (L1 / L5).
+/// registry-backed entry to borrow (L1 / L3 / L4 / L5 / final default).
+///
+/// `limits_known` mirrors the layer that produced the numbers, which is the same distinction [`MetadataSource`] already records alongside the entry.
+/// An operator override, a persisted cache entry and a live probe all have a source; the L5 substring table and the two provider-shaped defaults are guesses this crate invented.
+/// Recording it on the entry means a caller that sees only the entry, and not the `ResolvedModel` wrapper, can still tell the two apart.
 fn synthesize_entry(
     model: &str,
     provider: &str,
     context_window: u64,
     max_output_tokens: u64,
+    limits_known: bool,
 ) -> ModelCatalogEntry {
     ModelCatalogEntry {
         id: model.to_string(),
@@ -284,6 +289,7 @@ fn synthesize_entry(
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: false,
+        limits_known,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,
@@ -571,7 +577,9 @@ async fn probe_anthropic(
 ///
 /// Zero values are rejected at every step so a misconfigured server
 /// can't poison the cache with a useless `0`.
-fn parse_openai_model(json: &serde_json::Value) -> Option<u64> {
+///
+/// Also used by [`crate::provider_health`] against each element of a `GET /v1/models` listing: the per-model objects in a listing carry the same keys as the single-model response, and reading them there is what keeps a gateway-discovered catalog entry from being filled in with a literal (#7780).
+pub(crate) fn parse_openai_model(json: &serde_json::Value) -> Option<u64> {
     const KEYS: &[&str] = &[
         "max_model_len",
         "context_length",
@@ -587,6 +595,30 @@ fn parse_openai_model(json: &serde_json::Value) -> Option<u64> {
         }
     }
     None
+}
+
+/// Extract the maximum-output-tokens ceiling from one OpenAI-compatible model object, in the same spirit as [`parse_openai_model`].
+///
+/// The key list is deliberately **disjoint** from the context-window list above.
+/// `max_tokens` is claimed there as a last-ditch reading of the full window, and a server that reports only `max_tokens` gives no way to tell which of the two it meant — counting it as both would silently assert an output ceiling equal to the whole context.
+///
+/// 1. `max_output_tokens` — LiteLLM normalised key, also OpenRouter.
+/// 2. `max_completion_tokens` — OpenAI request-side name, echoed by some proxies.
+/// 3. `/top_provider/max_completion_tokens` — OpenRouter's listing shape.
+///
+/// Zero is rejected at every step: `0` is the catalog's "unknown / not applicable" encoding, and a misconfigured server reporting it must not be recorded as having answered.
+pub(crate) fn parse_openai_model_max_output(json: &serde_json::Value) -> Option<u64> {
+    const KEYS: &[&str] = &["max_output_tokens", "max_completion_tokens"];
+    for key in KEYS {
+        if let Some(n) = json.get(*key).and_then(|v| v.as_u64()) {
+            if n > 0 {
+                return Some(n);
+            }
+        }
+    }
+    json.pointer("/top_provider/max_completion_tokens")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
 }
 
 /// Probe a generic OpenAI-compatible `GET /v1/models/{model}` endpoint.
@@ -651,7 +683,7 @@ pub async fn resolve_model_metadata<'a>(
     // ----- Layer 1: agent manifest override -----
     if let Some(ctx) = request.manifest_override_context.filter(|v| *v > 0) {
         let max_out = request.manifest_override_max_output.unwrap_or(0);
-        let entry = synthesize_entry(request.model, request.provider, ctx, max_out);
+        let entry = synthesize_entry(request.model, request.provider, ctx, max_out, true);
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::AgentManifest,
@@ -689,6 +721,7 @@ pub async fn resolve_model_metadata<'a>(
                 request.provider,
                 cached.context_window,
                 cached.max_output_tokens,
+                true,
             );
             return ResolvedModel {
                 entry: Cow::Owned(entry),
@@ -712,7 +745,7 @@ pub async fn resolve_model_metadata<'a>(
             },
         )
         .await;
-        let entry = synthesize_entry(request.model, request.provider, ctx, 0);
+        let entry = synthesize_entry(request.model, request.provider, ctx, 0, true);
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::RuntimeProbe,
@@ -721,7 +754,7 @@ pub async fn resolve_model_metadata<'a>(
 
     // ----- Layer 5: hardcoded substring table + provider default -----
     if let Some(ctx) = lookup_hardcoded(stripped) {
-        let entry = synthesize_entry(request.model, request.provider, ctx, 0);
+        let entry = synthesize_entry(request.model, request.provider, ctx, 0, false);
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::HardcodedFallback,
@@ -735,13 +768,20 @@ pub async fn resolve_model_metadata<'a>(
             request.provider,
             DEFAULT_ANTHROPIC_CONTEXT,
             0,
+            false,
         );
         return ResolvedModel {
             entry: Cow::Owned(entry),
             source: MetadataSource::Default200kAnthropic,
         };
     }
-    let entry = synthesize_entry(request.model, request.provider, DEFAULT_GENERIC_CONTEXT, 0);
+    let entry = synthesize_entry(
+        request.model,
+        request.provider,
+        DEFAULT_GENERIC_CONTEXT,
+        0,
+        false,
+    );
     ResolvedModel {
         entry: Cow::Owned(entry),
         source: MetadataSource::Default32k,
@@ -771,6 +811,7 @@ mod tests {
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
+            limits_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,

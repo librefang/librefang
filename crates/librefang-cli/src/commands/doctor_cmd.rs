@@ -125,7 +125,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         }
 
         // --- Check 3: Config TOML syntax validation ---
-        let config_path = librefang_dir.join("config.toml");
+        let config_path = cli_config_path();
         if config_path.exists() {
             let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
             match toml::from_str::<toml::Value>(&config_content) {
@@ -229,7 +229,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
         // --- Check 4: Port availability ---
         // Read api_listen from config (default: 127.0.0.1:4545)
         let api_listen = {
-            let cfg_path = librefang_dir.join("config.toml");
+            let cfg_path = cli_config_path();
             if cfg_path.exists() {
                 std::fs::read_to_string(&cfg_path)
                     .ok()
@@ -610,8 +610,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
     // --- Check 11: .env keys vs config api_key_env consistency ---
     {
-        let librefang_dir = cli_librefang_home();
-        let config_path = librefang_dir.join("config.toml");
+        let config_path = cli_config_path();
         if config_path.exists() {
             let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
             // Look for api_key_env references in config
@@ -638,7 +637,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     // --- Check 12: Config deserialization into KernelConfig ---
     {
         let librefang_dir = cli_librefang_home();
-        let config_path = librefang_dir.join("config.toml");
+        let config_path = cli_config_path();
         if config_path.exists() {
             if !json {
                 println!("{}", i18n::t("doctor-section-config-val"));
@@ -895,7 +894,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
 
         // Count configured [[mcp_servers]] entries in config.toml (if any).
         let configured_count = {
-            let config_path = librefang_dir.join("config.toml");
+            let config_path = cli_config_path();
             if config_path.is_file() {
                 let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
                 toml::from_str::<toml::Value>(&raw)
@@ -1187,6 +1186,7 @@ pub(crate) fn cmd_doctor(json: bool, repair: bool) {
     {
         let ctx = doctor::AuditContext {
             librefang_home: cli_librefang_home(),
+            config_path: cli_config_path(),
         };
         for result in doctor::run_all(&ctx) {
             if !json {

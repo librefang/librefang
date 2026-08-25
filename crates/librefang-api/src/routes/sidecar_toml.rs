@@ -39,8 +39,11 @@ pub fn upsert_sidecar_block(
     // a venv binary (`command = "/opt/venv/bin/python"`) or pass extra
     // flags (`args = [..., "--debug"]`) don't lose those edits every
     // time someone clicks Save in the dashboard.
-    fn write_command_and_args_defaults(block: &mut Table, command: &str, args: &[&str]) {
+    fn write_command_default(block: &mut Table, command: &str) {
         block["command"] = value(command);
+    }
+
+    fn write_args_default(block: &mut Table, args: &[&str]) {
         let mut args_arr = Array::new();
         for a in args {
             args_arr.push(*a);
@@ -48,16 +51,23 @@ pub fn upsert_sidecar_block(
         block["args"] = value(args_arr);
     }
 
-    fn command_or_args_present(block: &Table) -> bool {
-        let cmd_present = block
+    fn command_present(block: &Table) -> bool {
+        block
             .get("command")
             .and_then(|i| i.as_str())
-            .is_some_and(|s| !s.is_empty());
-        let args_present = block
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    fn args_present(block: &Table) -> bool {
+        block
             .get("args")
             .and_then(|i| i.as_array())
-            .is_some_and(|a| !a.is_empty());
-        cmd_present || args_present
+            .is_some_and(|a| !a.is_empty())
+    }
+
+    fn write_command_and_args_defaults(block: &mut Table, command: &str, args: &[&str]) {
+        write_command_default(block, command);
+        write_args_default(block, args);
     }
 
     // Helper: apply the keys the dashboard configure form owns. `name`
@@ -123,11 +133,14 @@ pub fn upsert_sidecar_block(
             .unwrap_or("");
         if existing_name == name {
             let existing = aot.get_mut(i).expect("indexed");
-            // Backfill catalog defaults only if the operator never set
-            // `command`/`args` (e.g. block was hand-written as a stub).
-            // Otherwise preserve their hand-edits.
-            if !command_or_args_present(existing) {
-                write_command_and_args_defaults(existing, command, args);
+            // Backfill each missing catalog field independently. A partial
+            // hand-edit must not suppress the default for its required
+            // sibling, while a non-empty operator value remains untouched.
+            if !command_present(existing) {
+                write_command_default(existing, command);
+            }
+            if !args_present(existing) {
+                write_args_default(existing, args);
             }
             write_form_managed(existing, name, channel_type, env, managed_env_keys);
             replaced = true;

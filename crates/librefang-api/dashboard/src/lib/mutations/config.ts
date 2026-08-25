@@ -10,19 +10,24 @@ import {
 } from "../http/client";
 import { configKeys, overviewKeys } from "../queries/keys";
 
-type SetConfigResult = {
+export type SetConfigResult = {
   status: string;
   restart_required?: boolean;
   reload_error?: string;
 };
 type SetConfigVars = { path: string; value: unknown };
-type BatchSetConfigResult = Array<{
+export type BatchSetConfigItem = {
   path: string;
   value: unknown;
   data?: SetConfigResult;
   error?: Error;
-}>;
+};
+export type BatchSetConfigResult = BatchSetConfigItem[];
 type BatchSetConfigVars = SetConfigVars[];
+
+export function hasBatchConfigErrors(results: BatchSetConfigResult): boolean {
+  return results.some((result) => result.error !== undefined);
+}
 
 export function useSetConfigValue(
   options?: Partial<
@@ -40,6 +45,13 @@ export function useSetConfigValue(
   });
 }
 
+/**
+ * Save every entry independently and always resolve with one result per input.
+ *
+ * Partial success is intentional: ConfigPage clears successfully persisted
+ * drafts while retaining failed fields for retry. Callers that only need an
+ * aggregate outcome should use `hasBatchConfigErrors` on the resolved value.
+ */
 export function useBatchSetConfigValues(
   options?: Partial<
     UseMutationOptions<BatchSetConfigResult, Error, BatchSetConfigVars>
