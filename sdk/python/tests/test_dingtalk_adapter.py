@@ -191,7 +191,7 @@ def _callback_frame(payload_overrides=None, **frame_overrides):
         "conversationId": "cid1",
         "conversationType": "1",
         "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=xxx",
-        "sessionWebhookExpiredTime": 1735000000000,
+        "sessionWebhookExpiredTime": 4102444800000,
         "msgId": "m1",
     }
     if payload_overrides:
@@ -405,6 +405,39 @@ def test_mark_seen_empty_always_true():
     a = _adapter()
     assert a._mark_seen("") is True
     assert a._mark_seen(None) is True
+
+
+def test_session_webhook_cache_evicts_oldest_at_limit(monkeypatch):
+    monkeypatch.setattr(dt_mod, "SESSION_WEBHOOKS_MAX", 3)
+    a = _adapter()
+    for i in range(4):
+        a._cache_session_webhook(f"m{i}", f"https://example.test/{i}", 0)
+    assert list(a._session_webhooks) == ["m1", "m2", "m3"]
+
+
+def test_session_webhook_cache_drops_expired_urls(monkeypatch):
+    now_ms = time.time_ns() // 1_000_000
+    a = _adapter()
+    a._cache_session_webhook("expired", "https://example.test/old", now_ms - 1)
+    a._cache_session_webhook("live", "https://example.test/new", now_ms + 60_000)
+    assert list(a._session_webhooks) == ["live"]
+    assert a._pop_session_webhook("live") == "https://example.test/new"
+    assert "live" not in a._session_webhook_expiries
+
+
+def test_expired_session_webhook_update_invalidates_existing_url():
+    now_ms = time.time_ns() // 1_000_000
+    a = _adapter()
+    a._cache_session_webhook(
+        "same-message", "https://example.test/live", now_ms + 60_000,
+    )
+
+    a._cache_session_webhook(
+        "same-message", "https://example.test/expired", now_ms - 1,
+    )
+
+    assert a._pop_session_webhook("same-message") is None
+    assert "same-message" not in a._session_webhook_expiries
 
 
 # ─── on_send routing ─────────────────────────────────────────────────

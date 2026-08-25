@@ -461,6 +461,23 @@ pub struct SessionContextResponse {
     /// `UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is
     /// always positive.
     pub max_context_tokens: usize,
+    /// Which layer of the precedence chain produced `max_context_tokens`
+    /// (refs #7774): `agent_override`, `model_override`, `catalog`,
+    /// `session_hint` or `fallback`.
+    ///
+    /// Without this the number is unreadable: a window an operator set, one the
+    /// registry declared and one the runtime invented are all the same integer.
+    pub max_context_tokens_source: String,
+    /// True when `max_context_tokens` is a guess rather than a fact about the
+    /// model — i.e. the source is `fallback` (refs #7774).
+    ///
+    /// The condition behind the report that opened the issue: a gateway-served
+    /// model reports no window, the runtime assumes 8192, and a conversation
+    /// well inside the model's real window is refused for an overflow that
+    /// exists only in that assumption.
+    /// Clients render the warning off this flag rather than string-matching the
+    /// source.
+    pub max_context_tokens_assumed: bool,
     /// Usage percentage, clamped to 100 with one decimal of precision.
     pub pct: f64,
     /// The agent's model id.
@@ -578,6 +595,8 @@ pub async fn get_agent_session_context(
             Json(SessionContextResponse {
                 used_tokens: report.estimated_tokens,
                 max_context_tokens: report.context_window,
+                max_context_tokens_source: report.context_window_source.as_str().to_string(),
+                max_context_tokens_assumed: report.context_window_source.is_assumed(),
                 pct: report.usage_percent,
                 model,
                 pressure: format!("{:?}", report.pressure).to_lowercase(),
@@ -1278,20 +1297,13 @@ pub async fn export_session_trajectory(
     use axum::http::header;
     use axum::response::IntoResponse;
 
-    let (
-        err_invalid_id,
-        err_session_invalid,
-        err_not_found,
-        err_session_not_found,
-        err_generic_key,
-    ) = {
+    let (err_invalid_id, err_session_invalid, err_not_found, err_session_not_found) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
             t.t("api-error-agent-invalid-id"),
             t.t("api-error-session-invalid-id"),
             t.t("api-error-agent-not-found"),
             "Session not found".to_string(),
-            "api-error-generic".to_string(),
         )
     };
 
@@ -1350,10 +1362,9 @@ pub async fn export_session_trajectory(
         }
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": msg})),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
                 .into_response();
         }
@@ -1370,12 +1381,10 @@ pub async fn export_session_trajectory(
         let json = match bundle.to_json() {
             Ok(json) => json,
             Err(error) => {
-                tracing::error!(%error, "failed to serialize trajectory bundle");
                 let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                let msg = t.t_args(&err_generic_key, &[("error", &error.to_string())]);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": msg})),
+                    Json(serde_json::json!({"error": scrub_500(&error, &t)})),
                 )
                     .into_response();
             }
@@ -1783,5 +1792,16 @@ mod tests {
         assert!(capped.len() <= 102_400);
         assert!(capped.is_char_boundary(capped.len()));
         assert!(input.starts_with(&capped));
+    }
+
+    #[test]
+    fn trajectory_export_internal_errors_are_scrubbed() {
+        let t = ErrorTranslator::new("en");
+        let detail = "database failure at /srv/private/memory.db";
+        let body = scrub_500(&detail, &t);
+
+        assert_eq!(body, "Internal server error");
+        assert!(!body.contains("/srv/private"));
+        assert!(!body.contains("database"));
     }
 }

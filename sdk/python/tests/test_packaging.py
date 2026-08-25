@@ -14,6 +14,9 @@ def test_legacy_setup_metadata_includes_real_package(tmp_path):
     for filename in ("setup.py", "pyproject.toml", "README.md", "LICENSE"):
         shutil.copy2(project / filename, checkout / filename)
     shutil.copytree(project / "librefang", checkout / "librefang")
+    nested_template = checkout / "librefang" / "sidecar" / "template" / "assets" / "config"
+    nested_template.mkdir(parents=True)
+    (nested_template / "example.toml").write_text("enabled = true\n", encoding="utf-8")
 
     fixture_version = "2099.1.2rc3"
     pyproject = checkout / "pyproject.toml"
@@ -45,11 +48,13 @@ def test_legacy_setup_metadata_includes_real_package(tmp_path):
 
     assert "Name: librefang-sdk" in metadata
     assert f"Version: {fixture_version}" in metadata
+    assert "Requires-Python: >=3.10" in metadata
     assert "librefang/__init__.py" in names
     assert "librefang/sidecar/adapters/discord.py" in names
     assert "librefang/sidecar/template/README.md" in names
     assert "librefang/sidecar/template/adapter.py.tmpl" in names
     assert "librefang/sidecar/template/requirements.txt" in names
+    assert "librefang/sidecar/template/assets/config/example.toml" in names
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(wheel)

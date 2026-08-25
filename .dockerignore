@@ -11,14 +11,28 @@
 # ── Secrets and user-private state ────────────────────────────────────
 .env
 .env.*
+!.env.example
+!.env.template
+!.env.sample
 secrets.env
 secrets.env.*
-config.toml
+/config.toml
 *.pem
 *.key
 *.cert
 *.p12
 *.pfx
+*.kdbx
+*.asc
+*.gpg
+id_rsa
+id_ed25519
+id_ecdsa
+/credentials
+/.netrc
+/.npmrc
+/.pypirc
+serviceaccount.json
 
 # ── Runtime data files ────────────────────────────────────────────────
 # Local databases and journal files left over from `librefang start` —
@@ -61,6 +75,7 @@ node_modules
 .vscode
 .idea
 .devcontainer
+# Local Cargo aliases and test-only settings are intentionally omitted.
 .cargo
 .config
 .envrc
@@ -85,7 +100,6 @@ mise.lock
 # uses include_str! to embed examples/custom-agent/agent.toml at
 # compile time, so excluding it breaks the build.
 docs
-sdk
 scripts
 articles
 i18n
@@ -93,12 +107,16 @@ web
 *.md
 !crates/**/*.md
 # sdk/python/librefang is embedded into the binary at compile time by
-# librefang-channels (include_dir! in embedded_sdk.rs, #5472), so the
-# `sdk` exclusion above must let this one subtree back into the build
-# context. Placed after the *.md rule so the lone tracked Markdown file
+# librefang-channels (include_dir! in embedded_sdk.rs, #5472). Exclude SDK
+# contents rather than the parent directories so classic builders descend
+# far enough for the negations to restore this subtree. Placed after the
+# *.md rule so the lone tracked Markdown file
 # (sidecar/template/README.md) survives — .dockerignore honors the last
 # matching pattern.
-!sdk/python/librefang
+sdk/*
+!sdk/python/
+sdk/python/*
+!sdk/python/librefang/
 !sdk/python/librefang/**
 LICENSE-*
 CLAUDE.md

@@ -1,0 +1,45 @@
+# Strategic-merge patch.
+# Every list here merges by its patch-merge key (`name` for containers, env and volumes; `mountPath` for volumeMounts), so the base StatefulSet's own entries survive untouched.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: librefang
+spec:
+  template:
+    metadata:
+      annotations:
+        # sha256 of config.toml's raw bytes, which is byte-for-byte the value `GET /api/config/status` reports as `checksum`.
+        # Changing config.toml without changing this annotation leaves the pod template identical, so no rollout happens and the running daemon keeps the old file — which is why scripts/check-k8s-manifests.py recomputes the hash from the rendered ConfigMap and fails when the two disagree.
+        #
+        # Regenerate with:
+        #   printf 'sha256:%s\n' "$(openssl dgst -sha256 -r config.toml | awk '{print $1}')"
+        #
+        # `checksum/config` rather than a librefang-specific key: it is the convention Helm charts use for exactly this, so an operator reading the pod template already knows what it is for.
+        checksum/config: "sha256:c7607f7151246fb65efc1183680a450cfc3174dbfb9f32e78bb85c1ee6b19336"
+    spec:
+      containers:
+        - name: librefang
+          env:
+            # Relocation.
+            # The daemon resolves its config file through this first (`default_config_path`), and since #6695 every reader and writer — hot-reload, the change watcher, `GET /api/config/status`, the CLI inside the pod — resolves the same way, so nothing writes a second copy into /data that the daemon never reads.
+            - name: LIBREFANG_CONFIG_PATH
+              value: /etc/librefang/config.toml
+            # The lock, kept orthogonal to relocation on purpose: a deployment may bind-mount its config elsewhere and still want to edit it from the dashboard.
+            # Read from the environment on every call, so a config write cannot unlock the file it is being refused.
+            #
+            # A typo here resolves to *mutable*, not managed.
+            # Verify with `GET /api/config/status` rather than assuming.
+            - name: LIBREFANG_CONFIG_MODE
+              value: managed
+          volumeMounts:
+            - name: config
+              mountPath: /etc/librefang
+              # ConfigMap volumes are read-only regardless; stating it keeps the manifest honest about the intent.
+              # It is defence in depth and not the enforcement mechanism — enforcement is the 423, because an EACCES surfaces as a 500 with an errno that tells an operator nothing about why the write was refused.
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: librefang-config
+            # 0444: the file is readable by uid 1001 without granting the group or others anything the mount does not already imply.
+            defaultMode: 0444

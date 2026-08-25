@@ -14,12 +14,12 @@ use agent_client_protocol::schema::v1::{
     InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
     LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
     PromptCapabilities, PromptRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionCloseCapabilities, SessionInfo, SessionListCapabilities,
-    SessionResumeCapabilities,
+    SessionCapabilities, SessionCloseCapabilities, SessionId as AcpSessionId, SessionInfo,
+    SessionListCapabilities, SessionResumeCapabilities,
 };
 use agent_client_protocol::Stdio;
 use agent_client_protocol::{Agent, Client, ConnectTo, Dispatch};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, SessionId as LfSessionId};
 use tracing::debug;
 
 use crate::fs::{FsCapabilities, FsClientHandle};
@@ -38,6 +38,27 @@ use crate::{AcpKernel, AcpResult};
 /// the connection's framed stream.
 pub async fn run<K: AcpKernel>(kernel: Arc<K>, agent_id: AgentId) -> AcpResult<()> {
     run_with_transport(kernel, agent_id, Stdio::new()).await
+}
+
+/// Publish a session mapping and bind its editor reverse-RPC handles.
+///
+/// Replacing an active ACP id cancels the displaced prompt in
+/// [`SessionStore::insert`]. Remove its registrations before publishing the
+/// replacement handles so stale session state cannot retain editor access.
+fn install_session<K: AcpKernel>(
+    kernel: &K,
+    sessions: &SessionStore,
+    acp_id: AcpSessionId,
+    state: SessionState,
+) -> LfSessionId {
+    let lf_id = state.librefang_session_id;
+    if let Some(previous) = sessions.insert(acp_id, state) {
+        kernel.unregister_session_fs(previous.librefang_session_id);
+        kernel.unregister_session_terminal(previous.librefang_session_id);
+    }
+    kernel.register_session_fs(lf_id);
+    kernel.register_session_terminal(lf_id);
+    lf_id
 }
 
 /// Same as [`run`] but with an explicit transport. Used by integration
@@ -134,16 +155,14 @@ where
             async move |req: NewSessionRequest, responder, _cx| {
                 let new_id = next_session_id();
                 let state = SessionState::for_acp_id(&new_id, req.cwd);
-                let lf_id = state.librefang_session_id;
+                let lf_id = install_session(
+                    kernel_for_new.as_ref(),
+                    sessions_for_new.as_ref(),
+                    new_id.clone(),
+                    state,
+                );
                 debug!(session_id = %new_id.0, librefang_id = %lf_id.0,
                        "ACP session/new");
-                sessions_for_new.insert(new_id.clone(), state);
-                // Bind the editor's `fs/*` client (set at `initialize`)
-                // to this session so runtime tools dispatched on it can
-                // route through the editor (#3313). No-op for kernels
-                // without an attached editor.
-                kernel_for_new.register_session_fs(lf_id);
-                kernel_for_new.register_session_terminal(lf_id);
                 responder.respond(NewSessionResponse::new(new_id))
             },
             agent_client_protocol::on_receive_request!(),
@@ -159,14 +178,16 @@ where
         // placeholders identical to the live-prompt path.
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: agent_client_protocol::ConnectionTo<Client>| {
-                let state = SessionState::for_acp_id(&req.session_id, req.cwd);
-                let lf_id = state.librefang_session_id;
-                debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
+                let acp_id = req.session_id;
+                let state = SessionState::for_acp_id(&acp_id, req.cwd);
+                let lf_id = install_session(
+                    kernel_for_load.as_ref(),
+                    sessions_for_load.as_ref(),
+                    acp_id.clone(),
+                    state,
+                );
+                debug!(session_id = %acp_id.0, librefang_id = %lf_id.0,
                        "ACP session/load");
-                let acp_id = req.session_id.clone();
-                sessions_for_load.insert(req.session_id, state);
-                kernel_for_load.register_session_fs(lf_id);
-                kernel_for_load.register_session_terminal(lf_id);
                 replay_session_history(&kernel_for_load, &cx, &acp_id, lf_id).await;
                 responder.respond(LoadSessionResponse::default())
             },
@@ -177,13 +198,16 @@ where
         // The client already has the conversation.
         .on_receive_request(
             async move |req: ResumeSessionRequest, responder, _cx| {
-                let state = SessionState::for_acp_id(&req.session_id, req.cwd);
-                let lf_id = state.librefang_session_id;
-                debug!(session_id = %req.session_id.0, librefang_id = %lf_id.0,
+                let acp_id = req.session_id;
+                let state = SessionState::for_acp_id(&acp_id, req.cwd);
+                let lf_id = install_session(
+                    kernel_for_resume.as_ref(),
+                    sessions_for_resume.as_ref(),
+                    acp_id.clone(),
+                    state,
+                );
+                debug!(session_id = %acp_id.0, librefang_id = %lf_id.0,
                        "ACP session/resume");
-                sessions_for_resume.insert(req.session_id, state);
-                kernel_for_resume.register_session_fs(lf_id);
-                kernel_for_resume.register_session_terminal(lf_id);
                 responder.respond(ResumeSessionResponse::default())
             },
             agent_client_protocol::on_receive_request!(),

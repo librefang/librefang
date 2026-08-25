@@ -205,10 +205,10 @@ impl ContextEngine for ScriptableContextEngine {
         // Apply ingest_filter — skip hook when message doesn't match.
         // Bootstrap overrides take precedence over the statically configured filter.
         let effective_ingest_filter: Option<String> = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             guard
                 .ingest_filter
                 .clone()
@@ -289,6 +289,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 image_url: None,
                                 image_embedding: None,
                                 modality: Default::default(),
+                                similarity: None,
                             });
                         }
                     }
@@ -343,6 +344,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     image_url: None,
                                     image_embedding: None,
                                     modality: Default::default(),
+                                    similarity: None,
                                 });
                             }
                         }
@@ -393,6 +395,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 image_url: None,
                                 image_embedding: None,
                                 modality: Default::default(),
+                                similarity: None,
                             });
                         }
                     }
@@ -935,10 +938,10 @@ impl ContextEngine for ScriptableContextEngine {
         let timeout_secs = self.hook_timeout_secs;
         // Merge bootstrap env overrides into the env passed to the background task.
         let plugin_env = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -952,10 +955,10 @@ impl ContextEngine for ScriptableContextEngine {
         let retry_delay_ms = self.retry_delay_ms;
         let max_memory_mb = self.max_memory_mb;
         let allow_network = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             guard.allow_network.unwrap_or(self.allow_network)
         };
         let traces = std::sync::Arc::clone(&self.traces);
@@ -1254,6 +1257,22 @@ mod request_llm_summary_tests {
     // Short `Arc` only used by Unix-gated make_transform_engine; rest of module uses std::sync::Arc fully-qualified.
     #[cfg(unix)]
     use std::sync::Arc;
+
+    #[test]
+    fn recovered_scriptable_lock_clears_poison_flag() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(7_u8));
+        let poison_target = std::sync::Arc::clone(&state);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_target.lock().unwrap();
+            panic!("poison test lock");
+        })
+        .join();
+
+        assert!(state.is_poisoned());
+        assert_eq!(*lock_recover(&state, "test_state"), 7);
+        assert!(!state.is_poisoned());
+        assert!(state.lock().is_ok());
+    }
 
     // Windows has no /bin/sh — only this shell-script test harness is gated, not the feature.
     #[cfg(unix)]

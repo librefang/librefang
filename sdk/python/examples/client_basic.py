@@ -1,45 +1,59 @@
 #!/usr/bin/env python3
-"""
-Basic example — create an agent and chat with it via the REST API.
-
-Usage:
-    python client_basic.py
-"""
+"""Create an agent and chat with it through the LibreFang REST API."""
 
 import sys
-import os
 import time
+from typing import Any, Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from librefang import Client as LibreFang
+from librefang import Client
+from librefang.librefang_client import LibreFangError
 
-client = LibreFang("http://localhost:4545")
 
-# Check server health
-health = client.health()
-print("Server:", health)
+def main(client: Optional[Any] = None) -> int:
+    client = client or Client("http://localhost:4545")
+    created_agent_id = None
+    failed = False
 
-# List existing agents
-agents = client.agents.list()
-print(f"Agents: {len(agents)}")
+    try:
+        print("Server:", client.system.health())
 
-# Use existing agent or create a new one with unique name
-if agents:
-    agent = agents[0]
-    print(f"Using existing agent: {agent['id']}")
-    should_delete = False
-else:
-    timestamp = int(time.time())
-    agent = client.agents.create(template="assistant", name=f"sdk-test-{timestamp}")
-    print(f"Created agent: {agent['id']}")
-    should_delete = True
+        page = client.agents.list_agents()
+        agents = page.get("items", [])
+        print(f"Agents: {page.get('total', len(agents))}")
 
-# Send a message and get the full response
-print("\n--- Sending message ---")
-reply = client.agents.message(agent["id"], "Say hello in 5 words.")
-print(f"Reply: {reply}")
+        if agents:
+            agent_id = agents[0]["id"]
+            print(f"Using existing agent: {agent_id}")
+        else:
+            timestamp = int(time.time())
+            agent = client.agents.spawn_agent(
+                template="assistant",
+                name=f"sdk-test-{timestamp}",
+            )
+            agent_id = agent["agent_id"]
+            created_agent_id = agent_id
+            print(f"Created agent: {agent_id}")
 
-# Clean up only if we created it
-if should_delete:
-    client.agents.delete(agent["id"])
-    print("Agent deleted.")
+        print("\n--- Sending message ---")
+        reply = client.agents.send_message(
+            agent_id,
+            message="Say hello in 5 words.",
+        )
+        print(f"Reply: {reply}")
+    except LibreFangError as error:
+        print(f"LibreFang request failed: {error}", file=sys.stderr)
+        failed = True
+    finally:
+        if created_agent_id is not None:
+            try:
+                client.agents.kill_agent(created_agent_id, confirm=True)
+                print("Agent deleted.")
+            except LibreFangError as error:
+                print(f"Agent cleanup failed: {error}", file=sys.stderr)
+                failed = True
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

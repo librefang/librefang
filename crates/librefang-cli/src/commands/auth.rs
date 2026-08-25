@@ -120,7 +120,7 @@ pub(crate) async fn persist_chatgpt_auth(
         i18n::t_args("auth-chatgpt-selected-model", &[("model", &best_model)])
     );
 
-    update_chatgpt_config(&home, &best_model)?;
+    update_chatgpt_config(&best_model)?;
 
     println!(
         "{}",
@@ -175,11 +175,8 @@ pub(crate) fn write_chatgpt_secrets(
     Ok(secrets_path)
 }
 
-pub(crate) fn update_chatgpt_config(
-    home: &std::path::Path,
-    best_model: &str,
-) -> Result<(), String> {
-    let config_path = home.join("config.toml");
+pub(crate) fn update_chatgpt_config(best_model: &str) -> Result<(), String> {
+    let config_path = cli_config_path();
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc = if config_str.trim().is_empty() {
         toml_edit::DocumentMut::new()
@@ -235,7 +232,7 @@ pub(crate) fn cmd_auth_chatgpt(device_auth: bool) {
 /// Resolve the active config.toml path. `--config <path>` overrides; else
 /// `$LIBREFANG_HOME/config.toml` (or `~/.librefang/config.toml`).
 pub(crate) fn pool_config_path(config_override: Option<PathBuf>) -> PathBuf {
-    config_override.unwrap_or_else(|| librefang_home().join("config.toml"))
+    config_override.unwrap_or_else(cli_config_path)
 }
 
 /// Parse config.toml into a `toml_edit::DocumentMut` so comments, blank

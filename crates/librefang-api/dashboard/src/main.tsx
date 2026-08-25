@@ -12,73 +12,19 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { ToastContainer } from "./components/ui/Toast";
+import { RootErrorBoundary } from "./components/RootErrorBoundary";
 import "./index.css";
 import i18n, { i18nReady } from "./lib/i18n";
-import { channelKeys, handKeys, mcpKeys, pluginKeys } from "./lib/queries/keys";
 import { createDashboardQueryClient } from "./lib/queryClient";
-
-interface RootErrorBoundaryState {
-  hasError: boolean;
-  error: Error | null;
-}
-
-class RootErrorBoundary extends React.Component<
-  { children: React.ReactNode },
-  RootErrorBoundaryState
-> {
-  state: RootErrorBoundaryState = { hasError: false, error: null };
-
-  static getDerivedStateFromError(error: Error): RootErrorBoundaryState {
-    return { hasError: true, error };
-  }
-
-  render() {
-    if (this.state.hasError) {
-      // Inline styles: this boundary may render before CSS is loaded.
-      return (
-        <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ textAlign: "center", padding: "2rem", maxWidth: "32rem" }}>
-            <p style={{ fontSize: "1.125rem", fontWeight: 600, marginBottom: "0.5rem" }}>
-              {i18n.t("errors.something_went_wrong", "Something went wrong")}
-            </p>
-            <p style={{ fontSize: "0.875rem", color: "#6b7280", wordBreak: "break-word" }}>
-              {this.state.error?.message ?? i18n.t("errors.unexpected", "An unexpected error occurred.")}
-            </p>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                marginTop: "1rem",
-                borderRadius: "0.75rem",
-                backgroundColor: "#0ea5e9",
-                padding: "0.625rem 1.5rem",
-                fontSize: "0.875rem",
-                fontWeight: 700,
-                color: "#fff",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              {i18n.t("common.reload", "Reload")}
-            </button>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
 
 const queryClient = createDashboardQueryClient();
 
-// Backend resolves Accept-Language against `[i18n.<lang>]` blocks in
-// plugin / MCP catalog / hand / channel manifests, so the response body
-// changes when the user flips languages in the UI. React Query keys do
-// not encode language, so we invalidate the affected domains on each
-// `languageChanged` event to force a refetch with the new header.
+// Every authenticated request carries Accept-Language. Several manifest
+// domains return localized bodies, and that set grows over time. Query keys do
+// not encode language, so invalidate the whole cache instead of maintaining a
+// fragile domain allowlist whenever the user explicitly changes language.
 const onLanguageChanged = () => {
-  for (const all of [pluginKeys.all, mcpKeys.all, handKeys.all, channelKeys.all]) {
-    queryClient.invalidateQueries({ queryKey: all });
-  }
+  void queryClient.invalidateQueries();
 };
 i18n.on("languageChanged", onLanguageChanged);
 
