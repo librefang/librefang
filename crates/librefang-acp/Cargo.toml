@@ -36,7 +36,7 @@ uuid = { workspace = true }
 dashmap = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 # Used by `tests/acp_integration.rs` for the duplex transport's
 # `AsyncRead` / `AsyncWrite` bounds and for stamping `ApprovalRequest`
 # fixtures. Production code in this crate doesn't touch them directly

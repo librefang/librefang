@@ -6,6 +6,7 @@ import {
   removeNodeAndCascadeEdges,
   resolveDependencyIds,
   resolveDependencyNames,
+  stepAgentPayload,
 } from "./canvas";
 
 type N = Node<{ label: string }>;
@@ -243,5 +244,73 @@ describe("canvas dependency references", () => {
       { id: "node-a", label: "Duplicate" },
       { id: "node-b", label: "Duplicate" },
     ])).toEqual([]);
+  });
+});
+
+describe("stepAgentPayload", () => {
+  it("sends only agent_id when a node is bound to a concrete instance", () => {
+    // A node carries the name alongside the id purely so the card can render
+    // it; sending both is the ambiguous payload the API rejects.
+    expect(stepAgentPayload({ agentId: "abc", agentName: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("sends agent_type when the node is bound to a type", () => {
+    expect(stepAgentPayload({ agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+  });
+
+  it("prefers a concrete instance over a stale type binding", () => {
+    expect(stepAgentPayload({ agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("falls back to agent_name when there is no id or type", () => {
+    expect(stepAgentPayload({ agentName: "researcher" })).toEqual({
+      agent_name: "researcher",
+    });
+  });
+
+  it("returns null for an unbound node so the caller can drop the step", () => {
+    expect(stepAgentPayload({ label: "unbound" })).toBeNull();
+  });
+
+  it("lets an explicit source outrank the specificity fallback", () => {
+    // The fallback binds the most specific field present; a recorded source
+    // (#7724) is the operator's actual choice and wins over it, which is what
+    // makes leaving an id or a type binding possible at all.
+    expect(stepAgentPayload({ agentSource: "name", agentId: "abc", agentName: "researcher" })).toEqual({
+      agent_name: "researcher",
+    });
+    expect(stepAgentPayload({ agentSource: "type", agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+    expect(stepAgentPayload({ agentSource: "instance", agentId: "abc", agentType: "researcher" })).toEqual({
+      agent_id: "abc",
+    });
+  });
+
+  it("falls back to specificity when the recorded source has no value", () => {
+    // A half-authored node must not silently drop the binding its card is
+    // still showing — that is how a workflow round-trips as zero steps.
+    expect(stepAgentPayload({ agentSource: "name", agentName: "  ", agentType: "researcher" })).toEqual({
+      agent_type: "researcher",
+    });
+  });
+
+  it("treats a blank binding field as no binding", () => {
+    expect(stepAgentPayload({ agentId: " ", agentName: "\t", agentType: "" })).toBeNull();
+  });
+
+  it("never returns more than one routing key", () => {
+    const payload = stepAgentPayload({
+      agentId: "abc",
+      agentName: "researcher",
+      agentType: "researcher",
+    });
+    expect(Object.keys(payload ?? {})).toHaveLength(1);
   });
 });

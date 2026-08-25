@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { HandsPage } from "./HandsPage";
+import {
+  findLatestHand,
+  HandSettingsEditor,
+  HandsPage,
+  RequirementsForm,
+} from "./HandsPage";
 import {
   useHands,
   useActiveHands,
@@ -505,5 +510,71 @@ describe("HandsPage", () => {
 
     const activateBtn = screen.getByRole("button", { name: "hands.activate" });
     expect(activateBtn).toBeDisabled();
+  });
+
+  it("masks requirement secrets in the detail form", async () => {
+    render(
+      <RequirementsForm
+        handId="h1"
+        requirements={[{ key: "API_KEY", label: "API key", satisfied: false }]}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("API_KEY")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
+  it("preserves a dirty settings draft across equivalent query objects", async () => {
+    const user = userEvent.setup();
+    const firstSettings = {
+      settings: [{ key: "tone", label: "Tone" }],
+      current_values: { tone: "calm" },
+    };
+    const { rerender } = render(
+      <HandSettingsEditor
+        handId="h1"
+        settings={firstSettings}
+        isLoading={false}
+        isActive
+      />,
+    );
+    const setting = screen.getByLabelText("Tone") as HTMLInputElement;
+    await user.clear(setting);
+    await user.type(setting, "focused");
+
+    rerender(
+      <HandSettingsEditor
+        handId="h1"
+        settings={{
+          settings: [{ key: "tone", label: "Tone" }],
+          current_values: { tone: "calm" },
+        }}
+        isLoading={false}
+        isActive
+      />,
+    );
+
+    expect(screen.getByLabelText("Tone")).toHaveValue("focused");
+
+    rerender(
+      <HandSettingsEditor
+        handId="h1"
+        settings={{
+          settings: [{ key: "tone", label: "Tone" }],
+          current_values: { tone: "server-update" },
+        }}
+        isLoading={false}
+        isActive
+      />,
+    );
+    expect(screen.getByLabelText("Tone")).toHaveValue("focused");
+  });
+
+  it("drops the selected hand when it leaves the latest list", () => {
+    const selected = { id: "h1", name: "Alpha", requirements_met: true };
+    expect(findLatestHand(selected, [selected])).toBe(selected);
+    expect(findLatestHand(selected, [])).toBeNull();
   });
 });

@@ -649,11 +649,18 @@ fn build_login_redirect(provider: &ResolvedProvider) -> impl IntoResponse {
             );
             Redirect::temporary(auth_url.as_str()).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to build auth URL: {e}")})),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::error!(
+                provider = %provider.id,
+                %error,
+                "failed to build OAuth authorization URL"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to build authorization URL"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1582,6 +1589,15 @@ pub async fn auth_refresh(
 /// If enabled, attempts to validate the Bearer token against configured providers
 /// and injects `IdTokenClaims` into request extensions for downstream handlers.
 /// Does NOT block requests — the existing api_key middleware handles access control.
+///
+/// # The `roles` claim (#7744)
+///
+/// `IdTokenClaims` has parsed a `roles: Vec<String>` claim since the type was written, and until now every downstream handler ignored the extension entirely, so a validated claim about what the caller is allowed to do reached no authorization decision at all.
+/// This middleware now also resolves those claims through `[external_auth.role_map]` and injects a [`crate::middleware::OidcRoleGrant`] when they map to a LibreFang role.
+/// Resolution happens here rather than in [`crate::middleware::auth`] because this is the layer that holds both the validated claims and the `ResolvedProvider` the token authenticated against — the provider is what decides whether the token was audience-bound and whether its email was verified, and neither fact survives into the claims struct.
+///
+/// The grant is strictly additive. It is injected only when an operator wrote a `role_map`, and [`crate::middleware::auth`] consults it only where it was about to reject the request, so no request that succeeds today changes outcome or role.
+/// Axum runs the last-added layer first, and `server.rs` adds `middleware::auth` after this one, which is what puts the grant in extensions before the credential path looks for it.
 pub async fn oidc_auth_middleware(
     State(state): State<Arc<AppState>>,
     mut request: axum::http::Request<axum::body::Body>,
@@ -1638,6 +1654,13 @@ pub async fn oidc_auth_middleware(
                             .into_response();
                     }
                 }
+                // Resolve `[external_auth.role_map]` before the claims are
+                // moved into extensions. See `role_grant_from_claims` for the
+                // two provider-level gates that have no representation in the
+                // claims struct and therefore cannot be checked downstream.
+                if let Some(grant) = role_grant_from_claims(&claims, provider, &config.role_map) {
+                    request.extensions_mut().insert(grant);
+                }
                 // Inject claims into request extensions.
                 request.extensions_mut().insert(claims);
                 break;
@@ -1649,6 +1672,66 @@ pub async fn oidc_auth_middleware(
     }
 
     next.run(request).await
+}
+
+/// Resolve a validated ID token into a [`crate::middleware::OidcRoleGrant`], or `None` when the token authorizes nothing (#7744).
+///
+/// Two gates here have no representation in [`IdTokenClaims`], which is why the grant is built at the provider loop rather than anywhere downstream:
+///
+/// **The provider must be audience-bound.** `validate_jwt_cached` sets `validation.validate_aud = false` when `expected_audience` is empty, so with no audience configured *any* token signed by that issuer's JWKS validates — including one minted for an unrelated OAuth client in the same tenant.
+/// That is tolerable while the claims are inert, and not tolerable as a grant of API privilege, so an unbound provider grants nothing.
+/// `resolve_single_provider` falls back to `client_id` when `audience` is unset, so this only bites a provider configured with neither.
+///
+/// **The email must be verified when the provider requires it.** `require_email_verified` is the #3703 mitigation, and the callback route enforces it before minting anything; the middleware path never did, because it had nothing to mint.
+/// It does now.
+///
+/// Neither gate rejects the request — an unverified or audience-unbound token is simply not a credential, and the caller falls through to whatever the rest of the auth chain makes of it.
+/// Turning either into a 403 here would change the outcome of requests that authenticate by some *other* means and merely happen to carry a JWT, which is a regression this increment has no reason to risk.
+fn role_grant_from_claims(
+    claims: &IdTokenClaims,
+    provider: &ResolvedProvider,
+    role_map: &std::collections::BTreeMap<String, String>,
+) -> Option<crate::middleware::OidcRoleGrant> {
+    if role_map.is_empty() {
+        return None;
+    }
+    if provider.audience.is_empty() {
+        debug!(
+            provider = %provider.id,
+            "external_auth.role_map is configured but this provider has no audience \
+             to bind tokens to; refusing to derive a role from an unbound token"
+        );
+        return None;
+    }
+    if provider.require_email_verified && claims.email_verified != Some(true) {
+        debug!(
+            provider = %provider.id,
+            "refusing to derive a role from a token whose email is unverified"
+        );
+        return None;
+    }
+    let role = librefang_kernel::auth::translate_oidc_roles(role_map, &claims.roles)?;
+    // `email` is the operator-recognisable identity and the one `[[users]]`
+    // entries are normally named after; `sub` is the fallback for providers
+    // that issue no email claim. Either way the id is `UserId::from_name`, the
+    // same derivation every other credential path uses, so an OIDC caller and
+    // a declared user of the same name are one principal rather than two.
+    let name = claims
+        .email
+        .clone()
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| claims.sub.clone());
+    let user_id = librefang_types::agent::UserId::from_name(&name);
+    debug!(
+        provider = %provider.id,
+        role = %role,
+        "OIDC role claim resolved to a LibreFang role"
+    );
+    Some(crate::middleware::OidcRoleGrant {
+        name,
+        role,
+        user_id,
+    })
 }
 
 // ── Provider Resolution ─────────────────────────────────────────────────
@@ -2101,7 +2184,35 @@ fn email_domain(email: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use base64::Engine;
+
+    #[tokio::test]
+    async fn login_redirect_scrubs_authorization_url_parse_errors() {
+        let provider = ResolvedProvider {
+            id: "broken-provider".to_string(),
+            display_name: "Broken".to_string(),
+            auth_url: "https://[invalid-host".to_string(),
+            token_url: "https://idp.example/token".to_string(),
+            userinfo_url: String::new(),
+            jwks_uri: String::new(),
+            client_id: "client".to_string(),
+            client_secret_env: "TEST_SECRET".to_string(),
+            redirect_url: "https://app.example/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: false,
+        };
+
+        let response = build_login_redirect(&provider).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Failed to build authorization URL"));
+        assert!(!body.contains("invalid-host"));
+        assert!(!body.contains("IPv6"));
+    }
 
     #[test]
     fn email_domain_redacts_local_part_and_handles_malformed_input() {

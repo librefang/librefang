@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Clock, Database, Moon, Sparkles, Zap } from "lucide-react";
 import { Badge } from "../../components/ui/Badge";
@@ -8,6 +9,17 @@ import type {
   MemoryStatsResponse,
 } from "../../api";
 import { formatRelativeMs } from "./formatters";
+
+const RELATIVE_TIME_REFRESH_MS = 30_000;
+
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(intervalId);
+  }, [intervalMs]);
+  return now;
+}
 
 interface Props {
   scopedAgent: AgentItem | undefined;
@@ -27,7 +39,7 @@ export function ScopeSummary({
   kvCount,
 }: Props) {
   const { t, i18n } = useTranslation();
-  const now = Date.now();
+  const now = useNow(RELATIVE_TIME_REFRESH_MS);
   const tNever = () => t("common.never", { defaultValue: "never" });
   const tJustNow = () => t("common.just_now", { defaultValue: "just now" });
 
@@ -128,12 +140,12 @@ export function ScopeSummary({
                 variant={dreamForAgent.auto_dream_enabled ? "info" : "default"}
               >
                 {dreamForAgent.auto_dream_enabled
-                  ? t("settings.auto_dream_enrolled", "Enrolled")
-                  : t("settings.auto_dream_not_enrolled", "Off")}
+                  ? t("memory.auto_dream_enrolled", { defaultValue: "Enrolled" })
+                  : t("memory.auto_dream_not_enrolled", { defaultValue: "Off" })}
               </Badge>
               {dreamForAgent.auto_dream_enabled && (
                 <span className="text-[11px] text-text-dim">
-                  {t("settings.auto_dream_last", "Last")}:{" "}
+                  {t("memory.auto_dream_last", { defaultValue: "Last" })}:{" "}
                   {formatRelativeMs(
                     dreamForAgent.last_consolidated_at_ms,
                     now,
@@ -142,7 +154,7 @@ export function ScopeSummary({
                     tJustNow,
                   )}
                   {" · "}
-                  {t("settings.auto_dream_next", "Next")}:{" "}
+                  {t("memory.auto_dream_next", { defaultValue: "Next" })}:{" "}
                   {formatRelativeMs(
                     dreamForAgent.next_eligible_at_ms,
                     now,

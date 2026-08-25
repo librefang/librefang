@@ -188,6 +188,7 @@ pub struct ModelCatalogEntry {
     /// applicable" — image and audio models in the registry omit this field.
     /// Consumers MUST treat `0` as unknown and supply their own default;
     /// never propagate `0` into compaction thresholds or budget math.
+    /// [`Self::limits_known`] distinguishes the two readings of `0`.
     #[serde(default)]
     pub context_window: u64,
     /// Maximum output tokens. `0` or absent means "unknown / not applicable".
@@ -204,6 +205,18 @@ pub struct ModelCatalogEntry {
     /// Older registry entries predate this field and carry explicit prices, so a missing value defaults to true.
     #[serde(default = "default_true")]
     pub pricing_known: bool,
+    /// Whether `context_window` / `max_output_tokens` above came from a source.
+    ///
+    /// `true` — a curated registry entry, an operator override, or the endpoint itself supplied the numbers, so a consumer may treat them as a real ceiling.
+    /// `false` — no source supplied them: whatever value is present is a LibreFang-chosen default, and it MUST NOT be packed against, clamped against, or presented to an operator as a discovered fact.
+    ///
+    /// The flag records provenance, which the number alone cannot.
+    /// An image or audio entry legitimately has no token context and carries `context_window: 0` with `limits_known: true` — the limits are known to be inapplicable, which is not the same as unknown.
+    /// A model discovered behind an OpenAI-compatible gateway that reports no capacity carries `limits_known: false`; that path additionally zeroes both fields so the existing `> 0` guards in the compaction and budget math fall through to their conservative default instead of packing a prompt against a guess (#7780).
+    ///
+    /// Older registry entries predate this field and carry real numbers, so a missing value defaults to true — the same convention `pricing_known` uses.
+    #[serde(default = "default_true")]
+    pub limits_known: bool,
     /// Cost per million image input tokens (USD). Only set for image/multimodal
     /// models where image pixels are priced separately from text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +340,7 @@ impl Default for ModelCatalogEntry {
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
+            limits_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,
@@ -418,6 +432,23 @@ pub struct ModelOverrides {
     /// User override for `supports_thinking`. See [`Self::supports_tools`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_thinking: Option<bool>,
+    /// Operator override for the model's context window, in tokens (refs #7774).
+    ///
+    /// Corrects a *capacity fact* about the model rather than an inference parameter: a gateway that proxies a self-hosted runtime routinely reports `max_input_tokens: null`, and a model discovered from a `/models` listing gets whatever window the discovery path assumed.
+    /// `None` defers to the catalog entry (probed or registry-declared); `Some(n)` with `n > 0` wins over it.
+    /// A `Some(0)` is treated as absent everywhere the field is read, matching how `ModelCatalogEntry::context_window` already treats `0` as "unknown".
+    ///
+    /// Deliberately distinct from [`Self::max_tokens`], which is the per-request *output* cap sent on the wire. Setting the output cap to the model's window asks the model to reserve its whole context for the reply, which is the confusion this field exists to end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Operator override for the model's declared maximum output tokens (refs #7774).
+    ///
+    /// The sibling capacity limit to [`Self::context_window`], and unknown from
+    /// the same sources for the same reason — a gateway reporting
+    /// `max_input_tokens: null` reports `max_output_tokens: null` alongside it.
+    /// `None` defers to the catalog entry; `Some(n)` with `n > 0` wins over it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 impl ModelOverrides {
@@ -437,6 +468,8 @@ impl ModelOverrides {
             && self.supports_vision.is_none()
             && self.supports_streaming.is_none()
             && self.supports_thinking.is_none()
+            && self.context_window.is_none()
+            && self.max_output_tokens.is_none()
     }
 }
 
@@ -451,6 +484,124 @@ pub struct EffectiveCapabilities {
     pub supports_vision: bool,
     pub supports_streaming: bool,
     pub supports_thinking: bool,
+}
+
+/// Which layer supplied one of the values in [`EffectiveLimits`] (refs #7774).
+///
+/// A limit and its provenance are computed together, in one pass over the same
+/// override map and catalog entry, so a caller can never read a value from one
+/// layer and attribute it to another.
+/// The operator-facing consequence is the whole point of #7774's item 5: an
+/// 8192 that came from a registry-declared catalog entry and an 8192 nobody
+/// ever measured are the same number and a completely different fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitSource {
+    /// Neither the operator override nor the catalog entry carried a usable
+    /// value, so the paired `Option` is `None` and the caller's own fallback
+    /// decides the number.
+    #[default]
+    Unknown,
+    /// The catalog entry's registry-declared or probe-discovered value.
+    Catalog,
+    /// The operator's `model_overrides.json` correction, which outranks the
+    /// catalog because it exists to correct it.
+    Override,
+}
+
+/// Effective capacity limits for a model after applying operator overrides on
+/// top of the catalog entry's declared values (refs #7774). Returned by
+/// `ModelCatalog::effective_limits` / `effective_limits_for_manifest`.
+///
+/// Both value fields are `Option` because "unknown" is a real answer here and must
+/// not be flattened to `0`: a `0` propagated into compaction thresholds or
+/// budget math is the bug `ModelCatalogEntry::context_window` documents.
+/// `None` means neither the operator nor the catalog knows, and the caller
+/// applies its own fallback (and, for the context window, logs that it did).
+///
+/// Each value is paired with the [`LimitSource`] that produced it, so a caller
+/// reporting the number to an operator can also say where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EffectiveLimits {
+    /// Context window in tokens, or `None` when unknown.
+    pub context_window: Option<u64>,
+    /// Which layer supplied [`Self::context_window`].
+    /// [`LimitSource::Unknown`] exactly when the value is `None`.
+    #[serde(default)]
+    pub context_window_source: LimitSource,
+    /// Maximum output tokens, or `None` when unknown.
+    pub max_output_tokens: Option<u64>,
+    /// Which layer supplied [`Self::max_output_tokens`].
+    /// [`LimitSource::Unknown`] exactly when the value is `None`.
+    #[serde(default)]
+    pub max_output_tokens_source: LimitSource,
+}
+
+/// Which layer of the context-window precedence chain answered (refs #7774).
+///
+/// The chain itself lives in the kernel's `resolve_context_window`; this enum
+/// is the name it hands back so every surface can report the *provenance* of a
+/// window rather than only its size.
+/// [`Self::Fallback`] is the one an operator most needs to see: it means no
+/// layer knew the model's window and the number on screen is a guess the
+/// runtime made, which is exactly the condition that turns a real 16K
+/// conversation into an imaginary overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextWindowSource {
+    /// `agent.toml: [model] context_window` — an explicit per-agent override.
+    AgentOverride,
+    /// `model_overrides.json: context_window` — the per-model operator override.
+    ModelOverride,
+    /// The model catalog entry, registry-declared or probe-discovered.
+    Catalog,
+    /// The window persisted on the session by an earlier turn, used only when
+    /// nothing above resolves.
+    SessionHint,
+    /// Nothing resolved and the caller applied its own conservative default.
+    /// The value on screen is assumed, not known.
+    Fallback,
+}
+
+impl ContextWindowSource {
+    /// Whether the window this source produced is a guess rather than a fact
+    /// about the model.
+    ///
+    /// Only [`Self::Fallback`] qualifies. A session hint is a value some
+    /// earlier turn resolved and persisted, so it is second-hand rather than
+    /// invented — and when that earlier turn had nothing either, the hint it
+    /// wrote is filtered out as a zero rather than promoted to a fact.
+    pub fn is_assumed(self) -> bool {
+        matches!(self, ContextWindowSource::Fallback)
+    }
+
+    /// The stable wire name, matching the `serde` representation.
+    ///
+    /// Used where the value has to reach a JSON body or a log field without
+    /// routing through `serde_json` for one enum.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContextWindowSource::AgentOverride => "agent_override",
+            ContextWindowSource::ModelOverride => "model_override",
+            ContextWindowSource::Catalog => "catalog",
+            ContextWindowSource::SessionHint => "session_hint",
+            ContextWindowSource::Fallback => "fallback",
+        }
+    }
+}
+
+/// A resolved context window and the layer that produced it (refs #7774).
+///
+/// Returned by the kernel's `resolve_context_window` so the value and its
+/// provenance travel together; splitting them into two calls is how a report
+/// ends up labelling a catalog value as a fallback, or the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedContextWindow {
+    /// The window, in tokens. Always greater than zero — every layer filters
+    /// its own zeros before answering.
+    pub tokens: usize,
+    /// Which layer answered.
+    pub source: ContextWindowSource,
 }
 
 /// Per-region endpoint configuration.
@@ -552,20 +703,48 @@ impl Default for ProviderInfo {
     }
 }
 
+/// Derive the conventional API-key environment variable name for a provider id.
+///
+/// `litellm` → `LITELLM_API_KEY`, `alibaba-coding-plan` → `ALIBABA_CODING_PLAN_API_KEY`.
+/// This is the same shape the runtime already synthesizes when a provider is
+/// registered from a bare `[provider_urls]` entry, so a catalog file that omits
+/// `api_key_env` resolves to the variable the operator was already setting.
+pub fn default_api_key_env(provider_id: &str) -> String {
+    format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_"))
+}
+
 /// Provider metadata as stored in TOML catalog files.
 ///
 /// Unlike [`ProviderInfo`], this struct omits runtime-only fields (`auth_status`,
 /// `model_count`) so it maps 1:1 to the `[provider]` section in community catalog
 /// files at `providers/<name>.toml`.
+///
+/// Every field except `id` is optional, because this struct doubles as a
+/// partial overlay (#7776). A file that carries only `id` and one flag — which
+/// is exactly what the discovery toggle used to write, and what an operator
+/// hand-editing the TOML naturally produces — must still deserialize; the
+/// alternative is a hard parse error that makes the loader drop the whole file
+/// and silently revert the setting on the next boot. Missing values are filled
+/// in by [`From<ProviderCatalogToml> for ProviderInfo`] (`display_name` falls
+/// back to `id`, `api_key_env` to [`default_api_key_env`]) or left empty for
+/// the catalog's merge step to fill from another source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCatalogToml {
     /// Provider identifier (e.g. "anthropic").
     pub id: String,
     /// Human-readable display name (e.g. "Anthropic").
+    /// Falls back to `id` when absent.
+    #[serde(default)]
     pub display_name: String,
     /// Environment variable name for the API key.
+    /// Falls back to [`default_api_key_env`] when absent.
+    #[serde(default)]
     pub api_key_env: String,
     /// Default base URL.
+    /// May legitimately be empty: CLI-backed providers have no HTTP endpoint,
+    /// and for a gateway configured through `[provider_urls]` in `config.toml`
+    /// the URL arrives after the catalog is loaded.
+    #[serde(default)]
     pub base_url: String,
     /// Whether an API key is required (false for local providers).
     #[serde(default = "default_key_required")]
@@ -593,10 +772,23 @@ fn default_key_required() -> bool {
 
 impl From<ProviderCatalogToml> for ProviderInfo {
     fn from(p: ProviderCatalogToml) -> Self {
+        // Back-fill the two fields a partial overlay is allowed to omit, so
+        // downstream code never has to special-case an empty display name or
+        // an empty env var name (#7776).
+        let display_name = if p.display_name.is_empty() {
+            p.id.clone()
+        } else {
+            p.display_name
+        };
+        let api_key_env = if p.api_key_env.is_empty() {
+            default_api_key_env(&p.id)
+        } else {
+            p.api_key_env
+        };
         Self {
             id: p.id,
-            display_name: p.display_name,
-            api_key_env: p.api_key_env,
+            display_name,
+            api_key_env,
             base_url: p.base_url,
             key_required: p.key_required,
             auth_status: AuthStatus::default(),
@@ -673,6 +865,66 @@ pub struct AliasesCatalogFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #7776: the discovery toggle used to write `id` + `discover_models` and
+    /// nothing else. That shape has to keep deserializing, or the loader drops
+    /// the file and the operator's opt-in silently reverts on the next boot.
+    #[test]
+    fn partial_provider_record_deserializes_and_backfills_identity() {
+        let raw = "[provider]\nid = \"litellm\"\ndiscover_models = true\n";
+        let file: ModelCatalogFile = toml::from_str(raw).expect("partial overlay must parse");
+        let provider = file.provider.expect("the [provider] table is present");
+        assert!(provider.discover_models);
+
+        let info: ProviderInfo = provider.into();
+        assert_eq!(info.id, "litellm");
+        assert_eq!(
+            info.display_name, "litellm",
+            "an absent display name falls back to the id"
+        );
+        assert_eq!(
+            info.api_key_env, "LITELLM_API_KEY",
+            "an absent api_key_env falls back to the conventional derivation"
+        );
+        assert_eq!(
+            info.base_url, "",
+            "base_url stays empty for the catalog merge / [provider_urls] to fill"
+        );
+        assert!(
+            info.key_required,
+            "key_required keeps its historical default"
+        );
+        assert!(info.discover_models, "the flag the file exists to carry");
+    }
+
+    /// A complete record must not be disturbed by the fallbacks above.
+    #[test]
+    fn complete_provider_record_keeps_every_declared_value() {
+        let raw = concat!(
+            "[provider]\n",
+            "id = \"acme\"\n",
+            "display_name = \"ACME Inc\"\n",
+            "api_key_env = \"ACME_TOKEN\"\n",
+            "base_url = \"https://api.acme.test/v1\"\n",
+            "key_required = false\n",
+        );
+        let file: ModelCatalogFile = toml::from_str(raw).expect("full record must parse");
+        let info: ProviderInfo = file.provider.expect("provider table").into();
+        assert_eq!(info.display_name, "ACME Inc");
+        assert_eq!(info.api_key_env, "ACME_TOKEN");
+        assert_eq!(info.base_url, "https://api.acme.test/v1");
+        assert!(!info.key_required);
+        assert!(!info.discover_models, "absent flag stays off");
+    }
+
+    #[test]
+    fn default_api_key_env_uppercases_and_underscores() {
+        assert_eq!(default_api_key_env("litellm"), "LITELLM_API_KEY");
+        assert_eq!(
+            default_api_key_env("alibaba-coding-plan"),
+            "ALIBABA_CODING_PLAN_API_KEY"
+        );
+    }
 
     #[test]
     fn test_model_tier_display() {
@@ -1308,5 +1560,52 @@ aliases = []
         "#;
         let entry: ModelCatalogEntry = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(entry.reasoning_echo_policy, ReasoningEchoPolicy::None);
+    }
+
+    /// Refs #7774. A `model_overrides.json` written before the capacity-limit
+    /// fields existed must keep parsing, and must not acquire a limit override
+    /// it never asked for — the whole backward-compatibility contract of this
+    /// change rests on `None` here.
+    #[test]
+    fn overrides_file_without_capacity_limits_still_parses_as_absent() {
+        let json = r#"{"temperature": 0.7, "max_tokens": 4096}"#;
+        let o: ModelOverrides = serde_json::from_str(json).expect("legacy overrides parse");
+        assert_eq!(o.max_tokens, Some(4096));
+        assert_eq!(o.context_window, None);
+        assert_eq!(o.max_output_tokens, None);
+        assert!(!o.is_empty(), "temperature/max_tokens are still overrides");
+    }
+
+    /// Refs #7774. The capacity limits are part of `is_empty`, or an overrides
+    /// document carrying nothing but a corrected context window would be
+    /// dropped by `ModelCatalog::set_overrides` the moment it was saved.
+    #[test]
+    fn a_context_window_override_alone_is_not_an_empty_override_set() {
+        let o = ModelOverrides {
+            context_window: Some(16_384),
+            ..Default::default()
+        };
+        assert!(!o.is_empty());
+        let max_out_only = ModelOverrides {
+            max_output_tokens: Some(8_192),
+            ..Default::default()
+        };
+        assert!(!max_out_only.is_empty());
+        assert!(ModelOverrides::default().is_empty());
+    }
+
+    /// Refs #7774. Absent limits stay absent on the wire: the dashboard reads
+    /// `overrides.context_window == undefined` as "no override, show the
+    /// catalog value", so serializing an explicit `null` would be a lie the UI
+    /// cannot distinguish from a real zero.
+    #[test]
+    fn absent_capacity_limits_are_omitted_from_serialized_overrides() {
+        let json = serde_json::to_string(&ModelOverrides {
+            temperature: Some(0.5),
+            ..Default::default()
+        })
+        .expect("serialize");
+        assert!(!json.contains("context_window"), "{json}");
+        assert!(!json.contains("max_output_tokens"), "{json}");
     }
 }

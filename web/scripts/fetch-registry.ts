@@ -2,9 +2,16 @@
 // Build-time script: fetch registry data from GitHub and save as static JSON
 // Run: npx tsx scripts/fetch-registry.ts
 
+import { writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
 const API = 'https://api.github.com/repos/librefang/librefang-registry/contents'
 const RAW = 'https://raw.githubusercontent.com/librefang/librefang-registry/main'
 const HEADERS: Record<string, string> = { Accept: 'application/vnd.github.v3+json' }
+const REQUEST_TIMEOUT_MS = 15_000
+const REQUEST_RETRIES = 2
+const RETRY_DELAY_MS = 250
 
 // Use token if available to avoid rate limits
 const token = process.env.GITHUB_TOKEN
@@ -12,23 +19,94 @@ if (token) HEADERS['Authorization'] = `Bearer ${token}`
 
 interface GHItem { name: string; type: string }
 interface I18nEntry { name?: string; description?: string }
-interface Detail { id: string; name: string; description: string; category: string; icon: string; tags?: string[]; i18n?: Record<string, I18nEntry> }
+export interface Detail { id: string; name: string; description: string; category: string; icon: string; tags?: string[]; i18n?: Record<string, I18nEntry> }
 
-async function fetchDir(path: string): Promise<GHItem[]> {
-  const res = await fetch(`${API}/${path}`, { headers: HEADERS })
+interface RequestOptions {
+  fetchImpl?: typeof fetch
+  retries?: number
+  retryDelayMs?: number
+  timeoutMs?: number
+}
+
+type RequestFn = (url: string, init?: RequestInit) => Promise<Response>
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
+}
+
+function retryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500
+}
+
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit = {},
+  options: RequestOptions = {},
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch
+  const retries = options.retries ?? REQUEST_RETRIES
+  const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS
+  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS
+  let lastError: unknown
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetchImpl(url, { ...init, signal: controller.signal })
+      if (!retryableStatus(response.status) || attempt === retries) return response
+      await response.body?.cancel()
+      lastError = new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      lastError = error
+      if (attempt === retries) throw error
+    } finally {
+      clearTimeout(timeout)
+    }
+    if (retryDelayMs > 0) await delay(retryDelayMs * (attempt + 1))
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Registry request failed')
+}
+
+async function responseError(label: string, response: Response): Promise<Error> {
+  const body = (await response.text()).trim().slice(0, 500)
+  const detail = body ? `: ${body}` : ''
+  return new Error(`Failed to fetch ${label}: HTTP ${response.status}${detail}`)
+}
+
+export async function fetchDir(
+  path: string,
+  request: RequestFn = fetchWithRetry,
+  allowMissing = false,
+): Promise<GHItem[]> {
+  const res = await request(`${API}/${path}`, { headers: HEADERS })
   if (!res.ok) {
-    // 404 is expected for optional categories (skills, mcp may not exist yet).
-    if (res.status !== 404) console.error(`Failed to fetch ${path}: ${res.status}`)
-    return []
+    if (res.status === 404 && allowMissing) return []
+    throw await responseError(path, res)
   }
   const items: GHItem[] = await res.json()
   return items.filter(f => (f.type === 'dir' || f.name.endsWith('.toml')) && f.name !== 'README.md')
 }
 
-function parseToml(text: string, fallbackId: string): Detail {
+function escapeRegExp(value: string): string {
+  const special = '\\^$.*+?()[]{}|'
+  return [...value].map((character) => special.includes(character) ? '\\' + character : character).join('')
+}
+
+function decodeDoubleQuoted(value: string): string {
+  try {
+    return JSON.parse('"' + value + '"') as string
+  } catch {
+    return value
+  }
+}
+
+export function parseToml(text: string, fallbackId: string): Detail {
   const get = (key: string) => {
-    const m = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm'))
-    return m ? m[1]! : ''
+    const pattern = '^' + escapeRegExp(key) + '\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"'
+    const m = text.match(new RegExp(pattern, 'm'))
+    return m ? decodeDoubleQuoted(m[1]!) : ''
   }
   // Parse i18n sections — capture both name and description so the
   // card title localizes (not just the blurb). Line-oriented on
@@ -41,7 +119,8 @@ function parseToml(text: string, fallbackId: string): Detail {
   // token), so we ignore nested [i18n.zh.agents.main] subsections.
   const headerRe = /^\[i18n\.([a-zA-Z-]+)\]\s*$/
   const anyHeaderRe = /^\[/
-  const kvRe = (k: string) => new RegExp(`^\\s*${k}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`)
+  const kvRe = (k: string) =>
+    new RegExp('^\\s*' + escapeRegExp(k) + '\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"')
   const nameRe = kvRe('name')
   const descRe = kvRe('description')
   for (let i = 0; i < lines.length; i++) {
@@ -52,9 +131,9 @@ function parseToml(text: string, fallbackId: string): Detail {
     for (let j = i + 1; j < lines.length; j++) {
       if (anyHeaderRe.test(lines[j]!)) break
       const n = lines[j]!.match(nameRe)
-      if (n && entry.name === undefined) entry.name = n[1]!
+      if (n && entry.name === undefined) entry.name = decodeDoubleQuoted(n[1]!)
       const d = lines[j]!.match(descRe)
-      if (d && entry.description === undefined) entry.description = d[1]!
+      if (d && entry.description === undefined) entry.description = decodeDoubleQuoted(d[1]!)
     }
     if (entry.name || entry.description) i18n[lang] = entry
   }
@@ -74,25 +153,38 @@ function parseToml(text: string, fallbackId: string): Detail {
   return result
 }
 
-async function fetchToml(path: string, fallbackId: string): Promise<Detail | null> {
-  const res = await fetch(`${RAW}/${path}`)
-  if (!res.ok) return null
+export async function fetchToml(
+  path: string,
+  fallbackId: string,
+  request: RequestFn = fetchWithRetry,
+): Promise<Detail | null> {
+  const res = await request(`${RAW}/${path}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw await responseError(path, res)
   return parseToml(await res.text(), fallbackId)
 }
 
 // Skills ship as SKILL.md with YAML frontmatter instead of TOML.
 // Only `name` and `description` are guaranteed; id falls back to the
 // directory name and category is always "skills".
-async function fetchSkillMd(path: string, fallbackId: string): Promise<Detail | null> {
-  const res = await fetch(`${RAW}/${path}`)
-  if (!res.ok) return null
-  const text = await res.text()
+export function parseSkillMd(text: string, fallbackId: string): Detail | null {
   const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
   if (!fm) return null
   const block = fm[1]!
   const get = (key: string) => {
-    const m = block.match(new RegExp(`^${key}\\s*:\\s*"?([^"\\n]*?)"?\\s*$`, 'm'))
-    return m ? m[1]!.trim() : ''
+    for (const line of block.split(/\r?\n/)) {
+      const match = line.match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/)
+      if (!match || match[1] !== key) continue
+      const value = match[2]!.trim()
+      if (value.startsWith('"') && value.endsWith('"')) {
+        return decodeDoubleQuoted(value.slice(1, -1))
+      }
+      if (value.startsWith("'") && value.endsWith("'")) {
+        return value.slice(1, -1).replace(/''/g, "'")
+      }
+      return value
+    }
+    return ''
   }
   return {
     id: get('id') || fallbackId,
@@ -101,6 +193,17 @@ async function fetchSkillMd(path: string, fallbackId: string): Promise<Detail | 
     category: 'skills',
     icon: '',
   }
+}
+
+export async function fetchSkillMd(
+  path: string,
+  fallbackId: string,
+  request: RequestFn = fetchWithRetry,
+): Promise<Detail | null> {
+  const res = await request(`${RAW}/${path}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw await responseError(path, res)
+  return parseSkillMd(await res.text(), fallbackId)
 }
 
 type Fetcher = (path: string, fallbackId: string) => Promise<Detail | null>
@@ -122,6 +225,35 @@ async function fetchBatch(
   return out
 }
 
+interface RegistryDetails {
+  hands: Detail[]
+  channels: Detail[]
+  providers: Detail[]
+  workflows: Detail[]
+  agents: Detail[]
+  plugins: Detail[]
+  skills: Detail[]
+  mcp: Detail[]
+}
+
+export function createRegistryData(
+  details: RegistryDetails,
+  fetchedAt = new Date().toISOString(),
+) {
+  return {
+    ...details,
+    handsCount: details.hands.length,
+    channelsCount: details.channels.length,
+    providersCount: details.providers.length,
+    workflowsCount: details.workflows.length,
+    agentsCount: details.agents.length,
+    pluginsCount: details.plugins.length,
+    skillsCount: details.skills.length,
+    mcpCount: details.mcp.length,
+    fetchedAt,
+  }
+}
+
 async function main() {
   console.log('Fetching registry data...')
 
@@ -132,8 +264,8 @@ async function main() {
     fetchDir('workflows'),
     fetchDir('agents'),
     fetchDir('plugins'),
-    fetchDir('skills'),
-    fetchDir('mcp'),
+    fetchDir('skills', fetchWithRetry, true),
+    fetchDir('mcp', fetchWithRetry, true),
   ])
 
   const filter = (items: GHItem[]) => items.filter(f => f.name !== 'README.md')
@@ -164,7 +296,7 @@ async function main() {
     fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
   ])
 
-  const data = {
+  const data = createRegistryData({
     hands: handDetails,
     channels: channelDetails,
     providers: providerDetails,
@@ -173,22 +305,17 @@ async function main() {
     plugins: pluginDetails,
     skills: skillDetails,
     mcp: mcpDetails,
-    handsCount: hands.length,
-    channelsCount: channels.length,
-    providersCount: providers.length,
-    workflowsCount: workflows.length,
-    agentsCount: agents.length,
-    pluginsCount: plugins.length,
-    skillsCount: skills.length,
-    mcpCount: mcp.length,
-    fetchedAt: new Date().toISOString(),
-  }
+  })
 
-  const fs = await import('fs')
-  const path = await import('path')
-  const outPath = path.join(import.meta.dirname, '..', 'public', 'registry.json')
-  fs.writeFileSync(outPath, JSON.stringify(data, null, 2))
+  const outPath = resolve(import.meta.dirname, '..', 'public', 'registry.json')
+  writeFileSync(outPath, JSON.stringify(data, null, 2))
   console.log(`Written to ${outPath}`)
 }
 
-main().catch(console.error)
+const entrypoint = process.argv[1]
+if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) {
+  main().catch((error: unknown) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

@@ -112,7 +112,7 @@ impl DriverCache {
             key_hash,
             config.base_url.as_deref().unwrap_or(""),
             config.proxy_url.as_deref().unwrap_or(""),
-            config.request_timeout_secs.map_or(0, |s| s),
+            config.request_timeout_secs.unwrap_or(0),
             config.message_timeout_secs,
         )
     }

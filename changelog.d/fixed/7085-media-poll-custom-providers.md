@@ -1,0 +1,1 @@
+Keep `GET /api/media/video/{task_id}` working for media providers configured through `provider_urls`, and keep its unknown-provider rejection carrying the documented `invalid_request` code. (#7085) (@houko)

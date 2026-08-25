@@ -10,19 +10,50 @@
 // try/catch pattern already used in `components/TerminalTabs.tsx`
 // (#5140) so every site degrades to a sensible default instead.
 
-export function safeStorageGet(key: string): string | null {
+export type StorageReadResult =
+  | { ok: true; value: string | null }
+  | { ok: false; reason: "unavailable" | "error"; error?: unknown };
+
+type StorageAccessResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: "unavailable" | "error"; error?: unknown };
+
+function withStorage<T>(
+  operation: "safeStorageGet" | "safeStorageSet",
+  key: string,
+  access: (storage: Storage) => T,
+  warnUnavailable: boolean,
+): StorageAccessResult<T> {
+  let storage: Storage | undefined;
   try {
-    return globalThis.localStorage?.getItem(key) ?? null;
-  } catch (e) {
-    console.warn(`safeStorageGet("${key}") failed:`, e);
-    return null;
+    storage = globalThis.localStorage;
+  } catch (error) {
+    console.warn(`${operation}("${key}") failed:`, error);
+    return { ok: false, reason: "error", error };
+  }
+  if (typeof storage === "undefined") {
+    if (warnUnavailable) {
+      console.warn(`${operation}("${key}") skipped: localStorage unavailable`);
+    }
+    return { ok: false, reason: "unavailable" };
+  }
+  try {
+    return { ok: true, value: access(storage) };
+  } catch (error) {
+    console.warn(`${operation}("${key}") failed:`, error);
+    return { ok: false, reason: "error", error };
   }
 }
 
+export function safeStorageRead(key: string): StorageReadResult {
+  return withStorage("safeStorageGet", key, (storage) => storage.getItem(key), false);
+}
+
+export function safeStorageGet(key: string): string | null {
+  const result = safeStorageRead(key);
+  return result.ok ? result.value : null;
+}
+
 export function safeStorageSet(key: string, value: string): void {
-  try {
-    globalThis.localStorage?.setItem(key, value);
-  } catch (e) {
-    console.warn(`safeStorageSet("${key}") failed:`, e);
-  }
+  withStorage("safeStorageSet", key, (storage) => storage.setItem(key, value), true);
 }

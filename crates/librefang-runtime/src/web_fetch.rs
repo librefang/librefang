@@ -730,7 +730,7 @@ pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
             let octets = v4.octets();
             matches!(
                 octets,
-                [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
+                [0, ..] | [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
             )
         }
         IpAddr::V6(v6) => {
@@ -1258,6 +1258,8 @@ mod tests {
     #[test]
     fn test_ssrf_blocks_zero_ip() {
         assert!(check_ssrf("http://0.0.0.0/", &[]).is_err());
+        assert!(check_ssrf("http://0.1.2.3/", &[]).is_err());
+        assert!(check_ssrf("http://[::ffff:0.1.2.3]/", &[]).is_err());
     }
 
     #[test]
@@ -1327,6 +1329,8 @@ mod tests {
         assert!(is_private_ip(&mapped_private));
         let mapped_link_local: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
         assert!(is_private_ip(&mapped_link_local));
+        assert!(is_private_ip(&"0.1.2.3".parse().unwrap()));
+        assert!(is_private_ip(&"::ffff:0.1.2.3".parse().unwrap()));
     }
 
     #[test]
