@@ -74,14 +74,27 @@ async fn boot_enabled() -> Harness {
 }
 
 async fn send(harness: &Harness, method: Method, path: &str, token: Option<&str>) -> StatusCode {
+    send_with_body(harness, method, path, token, Body::from("{}")).await
+}
+
+async fn send_with_body(
+    harness: &Harness,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    body: Body,
+) -> StatusCode {
     let mut req = Request::builder().method(method).uri(path);
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
-    let req = req
+    let mut req = req
         .header("Content-Type", "application/json")
-        .body(Body::from("{}"))
+        .body(body)
         .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+    ));
     harness
         .app
         .clone()
@@ -116,21 +129,16 @@ async fn authentication_verify_is_public() {
     // A garbage body reaches the handler (public) and fails at ceremony
     // lookup → 400, never 401. Proves the verify endpoint is public too.
     let h = boot_enabled().await;
-    let mut req = Request::builder()
-        .method(Method::POST)
-        .uri("/api/auth/passkey/authentication-verify")
-        .header("Content-Type", "application/json")
-        .body(Body::from(
+    let status = send_with_body(
+        &h,
+        Method::POST,
+        "/api/auth/passkey/authentication-verify",
+        None,
+        Body::from(
             r#"{"ceremony_id":"nope","credential":{"id":"AAAA","rawId":"AAAA","response":{"authenticatorData":"AAAA","clientDataJSON":"AAAA","signature":"AAAA"},"type":"public-key"}}"#,
-        ))
-        .unwrap();
-    // The handler extracts `ConnectInfo<SocketAddr>` (for the session cookie's
-    // Secure attribute); a bare tower `oneshot` has no connect info, so inject
-    // it the way `axum::serve(..).into_make_service_with_connect_info` would.
-    req.extensions_mut().insert(axum::extract::ConnectInfo(
-        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
-    ));
-    let status = h.app.clone().oneshot(req).await.unwrap().status();
+        ),
+    )
+    .await;
     assert_ne!(status, StatusCode::UNAUTHORIZED, "verify must be public");
     assert_eq!(status, StatusCode::BAD_REQUEST, "unknown ceremony → 400");
 }
@@ -171,9 +179,10 @@ async fn list_and_revoke_require_auth() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn endpoints_503_when_disabled() {
-    // Default config: passkey_enabled = false → engine None → 503 on the
-    // public authentication-options (api_key unset, so auth isn't the gate).
-    let h = boot(base_config()).await;
+    let mut cfg = base_config();
+    cfg.passkey_enabled = false;
+    cfg.api_key.clear();
+    let h = boot(cfg).await;
     let status = send(
         &h,
         Method::POST,

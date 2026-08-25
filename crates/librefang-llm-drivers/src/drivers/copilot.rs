@@ -51,10 +51,15 @@ impl CopilotTokenCache {
     }
 
     fn lock_cached(&self) -> MutexGuard<'_, Option<CachedToken>> {
-        self.cached.lock().unwrap_or_else(|poisoned| {
-            warn!("Copilot token cache lock poisoned; recovering inner state");
-            poisoned.into_inner()
-        })
+        match self.cached.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("Copilot token cache lock poisoned; recovering inner state");
+                let guard = poisoned.into_inner();
+                self.cached.clear_poison();
+                guard
+            }
+        }
     }
 
     /// Get a valid cached token, or None if expired/missing.
@@ -370,7 +375,9 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(cache.cached.is_poisoned());
         assert_eq!(*cache.get().unwrap().token, "old-token");
+        assert!(!cache.cached.is_poisoned());
         cache.set(CachedToken {
             token: Zeroizing::new("fresh-token".to_string()),
             expires_at: Instant::now() + Duration::from_secs(3600),
@@ -379,6 +386,10 @@ mod tests {
         let fresh = cache.get().unwrap();
         assert_eq!(*fresh.token, "fresh-token");
         assert_eq!(fresh.base_url, "https://proxy.example");
+        assert_eq!(
+            *cache.cached.lock().unwrap().as_ref().unwrap().token,
+            "fresh-token"
+        );
     }
 
     #[test]

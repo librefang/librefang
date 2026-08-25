@@ -4801,7 +4801,11 @@ mod tests {
         assert_eq!(map_tool_name("write_file"), Some("file_write"));
         assert_eq!(map_tool_name("execute_command"), Some("shell_exec"));
         assert_eq!(map_tool_name("fetch_url"), Some("web_fetch"));
-        assert_eq!(map_tool_name("memory_search"), Some("memory_recall"));
+        // #7808: search-shaped names resolve to semantic search, not exact-key KV.
+        assert_eq!(
+            map_tool_name("memory_search"),
+            Some("memory_semantic_search")
+        );
         assert_eq!(map_tool_name("unknown_tool"), None);
         // New Claude-style mappings
         assert_eq!(map_tool_name("Read"), Some("file_read"));

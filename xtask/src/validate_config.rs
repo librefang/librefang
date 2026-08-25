@@ -2,6 +2,107 @@ use clap::Parser;
 use std::fs;
 use std::path::PathBuf;
 
+const REDACTED: &str = "[REDACTED]";
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["api_key", "secret", "password", "credential", "private_key"]
+        .iter()
+        .any(|marker| key.contains(marker))
+        || key == "token"
+        || key.ends_with("_token")
+}
+
+fn redact_value(value: &mut toml_edit::Value) {
+    match value {
+        toml_edit::Value::Array(array) => {
+            for value in array.iter_mut() {
+                redact_value(value);
+            }
+        }
+        toml_edit::Value::InlineTable(table) => {
+            for (key, value) in table.iter_mut() {
+                if is_sensitive_key(&key) {
+                    *value = toml_edit::Value::from(REDACTED);
+                } else {
+                    redact_value(value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_item(item: &mut toml_edit::Item) {
+    match item {
+        toml_edit::Item::Value(value) => redact_value(value),
+        toml_edit::Item::Table(table) => {
+            for (key, item) in table.iter_mut() {
+                if is_sensitive_key(&key) {
+                    *item = toml_edit::value(REDACTED);
+                } else {
+                    redact_item(item);
+                }
+            }
+        }
+        toml_edit::Item::ArrayOfTables(tables) => {
+            for table in tables.iter_mut() {
+                for (key, item) in table.iter_mut() {
+                    if is_sensitive_key(&key) {
+                        *item = toml_edit::value(REDACTED);
+                    } else {
+                        redact_item(item);
+                    }
+                }
+            }
+        }
+        toml_edit::Item::None => {}
+    }
+}
+
+fn redacted_config(doc: &toml_edit::DocumentMut) -> String {
+    let mut redacted = doc.clone();
+    for (key, item) in redacted.iter_mut() {
+        if is_sensitive_key(&key) {
+            *item = toml_edit::value(REDACTED);
+        } else {
+            redact_item(item);
+        }
+    }
+    redacted.to_string()
+}
+
+fn validate_known_fields(doc: &toml_edit::DocumentMut) -> Result<(), String> {
+    if let Some(provider) = doc.get("llm").and_then(|section| section.get("provider")) {
+        if provider.as_str().is_none() {
+            return Err("llm.provider must be a string".to_string());
+        }
+    }
+
+    if let Some(limit) = doc
+        .get("budget")
+        .and_then(|section| section.get("daily_limit_usd"))
+    {
+        let Some(value) = limit.as_float() else {
+            return Err("budget.daily_limit_usd must be a floating-point number".to_string());
+        };
+        if value < 0.0 {
+            return Err("budget.daily_limit_usd cannot be negative".to_string());
+        }
+    }
+
+    if let Some(port) = doc.get("api").and_then(|section| section.get("port")) {
+        let Some(value) = port.as_integer() else {
+            return Err("api.port must be an integer".to_string());
+        };
+        if !(1..=65535).contains(&value) {
+            return Err(format!("api.port must be 1-65535, got {value}"));
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Parser, Debug)]
 pub struct ValidateConfigArgs {
     /// Path to config file (default: ~/.librefang/config.toml)
@@ -77,9 +178,16 @@ pub fn run(args: ValidateConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Validate specific fields
+            if let Err(error) = validate_known_fields(&doc) {
+                println!("  Error: {error}");
+                return Err("invalid config".into());
+            }
+
             if let Some(llm) = doc.get("llm") {
                 if let Some(provider) = llm.get("provider") {
-                    let p = provider.as_str().unwrap_or("");
+                    let p = provider
+                        .as_str()
+                        .expect("type checked by validate_known_fields");
                     let valid_providers = [
                         "groq",
                         "openai",
@@ -94,31 +202,9 @@ pub fn run(args: ValidateConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if let Some(budget) = doc.get("budget") {
-                if let Some(limit) = budget.get("daily_limit_usd") {
-                    if let Some(v) = limit.as_float() {
-                        if v < 0.0 {
-                            println!("  Error: budget.daily_limit_usd cannot be negative");
-                            return Err("invalid config".into());
-                        }
-                    }
-                }
-            }
-
-            if let Some(api) = doc.get("api") {
-                if let Some(port) = api.get("port") {
-                    if let Some(p) = port.as_integer() {
-                        if !(1..=65535).contains(&p) {
-                            println!("  Error: api.port must be 1-65535, got {}", p);
-                            return Err("invalid config".into());
-                        }
-                    }
-                }
-            }
-
             if args.show {
-                println!("\n--- Config Contents ---");
-                println!("{}", content);
+                println!("\n--- Config Contents (secrets redacted) ---");
+                println!("{}", redacted_config(&doc));
                 println!("--- End ---");
             }
 
@@ -132,4 +218,95 @@ pub fn run(args: ValidateConfigArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_sensitive_key, redacted_config, validate_known_fields, REDACTED};
+
+    #[test]
+    fn sensitive_key_matching_covers_nested_config_secret_names() {
+        for key in [
+            "api_key",
+            "client_secret",
+            "admin_password",
+            "access_token",
+            "credentials",
+            "private_key_path",
+        ] {
+            assert!(is_sensitive_key(key), "{key} must be redacted");
+        }
+        for key in ["provider", "model", "client_id", "token_budget"] {
+            assert!(!is_sensitive_key(key), "{key} must remain visible");
+        }
+    }
+
+    #[test]
+    fn config_display_redacts_tables_inline_tables_and_arrays() {
+        let doc = r#"
+api_key = "root-secret"
+provider = "openai"
+
+[network]
+shared_secret = "network-secret"
+
+[[extensions]]
+name = "visible"
+credentials = "extension-secret"
+settings = { password = "inline-secret", region = "visible-region" }
+rules = [{ access_token = "array-secret", label = "visible-label" }]
+"#
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+
+        let shown = redacted_config(&doc);
+
+        for secret in [
+            "root-secret",
+            "network-secret",
+            "extension-secret",
+            "inline-secret",
+            "array-secret",
+        ] {
+            assert!(!shown.contains(secret), "leaked {secret}");
+        }
+        assert_eq!(shown.matches(REDACTED).count(), 5);
+        for visible in ["openai", "visible", "visible-region", "visible-label"] {
+            assert!(shown.contains(visible), "lost {visible}");
+        }
+    }
+
+    #[test]
+    fn known_fields_reject_wrong_toml_types() {
+        for (source, expected) in [
+            ("[llm]\nprovider = 42", "llm.provider must be a string"),
+            (
+                "[budget]\ndaily_limit_usd = \"ten\"",
+                "budget.daily_limit_usd must be a floating-point number",
+            ),
+            ("[api]\nport = \"4545\"", "api.port must be an integer"),
+        ] {
+            let doc = source.parse::<toml_edit::DocumentMut>().unwrap();
+            assert_eq!(validate_known_fields(&doc).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn known_fields_retain_range_validation() {
+        let negative_budget = "[budget]\ndaily_limit_usd = -1.0"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            validate_known_fields(&negative_budget).unwrap_err(),
+            "budget.daily_limit_usd cannot be negative"
+        );
+
+        let invalid_port = "[api]\nport = 70000"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            validate_known_fields(&invalid_port).unwrap_err(),
+            "api.port must be 1-65535, got 70000"
+        );
+    }
 }

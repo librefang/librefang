@@ -31,6 +31,14 @@ pub struct ConsolidationPromptInput<'a> {
     /// (e.g. "agent prefers Chinese responses"). Passed through unchanged,
     /// empty string omits the section entirely.
     pub extra: &'a str,
+    /// Whether this agent's manifest opted in to `memory_semantic_consolidate`
+    /// (#7808).
+    ///
+    /// The prompt lists tools the model is expected to call, so it must not
+    /// name one that was stripped from the schema: a dream that spends turns
+    /// calling a tool it does not have is a wasted dream, and the loop-guard
+    /// counts the refusals.
+    pub may_consolidate: bool,
 }
 
 /// Build the dream message delivered to the target agent. The prompt
@@ -55,7 +63,8 @@ memories so future sessions can orient quickly.\n\
 \n\
 ## Phase 1 — Orient\n\
 \n\
-- Use `memory_recall` or `memory_list` to see what's already stored.\n\
+- Use `memory_semantic_search` to ask what you already know about a topic, and `memory_semantic_stats` for the shape of the whole store.\n\
+- Use `memory_list` to enumerate exact key/value entries — a separate, keyed store from the semantic one.\n\
 - Note which topics are well-covered and which are thin or missing.\n\
 - Skim categories so you improve existing memories rather than duplicating them.\n\
 \n\
@@ -74,6 +83,7 @@ Don't exhaustively trawl — look for things you already suspect matter.\n\
 For each thing worth remembering:\n\
 \n\
 - **Merge** into an existing memory if one covers the same topic — prefer updating over creating near-duplicates.\n\
+- Record what survives with `memory_semantic_add`, phrased so it stands on its own without this conversation.\n\
 - **Convert relative dates** (\"yesterday\", \"last week\") to absolute dates so the memory stays interpretable after time passes.\n\
 - **Delete contradicted facts** — if today's investigation disproves an old memory, fix it at the source rather than adding a contradiction.\n\
 \n\
@@ -81,9 +91,10 @@ Focus on durable, actionable knowledge: preferences, non-obvious constraints, re
 \n\
 ## Phase 4 — Prune\n\
 \n\
-- Remove memories that are stale, wrong, or superseded by a newer fragment.\n\
-- Collapse near-duplicates into a single canonical entry.\n\
+- Remove memories that are stale, wrong, or superseded by a newer fragment — `memory_semantic_forget` takes an id from `memory_semantic_search`.\n\
+- Collapse near-duplicates into a single canonical entry. `memory_semantic_duplicates` reports the groups.\n\
 - Resolve contradictions — if two memories disagree, fix the wrong one.\n\
+- Delete deliberately: nobody is watching this run, and there is no undo you can reach.\n\
 \n\
 ---\n\
 \n",
@@ -136,12 +147,29 @@ The kernel restricts this session to memory tools only — attempts to call \
 shell, file-edit, or network-mutating tools will be refused before the \
 driver sees them. Stick to:\n\
 \n\
-- `memory_store` — write a new memory.\n\
-- `memory_recall` — search existing memories.\n\
-- `memory_list` — enumerate stored keys.\n\
-\n\
-Session transcripts live in the memory substrate — use `memory_recall` \
-rather than trying to open files directly.\n\
+- `memory_semantic_search` — search remembered facts by meaning. This is the store that gets recalled into your prompts automatically.\n\
+- `memory_semantic_add` — record a durable fact in that store.\n\
+- `memory_semantic_forget` — retract one memory by id when it is wrong or superseded.\n\
+- `memory_semantic_duplicates` — report near-duplicate groups without changing anything.\n\
+- `memory_semantic_stats` — counts and category breakdown for the semantic store.\n\
+- `memory_store` / `memory_recall` / `memory_list` — the separate exact-key key/value store. `memory_recall` matches a key character for character; it does not search.\n\
+\n",
+    );
+
+    // Named only when the agent's manifest granted it. Listing a tool the
+    // kernel stripped from the schema wastes dream turns on refusals and, over
+    // three of them, trips the loop guard (#7808).
+    if input.may_consolidate {
+        out.push_str(
+            "- `memory_semantic_consolidate` — merge every near-duplicate group at once, \
+keeping the newest of each and retracting the rest. Run `memory_semantic_duplicates` first \
+and check that what it lists is what you mean to lose.\n",
+        );
+    }
+
+    out.push_str(
+        "\nSession transcripts live in the memory substrate — search them with \
+`memory_semantic_search` rather than trying to open files directly.\n\
 \n",
     );
 
@@ -173,6 +201,7 @@ mod tests {
             session_ids: &[],
             total_sessions: 0,
             extra: "",
+            may_consolidate: false,
         }
     }
 
@@ -194,6 +223,49 @@ mod tests {
         assert!(p.contains("memory_store"));
         assert!(p.contains("memory_recall"));
         assert!(p.contains("memory_list"));
+        // #7808: the semantic store is the one a dream is for. Before it had an
+        // agent-callable surface this prompt could only direct the model at
+        // key/value tools, and told it `memory_recall` "searches" — the exact
+        // false belief the issue was filed over.
+        assert!(p.contains("memory_semantic_search"));
+        assert!(p.contains("memory_semantic_add"));
+        assert!(p.contains("memory_semantic_forget"));
+        assert!(p.contains("memory_semantic_duplicates"));
+        assert!(
+            p.contains("does not search"),
+            "the prompt must say what memory_recall does NOT do, or the dream keys off the \
+             same wrong mental model that produced #7808"
+        );
+    }
+
+    /// The prompt must not name a tool the kernel stripped from the schema.
+    ///
+    /// A dream that spends turns calling a tool it does not have wastes the
+    /// run, and three consecutive refusals trip the agent loop's guard — so
+    /// naming `memory_semantic_consolidate` unconditionally would make an
+    /// unrelated safety default look like a broken dream (#7808).
+    #[test]
+    fn consolidate_is_named_only_when_the_agent_opted_in() {
+        let withheld = build_consolidation_prompt(empty_input());
+        assert!(
+            !withheld.contains("memory_semantic_consolidate"),
+            "an agent without allow_self_consolidation must not be told to call it"
+        );
+        // The read-only alternative is offered regardless, so a dream that
+        // cannot merge can still report what it found.
+        assert!(withheld.contains("memory_semantic_duplicates"));
+
+        let granted = build_consolidation_prompt(ConsolidationPromptInput {
+            session_ids: &[],
+            total_sessions: 0,
+            extra: "",
+            may_consolidate: true,
+        });
+        assert!(granted.contains("memory_semantic_consolidate"));
+        assert!(
+            granted.contains("check that what it lists is what you mean to lose"),
+            "the grant must arrive with the warning, not just the tool name"
+        );
     }
 
     #[test]
@@ -209,6 +281,7 @@ mod tests {
             session_ids: &ids,
             total_sessions: 2,
             extra: "",
+            may_consolidate: false,
         });
         assert!(p.contains("2 session(s)"));
         assert!(p.contains("sess-a"));
@@ -223,6 +296,7 @@ mod tests {
             session_ids: &ids,
             total_sessions: 50,
             extra: "",
+            may_consolidate: false,
         });
         assert!(p.contains("50 session(s)"));
         assert!(p.contains("showing the 1 most recent"));
@@ -237,9 +311,10 @@ mod tests {
             session_ids: &[],
             total_sessions: 7,
             extra: "",
+            may_consolidate: false,
         });
         assert!(p.contains("7 session(s)"));
-        assert!(p.contains("memory_recall"));
+        assert!(p.contains("memory_semantic_search"));
         // The fallback sentence is the positive signal. The negative
         // signal is that "most recent" (the truncation marker) does not
         // appear — we can't assert "no bullets" because the tool-constraints
@@ -263,6 +338,7 @@ mod tests {
             session_ids: &[],
             total_sessions: 0,
             extra: "Favour concise bullet points.",
+            may_consolidate: false,
         });
         assert!(p.contains("Additional context"));
         assert!(p.contains("Favour concise bullet points."));
