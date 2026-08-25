@@ -845,6 +845,8 @@ mod tests {
     /// Async variant must yield identical content for the standard read
     /// path. This pins the byte-for-byte equivalence with the sync API
     /// — if a future refactor diverges, this test will catch it.
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_matches_sync_for_basic_read() {
         let _serial = cache_serial();
@@ -859,6 +861,8 @@ mod tests {
 
     /// Async API must honour the symlink rejection identically to sync.
     #[cfg(unix)]
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_rejects_symlink_context_file() {
         let _serial = cache_serial();
@@ -878,6 +882,8 @@ mod tests {
 
     /// Async API picks up `.identity/context.md` over the legacy root
     /// fallback — same precedence rule as the sync version.
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_identity_dir_takes_precedence() {
         let _serial = cache_serial();
