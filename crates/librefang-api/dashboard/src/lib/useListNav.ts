@@ -10,10 +10,20 @@ function isTypingTarget(target: EventTarget | null): boolean {
   return false;
 }
 
+function isNativeInteractiveOutsideList(): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return false;
+  if (active.closest("[data-listnav-index]")) return false;
+  return active.matches(
+    "button, a[href], summary, [role='button'], [role='link']",
+  );
+}
+
 export interface ListNavOptions<T> {
   // Items currently rendered in the list (filtered, sorted, etc.).
   items: readonly T[];
-  // Called on Enter — usually opens detail / drills in.
+  // Called on Enter — usually opens detail / drills in. Mouse clicks only
+  // select; row-local buttons and links retain their own activation behavior.
   onActivate?: (item: T, index: number) => void;
   // Called on Esc — usually closes detail or clears selection.
   onEscape?: () => void;
@@ -63,25 +73,40 @@ export function useListNav<T>({
 }: ListNavOptions<T>): ListNavApi {
   const [selectedIndex, setSelectedIndexRaw] = useState(-1);
   const itemRefs = useRef(new Map<number, HTMLElement>());
+  const itemHandlers = useRef(
+    new Map<number, Omit<ListNavItemProps, "tabIndex" | "aria-selected">>(),
+  );
   const lastGAt = useRef(0);
 
   const length = items.length;
+  const selectedIndexRef = useRef(selectedIndex);
+  const itemsRef = useRef(items);
+  const lengthRef = useRef(length);
+  const onActivateRef = useRef(onActivate);
+  const onEscapeRef = useRef(onEscape);
+  selectedIndexRef.current = selectedIndex;
+  itemsRef.current = items;
+  lengthRef.current = length;
+  onActivateRef.current = onActivate;
+  onEscapeRef.current = onEscape;
+
+  const setSelectedIndex = useCallback((idx: number) => {
+    selectedIndexRef.current = idx;
+    setSelectedIndexRaw(idx);
+  }, []);
+
   // Re-clamp when the list shrinks past the current selection.
   useEffect(() => {
     if (selectedIndex >= length) {
-      setSelectedIndexRaw(length === 0 ? -1 : length - 1);
+      setSelectedIndex(length === 0 ? -1 : length - 1);
     }
-  }, [length, selectedIndex]);
-
-  const setSelectedIndex = useCallback((idx: number) => {
-    setSelectedIndexRaw(idx);
-  }, []);
+  }, [length, selectedIndex, setSelectedIndex]);
 
   // Scroll selected row into view (centered in viewport).
   useEffect(() => {
     if (selectedIndex < 0) return;
     const el = itemRefs.current.get(selectedIndex);
-    el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    el?.scrollIntoView({ block: "nearest", behavior: "auto" });
     // Move focus so screen readers announce the new selection.
     if (el && document.activeElement !== el) {
       // Avoid stealing focus from the body when the user hasn't yet
@@ -97,34 +122,39 @@ export function useListNav<T>({
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (length === 0 && e.key !== "Escape") return;
+      if (lengthRef.current === 0 && e.key !== "Escape") return;
 
       // Enter activates current selection (or first item if none selected).
       if (e.key === "Enter") {
-        if (!onActivate) return;
-        const idx = selectedIndex >= 0 ? selectedIndex : 0;
-        if (idx < length) {
+        const activate = onActivateRef.current;
+        if (!activate || isNativeInteractiveOutsideList()) return;
+        const idx = selectedIndexRef.current >= 0 ? selectedIndexRef.current : 0;
+        if (idx < lengthRef.current) {
           e.preventDefault();
-          onActivate(items[idx], idx);
+          activate(itemsRef.current[idx], idx);
         }
         return;
       }
 
       if (e.key === "Escape") {
-        if (selectedIndex >= 0) setSelectedIndexRaw(-1);
-        onEscape?.();
+        if (selectedIndexRef.current >= 0) setSelectedIndex(-1);
+        onEscapeRef.current?.();
         return;
       }
 
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndexRaw((cur) => Math.min(length - 1, cur < 0 ? 0 : cur + 1));
+        const current = selectedIndexRef.current;
+        setSelectedIndex(
+          Math.min(lengthRef.current - 1, current < 0 ? 0 : current + 1),
+        );
         lastGAt.current = 0;
         return;
       }
       if (e.key === "k" || e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndexRaw((cur) => Math.max(0, cur < 0 ? 0 : cur - 1));
+        const current = selectedIndexRef.current;
+        setSelectedIndex(Math.max(0, current < 0 ? 0 : current - 1));
         lastGAt.current = 0;
         return;
       }
@@ -132,7 +162,7 @@ export function useListNav<T>({
       // Shift+G → bottom (vim).
       if (e.key === "G" && e.shiftKey) {
         e.preventDefault();
-        setSelectedIndexRaw(length - 1);
+        setSelectedIndex(lengthRef.current - 1);
         lastGAt.current = 0;
         return;
       }
@@ -142,7 +172,7 @@ export function useListNav<T>({
         const now = Date.now();
         if (lastGAt.current && now - lastGAt.current < 1500) {
           e.preventDefault();
-          setSelectedIndexRaw(0);
+          setSelectedIndex(0);
           lastGAt.current = 0;
         } else {
           lastGAt.current = now;
@@ -152,22 +182,30 @@ export function useListNav<T>({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [items, length, selectedIndex, onActivate, onEscape, disabled]);
+  }, [disabled, setSelectedIndex]);
 
-  const getItemProps = useCallback(
-    (index: number): ListNavItemProps => ({
-      ref: (el: HTMLElement | null) => {
-        if (el) itemRefs.current.set(index, el);
-        else itemRefs.current.delete(index);
-      },
-      tabIndex: index === selectedIndex ? 0 : -1,
-      "aria-selected": index === selectedIndex,
-      "data-listnav-index": index,
-      onMouseEnter: () => setSelectedIndexRaw(index),
-      onClick: () => setSelectedIndexRaw(index),
-    }),
-    [selectedIndex],
-  );
+  const getItemProps = useCallback((index: number): ListNavItemProps => {
+    let stable = itemHandlers.current.get(index);
+    if (!stable) {
+      stable = {
+        ref: (el: HTMLElement | null) => {
+          if (el) itemRefs.current.set(index, el);
+          else itemRefs.current.delete(index);
+        },
+        "data-listnav-index": index,
+        onMouseEnter: () => setSelectedIndex(index),
+        // Click selects only. Interactive children retain native behavior;
+        // Enter is the explicit list-level activation gesture.
+        onClick: () => setSelectedIndex(index),
+      };
+      itemHandlers.current.set(index, stable);
+    }
+    return {
+      ...stable,
+      tabIndex: index === selectedIndexRef.current ? 0 : -1,
+      "aria-selected": index === selectedIndexRef.current,
+    };
+  }, [setSelectedIndex]);
 
   return { selectedIndex, setSelectedIndex, getItemProps };
 }

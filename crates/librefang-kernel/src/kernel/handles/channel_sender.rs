@@ -416,7 +416,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // the first equal-specificity match — `max_by_key` would keep the
         // *last*, drifting from inbound on a tie.
         let bound_agent = {
-            let bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+            let bindings = super::super::bindings_and_handle::lock_bindings(&self.mesh.bindings);
             let mut best: Option<&librefang_types::config::AgentBinding> = None;
             for b in bindings
                 .iter()

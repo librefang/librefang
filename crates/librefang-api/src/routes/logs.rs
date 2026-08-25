@@ -6,6 +6,8 @@ use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type SseEventResult = Result<axum::response::sse::Event, std::convert::Infallible>;
+
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new().route("/logs/stream", axum::routing::get(logs_stream))
 }
@@ -30,16 +32,17 @@ pub async fn logs_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
-    let level_filter = params.get("level").cloned().unwrap_or_default();
+    let level_filter = params
+        .get("level")
+        .map(|level| level.to_ascii_lowercase())
+        .unwrap_or_default();
     let text_filter = params
         .get("filter")
         .cloned()
         .unwrap_or_default()
         .to_lowercase();
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<
-        Result<axum::response::sse::Event, std::convert::Infallible>,
-    >(256);
+    let (tx, rx) = tokio::sync::mpsc::channel::<SseEventResult>(256);
 
     // Subscribe to the kernel shutdown signal so this detached task can
     // exit promptly on daemon shutdown. Without this the only loop exit
@@ -65,6 +68,9 @@ pub async fn logs_stream(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = tx.closed() => {
+                    return; // Client disconnected while the audit log was quiet.
+                }
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         return; // Kernel shutting down — drop Arc<AppState>.
@@ -84,10 +90,19 @@ pub async fn logs_stream(
 
             for entry in &entries {
                 let action_str = format!("{:?}", entry.action);
+                let action_lower = if level_filter.is_empty() && text_filter.is_empty() {
+                    None
+                } else {
+                    Some(action_str.to_ascii_lowercase())
+                };
 
                 // Apply level filter
                 if !level_filter.is_empty() {
-                    let classified = classify_audit_level(&action_str);
+                    let classified = classify_lowercase_audit_level(
+                        action_lower
+                            .as_deref()
+                            .expect("filter requires lowercase action"),
+                    );
                     if classified != level_filter {
                         continue;
                     }
@@ -95,9 +110,17 @@ pub async fn logs_stream(
 
                 // Apply text filter
                 if !text_filter.is_empty() {
-                    let haystack = format!("{} {} {}", action_str, entry.detail, entry.agent_id)
-                        .to_lowercase();
-                    if !haystack.contains(&text_filter) {
+                    let action_matches = action_lower
+                        .as_deref()
+                        .expect("filter requires lowercase action")
+                        .contains(&text_filter);
+                    let detail_matches = contains_lowercase_filter(&entry.detail, &text_filter);
+                    let agent_matches = if action_matches || detail_matches {
+                        false
+                    } else {
+                        contains_lowercase_filter(&entry.agent_id.to_string(), &text_filter)
+                    };
+                    if !action_matches && !detail_matches && !agent_matches {
                         continue;
                     }
                 }
@@ -111,17 +134,24 @@ pub async fn logs_stream(
                     "outcome": entry.outcome,
                     "hash": entry.hash,
                 });
-                let data = serde_json::to_string(&json).unwrap_or_default();
+                let data = match serde_json::to_string(&json) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        tracing::warn!(error = %error, seq = entry.seq, "Failed to serialize audit SSE event");
+                        continue;
+                    }
+                };
                 if tx.send(Ok(Event::default().data(data))).await.is_err() {
                     return; // Client disconnected
                 }
             }
 
             // Update tracking state
-            if let Some(last) = entries.last() {
-                last_seq = last.seq;
-            }
-            first_poll = false;
+            update_poll_cursor(
+                &mut first_poll,
+                &mut last_seq,
+                entries.last().map(|e| e.seq),
+            );
         }
     });
 
@@ -130,11 +160,18 @@ pub async fn logs_stream(
     // and log on panic (#5137). The watchdog ends naturally when the
     // forwarder returns (client disconnect) — no leak.
     tokio::spawn(async move {
-        if let Err(e) = forwarder.await {
-            if e.is_panic() {
+        match forwarder.await {
+            Ok(()) => {}
+            Err(error) if error.is_panic() => {
                 tracing::error!(
-                    error = %e,
+                    error = %error,
                     "SSE log forwarder task panicked; EventSource stalled"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "SSE log forwarder task was cancelled"
                 );
             }
         }
@@ -150,14 +187,90 @@ pub async fn logs_stream(
         .into_response()
 }
 
-/// Classify an audit action string into a level (info, warn, error).
-fn classify_audit_level(action: &str) -> &'static str {
-    let a = action.to_lowercase();
-    if a.contains("error") || a.contains("fail") || a.contains("crash") || a.contains("denied") {
+/// Classify an already-lowercase audit action into a level (info, warn, error).
+fn classify_lowercase_audit_level(action: &str) -> &'static str {
+    if action.contains("error")
+        || action.contains("fail")
+        || action.contains("crash")
+        || action.contains("denied")
+    {
         "error"
-    } else if a.contains("warn") || a.contains("block") || a.contains("kill") {
+    } else if action.contains("warn") || action.contains("block") || action.contains("kill") {
         "warn"
     } else {
         "info"
+    }
+}
+
+/// Test a pre-lowercased filter without allocating for the common ASCII case.
+fn contains_lowercase_filter(haystack: &str, lowercase_filter: &str) -> bool {
+    if lowercase_filter.is_empty() {
+        return true;
+    }
+    if lowercase_filter.is_ascii() {
+        haystack
+            .as_bytes()
+            .windows(lowercase_filter.len())
+            .any(|window| window.eq_ignore_ascii_case(lowercase_filter.as_bytes()))
+    } else {
+        haystack.to_lowercase().contains(lowercase_filter)
+    }
+}
+
+fn update_poll_cursor(first_poll: &mut bool, last_seq: &mut u64, newest_seq: Option<u64>) {
+    if let Some(seq) = newest_seq {
+        *last_seq = seq;
+        *first_poll = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_initial_poll_keeps_bounded_backfill_mode() {
+        let mut first_poll = true;
+        let mut last_seq = 0;
+
+        update_poll_cursor(&mut first_poll, &mut last_seq, None);
+
+        assert!(first_poll);
+        assert_eq!(last_seq, 0);
+    }
+
+    #[test]
+    fn populated_initial_poll_establishes_cursor() {
+        let mut first_poll = true;
+        let mut last_seq = 0;
+
+        update_poll_cursor(&mut first_poll, &mut last_seq, Some(42));
+
+        assert!(!first_poll);
+        assert_eq!(last_seq, 42);
+    }
+
+    #[tokio::test]
+    async fn sender_detects_a_quiet_client_disconnect() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<SseEventResult>(1);
+        drop(rx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), tx.closed())
+            .await
+            .expect("sender should observe a dropped SSE receiver");
+    }
+
+    #[test]
+    fn audit_level_uses_the_reused_lowercase_action() {
+        assert_eq!(classify_lowercase_audit_level("permissiondenied"), "error");
+        assert_eq!(classify_lowercase_audit_level("processkilled"), "warn");
+        assert_eq!(classify_lowercase_audit_level("configchange"), "info");
+    }
+
+    #[test]
+    fn text_filter_avoids_allocation_for_ascii_and_supports_unicode() {
+        assert!(contains_lowercase_filter("Agent FAILED safely", "fail"));
+        assert!(!contains_lowercase_filter("Agent completed", "fail"));
+        assert!(contains_lowercase_filter("Überprüfung", "über"));
     }
 }

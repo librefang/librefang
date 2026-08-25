@@ -71,6 +71,7 @@ import {
   useAgentTemplates,
   useAgentTools,
   useAgentSkills,
+  useAgentMcpServers,
   usePromptVersions,
   useTools,
 } from "../lib/queries/agents";
@@ -79,8 +80,7 @@ import {
   useCloneAgent,
   useDeleteAgent,
   usePatchAgent,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useResetAgentSession,
   useResumeAgent,
   useSpawnAgent,
@@ -188,7 +188,7 @@ export function SystemPromptSection({
   const bind = (version: PromptVersion) => {
     if (bindVersion.isPending) return;
     bindVersion.mutate(
-      { agentId, version },
+      { agentId, version, previousSystemPrompt: current },
       {
         onSuccess: () => {
           addToast(
@@ -388,8 +388,7 @@ export function AgentsPage() {
   const spawnMutation = useSpawnAgent();
   const suspendMutation = useSuspendAgent();
   const resumeMutation = useResumeAgent();
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
   const patchAgentMutation = usePatchAgent();
   const cloneMutation = useCloneAgent();
   const resetSessionMutation = useResetAgentSession();
@@ -581,14 +580,8 @@ export function AgentsPage() {
       return;
     }
 
-    // Caller picks the mutation based on cached agent-detail knowledge: hand
-    // agents go through the hand-runtime-config endpoint (also invalidates
-    // handKeys.details()), everyone else hits the standalone /config route.
-    const mutation = detailAgent.is_hand
-      ? patchHandAgentRuntimeConfigMutation
-      : patchAgentConfigMutation;
-    mutation.mutate(
-      { agentId: detailAgent.id, config: patch },
+    patchAgentRuntimeConfigMutation.mutate(
+      { agentId: detailAgent.id, isHand: detailAgent.is_hand === true, config: patch },
       {
         onSuccess: async () => {
           setEditingModel(false);
@@ -634,6 +627,13 @@ export function AgentsPage() {
   // blank for almost every agent.
   const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
   const tabAgentToolsQuery = useAgentTools(detailAgent?.id ?? "", {
+    enabled: !!detailAgent && agentTab === "tools",
+  });
+  // Per-agent MCP server assignment (#7713). The Tools tab is where MCP grants
+  // are explained, and it is the only place a declared-but-unconnected server
+  // can be shown at all: a server with no connection contributes no tools, so
+  // it forms no tool group and would otherwise be invisible on this page.
+  const tabAgentMcpQuery = useAgentMcpServers(detailAgent?.id ?? "", {
     enabled: !!detailAgent && agentTab === "tools",
   });
   // Per-agent skill assignment (#4917) — backs the inline assign/unassign
@@ -930,11 +930,11 @@ export function AgentsPage() {
   const isDetailDrawerCrashed = drawerDetailState === "crashed";
   const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
   const lockRename = !!detailAgent?.is_hand;
-  const activeConfigMutation = detailAgent?.is_hand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
-  // Derive both validity and dirty state from the same strict builder used by
-  // Save. This keeps trailing garbage from enabling a button that then no-ops.
+  const activeConfigMutation = patchAgentRuntimeConfigMutation;
+  // Save enables when the draft is both valid AND differs from the persisted model in any field — Provider, Model, Max tokens, or Temperature.
+  // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
+  // Deriving the two separately is what produced #5917 — the gate checked validity only, and combined with the provider-switch model reset, Max-token / Temperature edits never lit Save.
+  // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
   const modelValid = modelPatchPreview !== null;
@@ -1457,6 +1457,10 @@ export function AgentsPage() {
       .slice()
       .sort();
     const available: string[] = (skillsData?.available ?? []).slice().sort();
+    // Assigned names the registry does not have (#7713). Marked in place rather
+    // than listed separately: they are genuinely assigned, they just contribute
+    // nothing until the skill is installed and the registry reloaded.
+    const pendingSkills = new Set(skillsData?.pending ?? []);
     // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — every
     // registry skill usable, the default), or 'allowlist' (manifest pins a
     // set). Prefer the live query's mode; fall back to the detail payload.
@@ -1686,6 +1690,7 @@ export function AgentsPage() {
                       action="remove"
                       onRemove={() => removeSkill(s)}
                       busy={mutating}
+                      pending={pendingSkills.has(s)}
                     />
                   ))}
                 </div>
@@ -1880,6 +1885,15 @@ export function AgentsPage() {
       );
     };
 
+    // Declared MCP servers with no live connection (#7713). The kernel derives
+    // this from the connection pool rather than the configured server list, so a
+    // server that is configured here and simply unreachable is included — which
+    // is the case worth surfacing, since it looks identical to a healthy one
+    // everywhere else on this page.
+    const pendingMcpServers: string[] = (tabAgentMcpQuery.data?.pending ?? [])
+      .slice()
+      .sort();
+
     const assignedGroups = sortedGroups.filter(
       ([name, tools]) => getGroupStatus(name, tools) !== "none",
     );
@@ -1900,6 +1914,39 @@ export function AgentsPage() {
                 : draft.length}
           </div>
         </div>
+
+        {pendingMcpServers.length > 0 && (
+          <div
+            className="rounded-md border border-amber-400/30 bg-amber-400/5 p-3 flex items-start gap-3"
+            data-testid="agent-pending-mcp"
+          >
+            <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.mcp_pending_title", {
+                  defaultValue: "MCP servers not connected",
+                })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.mcp_pending_desc", {
+                  defaultValue:
+                    "Granted in agent.toml but no live connection, so they contribute no tools. Check the server on the MCP page; the grant activates as soon as it connects.",
+                })}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {pendingMcpServers.map((name) => (
+                  <span
+                    key={name}
+                    className="font-mono text-[10.5px] rounded px-1.5 py-0.5 bg-main/60 border border-border-subtle text-text-main"
+                    data-testid="agent-pending-mcp-item"
+                  >
+                    {name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         {isLoading ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-center justify-center">
@@ -2675,14 +2722,12 @@ export function AgentsPage() {
                       value={detailAgent.web_search_augmentation || "off"}
                       onChange={e => {
                         const mode = e.target.value as "off" | "auto" | "always";
-                        // Branch in the caller, not the hook — only the
-                        // caller knows from the cached detail whether this
-                        // agent is a hand role.
-                        const mutation = detailAgent.is_hand
-                          ? patchHandAgentRuntimeConfigMutation
-                          : patchAgentConfigMutation;
-                        mutation.mutate(
-                          { agentId: detailAgent.id, config: { web_search_augmentation: mode } },
+                        patchAgentRuntimeConfigMutation.mutate(
+                          {
+                            agentId: detailAgent.id,
+                            isHand: detailAgent.is_hand === true,
+                            config: { web_search_augmentation: mode },
+                          },
                           {
                             onSuccess: async () => {
                               await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);

@@ -2,7 +2,7 @@ pkgname=librefang-desktop-bin
 pkgver=2026.6.24_beta.23
 _upstream_ver=${pkgver/_/-}
 _desktop_ver=26.6.32263
-pkgrel=1
+pkgrel=2
 pkgdesc="Native LibreFang desktop app"
 arch=('x86_64')
 url="https://librefang.ai"
@@ -12,7 +12,7 @@ optdepends=(
   'python: first-party channel sidecar adapters when running a local daemon'
   'docker: Docker-backed tools and sandbox workflows when running a local daemon'
 )
-provides=('librefang-desktop')
+provides=("librefang-desktop=${pkgver}")
 conflicts=('librefang-desktop')
 options=('!debug')
 source=(
@@ -25,7 +25,17 @@ sha256sums=(
 )
 
 package() {
-  local data_archive=("$srcdir"/data.tar.*)
-  bsdtar --no-same-owner -xf "${data_archive[0]}" -C "$pkgdir"
+  local nullglob_was_set=0
+  shopt -q nullglob && nullglob_was_set=1
+  shopt -s nullglob
+  local data_archives=("$srcdir"/data.tar.*)
+  (( nullglob_was_set )) || shopt -u nullglob
+
+  if (( ${#data_archives[@]} != 1 )) || [[ ! -f "${data_archives[0]:-}" ]]; then
+    error "expected exactly one data.tar.* archive, found ${#data_archives[@]}"
+    return 1
+  fi
+
+  bsdtar --no-same-owner -xf "${data_archives[0]}" -C "$pkgdir"
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/${pkgname}/LICENSE"
 }

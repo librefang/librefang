@@ -17,6 +17,11 @@ api-error-template-invalid-name = Ungueltiger Vorlagenname
 api-error-template-not-found = Vorlage '{ $name }' nicht gefunden
 api-error-template-parse-failed = Vorlage konnte nicht analysiert werden: { $error }
 api-error-template-required = 'manifest_toml' oder 'template' ist erforderlich
+api-error-template-invalid-manifest = Ungueltiges Vorlagenmanifest
+api-error-template-read-failed = Vorlage konnte nicht gelesen werden
+api-error-agent-type-exists = Ein Agententyp namens '{ $name }' existiert bereits
+api-error-agent-type-name-taken = '{ $name }' ist der Name eines laufenden Agenten; waehlen Sie einen anderen Namen fuer den Agententyp
+api-error-agent-type-not-editable = Agententyp '{ $name }' stammt aus dem Arbeitsbereich eines laufenden Agenten und wird ueber /api/agents verwaltet
 
 # Manifest errors
 api-error-manifest-too-large = Manifest zu gross (max 1MB)

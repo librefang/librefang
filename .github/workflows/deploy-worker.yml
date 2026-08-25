@@ -11,10 +11,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-workers-production
+  cancel-in-progress: false
+
 jobs:
   deploy-worker:
     name: Deploy Main Worker
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -23,10 +28,12 @@ jobs:
 
       - name: Test Worker
         working-directory: deploy/worker
+        shell: bash
         run: npm test
 
       - name: Deploy Worker
         working-directory: deploy/worker
+        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -35,6 +42,7 @@ jobs:
   deploy-github-stats:
     name: Deploy GitHub Stats Worker
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -43,6 +51,7 @@ jobs:
 
       - name: Deploy GitHub Stats Worker
         working-directory: web/workers/github-stats-worker
+        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

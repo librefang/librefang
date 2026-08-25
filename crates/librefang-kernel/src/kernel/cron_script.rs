@@ -8,6 +8,32 @@
 
 use std::path::Path;
 
+/// Maximum bytes retained from each pre-check script output stream.
+const SCRIPT_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+
+/// Retain at most `limit` bytes while continuing to drain the reader.
+///
+/// Stopping at the memory cap would close the pipe while the child may still
+/// be writing. That can block or terminate the child instead of merely
+/// truncating the daemon's retained copy.
+async fn read_capped_and_drain<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let probe_limit = limit.saturating_add(1);
+    let mut retained = Vec::with_capacity(limit.min(4096));
+    let mut probe = (&mut reader).take(probe_limit as u64);
+    probe.read_to_end(&mut retained).await?;
+    drop(probe);
+
+    let truncated = retained.len() > limit;
+    retained.truncate(limit);
+    tokio::io::copy(&mut reader, &mut tokio::io::sink()).await?;
+    Ok((retained, truncated))
+}
+
 /// Run a cron job's pre-check script and parse the wake gate from its output.
 ///
 /// Returns `true` if the agent should be woken (normal path), `false` to skip.
@@ -39,11 +65,7 @@ pub(super) async fn cron_script_wake_gate(
     agent_workspace: Option<&std::path::Path>,
 ) -> bool {
     use std::process::Stdio;
-    use tokio::io::AsyncReadExt;
     use tokio::process::Command;
-
-    /// Maximum bytes we read from stdout before truncating.
-    const MAX_OUTPUT: usize = 64 * 1024; // 64 KiB
 
     // Resolve a safe working directory for the child process.
     // Preference order: agent workspace → system temp → current dir.
@@ -75,21 +97,43 @@ pub(super) async fn cron_script_wake_gate(
         match child {
             Err(e) => Err(e),
             Ok(mut child) => {
-                // Cap stdout at MAX_OUTPUT bytes.
-                let mut stdout_buf = Vec::with_capacity(MAX_OUTPUT.min(4096));
-                if let Some(stdout) = child.stdout.take() {
-                    let _ = stdout
-                        .take(MAX_OUTPUT as u64)
-                        .read_to_end(&mut stdout_buf)
-                        .await;
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let stdout_read = async {
+                    match stdout {
+                        Some(stdout) => {
+                            read_capped_and_drain(stdout, SCRIPT_OUTPUT_LIMIT_BYTES).await
+                        }
+                        None => Ok((Vec::new(), false)),
+                    }
+                };
+                let stderr_read = async {
+                    match stderr {
+                        Some(stderr) => {
+                            read_capped_and_drain(stderr, SCRIPT_OUTPUT_LIMIT_BYTES).await
+                        }
+                        None => Ok((Vec::new(), false)),
+                    }
+                };
+                let (stdout_result, stderr_result) = tokio::join!(stdout_read, stderr_read);
+                let (stdout_buf, stdout_truncated) = stdout_result?;
+                let (_, stderr_truncated) = stderr_result?;
+
+                if stdout_truncated {
+                    tracing::warn!(
+                        job = %job_name,
+                        script = %script_path,
+                        limit_bytes = SCRIPT_OUTPUT_LIMIT_BYTES,
+                        "cron: pre-check stdout truncated; wake-gate line may be incomplete"
+                    );
                 }
-                // Drain stderr (up to the same cap) to avoid blocking the child.
-                if let Some(stderr) = child.stderr.take() {
-                    let mut _discard = Vec::new();
-                    let _ = stderr
-                        .take(MAX_OUTPUT as u64)
-                        .read_to_end(&mut _discard)
-                        .await;
+                if stderr_truncated {
+                    tracing::debug!(
+                        job = %job_name,
+                        script = %script_path,
+                        limit_bytes = SCRIPT_OUTPUT_LIMIT_BYTES,
+                        "cron: pre-check stderr truncated"
+                    );
                 }
                 let status = child.wait().await?;
                 Ok((status, stdout_buf))
@@ -235,4 +279,49 @@ fn parse_wake_gate(script_output: &str) -> bool {
 
     // Only `{"wakeAgent": false}` (strict bool false) skips the agent.
     value.get("wakeAgent") != Some(&serde_json::Value::Bool(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capped_reader_retains_prefix_and_drains_remainder() {
+        let input = std::io::Cursor::new(vec![b'x'; 128]);
+
+        let (retained, truncated) = read_capped_and_drain(input, 64).await.unwrap();
+
+        assert_eq!(retained, vec![b'x'; 64]);
+        assert!(truncated);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wake_gate_concurrently_drains_full_stderr_pipe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("wake-gate.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\ndd if=/dev/zero bs=1024 count=1024 2>/dev/null | cat >&2\nprintf '{\"wakeAgent\":false}\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let should_wake = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            cron_script_wake_gate(
+                "pipe-drain-test",
+                script.to_str().unwrap(),
+                Some(tmp.path()),
+            ),
+        )
+        .await
+        .expect("stderr-heavy script must not deadlock");
+
+        assert!(!should_wake);
+    }
 }

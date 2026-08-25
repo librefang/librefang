@@ -267,10 +267,20 @@ impl ConsolidationLock {
                 LibreFangError::Internal(format!("auto_dream: create lock parent dir failed: {e}"))
             })?;
         }
-        let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
-        fs::write(&self.path, token.as_bytes())
+        // `record_now` records a completed manual consolidation. It must not
+        // leave a holder token: our PID remains live, so `try_acquire` would
+        // otherwise treat this completed run as active for up to an hour.
+        fs::write(&self.path, b"")
             .await
             .map_err(|e| LibreFangError::Internal(format!("auto_dream: touch lock failed: {e}")))?;
+        // Keep the completion timestamp explicit, matching `release`. This is
+        // also needed on coarse-resolution filesystems when the lock file was
+        // written earlier in the same clock tick.
+        set_mtime_ms(&self.path, now_ms()).map_err(|e| {
+            LibreFangError::Internal(format!(
+                "auto_dream: refresh mtime after manual consolidation failed: {e}"
+            ))
+        })?;
         Ok(())
     }
 
@@ -536,6 +546,28 @@ mod tests {
             "expected Some after release (live-holder gate should not trip)",
         );
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn record_now_leaves_no_holder_so_next_acquire_succeeds() {
+        let path = tmpfile("record-now");
+        let lock = ConsolidationLock::new(path.clone());
+
+        lock.record_now().await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "",
+            "a completed manual consolidation must not retain a live PID token"
+        );
+        let prior = lock.try_acquire().await.unwrap();
+        assert!(
+            prior.is_some(),
+            "record_now must not make a completed run look like a live holder"
+        );
+
+        lock.release().await.unwrap();
+        tokio::fs::remove_file(&path).await.unwrap();
     }
 
     // Unix-only: `is_process_running` always returns true on Windows

@@ -48,8 +48,25 @@ import {
 const TOTP_REGEX = /^\d{6}$/;
 const RECOVERY_REGEX = /^\d{4}-\d{4}$/;
 
-function isValidTotpOrRecovery(v: string) {
+export function isValidTotpOrRecovery(v: string) {
   return TOTP_REGEX.test(v) || RECOVERY_REGEX.test(v);
+}
+
+export function sanitizeTotpOrRecovery(value: string): string {
+  const filtered = value.replace(/[^0-9-]/g, "");
+  const dashIndex = filtered.indexOf("-");
+  if (dashIndex < 0) return filtered.slice(0, 6);
+
+  const beforeDash = filtered
+    .slice(0, dashIndex)
+    .replace(/-/g, "")
+    .slice(0, 4);
+  const afterDash = filtered
+    .slice(dashIndex + 1)
+    .replace(/-/g, "")
+    .slice(0, 4);
+  if (beforeDash.length < 4) return `${beforeDash}${afterDash}`.slice(0, 6);
+  return `${beforeDash}-${afterDash}`;
 }
 
 type Tab = "pending" | "history";
@@ -107,21 +124,21 @@ function useNow(intervalMs = 30_000) {
 /*  Inline edit-and-approve form                                      */
 /* ------------------------------------------------------------------ */
 
-function EditAndApproveForm({ id, onDone }: { id: string; onDone: () => void }) {
+function EditAndApproveForm({
+  isPending,
+  onSubmit,
+  onCancel,
+}: {
+  isPending: boolean;
+  onSubmit: (feedback: string) => void;
+  onCancel: () => void;
+}) {
   const { t } = useTranslation();
   const [feedback, setFeedback] = useState("");
-  const addToast = useUIStore((s) => s.addToast);
-  const modifyAndRetry = useModifyAndRetryApproval();
 
-  async function handleSubmit() {
+  function handleSubmit() {
     if (!feedback.trim()) return;
-    try {
-      await modifyAndRetry.mutateAsync({ id, feedback: feedback.trim() });
-      addToast(t("approvals.modifiedToast"), "success");
-      onDone();
-    } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : String(e), "error");
-    }
+    onSubmit(feedback.trim());
   }
 
   return (
@@ -137,15 +154,15 @@ function EditAndApproveForm({ id, onDone }: { id: string; onDone: () => void }) 
         className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors resize-none"
       />
       <div className="flex gap-2 justify-end">
-        <Button variant="ghost" size="sm" onClick={onDone}>
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={isPending}>
           {t("common.cancel", "Cancel")}
         </Button>
         <Button
           variant="primary"
           size="sm"
           onClick={handleSubmit}
-          disabled={modifyAndRetry.isPending || !feedback.trim()}
-          isLoading={modifyAndRetry.isPending}
+          disabled={isPending || !feedback.trim()}
+          isLoading={isPending}
         >
           {t("approvals.editApproveSubmit")}
         </Button>
@@ -187,7 +204,7 @@ function TotpModal({
   const digits = isRecovery ? null : value.padEnd(6, " ").slice(0, 6).split("");
   const cursorIdx = Math.min(value.length, 5);
   const valid = isValidTotpOrRecovery(value);
-  const maskedRecovery = reveal ? value : value.replace(/[^-]/g, "•");
+  const maskedRecovery = reveal ? value : "•".repeat(value.length);
 
   return (
     <div
@@ -278,9 +295,7 @@ function TotpModal({
           ref={inputRef}
           type="password"
           value={value}
-          onChange={(e) =>
-            setValue(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))
-          }
+          onChange={(e) => setValue(sanitizeTotpOrRecovery(e.target.value))}
           onKeyDown={(e) => {
             if (e.key === "Enter" && valid && !pending) onSubmit(value);
           }}
@@ -502,6 +517,12 @@ const HistoryRow = React.memo(function HistoryRow({
 
 const HISTORY_PAGE_SIZE = 50;
 
+export function maxHistoryOffset(total: number): number {
+  return total > 0
+    ? Math.floor((total - 1) / HISTORY_PAGE_SIZE) * HISTORY_PAGE_SIZE
+    : 0;
+}
+
 function HistoryTab() {
   const { t } = useTranslation();
   const [offset, setOffset] = useState(0);
@@ -511,6 +532,11 @@ function HistoryTab() {
   const total = auditQuery.data?.total ?? 0;
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + HISTORY_PAGE_SIZE, total);
+
+  useEffect(() => {
+    const maximum = maxHistoryOffset(total);
+    if (offset > maximum) setOffset(maximum);
+  }, [offset, total]);
 
   if (auditQuery.isLoading) return <ListSkeleton rows={5} />;
   if (auditQuery.isError) {
@@ -589,6 +615,7 @@ function PendingCard({
   approval,
   totpEnforced,
   isPending,
+  onModifyAndRetry,
   onApprove,
   onDeny,
   isEditing,
@@ -599,6 +626,7 @@ function PendingCard({
   approval: ApprovalItem;
   totpEnforced: boolean;
   isPending: boolean;
+  onModifyAndRetry: (feedback: string) => void;
   onApprove: () => void;
   onDeny: () => void;
   isEditing: boolean;
@@ -704,7 +732,13 @@ function PendingCard({
           </Button>
         </div>
 
-        {isEditing && <EditAndApproveForm id={approval.id} onDone={onToggleEdit} />}
+        {isEditing && (
+          <EditAndApproveForm
+            isPending={isPending}
+            onSubmit={onModifyAndRetry}
+            onCancel={onToggleEdit}
+          />
+        )}
       </div>
     </Card>
     </div>
@@ -808,7 +842,8 @@ function TrustedSendersCard() {
 export function ApprovalsPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>("pending");
-  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
+  const pendingIdsRef = useRef<Set<string>>(new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
   const [totpFor, setTotpFor] = useState<ApprovalItem | null>(null);
   const [filter, setFilter] = useState("");
@@ -819,8 +854,9 @@ export function ApprovalsPage() {
   const totpQuery = useTotpStatus();
   const approveMutation = useApproveApproval();
   const rejectMutation = useRejectApproval();
+  const modifyAndRetryMutation = useModifyAndRetryApproval();
 
-  const totpEnforced = totpQuery.data?.enforced ?? false;
+  const totpEnforced = !totpQuery.isSuccess || totpQuery.data?.enforced !== false;
   const approvals = useMemo(() => approvalsQuery.data ?? [], [approvalsQuery.data]);
   const pendingApprovals = useMemo(
     () => approvals.filter((a) => !a.status || a.status === "pending"),
@@ -851,8 +887,20 @@ export function ApprovalsPage() {
     },
   });
 
+  function beginDecision(id: string): boolean {
+    if (pendingIdsRef.current.has(id)) return false;
+    pendingIdsRef.current.add(id);
+    setPendingIds(new Set(pendingIdsRef.current));
+    return true;
+  }
+
+  function finishDecision(id: string) {
+    pendingIdsRef.current.delete(id);
+    setPendingIds(new Set(pendingIdsRef.current));
+  }
+
   async function executeApprove(id: string, totpCode?: string) {
-    setPendingId(id);
+    if (!beginDecision(id)) return;
     try {
       await approveMutation.mutateAsync({ id, totpCode });
       addToast(t("approvals.approvedToast"), "success");
@@ -860,19 +908,32 @@ export function ApprovalsPage() {
     } catch (e: unknown) {
       addToast(e instanceof Error ? e.message : String(e), "error");
     } finally {
-      setPendingId(null);
+      finishDecision(id);
     }
   }
 
   async function executeReject(id: string) {
-    setPendingId(id);
+    if (!beginDecision(id)) return;
     try {
       await rejectMutation.mutateAsync(id);
       addToast(t("approvals.rejectedToast"), "success");
     } catch (e: unknown) {
       addToast(e instanceof Error ? e.message : String(e), "error");
     } finally {
-      setPendingId(null);
+      finishDecision(id);
+    }
+  }
+
+  async function executeModifyAndRetry(id: string, feedback: string) {
+    if (!beginDecision(id)) return;
+    try {
+      await modifyAndRetryMutation.mutateAsync({ id, feedback });
+      addToast(t("approvals.modifiedToast"), "success");
+      setEditingId(null);
+    } catch (e: unknown) {
+      addToast(e instanceof Error ? e.message : String(e), "error");
+    } finally {
+      finishDecision(id);
     }
   }
 
@@ -1012,10 +1073,13 @@ export function ApprovalsPage() {
                 key={a.id}
                 approval={a}
                 totpEnforced={totpEnforced}
-                isPending={pendingId === a.id}
+                isPending={pendingIds.has(a.id)}
                 isEditing={editingId === a.id}
                 onApprove={() => handleApprove(a)}
                 onDeny={() => void executeReject(a.id)}
+                onModifyAndRetry={(feedback) =>
+                  void executeModifyAndRetry(a.id, feedback)
+                }
                 onToggleEdit={() => setEditingId(editingId === a.id ? null : a.id)}
                 navProps={nav.getItemProps(i)}
                 selected={nav.selectedIndex === i}
@@ -1029,7 +1093,7 @@ export function ApprovalsPage() {
       {totpFor && (
         <TotpModal
           approval={totpFor}
-          pending={pendingId === totpFor.id}
+          pending={pendingIds.has(totpFor.id)}
           onCancel={() => setTotpFor(null)}
           onSubmit={(code) => void executeApprove(totpFor.id, code)}
         />

@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
+import * as http from "../http/client";
 import {
   useActivatePromptVersion,
   useStartExperiment,
   usePauseExperiment,
+  useCompleteExperiment,
   useDeletePromptVersion,
   useCreatePromptVersion,
   useCreateExperiment,
@@ -18,8 +20,9 @@ vi.mock("../http/client", async () => {
   return {
     ...actual,
     activatePromptVersion: vi.fn().mockResolvedValue({}),
-    startExperiment: vi.fn().mockResolvedValue({}),
-    pauseExperiment: vi.fn().mockResolvedValue({}),
+    startExperiment: vi.fn().mockResolvedValue({ id: "exp-1", status: "running" }),
+    pauseExperiment: vi.fn().mockResolvedValue({ id: "exp-1", status: "paused" }),
+    completeExperiment: vi.fn().mockResolvedValue({ id: "exp-1", status: "completed" }),
     deletePromptVersion: vi.fn().mockResolvedValue({}),
     createPromptVersion: vi.fn().mockResolvedValue({}),
     createExperiment: vi.fn().mockResolvedValue({}),
@@ -45,31 +48,73 @@ describe("useActivatePromptVersion", () => {
       queryKey: agentKeys.detail("agent-1"),
     });
   });
+
+  it("patches a returned version without refetching the same list", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    queryClient.setQueryData(agentKeys.promptVersions("agent-1"), [
+      { id: "v-1", is_active: false },
+      { id: "v-2", is_active: true },
+    ]);
+    vi.mocked(http.activatePromptVersion).mockResolvedValueOnce({
+      id: "v-1",
+      agent_id: "agent-1",
+      version: 1,
+      content_hash: "hash",
+      system_prompt: "prompt",
+      tools: [],
+      variables: [],
+      created_at: "2026-01-01T00:00:00Z",
+      created_by: "user",
+      is_active: true,
+    });
+    const { result } = renderHook(() => useActivatePromptVersion(), { wrapper });
+
+    await result.current.mutateAsync({ versionId: "v-1", agentId: "agent-1" });
+
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: agentKeys.promptVersions("agent-1"),
+    });
+    expect(queryClient.getQueryData(agentKeys.promptVersions("agent-1"))).toEqual([
+      expect.objectContaining({ id: "v-1", is_active: true }),
+      { id: "v-2", is_active: false },
+    ]);
+  });
 });
 
 describe("useStartExperiment", () => {
-  it("invalidates experiments and experimentMetrics keys", async () => {
+  it("patches experiments and invalidates only experiment metrics", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
-
+    const setSpy = vi.spyOn(queryClient, "setQueryData");
     const { result } = renderHook(() => useStartExperiment(), { wrapper });
 
-    result.current.mutate({ experimentId: "exp-1", agentId: "agent-1" });
+    await result.current.mutateAsync({ experimentId: "exp-1", agentId: "agent-1" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
       queryKey: agentKeys.experiments("agent-1"),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: agentKeys.experimentMetrics("exp-1"),
     });
+    expect(setSpy).toHaveBeenCalledWith(
+      agentKeys.experiments("agent-1"),
+      expect.any(Function),
+    );
+    const updater = setSpy.mock.calls[0]?.[1] as (
+      previous: Array<{ id: string; status: string }>,
+    ) => unknown;
+    expect(updater([{ id: "exp-1", status: "draft" }])).toEqual([
+      { id: "exp-1", status: "running" },
+    ]);
   });
 });
 
 describe("usePauseExperiment", () => {
-  it("invalidates experiments and experimentMetrics keys", async () => {
+  it("patches experiments and invalidates only experiment metrics", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -78,9 +123,26 @@ describe("usePauseExperiment", () => {
     result.current.mutate({ experimentId: "exp-1", agentId: "agent-1" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: agentKeys.experiments("agent-1"),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: agentKeys.experimentMetrics("exp-1"),
+    });
+  });
+});
+
+describe("useCompleteExperiment", () => {
+  it("patches experiments and invalidates only experiment metrics", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useCompleteExperiment(), { wrapper });
+
+    await result.current.mutateAsync({ experimentId: "exp-1", agentId: "agent-1" });
+
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
       queryKey: agentKeys.experiments("agent-1"),
     });
     expect(invalidateSpy).toHaveBeenCalledWith({

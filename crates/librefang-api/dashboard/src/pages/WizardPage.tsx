@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import type { ProviderItem } from "../api";
@@ -30,7 +29,9 @@ export function WizardPage() {
   const [apiKey, setApiKey] = useState<string>("");
   const [confirmReplace, setConfirmReplace] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [defaultProviderApplied, setDefaultProviderApplied] = useState(false);
   const [done, setDone] = useState(false);
+  const finalizeLockRef = useRef(false);
 
   const providersQuery = useProviders();
   const validateProviderMutation = useValidateProviderKey();
@@ -68,32 +69,40 @@ export function WizardPage() {
   const needsReplaceConfirm = existingKeyWorking && typingNewKey && !confirmReplace;
   const isValidatedSelection = !!providerId && validatedProviderId === providerId;
 
-  const validateProvider = useMutation({
-    mutationFn: () =>
-      validateProviderMutation.mutateAsync({
-        providerId,
-        apiKey,
-      }),
-    onSuccess: () => {
+  const validateProvider = async () => {
+    try {
+      await validateProviderMutation.mutateAsync({ providerId, apiKey });
       setValidatedProviderId(providerId);
       addToast(t("wizard.provider_connected"), "success");
       setStep(3);
-    },
-    onError: (err: Error) => {
-      addToast(t("wizard.provider_failed", { message: err.message || "" }), "error");
-    },
-  });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addToast(t("wizard.provider_failed", { message }), "error");
+    }
+  };
 
   const finalize = async () => {
-    if (!providerId || !isValidatedSelection) return;
+    if (!providerId || !isValidatedSelection || finalizeLockRef.current) return;
+    finalizeLockRef.current = true;
     setFinalizing(true);
     try {
-      await setDefaultProviderMutation.mutateAsync({ id: providerId });
-      await quickInitMutation.mutateAsync();
+      if (!defaultProviderApplied) {
+        await setDefaultProviderMutation.mutateAsync({ id: providerId });
+        setDefaultProviderApplied(true);
+      }
+      try {
+        await quickInitMutation.mutateAsync();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        addToast(t("wizard.quick_init_failed", { message }), "error");
+        return;
+      }
       setDone(true);
     } catch (err) {
-      addToast(t("wizard.finalize_failed", { message: (err as Error).message }), "error");
+      const message = err instanceof Error ? err.message : String(err);
+      addToast(t("wizard.finalize_failed", { message }), "error");
     } finally {
+      finalizeLockRef.current = false;
       setFinalizing(false);
     }
   };
@@ -170,6 +179,7 @@ export function WizardPage() {
                         if (providerId !== p.id) {
                           setProviderId(p.id);
                           setValidatedProviderId("");
+                          setDefaultProviderApplied(false);
                           setApiKey("");
                           setConfirmReplace(false);
                           setStep(2);
@@ -266,9 +276,9 @@ export function WizardPage() {
               </label>
             )}
 
-            {validateProvider.isError && (
+            {validateProviderMutation.isError && (
               <p className="text-xs text-error mt-3 font-medium">
-                {(validateProvider.error as Error)?.message}
+                {(validateProviderMutation.error as Error)?.message}
               </p>
             )}
           </div>
@@ -317,12 +327,12 @@ export function WizardPage() {
             <Button
               variant="primary"
               rightIcon={<ArrowRight className="h-4 w-4" />}
-              isLoading={validateProvider.isPending}
+              isLoading={validateProviderMutation.isPending}
               disabled={
                 (requiresKey && !apiKey.trim() && !isProviderAvailable(selectedProvider?.auth_status))
                 || needsReplaceConfirm
               }
-              onClick={() => validateProvider.mutate()}
+              onClick={validateProvider}
             >
               {t("wizard.connect")}
             </Button>
@@ -332,10 +342,12 @@ export function WizardPage() {
               variant="primary"
               rightIcon={<Rocket className="h-4 w-4" />}
               isLoading={finalizing}
-              disabled={!isValidatedSelection}
+              disabled={!isValidatedSelection || finalizing}
               onClick={finalize}
             >
-              {t("wizard.finish_action")}
+              {defaultProviderApplied
+                ? t("common.retry")
+                : t("wizard.finish_action")}
             </Button>
           )}
         </div>

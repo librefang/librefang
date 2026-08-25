@@ -53,6 +53,12 @@ use tracing::{debug, info, warn};
 /// across modes. A future protocol extension may let the editor pick
 /// per-connection — see #3313 phase-2 follow-up.
 const DEFAULT_AGENT: &str = "assistant";
+const ACCEPT_ERROR_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+const ACCEPT_ERROR_MAX_BACKOFF: Duration = Duration::from_secs(5);
+
+fn next_accept_error_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(ACCEPT_ERROR_MAX_BACKOFF)
+}
 
 /// Accept connections on `sock_path` and serve ACP over each. Returns
 /// only when the listener fails to bind or the loop is interrupted —
@@ -66,12 +72,22 @@ pub async fn run_listener(kernel: Arc<LibreFangKernel>, sock_path: PathBuf) -> s
     info!(path = %sock_path.display(), "ACP UDS listener bound (mode 0o600)");
 
     let self_uid = self_euid();
+    let mut accept_error_backoff = ACCEPT_ERROR_INITIAL_BACKOFF;
 
     loop {
         let stream = match listener.accept().await {
-            Ok((s, _)) => s,
+            Ok((s, _)) => {
+                accept_error_backoff = ACCEPT_ERROR_INITIAL_BACKOFF;
+                s
+            }
             Err(e) => {
-                warn!(error = %e, "ACP UDS accept failed");
+                warn!(
+                    error = %e,
+                    retry_after_ms = accept_error_backoff.as_millis(),
+                    "ACP UDS accept failed"
+                );
+                tokio::time::sleep(accept_error_backoff).await;
+                accept_error_backoff = next_accept_error_backoff(accept_error_backoff);
                 continue;
             }
         };
@@ -299,6 +315,21 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn accept_error_backoff_grows_and_caps() {
+        let mut backoff = ACCEPT_ERROR_INITIAL_BACKOFF;
+        assert_eq!(backoff, Duration::from_millis(50));
+
+        backoff = next_accept_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_millis(100));
+
+        for _ in 0..16 {
+            backoff = next_accept_error_backoff(backoff);
+        }
+        assert_eq!(backoff, ACCEPT_ERROR_MAX_BACKOFF);
+        assert_eq!(next_accept_error_backoff(backoff), ACCEPT_ERROR_MAX_BACKOFF);
+    }
 
     #[tokio::test]
     async fn bind_atomic_owner_only_sets_mode_0600() {

@@ -5,8 +5,8 @@
 // adjacent (QR code + device removal) so we cover happy/loading/error paths
 // plus the device-removal mutation wiring.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MobilePairingPage } from "./MobilePairingPage";
 import {
@@ -15,6 +15,14 @@ import {
   useRemovePairedDevice,
 } from "../lib/queries/pairing";
 import { ApiError } from "../lib/http/errors";
+import QRCode from "qrcode";
+import { cloneElement, type ReactElement } from "react";
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ to, children, ...rest }: { to: string; children: React.ReactNode }) => (
+    <a href={to} {...rest}>{children}</a>
+  ),
+}));
 
 vi.mock("../lib/queries/pairing", () => ({
   usePairingRequest: vi.fn(),
@@ -48,15 +56,21 @@ vi.mock("react-i18next", async () => {
     "mobile_pairing.remove_unknown_error": "unknown error",
     "mobile_pairing.error_disabled_title": "Device pairing is disabled",
     "mobile_pairing.error_disabled_body":
-      "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
+      "Enable pairing in <a>Config → Security</a> (<code>pairing.enabled = true</code>).",
     "mobile_pairing.error_generic_title": "Failed to generate pairing code",
     "mobile_pairing.qr_aria_label":
       "QR code for pairing with a mobile device",
+    "mobile_pairing.qr_render_failed":
+      "The pairing QR code could not be rendered. Refresh to try again.",
     "mobile_pairing.btn_try_again": "Try again",
   };
 
   return {
     ...actual,
+    Trans: ({ i18nKey, components }: { i18nKey: string; components?: Record<string, ReactElement> }) =>
+      i18nKey === "mobile_pairing.error_disabled_body" && components?.a
+        ? cloneElement(components.a, {}, "Config → Security")
+        : i18nKey,
     useTranslation: () => ({
       t: (key: string, opts?: Record<string, unknown>) => {
         let text = translations[key] ?? key;
@@ -100,14 +114,18 @@ describe("MobilePairingPage", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    removeMutate = vi.fn();
+    removeMutate = vi.fn().mockResolvedValue(undefined);
     useRemovePairedDeviceMock.mockReturnValue({
-      mutate: removeMutate,
+      mutateAsync: removeMutate,
       isPending: false,
       isError: false,
       error: null,
     });
     usePairedDevicesMock.mockReturnValue({ data: [] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders the loading spinner while the pairing request is in flight", () => {
@@ -140,6 +158,7 @@ describe("MobilePairingPage", () => {
     ).toBeInTheDocument();
     // Disabled state shows a help link, not the retry button.
     expect(screen.queryByText("Try again")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Config/ })).toHaveAttribute("href", "/config/security");
   });
 
   it("renders a generic error and a retry button on non-404 failures", () => {
@@ -192,6 +211,52 @@ describe("MobilePairingPage", () => {
     expect(
       screen.getByText("QR code expired — refresh to get a new one."),
     ).toBeInTheDocument();
+  });
+
+  it("expires the parent QR state when the countdown reaches zero", () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-01-01T00:00:00Z");
+    vi.setSystemTime(now);
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=short", expires_at: new Date(now.getTime() + 1500).toISOString() },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    expect(screen.queryByText("QR code expired — refresh to get a new one.")).not.toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(screen.getByText("QR code expired — refresh to get a new one.")).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it("treats an invalid expiry timestamp as expired", () => {
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=invalid", expires_at: "not-a-date" },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(screen.getByText("QR code expired — refresh to get a new one.")).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+  });
+
+  it("shows a visible fallback when QR rendering rejects", async () => {
+    vi.mocked(QRCode.toCanvas).mockRejectedValueOnce(new Error("too large"));
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=broken", expires_at: FUTURE_ISO },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("could not be rendered");
   });
 
   it("calls refetch when the inline refresh button is clicked", () => {
@@ -257,7 +322,7 @@ describe("MobilePairingPage", () => {
       ],
     });
     useRemovePairedDeviceMock.mockReturnValue({
-      mutate: removeMutate,
+      mutateAsync: removeMutate,
       isPending: false,
       isError: true,
       error: new Error("forbidden"),
@@ -266,6 +331,60 @@ describe("MobilePairingPage", () => {
     renderPage();
 
     expect(screen.getByText(/forbidden/)).toBeInTheDocument();
+  });
+
+  it("tracks every concurrent device removal independently", () => {
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=abc", expires_at: FUTURE_ISO },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+    usePairedDevicesMock.mockReturnValue({
+      data: [
+        { device_id: "dev-1", display_name: "Pixel", platform: "android", paired_at: FUTURE_ISO },
+        { device_id: "dev-2", display_name: "iPhone", platform: "ios", paired_at: FUTURE_ISO },
+      ],
+    });
+    removeMutate.mockImplementation(() => new Promise<void>(() => {}));
+    useRemovePairedDeviceMock.mockReturnValue({
+      mutateAsync: removeMutate,
+      isPending: false,
+      isError: false,
+      error: null,
+    });
+
+    renderPage();
+
+    const buttons = screen.getAllByRole("button", { name: "Remove device" });
+    fireEvent.click(buttons[0]);
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).not.toBeDisabled();
+    fireEvent.click(buttons[1]);
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeDisabled();
+    expect(removeMutate).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces an asynchronous device-removal failure", async () => {
+    removeMutate.mockRejectedValueOnce(new Error("device is busy"));
+    usePairingRequestMock.mockReturnValue({
+      data: { qr_uri: "librefang://pair?t=abc", expires_at: FUTURE_ISO },
+      error: null,
+      isLoading: false,
+      refetch: vi.fn(),
+    });
+    usePairedDevicesMock.mockReturnValue({
+      data: [
+        { device_id: "dev-1", display_name: "Pixel", platform: "android", paired_at: FUTURE_ISO },
+      ],
+    });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Remove device" }));
+
+    expect(await screen.findByText(/device is busy/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove device" })).not.toBeDisabled();
   });
 
   it("hides the paired-devices section entirely when the list is empty", () => {

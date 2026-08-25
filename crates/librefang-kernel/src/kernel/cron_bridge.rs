@@ -49,10 +49,10 @@ const FAN_OUT_WEBHOOK_TIMEOUT_SECS: u64 = 30;
 /// `reqwest::Client` is documented to be cloned and reused — it pools
 /// connections, DNS cache, and the TLS context internally. Constructing
 /// one per fire (the historical behaviour, #5127) churned TLS handshakes
-/// and idle pools on busy cron loads. We build exactly one for the
-/// lifetime of the process and hand a `.clone()` to each
-/// `CronDeliveryEngine` invocation.
-static FAN_OUT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+/// and idle pools on busy cron loads. We cache exactly one construction
+/// result for the lifetime of the process. A failure is handed to each
+/// engine so webhook targets fail in-band while other targets still run.
+static FAN_OUT_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
 /// Build the cron fan-out HTTP client. Pulled out into a free function so
 /// tests can drive it directly without going through `OnceLock`.
@@ -66,18 +66,24 @@ static FAN_OUT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// `CronDelivery::Webhook`) uses the same helper; the fan-out path used to
 /// drift to a bare `reqwest::Client::builder()` (no proxy, no CA fallback,
 /// no UA) which was a silent regression vs. the legacy delivery.
-fn build_fan_out_http_client() -> reqwest::Client {
-    librefang_runtime::http_client::proxied_client_builder()
+fn build_fan_out_http_client_from(
+    builder: reqwest::ClientBuilder,
+) -> Result<reqwest::Client, String> {
+    builder
         .timeout(Duration::from_secs(FAN_OUT_WEBHOOK_TIMEOUT_SECS))
         .build()
-        .expect("HTTP client build failed for cron fan-out engine")
+        .map_err(|error| format!("HTTP client unavailable for cron fan-out: {error}"))
+}
+
+fn build_fan_out_http_client() -> Result<reqwest::Client, String> {
+    build_fan_out_http_client_from(librefang_runtime::http_client::proxied_client_builder())
 }
 
 /// Return a clone of the shared cron fan-out HTTP client, initialising it
 /// on first access. `Client` cloning is cheap — it bumps an `Arc` on the
 /// inner pool — so handing one per fire to the engine is the intended
 /// reuse pattern.
-fn shared_fan_out_http_client() -> reqwest::Client {
+fn shared_fan_out_http_client() -> Result<reqwest::Client, String> {
     FAN_OUT_HTTP_CLIENT
         .get_or_init(build_fan_out_http_client)
         .clone()
@@ -138,7 +144,7 @@ pub(super) async fn cron_fan_out_targets(
     });
     // Reuse one process-wide `reqwest::Client` across every fire instead of
     // rebuilding it (TLS, DNS, HTTP/2 pool) per cron tick (#5127).
-    let engine = crate::cron_delivery::CronDeliveryEngine::with_http_client(
+    let engine = crate::cron_delivery::CronDeliveryEngine::with_http_client_result(
         sender,
         shared_fan_out_http_client(),
     );
@@ -169,6 +175,21 @@ pub(super) async fn cron_fan_out_targets(
             );
         }
     }
+}
+
+async fn post_legacy_webhook(
+    client: Result<reqwest::Client, String>,
+    url: &str,
+    payload: &serde_json::Value,
+) -> Result<reqwest::StatusCode, String> {
+    let client = client?;
+    client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map(|response| response.status())
+        .map_err(|error| error.to_string())
 }
 
 /// Deliver a cron job's agent response to the configured delivery target.
@@ -232,22 +253,17 @@ pub(super) async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = librefang_runtime::http_client::proxied_client_builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build();
-            if let Ok(client) = client {
-                let payload = serde_json::json!({
-                    "agent_id": agent_id.to_string(),
-                    "response": response,
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-                match client.post(url).json(&payload).send().await {
-                    Ok(resp) => {
-                        tracing::debug!(status = %resp.status(), "Cron webhook delivered");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Cron webhook delivery failed");
-                    }
+            let payload = serde_json::json!({
+                "agent_id": agent_id.to_string(),
+                "response": response,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            match post_legacy_webhook(shared_fan_out_http_client(), url, &payload).await {
+                Ok(status) => {
+                    tracing::debug!(status = %status, "Cron webhook delivered");
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Cron webhook delivery failed");
                 }
             }
         }
@@ -267,13 +283,14 @@ mod tests {
     /// once across N invocations, not once per fire (#5127). We can't read
     /// the production `OnceLock` counter directly, so this test pins the
     /// `OnceLock + get_or_init(build_fn)` pattern the production helper
-    /// uses by driving a local `OnceLock<reqwest::Client>` with a counted
+    /// uses by driving a local `OnceLock<Result<reqwest::Client, String>>`
+    /// with a counted
     /// builder closure across many calls and asserting the builder ran
     /// exactly once.
     #[test]
     fn fan_out_http_client_builds_once_across_many_fires() {
         let builds = AtomicUsize::new(0);
-        let slot: OnceLock<reqwest::Client> = OnceLock::new();
+        let slot: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
         let make = || {
             builds.fetch_add(1, Ordering::SeqCst);
@@ -291,6 +308,30 @@ mod tests {
             "cron fan-out client must build exactly once across many fires, \
              not once per fire — see #5127"
         );
+        assert!(slot.get().expect("client result was initialized").is_ok());
+    }
+
+    #[test]
+    fn fan_out_http_client_build_failure_is_returned() {
+        let builder = reqwest::Client::builder().user_agent("invalid\nuser-agent");
+
+        let error = build_fan_out_http_client_from(builder)
+            .expect_err("invalid user-agent must fail client construction");
+
+        assert!(error.contains("HTTP client unavailable for cron fan-out"));
+    }
+
+    #[tokio::test]
+    async fn legacy_webhook_reports_cached_client_build_failure() {
+        let error = post_legacy_webhook(
+            Err("HTTP client unavailable: simulated build failure".to_string()),
+            "https://example.invalid/hook",
+            &serde_json::json!({"response": "payload"}),
+        )
+        .await
+        .expect_err("cached client failure must be returned");
+
+        assert!(error.contains("simulated build failure"));
     }
 
     /// `shared_fan_out_http_client` must hand back a `reqwest::Client` that
@@ -303,8 +344,8 @@ mod tests {
     /// the structural invariant we pin here.
     #[test]
     fn shared_fan_out_http_client_returns_reusable_handle() {
-        let a = shared_fan_out_http_client();
-        let b = shared_fan_out_http_client();
+        let a = shared_fan_out_http_client().expect("shared HTTP client");
+        let b = shared_fan_out_http_client().expect("shared HTTP client");
         // `reqwest::Client` does not expose pool-identity, so we exercise
         // the only behaviour reuse promises: building requests against the
         // same handle does not panic and produces a well-formed
