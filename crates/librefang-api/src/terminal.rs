@@ -255,6 +255,16 @@ impl PtySession {
         let _ = self.child.kill();
     }
 
+    /// Poll for child exit without blocking the calling thread.
+    pub fn try_wait_exit(&mut self) -> std::io::Result<Option<(u32, Option<String>)>> {
+        self.child
+            .try_wait()
+            .map(|status| {
+                status.map(|status| (status.exit_code(), status.signal().map(str::to_string)))
+            })
+            .map_err(std::io::Error::other)
+    }
+
     /// Wait for the child process to exit and return (exit_code, optional_signal).
     pub fn wait_exit(&mut self) -> std::io::Result<(u32, Option<String>)> {
         let status = self.child.wait().map_err(std::io::Error::other)?;

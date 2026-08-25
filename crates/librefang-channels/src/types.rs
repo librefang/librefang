@@ -444,6 +444,52 @@ pub struct SenderContext {
     pub is_internal_system: bool,
 }
 
+/// Conversation identity a per-chat channel preference is keyed by.
+///
+/// `channel` and `chat_id` are exactly the pair the bridge feeds into `SessionId::for_sender_scope`, so a preference stored against this scope covers the same conversation slice `/new` resets and no wider. `account_id` is the one dimension the derived session id does not carry: two sidecar instances of the same channel type (two Telegram bots) can serve the same chat, and a preference set through one must not follow the other.
+///
+/// Constructed from the `SenderContext` on the message path and from `session_scope` plus the inbound `account_id` on the command path, so both sides land on the same key for the same conversation (#7140).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConversationScope {
+    /// Sanitized channel name (`telegram`, `whatsapp`, `ext-cron`, …).
+    pub channel: String,
+    /// Sidecar instance name, when the channel is multi-account.
+    pub account_id: Option<String>,
+    /// Chat / group / DM id within the channel.
+    pub chat_id: Option<String>,
+}
+
+impl ConversationScope {
+    /// Build the scope of the conversation a `SenderContext` came from.
+    ///
+    /// Empty strings collapse to `None` so an adapter that sends `""` and one that omits the field entirely do not split one conversation into two scopes.
+    pub fn from_sender(sender: &SenderContext) -> Self {
+        Self {
+            channel: sender.channel.clone(),
+            account_id: non_empty(sender.account_id.as_deref()),
+            chat_id: non_empty(sender.chat_id.as_deref()),
+        }
+    }
+
+    /// Build a scope from the parts the command path has on hand.
+    pub fn new(
+        channel: impl Into<String>,
+        account_id: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Self {
+        Self {
+            channel: channel.into(),
+            account_id: non_empty(account_id),
+            chat_id: non_empty(chat_id),
+        }
+    }
+}
+
+/// `Some(trimmed)` for a non-empty string, `None` otherwise.
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value.filter(|v| !v.is_empty()).map(str::to_string)
+}
+
 /// Reference to a participant in a group chat.
 ///
 /// Minimal shape required by the §C addressee guard. Full roster persistence

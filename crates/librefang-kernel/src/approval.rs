@@ -1,7 +1,7 @@
 //! Execution approval manager — gates dangerous operations behind human approval.
 
 use chrono::Utc;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use librefang_types::approval::{
     ApprovalAuditEntry, ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest,
     ApprovalResponse, RiskLevel, SecondFactor, TimeoutFallback,
@@ -124,6 +124,7 @@ impl ApprovalManager {
     fn read_policy(&self) -> RwLockReadGuard<'_, ApprovalPolicy> {
         self.policy.read().unwrap_or_else(|poisoned| {
             warn!("approval policy read lock poisoned; recovering inner state");
+            self.policy.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -131,6 +132,7 @@ impl ApprovalManager {
     fn write_policy(&self) -> RwLockWriteGuard<'_, ApprovalPolicy> {
         self.policy.write().unwrap_or_else(|poisoned| {
             warn!("approval policy write lock poisoned; recovering inner state");
+            self.policy.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -141,6 +143,7 @@ impl ApprovalManager {
                 state,
                 "approval state lock poisoned; recovering inner state"
             );
+            mutex.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -1064,6 +1067,51 @@ impl ApprovalManager {
         totp_verified: bool,
         user_id: Option<&str>,
     ) -> Result<(ApprovalResponse, Option<DeferredToolExecution>), String> {
+        let (response, deferred) = self.resolve_inner(
+            request_id,
+            decision,
+            decided_by,
+            totp_verified,
+            user_id,
+            || Ok(()),
+        )?;
+        Ok((response, deferred.map(|(deferred, ())| deferred)))
+    }
+
+    /// Resolve a request after acquiring the resource required to resume deferred work.
+    ///
+    /// `preflight` runs only for a pending request with a deferred payload. It runs
+    /// while that pending entry is still locked and before it is removed, so a
+    /// failed preflight leaves the approval retryable. The acquired resource is
+    /// returned alongside the deferred payload.
+    pub(crate) fn resolve_with_deferred_preflight<T>(
+        &self,
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
+        preflight: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(ApprovalResponse, Option<(DeferredToolExecution, T)>), String> {
+        self.resolve_inner(
+            request_id,
+            decision,
+            decided_by,
+            totp_verified,
+            user_id,
+            preflight,
+        )
+    }
+
+    fn resolve_inner<T>(
+        &self,
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        decided_by: Option<String>,
+        totp_verified: bool,
+        user_id: Option<&str>,
+        preflight: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(ApprovalResponse, Option<(DeferredToolExecution, T)>), String> {
         // Read policy once and hold the snapshot for both the gate check and
         // the grace-period recording below, avoiding a hot-reload race between
         // two separate lock acquisitions.
@@ -1085,8 +1133,14 @@ impl ApprovalManager {
             }
         }
 
-        match self.pending.remove(&request_id) {
-            Some((_, pending)) => {
+        match self.pending.entry(request_id) {
+            Entry::Occupied(entry) => {
+                let deferred_resource = if entry.get().deferred.is_some() {
+                    Some(preflight()?)
+                } else {
+                    None
+                };
+                let pending = entry.remove();
                 // Remove from persistent store now that it is resolved (issue #3611).
                 self.db_delete_pending(request_id);
 
@@ -1153,9 +1207,9 @@ impl ApprovalManager {
                 if let Some(sender) = pending.sender {
                     let _ = sender.send(decision);
                 }
-                Ok((response, pending.deferred))
+                Ok((response, pending.deferred.zip(deferred_resource)))
             }
-            None => {
+            Entry::Vacant(_) => {
                 // Not pending. Distinguish "already resolved" (→ 409 at the api boundary) from "never existed / long expired" (→ 404).
                 // Check the in-memory `recent` ring first for the fast path, then fall back to the durable audit log so the answer stays stable after `recent` evicts the entry or the daemon restarts (issue #6492 Bug 3).
                 let recent = Self::lock_state(&self.recent, "recent");
@@ -2234,9 +2288,23 @@ mod tests {
                 .join()
         });
         assert!(policy_poison.is_err());
+        assert!(manager.policy.is_poisoned());
         assert!(manager.policy().require_approval.is_empty());
+        assert!(!manager.policy.is_poisoned());
+
+        let policy_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _policy = manager.policy.write().unwrap();
+                    panic!("poison approval policy before write recovery");
+                })
+                .join()
+        });
+        assert!(policy_poison.is_err());
+        assert!(manager.policy.is_poisoned());
 
         manager.update_policy(ApprovalPolicy::default());
+        assert!(!manager.policy.is_poisoned());
         assert!(!manager.policy().require_approval.is_empty());
 
         let recent_poison = std::thread::scope(|scope| {
@@ -2248,7 +2316,9 @@ mod tests {
                 .join()
         });
         assert!(recent_poison.is_err());
+        assert!(manager.recent.is_poisoned());
         assert!(manager.list_recent(1).is_empty());
+        assert!(!manager.recent.is_poisoned());
     }
 
     fn make_deferred(agent_id: &str) -> DeferredToolExecution {

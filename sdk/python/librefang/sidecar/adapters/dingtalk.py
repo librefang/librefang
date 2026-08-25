@@ -69,6 +69,7 @@ Behaviour parity with the deleted Rust stream path:
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import json
 import os
 import queue
@@ -109,6 +110,9 @@ READ_TICK_SECS = 1.0
 #: Bounded dedupe envelope.
 SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
+
+#: Maximum pending per-message reply URLs retained when callers never reply.
+SESSION_WEBHOOKS_MAX = 10_000
 
 #: Inter-chunk delay (Rust: dingtalk.rs:831).
 INTER_CHUNK_DELAY_SECS = 0.2
@@ -354,7 +358,8 @@ class DingTalkAdapter(SidecarAdapter):
         # cmd.channel_id (= the message_id, since DingTalk's reply
         # path is per-message, not per-user). Stored briefly until
         # the next inbound from the same user / message.
-        self._session_webhooks: dict[str, str] = {}
+        self._session_webhooks: OrderedDict[str, str] = OrderedDict()
+        self._session_webhook_expiries: dict[str, int] = {}
         self._session_lock = threading.Lock()
 
         # Inbound dedupe on messageId (improvement #1).
@@ -371,6 +376,56 @@ class DingTalkAdapter(SidecarAdapter):
 
     def _mark_seen(self, msg_id: Optional[str]) -> bool:
         return self._seen.mark(msg_id)
+
+    # ---- sessionWebhook retention -----------------------------------
+
+    def _prune_session_webhooks(self, now_ms: int) -> None:
+        """Drop expired URLs and cap unanswered callbacks.
+
+        Caller must hold ``_session_lock``.
+        """
+        expired = [
+            msg_id
+            for msg_id, expires_at in self._session_webhook_expiries.items()
+            if expires_at <= now_ms
+        ]
+        for msg_id in expired:
+            self._session_webhooks.pop(msg_id, None)
+            self._session_webhook_expiries.pop(msg_id, None)
+
+        while len(self._session_webhooks) > SESSION_WEBHOOKS_MAX:
+            msg_id, _ = self._session_webhooks.popitem(last=False)
+            self._session_webhook_expiries.pop(msg_id, None)
+
+    def _cache_session_webhook(
+        self, msg_id: str, session_webhook: str, expires_at: Any,
+    ) -> None:
+        now_ms = time.time_ns() // 1_000_000
+        with self._session_lock:
+            self._prune_session_webhooks(now_ms)
+            if (
+                isinstance(expires_at, int)
+                and expires_at > 0
+                and expires_at <= now_ms
+            ):
+                # An expired replacement for an existing message ID must
+                # invalidate the previously cached reply URL as well.
+                self._session_webhooks.pop(msg_id, None)
+                self._session_webhook_expiries.pop(msg_id, None)
+                return
+            self._session_webhooks[msg_id] = session_webhook
+            self._session_webhooks.move_to_end(msg_id)
+            if isinstance(expires_at, int) and expires_at > 0:
+                self._session_webhook_expiries[msg_id] = expires_at
+            else:
+                self._session_webhook_expiries.pop(msg_id, None)
+            self._prune_session_webhooks(now_ms)
+
+    def _pop_session_webhook(self, msg_id: str) -> Optional[str]:
+        with self._session_lock:
+            self._prune_session_webhooks(time.time_ns() // 1_000_000)
+            self._session_webhook_expiries.pop(msg_id, None)
+            return self._session_webhooks.pop(msg_id, None)
 
     # ---- HTTP helpers -------------------------------------------------
 
@@ -567,8 +622,12 @@ class DingTalkAdapter(SidecarAdapter):
                 "session_webhook"
             )
             if session_webhook and isinstance(msg_id, str):
-                with self._session_lock:
-                    self._session_webhooks[msg_id] = session_webhook
+                expires_at = event["params"].get("metadata", {}).get(
+                    "session_webhook_expired_time"
+                )
+                self._cache_session_webhook(
+                    msg_id, session_webhook, expires_at,
+                )
 
             emit(event)
 
@@ -626,8 +685,7 @@ class DingTalkAdapter(SidecarAdapter):
         session_webhook = None
         msg_id = cmd.channel_id or ""
         if msg_id:
-            with self._session_lock:
-                session_webhook = self._session_webhooks.pop(msg_id, None)
+            session_webhook = self._pop_session_webhook(msg_id)
         if not session_webhook and cmd.user:
             librefang_user = cmd.user.get("librefang_user")
             if isinstance(librefang_user, str) and librefang_user.startswith(

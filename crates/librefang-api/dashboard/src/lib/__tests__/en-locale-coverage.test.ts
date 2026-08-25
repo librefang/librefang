@@ -444,6 +444,18 @@ function normalizeJsxText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+const ROOT_RECOVERY_TEXT = new Set([
+  "Something went wrong",
+  "An unexpected error occurred.",
+  "Reload",
+]);
+
+function isDependencyFreeRootRecoveryText(text: string, path: string): boolean {
+  return (
+    path === "components/RootErrorBoundary.tsx" && ROOT_RECOVERY_TEXT.has(text)
+  );
+}
+
 function isTechnicalLiteral(text: string): boolean {
   if (text === "") return true;
   if (text === "×") return true;
@@ -639,7 +651,11 @@ describe("Dashboard locale coverage", () => {
         path,
         line,
       }))
-      .filter(({ text, kind }) => !isAllowedHardcodedText(text, kind))
+      .filter(
+        ({ text, kind, path }) =>
+          !isAllowedHardcodedText(text, kind) &&
+          !isDependencyFreeRootRecoveryText(text, path),
+      )
       .map(({ text, kind, path, line }) => {
         return `${path}:${line} ${kind} ${JSON.stringify(text)}`;
       })
@@ -659,7 +675,11 @@ describe("Dashboard locale coverage", () => {
         path,
         line,
       }))
-      .filter(({ text, kind }) => !isAllowedLiteralCandidate(text, kind))
+      .filter(
+        ({ text, kind, path }) =>
+          !isAllowedLiteralCandidate(text, kind) &&
+          !isDependencyFreeRootRecoveryText(text, path),
+      )
       .map(({ text, kind, path, line }) => {
         return `${path}:${line} ${kind} ${JSON.stringify(text)}`;
       })

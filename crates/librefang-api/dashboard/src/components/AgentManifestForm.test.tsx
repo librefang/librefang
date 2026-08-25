@@ -67,6 +67,30 @@ describe("AgentManifestForm — validation feedback", () => {
     );
   });
 
+  it("opens scheduling errors and exposes an invalid continuous interval", () => {
+    const state = emptyManifestForm();
+    state.schedule = { mode: "continuous", check_interval_secs: "0" };
+
+    render(
+      <Harness
+        initialState={state}
+        invalidFields={new Set(["schedule.check_interval_secs"])}
+      />,
+    );
+
+    const input = screen.getByRole("spinbutton", {
+      name: "agents.form.check_interval_secs",
+    });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input).toHaveAttribute("aria-required", "true");
+    expect(input).toHaveAccessibleDescription("agents.detail.schedule_invalid_interval");
+    expect(input.closest("details")).toHaveAttribute("open");
+    expect(input.closest("details")?.querySelector("summary")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+
   it("opens response-format errors and exposes the schema error to assistive technology", () => {
     const state = emptyManifestForm();
     state.response_format = { mode: "json_schema", name: "response", schema: "", strict: false };

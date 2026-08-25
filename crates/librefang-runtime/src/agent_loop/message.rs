@@ -194,6 +194,26 @@ pub(super) fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("argument is required")
 }
 
+fn ensure_post_trim_minimum(
+    messages: &mut Vec<Message>,
+    agent_name: &str,
+    user_message: &str,
+    history_kind: &str,
+) {
+    if messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User) {
+        return;
+    }
+
+    warn!(
+        agent = %agent_name,
+        history = history_kind,
+        remaining = messages.len(),
+        "Trim + repair left too few messages, synthesizing minimal conversation"
+    );
+    messages.retain(|message| message.role == Role::System);
+    messages.push(Message::user(user_message));
+}
+
 /// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
 /// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
 ///
@@ -259,6 +279,12 @@ pub(super) fn safe_trim_messages(
         *session_messages = crate::session_repair::validate_and_repair(session_messages);
         *session_messages =
             crate::session_repair::ensure_starts_with_user(std::mem::take(session_messages));
+        ensure_post_trim_minimum(
+            session_messages,
+            agent_name,
+            user_message,
+            "persistent session",
+        );
     }
 
     if messages.len() <= max_history {
@@ -309,20 +335,7 @@ pub(super) fn safe_trim_messages(
 
     // Post-trim safety: ensure at least a user message survives so the LLM
     // request body is never empty.
-    if messages.len() < 2 || !messages.iter().any(|m| m.role == Role::User) {
-        warn!(
-            agent = %agent_name,
-            remaining = messages.len(),
-            "Trim + repair left too few messages, synthesizing minimal conversation"
-        );
-        // Keep any surviving system message, then append the current user turn.
-        let system_msgs: Vec<Message> = messages
-            .drain(..)
-            .filter(|m| m.role == Role::System)
-            .collect();
-        *messages = system_msgs;
-        messages.push(Message::user(user_message));
-    }
+    ensure_post_trim_minimum(messages, agent_name, user_message, "working copy");
 
     (working_mutated, session_mutated)
 }
@@ -524,5 +537,29 @@ mod safe_trim_session_repair_tests {
              got {:?} — this is the regression the audit closed",
             session[0].role
         );
+    }
+
+    #[test]
+    fn safe_trim_preserves_system_and_synthesizes_user_in_persisted_session() {
+        let mut system = Message::system("pinned system policy");
+        system.pinned = true;
+        let mut session = vec![system];
+        session.extend((0..20).map(|i| Message::assistant(format!("assistant-only-{i}"))));
+        let mut working = session.clone();
+
+        let (_, session_mutated) = safe_trim_messages(
+            &mut working,
+            &mut session,
+            "agent-under-test",
+            "current user message",
+            4,
+        );
+
+        assert!(session_mutated);
+        assert_eq!(session.len(), 2);
+        assert_eq!(session[0].role, Role::System);
+        assert_eq!(session[0].content.text_content(), "pinned system policy");
+        assert_eq!(session[1].role, Role::User);
+        assert_eq!(session[1].content.text_content(), "current user message");
     }
 }

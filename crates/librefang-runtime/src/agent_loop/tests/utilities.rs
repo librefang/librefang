@@ -498,12 +498,14 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
 //   (a) pad_missing_results only fills ids that have no result at
 //       all — real error content is never overwritten.
 //   (b) commit is idempotent (safe to call twice).
-//   (c) a StagedToolUseTurn dropped without commit leaves
-//       session.messages untouched (drop-safety via ? propagation).
-//   (d) commit atomically pushes exactly one assistant message plus
+//   (c) commit atomically pushes exactly one assistant message plus
 //       one user{tool_results} message in that order.
-//   (e) the happy path batch case commits once and grows the
+//   (d) the happy path batch case commits once and grows the
 //       session by exactly 2 messages.
+//
+// Drop safety is enforced by ownership, not a runtime test:
+// `StagedToolUseTurn` holds no session reference, and only explicit
+// `commit(&mut Session, ...)` can publish staged messages.
 // -------------------------------------------------------------------
 
 fn fresh_session() -> librefang_memory::session::Session {
@@ -679,35 +681,6 @@ fn staged_commit_is_idempotent() {
     assert_eq!(second, ToolResultOutcomeSummary::default());
     assert_eq!(session.messages.len(), len_after_first);
     assert_eq!(messages.len(), msgs_after_first);
-}
-
-#[test]
-fn staged_drop_without_commit_does_not_touch_session() {
-    // This test simulates the `?`-propagation path: a caller builds
-    // a StagedToolUseTurn, appends some results, then an error
-    // propagates through the caller (in production via `?`) — the
-    // staged turn is dropped without commit. Session state must be
-    // byte-for-byte identical to the pre-stage snapshot; no orphan
-    // ToolUse can have reached disk.
-    let session = fresh_session();
-    let snapshot = session.messages.clone();
-
-    {
-        let mut staged = staged_two_tool_use(session.agent_id.to_string());
-        staged.append_result(ContentBlock::ToolResult {
-            tool_use_id: "tool-a".to_string(),
-            tool_name: "tool_a".to_string(),
-            content: "ok-a".to_string(),
-            is_error: false,
-            status: librefang_types::tool::ToolExecutionStatus::Completed,
-            approval_request_id: None,
-        });
-        // Intentionally drop `staged` here without commit.
-        assert!(!staged.committed);
-    }
-
-    assert_eq!(session.messages.len(), snapshot.len());
-    assert!(session.messages.is_empty());
 }
 
 #[test]

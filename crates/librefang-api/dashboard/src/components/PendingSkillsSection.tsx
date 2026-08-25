@@ -31,6 +31,17 @@ import { formatDate } from "../lib/datetime";
 import { unifiedLineDiff, hasChanges } from "../lib/unifiedDiff";
 import type { PendingCandidate, PendingCaptureSource } from "../api";
 
+function unknownSourceLabel(
+  source: never,
+  t: (key: string, fallback: string) => string,
+): { label: string; detail: string } {
+  const kind = (source as { kind?: unknown }).kind;
+  return {
+    label: t("skills.pending_source_unknown", "Unknown source"),
+    detail: typeof kind === "string" ? kind : "unknown",
+  };
+}
+
 function sourceLabel(source: PendingCaptureSource, t: (key: string, fallback: string) => string): {
   label: string;
   detail: string;
@@ -45,6 +56,8 @@ function sourceLabel(source: PendingCaptureSource, t: (key: string, fallback: st
         label: t("skills.pending_source_repeated_tool", "Repeated tool pattern"),
         detail: `${source.tools} ×${source.repeat_count}`,
       };
+    default:
+      return unknownSourceLabel(source, t);
   }
 }
 
@@ -75,55 +88,65 @@ function UpdateDiffView({
       </span>
     ) : null;
 
+  let diffBody;
+  if (detail.isLoading) {
+    diffBody = (
+      <p className="text-muted-foreground">
+        {t("skills.pending_loading_current_body", "Loading current skill body…")}
+      </p>
+    );
+  } else if (detail.isError) {
+    diffBody = (
+      <p className="text-destructive">
+        {t("skills.pending_current_body_failed", "Could not load current skill body to diff:")} {" "}
+        {(detail.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}
+      </p>
+    );
+  } else if (!hasChanges(diff)) {
+    diffBody = (
+      <p className="text-muted-foreground">
+        {t("skills.pending_no_diff", "No differences between the current and proposed body.")}
+      </p>
+    );
+  } else {
+    diffBody = (
+      <pre className="overflow-x-auto whitespace-pre font-mono leading-snug">
+        {diff.map((line, idx) => {
+          let prefix = " ";
+          let cls = "text-muted-foreground";
+          if (line.kind === "add") {
+            prefix = "+";
+            cls = "bg-success/15 text-success";
+          } else if (line.kind === "remove") {
+            prefix = "-";
+            cls = "bg-destructive/15 text-destructive";
+          }
+          return (
+            <div key={idx} className={cls}>
+              {prefix} {line.text}
+            </div>
+          );
+        })}
+      </pre>
+    );
+  }
+
   return (
     <div className="mt-2 rounded border border-border/40 bg-muted/40 p-2 text-xs">
       <div className="mb-1 flex items-center gap-2 font-medium">
         <span>{t("skills.pending_proposed_changes", "Proposed changes")}</span>
         {versionLabel}
       </div>
-      {detail.isLoading ? (
-        <p className="text-muted-foreground">{t("skills.pending_loading_current_body", "Loading current skill body…")}</p>
-      ) : detail.isError ? (
-        <p className="text-destructive">
-          {t("skills.pending_current_body_failed", "Could not load current skill body to diff:")}{" "}
-          {(detail.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}
-        </p>
-      ) : !hasChanges(diff) ? (
-        <p className="text-muted-foreground">
-          {t("skills.pending_no_diff", "No differences between the current and proposed body.")}
-        </p>
-      ) : (
-        <pre className="overflow-x-auto whitespace-pre font-mono leading-snug">
-          {diff.map((line, idx) => {
-            const prefix =
-              line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " ";
-            const cls =
-              line.kind === "add"
-                ? "bg-success/15 text-success"
-                : line.kind === "remove"
-                  ? "bg-destructive/15 text-destructive"
-                  : "text-muted-foreground";
-            return (
-              <div key={idx} className={cls}>
-                {prefix} {line.text}
-              </div>
-            );
-          })}
-        </pre>
-      )}
+      {diffBody}
     </div>
   );
 }
 
-// A candidate is an update/patch when the backend tagged it `kind: "update"`
-// or it carries a target skill / version metadata (legacy drafts may omit
-// `kind`, which defaults to `create` server-side).
+// A candidate can only be reviewed as an update when it identifies the
+// existing target skill. Metadata without that identity is incomplete and
+// must not produce a misleading diff against an empty body.
 function isUpdateCandidate(candidate: PendingCandidate): boolean {
-  return (
-    candidate.kind === "update" ||
-    !!candidate.target_skill_id ||
-    !!candidate.current_version
-  );
+  return Boolean(candidate.target_skill_id?.trim());
 }
 
 function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
@@ -136,6 +159,11 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
 
   const src = sourceLabel(candidate.source, t);
   const isUpdate = isUpdateCandidate(candidate);
+  const hasUpdateMetadata =
+    candidate.kind === "update" ||
+    !!candidate.current_version ||
+    !!candidate.proposed_version;
+  const invalidUpdate = hasUpdateMetadata && !isUpdate;
   const busy = approve.isPending || reject.isPending || propose.isPending;
   const proposedPrUrl =
     propose.isSuccess && propose.data ? propose.data.pr_url : null;
@@ -178,6 +206,17 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             </span>
           </p>
           {isUpdate ? <UpdateDiffView candidate={candidate} /> : null}
+          {invalidUpdate ? (
+            <p
+              className="mt-2 rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive"
+              role="alert"
+            >
+              {t(
+                "skills.pending_invalid_update",
+                "This update is missing its target skill and cannot be approved.",
+              )}
+            </p>
+          ) : null}
           {expanded ? (
             <div className="mt-2 rounded border border-border/40 bg-muted/40 p-2 text-xs">
               <div className="mb-1 font-medium">{t("skills.pending_user_message_excerpt", "User message excerpt")}</div>
@@ -214,7 +253,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             size="sm"
             variant="primary"
             onClick={() => approve.mutate({ id: candidate.id })}
-            disabled={busy}
+            disabled={busy || invalidUpdate}
           >
             {approve.isPending ? t("skills.pending_approving", "Approving…") : t("approvals.approve", "Approve")}
           </Button>
@@ -222,7 +261,7 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
             size="sm"
             variant="secondary"
             onClick={() => propose.mutate({ id: candidate.id })}
-            disabled={busy}
+            disabled={busy || invalidUpdate}
             title={t("skills.pending_propose_registry_title", "Open a PR contributing this draft to the public skill registry")}
           >
             {propose.isPending ? t("skills.pending_proposing", "Proposing…") : t("skills.propose_registry", "Propose to Registry")}
@@ -277,7 +316,17 @@ function CandidateRow({ candidate }: { candidate: PendingCandidate }) {
           );
         }}
         title={t("skills.pending_reject_title", "Reject candidate?")}
-        message={`The pending candidate '${candidate.name}' will be deleted. This cannot be undone.`}
+        message={`${t(
+          "skills.pending_reject_message",
+          {
+            defaultValue: "The pending candidate '{{name}}' will be deleted. This cannot be undone.",
+            name: candidate.name,
+          },
+        )}${
+          reject.isError
+            ? ` ${t("skills.pending_reject_failed", "Reject failed:")} ${(reject.error as Error)?.message ?? t("skills.pending_unknown", "unknown")}`
+            : ""
+        }`}
         confirmLabel={reject.isPending ? t("skills.pending_rejecting", "Rejecting…") : t("approvals.reject", "Reject")}
         tone="destructive"
       />

@@ -1,0 +1,1 @@
+- Validate persisted mobile bundle daemon origins and consistently constrain fetch and WebSocket rewrites to supported API paths. (@xiaomo)

@@ -53,6 +53,9 @@ def test_parse_event_message_and_skips():
     ) is None
     assert a._parse_event('{"event":"message","message":"x"}') is None
     assert a._parse_event("not json") is None
+    assert a._parse_event(
+        '{"id":"n","event":"message","message":"hi","title":42}',
+    ) == ("n", "hi", "", "42")
 
 
 def test_to_event_text_command_sender_group_metadata():
@@ -215,6 +218,60 @@ def test_sse_loop_429_without_header_uses_default(monkeypatch):
     with pytest.raises(RuntimeError, match="429"):
         a._sse_loop(lambda _: None)
     assert sleeps == [na.RETRY_AFTER_DEFAULT_SECS]
+
+
+@pytest.mark.asyncio
+async def test_produce_does_not_stack_backoff_after_rate_limit(monkeypatch):
+    a = _adapter()
+    calls = 0
+    async_sleeps: list[float] = []
+
+    class _StopProducer(BaseException):
+        pass
+
+    def _sse(_emit):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise na._RateLimited("wait already completed")
+        raise _StopProducer()
+
+    monkeypatch.setattr(a, "_sse_loop", _sse)
+    async def _sleep(delay):
+        async_sleeps.append(delay)
+
+    monkeypatch.setattr(na.asyncio, "sleep", _sleep)
+
+    with pytest.raises(_StopProducer):
+        await a.produce(lambda _event: None)
+
+    assert async_sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_produce_transport_backoff_uses_shared_cap(monkeypatch):
+    a = _adapter()
+    sleeps: list[float] = []
+
+    class _StopProducer(BaseException):
+        pass
+
+    monkeypatch.setattr(
+        a, "_sse_loop",
+        lambda _emit: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    async def _sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) == 8:
+            raise _StopProducer()
+
+    monkeypatch.setattr(na.asyncio, "sleep", _sleep)
+
+    with pytest.raises(_StopProducer):
+        await a.produce(lambda _event: None)
+
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
 
 
 def test_publish_429_sleeps_retry_after_then_raises(monkeypatch):

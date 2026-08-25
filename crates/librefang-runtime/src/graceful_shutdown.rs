@@ -120,6 +120,7 @@ fn lock_shutdown_state<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> Mutex
             state,
             "shutdown state lock poisoned; recovering inner state"
         );
+        mutex.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -264,6 +265,7 @@ mod tests {
                 .join()
         });
         assert!(started_at_poison.is_err());
+        assert!(coord.started_at.is_poisoned());
 
         let phase_log_poison = std::thread::scope(|scope| {
             scope
@@ -274,14 +276,19 @@ mod tests {
                 .join()
         });
         assert!(phase_log_poison.is_err());
+        assert!(coord.phase_log.is_poisoned());
 
         assert!(coord.initiate());
         coord.advance_phase(ShutdownPhase::Draining, true, None);
+        assert!(!coord.started_at.is_poisoned());
+        assert!(!coord.phase_log.is_poisoned());
         let status = coord.status();
         assert!(status.is_shutting_down);
         assert_eq!(status.current_phase, "draining");
         assert_eq!(status.phases_completed.len(), 1);
         assert!(!coord.is_timeout_exceeded());
+        assert!(coord.started_at.lock().unwrap().is_some());
+        assert_eq!(coord.phase_log.lock().unwrap().len(), 1);
     }
 
     #[test]

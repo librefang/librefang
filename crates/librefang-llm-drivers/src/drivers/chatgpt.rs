@@ -198,10 +198,15 @@ impl ChatGptTokenCache {
     }
 
     fn lock_cached(&self) -> MutexGuard<'_, Option<CachedSessionToken>> {
-        self.cached.lock().unwrap_or_else(|poisoned| {
-            warn!("ChatGPT token cache lock poisoned; recovering inner state");
-            poisoned.into_inner()
-        })
+        match self.cached.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("ChatGPT token cache lock poisoned; recovering inner state");
+                let guard = poisoned.into_inner();
+                self.cached.clear_poison();
+                guard
+            }
+        }
     }
 
     /// Get a valid cached token, or None if expired/missing.
@@ -1243,7 +1248,9 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(cache.cached.is_poisoned());
         assert_eq!(*cache.get().unwrap().token, "rejected");
+        assert!(!cache.cached.is_poisoned());
         cache.invalidate_if_matches("rejected");
         assert!(cache.get().is_none());
 
@@ -1252,6 +1259,10 @@ mod tests {
             expires_at: Instant::now() + Duration::from_secs(86400),
         });
         assert_eq!(*cache.get().unwrap().token, "fresh");
+        assert_eq!(
+            *cache.cached.lock().unwrap().as_ref().unwrap().token,
+            "fresh"
+        );
     }
 
     #[test]
