@@ -198,6 +198,16 @@ The rules you must not break without asking:
 - **At most two follow-up comments** on a thread without human input, then stop. No "looks good" drive-bys. Every reply links evidence: commit SHAs, file paths, test names.
 - **Latest maintainer intent wins** in conflict resolution, and preserve both sides' intent — dropping a hunk because "it'll be reapplied later" is how regressions land.
 - **Batch merging is runner-pool bound, not merge bound.** Merging >10 PRs back-to-back saturates the free-plan `ubuntu-latest` pool; merge in batches, cancel *superseded* runs (never a run whose `head_sha` **is** its branch tip — `CI Gate` fails on `cancelled` and does not re-evaluate), and remember a stalled queue is not a CI failure.
+  What saturates the pool is not the merges, it is the **housekeeping fan-out per merge**.
+  Every push to `main` fires `TODO to Issue`; every PR close fires `Contributor Role` and `Issue-PR Link Labels`; every completed `Release` run fires `Release / Notify`.
+  At a normal merge rate that is invisible. At 250 merges it produced ~750 queued runs sitting ahead of the 196 queued `CI` runs, and nothing executed for over three hours.
+  The recovery is to cancel the housekeeping runs, which is safe: the `main` ruleset requires only `CI Gate`, GitHub auto-merge waits only on required checks, and `CI Gate`'s `cancelled` test covers only the 22 jobs in its own `needs` list — all inside `ci.yml`.
+  Never cancel `secrets` to buy queue capacity; a security scan is not the thing to trade away for speed.
+- **`gh run list --limit N` silently truncates, and the queue is usually deeper than it shows.**
+  Three separate diagnoses in one incident were wrong because `--limit 100` returned exactly 100 and that was read as the total.
+  `gh api "repos/OWNER/REPO/actions/runs?status=queued&per_page=1" -q '.total_count'` gives the real number; the paginated listing itself stops at 1000 results, so a queue deeper than that has to be cleared and re-enumerated in rounds.
+  A related trap: `gh run list --status in_progress` counts **runs**, not jobs, and a run whose jobs are all `queued` still reports as `queued` — so "0 in_progress" can mean either a dead pool or a pool that just handed out its last slot.
+  Distinguish them by whether anything has *completed* with a real conclusion recently, and exclude runs that fail at startup (a malformed workflow file completes as `failure` in seconds without ever consuming a runner, which reads exactly like throughput).
 - **Two green PRs can still break `main` together.** The `main` ruleset has no `strict_required_status_checks_policy`, so each PR merges on CI run against its own base. Group a merge sweep by changed file, re-run CI on later PRs in a group, and verify `main` itself after the batch.
 
 ## Common Gotchas
