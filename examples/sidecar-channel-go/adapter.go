@@ -40,15 +40,17 @@ type MessageParams struct {
 	ChannelID string `json:"channel_id"`
 }
 
-func sendEvent(method string, params interface{}) {
+func sendEvent(method string, params interface{}) error {
 	evt := Event{Method: method, Params: params}
-	data, _ := json.Marshal(evt)
-	fmt.Println(string(data))
+	return json.NewEncoder(os.Stdout).Encode(evt)
 }
 
 func main() {
 	// Signal readiness
-	sendEvent("ready", nil)
+	if err := sendEvent("ready", nil); err != nil {
+		fmt.Fprintf(os.Stderr, "encode ready event: %v\n", err)
+		return
+	}
 
 	// Read commands from stdin
 	scanner := bufio.NewScanner(os.Stdin)
@@ -60,22 +62,33 @@ func main() {
 
 		var cmd Command
 		if err := json.Unmarshal([]byte(line), &cmd); err != nil {
-			sendEvent("error", map[string]string{"message": fmt.Sprintf("Invalid JSON: %v", err)})
+			_ = sendEvent("error", map[string]string{"message": fmt.Sprintf("Invalid JSON: %v", err)})
 			continue
 		}
 
 		switch cmd.Method {
 		case "send":
 			var params SendParams
-			json.Unmarshal(cmd.Params, &params)
-			sendEvent("message", MessageParams{
+			if err := json.Unmarshal(cmd.Params, &params); err != nil {
+				_ = sendEvent("error", map[string]string{"message": fmt.Sprintf("Invalid send params: %v", err)})
+				continue
+			}
+			if err := sendEvent("message", MessageParams{
 				UserID:    "echo-user",
 				UserName:  "Echo Bot (Go)",
 				Text:      fmt.Sprintf("Echo: %s", params.Text),
 				ChannelID: params.ChannelID,
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "encode message event: %v\n", err)
+				return
+			}
 		case "shutdown":
-			os.Exit(0)
+			return
+		default:
+			_ = sendEvent("error", map[string]string{"message": fmt.Sprintf("Unsupported command: %s", cmd.Method)})
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "read command: %v\n", err)
 	}
 }

@@ -1,4 +1,18 @@
 use super::*;
+use librefang_skills::registry::SkillRegistry;
+use std::sync::{RwLock, RwLockReadGuard};
+
+fn read_agent_skills_registry(
+    registry: &RwLock<SkillRegistry>,
+) -> RwLockReadGuard<'_, SkillRegistry> {
+    registry.read().unwrap_or_else(|poisoned| {
+        tracing::warn!(
+            "Agent skill-assignment registry lock poisoned; recovering installed skills"
+        );
+        registry.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 #[utoipa::path(
     put,
@@ -201,6 +215,13 @@ pub struct SetAgentToolsRequest {
     /// Glob patterns allowed.
     #[serde(default)]
     pub tool_blocklist: Option<Vec<String>>,
+    /// `agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.
+    /// `None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.
+    ///
+    /// Named `disabled` to match the key `GET /api/agents/{id}/tools` already returns.
+    /// Until #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking.
+    #[serde(default)]
+    pub disabled: Option<bool>,
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
@@ -211,10 +232,10 @@ pub struct SetAgentToolsRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(
         content = SetAgentToolsRequest,
-        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609)."
+        description = "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742)."
     ),
     responses(
-        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.", body = crate::types::JsonObject)
+        (status = 200, description = "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -237,6 +258,7 @@ pub async fn set_agent_tools(
     if body.capabilities_tools.is_none()
         && body.tool_allowlist.is_none()
         && body.tool_blocklist.is_none()
+        && body.disabled.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -267,6 +289,7 @@ pub async fn set_agent_tools(
         body.capabilities_tools,
         body.tool_allowlist,
         body.tool_blocklist,
+        body.disabled,
     ) {
         // Read the agent back so the dashboard can `setQueryData` directly
         // instead of refetching. Returns the same shape as `GET /api/agents/{id}/tools`.
@@ -284,8 +307,9 @@ pub async fn set_agent_tools(
                 // Name any allowlist entry that provably cannot admit a tool (#6609).
                 // Evaluated against the entry read back *after* the write, so both the new declared set and the stored allowlist are the post-write values: a request that sets `capabilities_tools` and `tool_allowlist` together is judged against what it just wrote rather than what it replaced, and a request that only narrows `capabilities_tools` is judged against the allowlist it left in place.
                 //
-                // No `tools_disabled` guard is needed: `update_tool_config` unconditionally clears that flag on every successful write, so on this arm the agent's tools are always enabled.
-                if evaluate_inert_entries {
+                // Gated on `tools_disabled` as well, since #7742: `update_tool_config` no longer force-clears that flag, so an agent can reach this arm with every tool switched off.
+                // Naming an inert allowlist entry there would be advice about the second filter of a pipeline whose first stage already admits nothing — noise, and the same "your own request silenced a tool and the response was a clean 200" failure in reverse.
+                if evaluate_inert_entries && !entry.manifest.tools_disabled {
                     let inert = inert_tool_allowlist_entries(
                         &entry.manifest.capabilities.tools,
                         &entry.manifest.tool_allowlist,
@@ -355,19 +379,23 @@ pub async fn get_agent_skills(
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
-    let available = state
+    let available = read_agent_skills_registry(state.kernel.skill_registry_ref()).skill_names();
+    let mode = skill_assignment_mode(&entry.manifest);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
         .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .skill_names();
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.skills,
             "available": available,
-            "mode": skill_assignment_mode(&entry.manifest),
+            "mode": mode,
             "disabled": entry.manifest.skills_disabled,
+            // Declared but not installed — retained in the manifest, activates on the next skills reload (#7713).
+            "pending": pending.skills,
         })),
     )
 }
@@ -484,34 +512,60 @@ pub async fn get_agent_mcp_servers(
         }
     }
     let mode = mcp_servers_mode(&entry.manifest.mcp_servers);
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.mcp_servers,
             "available": available,
             "mode": mode,
+            // Declared but with no live connection — configured-and-unreachable counts as pending (#7713).
+            "pending": pending.mcp_servers,
         })),
     )
 }
 
 /// PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentMcpServersRequest {
+    /// MCP server names assigned to the agent.
+    /// An empty list disables MCP servers for the agent; `["*"]` enables all connected servers.
+    pub mcp_servers: Vec<String>,
+}
+
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of MCP server names"),
+    request_body(content = SetAgentMcpServersRequest, description = "Object containing the MCP server allowlist"),
     responses(
-        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentMcpServersRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -521,14 +575,7 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
-    let servers: Vec<String> = body["mcp_servers"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let servers = body.mcp_servers;
     match state
         .kernel
         .set_agent_mcp_servers(agent_id, servers.clone())
@@ -609,24 +656,51 @@ pub async fn get_agent_channels(
     )
 }
 
+/// Body of `PUT /api/agents/{id}/channels`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentChannelsRequest {
+    /// `channel_type` strings the agent may receive messages from.
+    /// An empty list clears the allowlist, which means "all channels" (`mode = "all"`).
+    pub channels: Vec<String>,
+}
+
 /// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+///
+/// Body shape mirrors the sibling `mcp_servers` route rather than the bare array the OpenAPI
+/// annotation used to advertise (#7742).
+/// The old handler read `body["channels"]` out of an untyped `Value` and fell back to `Vec::new()`
+/// for anything it did not recognise, so the documented bare-array body — and any typo in the key —
+/// silently cleared the allowlist and reopened the agent to every channel.
+/// Widening an allowlist is not a defensible interpretation of a malformed request, so a body that
+/// does not deserialize is now a 400.
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/channels",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of channel_type strings"),
+    request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist"),
     responses(
-        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_channels(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentChannelsRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -636,14 +710,7 @@ pub async fn set_agent_channels(
             )
         }
     };
-    let channels: Vec<String> = body["channels"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let channels = body.channels;
     match state.kernel.set_agent_channels(agent_id, channels.clone()) {
         Ok(()) => (
             StatusCode::OK,
@@ -868,26 +935,37 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Update model/provider — always go through set_agent_model so that
-    // provider-change semantics (prefix stripping, canonical-session cleanup,
-    // and clearing of stale per-agent api_key_env / base_url overrides) are
-    // applied uniformly. Bypassing it via update_model_and_provider was the
-    // root cause of #2380: switching to a non-default provider via the
-    // dashboard left stale CLOUDVERSE_API_KEY / cloudverse base_url on the
-    // manifest, so the new provider's request was sent to the old URL with
-    // the old credentials and rejected with "Missing Authentication header".
-    if let Some(ref new_model) = req.model {
-        if !new_model.is_empty() {
-            let explicit_provider = req.provider.as_deref().filter(|p| !p.is_empty());
-            if let Err(e) = state
-                .kernel
-                .set_agent_model(agent_id, new_model, explicit_provider)
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": scrub_500(&e, &t)})),
-                );
-            }
+    // Update model/provider through set_agent_model so provider-change semantics (prefix stripping, canonical-session cleanup, and stale per-agent credential/base URL removal) are applied uniformly.
+    // Bypassing it was the root cause of #2380.
+    // A provider-only PATCH keeps the stored model.
+    // Ignoring that shape returned 200 without changing anything (#7765).
+    let requested_model = req.model.as_deref().filter(|model| !model.is_empty());
+    let explicit_provider = req
+        .provider
+        .as_deref()
+        .filter(|provider| !provider.is_empty());
+    if requested_model.is_some() || explicit_provider.is_some() {
+        let model = match requested_model {
+            Some(model) => model.to_string(),
+            None => match state.kernel.agent_registry().get(agent_id) {
+                Some(entry) => entry.manifest.model.model,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                    );
+                }
+            },
+        };
+        if let Err(e) = state
+            .kernel
+            .set_agent_model(agent_id, &model, explicit_provider)
+        {
+            let status = kernel_err_to_status(&e);
+            return (
+                status,
+                Json(serde_json::json!({"error": kernel_err_body(status, &e, &t)})),
+            );
         }
     }
 
@@ -1288,5 +1366,32 @@ mod inert_allowlist_tests {
             ),
             v(&["web_search", "agent_spawn"])
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_registry_poison_tests {
+    use super::read_agent_skills_registry;
+    use librefang_skills::registry::SkillRegistry;
+    use std::sync::RwLock;
+
+    #[test]
+    fn agent_skills_registry_recovers_after_held_write_lock_panic() {
+        let registry = RwLock::new(SkillRegistry::new(std::path::PathBuf::from(
+            "/tmp/agent-skills-registry-poison-test",
+        )));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = registry.write().unwrap();
+            panic!("poison agent skill-assignment registry");
+        });
+        assert!(registry.is_poisoned());
+
+        assert!(read_agent_skills_registry(&registry)
+            .skill_names()
+            .is_empty());
+
+        assert!(!registry.is_poisoned());
+        assert!(registry.read().is_ok());
+        assert!(registry.write().is_ok());
     }
 }

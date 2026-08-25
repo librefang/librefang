@@ -13,6 +13,7 @@ jobs:
       !github.event.issue.pull_request &&
       contains(github.event.comment.body, '/claim')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Assign issue to commenter
         env:
@@ -38,6 +39,7 @@ jobs:
       !github.event.issue.pull_request &&
       contains(github.event.comment.body, '/unclaim')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Unassign issue
         env:

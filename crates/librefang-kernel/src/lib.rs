@@ -8,6 +8,7 @@
 //! and inter-agent communication.
 
 pub mod agent_identity_registry;
+pub mod agent_template;
 pub mod approval;
 pub mod auth;
 pub mod auto_dream;
@@ -56,7 +57,7 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
-pub use kernel::SkillReloadOutcome;
+pub use kernel::{PendingSkillMcpDeclarations, SemanticMemoryAccess, SkillReloadOutcome};
 pub use kernel::{SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON, SYSTEM_CHANNEL_WEBUI};
 pub use kernel_api::KernelApi;
 
@@ -66,9 +67,9 @@ pub use kernel_api::KernelApi;
 // migration can move callers off `LibreFangKernel` inherent forwards.
 pub use kernel::subsystems::{
     AgentSubsystemApi, CredentialPoolSummary, EventSubsystemApi, GovernanceSubsystemApi,
-    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemorySubsystemApi, MeshSubsystemApi,
-    MeteringSubsystemApi, ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi,
-    WorkflowSubsystemApi,
+    LlmSubsystemApi, McpSubsystemApi, MediaSubsystemApi, MemoryExtractionResolution,
+    MemoryExtractionTarget, MemorySubsystemApi, MeshSubsystemApi, MeteringSubsystemApi,
+    ProcessSubsystemApi, SecuritySubsystemApi, SkillsSubsystemApi, WorkflowSubsystemApi,
 };
 
 // ---------------------------------------------------------------------------

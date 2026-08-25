@@ -21,6 +21,9 @@ Exits 0 when every check passes, 1 with one line per failure otherwise.
 
 from __future__ import annotations
 
+import hashlib
+import posixpath
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -56,6 +59,38 @@ EXPECTED_PROBE_PATHS = {
     "livenessProbe": "/api/health",
     "readinessProbe": "/api/ready",
 }
+
+# Managed configuration (#6695).
+# `LIBREFANG_CONFIG_PATH` relocates the file and `LIBREFANG_CONFIG_MODE=managed` locks it; the two are independent, so the checks below only fire once the manifest has actually opted into the mode.
+CONFIG_MODE_ENV = "LIBREFANG_CONFIG_MODE"
+CONFIG_PATH_ENV = "LIBREFANG_CONFIG_PATH"
+MANAGED_MODE = "managed"
+
+# The pod-template annotation whose change is what rolls the StatefulSet when the config changes.
+# `checksum/config` is the Helm convention for exactly this, so an operator reading the template already knows what it is for.
+CHECKSUM_ANNOTATION = "checksum/config"
+
+# Config keys that carry a credential *value* rather than a reference to one.
+# A ConfigMap is stored unencrypted in etcd and this copy is in git besides, so a hit here is a leaked secret, not a style problem.
+# Keys ending `_env` name an environment variable and are deliberately absent: that is the supported way to point at a Secret from the config file.
+SECRET_VALUE_KEYS = (
+    "api_key",
+    "dashboard_pass",
+    "vault_key",
+    "state_secret",
+    "client_secret",
+    "password",
+)
+SECRET_ASSIGNMENT = re.compile(
+    r"^\s*(" + "|".join(SECRET_VALUE_KEYS) + r")\s*=\s*(\"[^\"]*\"|'[^']*')",
+    re.MULTILINE,
+)
+# `vault:` and `env:` values are indirections, which is the pattern this check exists to steer people towards rather than away from.
+SECRET_INDIRECTIONS = ("vault:", "env:")
+
+# `include = [...]` pulls further TOML files into the effective configuration, but the checksum on `GET /api/config/status` is computed over the primary file's raw bytes alone.
+# Editing an included file would therefore leave the checksum unchanged, and an operator using it to confirm a rollout landed gets a false negative — so the annotation this overlay is built around would stop meaning what it says.
+INCLUDE_DIRECTIVE = re.compile(r"^\s*include\s*=", re.MULTILINE)
 
 
 class Failures:
@@ -114,6 +149,21 @@ def check_statefulset(sts: dict[str, Any], failures: Failures) -> None:
 
     check_pod_security(pod_spec, failures)
     check_volume_claims(spec, pod_spec, failures)
+
+    # An init container copying config.toml into /data is the workaround
+    # managed mode exists to remove (#6695): the daemon resolves
+    # LIBREFANG_CONFIG_PATH itself, so a read-only mount is bootable directly.
+    # A copy would also defeat the lock, because the daemon would then own a
+    # writable duplicate the manifest no longer controls.
+    init_containers = pod_spec.get("initContainers", [])
+    failures.check(
+        not init_containers,
+        "the pod template declares initContainers "
+        f"({[c.get('name') for c in init_containers]!r}). A config.toml copy "
+        "step is not needed — LIBREFANG_CONFIG_PATH boots straight off a "
+        "read-only mount — and a writable duplicate under /data would be a "
+        "second source of truth the deployment does not control.",
+    )
 
     containers = pod_spec.get("containers", [])
     if not failures.check(
@@ -316,6 +366,219 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
     )
 
 
+def check_managed_config(
+    docs: list[dict[str, Any]], sts: dict[str, Any], failures: Failures
+) -> None:
+    """Assert the managed-configuration contract (#6695), when opted into.
+
+    Silent unless the manifest sets `LIBREFANG_CONFIG_MODE`, so the base kustomization — which is deliberately mutable — passes unchanged.
+    """
+    template = sts.get("spec", {}).get("template", {})
+    pod_spec = template.get("spec", {})
+    containers = pod_spec.get("containers", [])
+    if len(containers) != 1:
+        return  # already reported by check_statefulset
+    container = containers[0]
+    env = {e.get("name"): e for e in container.get("env", []) if isinstance(e, dict)}
+
+    if CONFIG_MODE_ENV not in env:
+        return
+
+    mode_entry = env[CONFIG_MODE_ENV]
+    if mode_entry.get("valueFrom") is not None:
+        failures.fail(
+            f"{CONFIG_MODE_ENV} must be a literal value in the manifest, not a "
+            "valueFrom reference. The lock is what stops the API from editing "
+            "the deployment's own config, so which mode is in force has to be "
+            "readable from the manifest rather than from another object."
+        )
+        return
+    mode = mode_entry.get("value")
+    if mode != MANAGED_MODE:
+        failures.fail(
+            f"{CONFIG_MODE_ENV} is {mode!r}. Any value other than "
+            f"{MANAGED_MODE!r} — including a typo, an empty string, and a "
+            "capitalised variant — resolves to mutable, silently and by "
+            "design. Set it exactly or remove it."
+        )
+        return
+
+    path_entry = env.get(CONFIG_PATH_ENV, {})
+    if path_entry.get("valueFrom") is not None:
+        failures.fail(
+            f"{CONFIG_PATH_ENV} must be a literal value in the manifest, not a "
+            "valueFrom reference — it names the file this checker has to find "
+            "a mount for."
+        )
+        return
+    config_path = path_entry.get("value")
+    if not config_path:
+        failures.fail(
+            f"{CONFIG_MODE_ENV}={MANAGED_MODE} without {CONFIG_PATH_ENV}. The "
+            f"daemon would lock {DATA_DIR}/config.toml, a file on the PVC that "
+            "the deployment does not supply, so first boot has nothing to read "
+            "and no way to write it."
+        )
+        return
+
+    if not posixpath.isabs(config_path):
+        failures.fail(f"{CONFIG_PATH_ENV} must be absolute, got {config_path!r}.")
+        return
+
+    if config_path == DATA_DIR or config_path.startswith(DATA_DIR + "/"):
+        failures.fail(
+            f"{CONFIG_PATH_ENV} {config_path!r} is inside {DATA_DIR}, which is "
+            "the PVC. A ConfigMap mounted there would shadow the daemon's own "
+            "state directory; a path outside it is the point of relocating."
+        )
+        return
+
+    config_dir, config_key = posixpath.split(config_path)
+    mount = _find_config_mount(container, config_path, config_dir)
+    if mount is None:
+        failures.fail(
+            f"no volumeMount supplies {config_path!r}. Mount the ConfigMap at "
+            f"{config_dir!r}, or at {config_path!r} with a matching subPath."
+        )
+        return
+
+    failures.check(
+        mount.get("readOnly") is True,
+        f"the volumeMount supplying {config_path!r} must set readOnly: true. "
+        "It is defence in depth rather than the enforcement mechanism — the "
+        "423 is — but a manifest that declares a managed file and mounts it "
+        "writable is stating two different intentions.",
+    )
+    if mount.get("subPath"):
+        config_key = mount["subPath"]
+
+    volume = next(
+        (v for v in pod_spec.get("volumes", []) if v.get("name") == mount.get("name")),
+        None,
+    )
+    if volume is None or "configMap" not in volume:
+        failures.fail(
+            f"volume {mount.get('name')!r} must be a configMap volume — a "
+            "managed config comes from the manifest, and this checker verifies "
+            "the checksum annotation against its rendered contents."
+        )
+        return
+
+    cm_name = volume["configMap"].get("name")
+    config_map = next(
+        (
+            d
+            for d in docs
+            if d.get("kind") == "ConfigMap" and d.get("metadata", {}).get("name") == cm_name
+        ),
+        None,
+    )
+    if config_map is None:
+        failures.fail(
+            f"ConfigMap {cm_name!r} is referenced but not rendered by this "
+            "kustomization. An out-of-band ConfigMap cannot be checked here, "
+            "and the checksum annotation could not be verified against it."
+        )
+        return
+
+    contents = config_map.get("data", {}).get(config_key)
+    if contents is None:
+        failures.fail(
+            f"ConfigMap {cm_name!r} has no data key {config_key!r}; it has "
+            f"{sorted(config_map.get('data', {}))!r}. The key name is the "
+            f"filename the mount exposes, so it must match {config_path!r}."
+        )
+        return
+
+    check_no_secret_values(cm_name, config_key, contents, failures)
+    check_no_include(cm_name, config_key, contents, failures)
+    check_checksum_annotation(template, contents, failures)
+
+
+def _find_config_mount(
+    container: dict[str, Any], config_path: str, config_dir: str
+) -> dict[str, Any] | None:
+    """The volumeMount that puts `config_path` in the container's filesystem.
+
+    Either the whole directory is mounted, or the single file is mounted with a subPath.
+    Both are valid; a subPath mount additionally never picks up a ConfigMap update in place, which is consistent with rollout-only updates.
+    """
+    for mount in container.get("volumeMounts", []):
+        if mount.get("subPath") and mount.get("mountPath") == config_path:
+            return mount
+        if not mount.get("subPath") and mount.get("mountPath") == config_dir:
+            return mount
+    return None
+
+
+def check_no_secret_values(
+    cm_name: str, key: str, contents: str, failures: Failures
+) -> None:
+    """No credential may be spelled out in a ConfigMap."""
+    for match in SECRET_ASSIGNMENT.finditer(contents):
+        field, raw = match.group(1), match.group(2)
+        value = raw[1:-1]
+        if not value or value.startswith(SECRET_INDIRECTIONS):
+            continue
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} assigns {field} a literal "
+            "value. A ConfigMap is unencrypted in etcd and readable by anyone "
+            "with `get configmaps` in the namespace, and this copy is in "
+            "version control. Supply it from a Secret through the pod "
+            "environment instead — see deploy/kubernetes/secrets.example.yaml."
+        )
+
+
+def check_no_include(
+    cm_name: str, key: str, contents: str, failures: Failures
+) -> None:
+    """A managed config must be one file, because its checksum only covers one.
+
+    Of the three ways to reconcile `include` with the checksum — hash the transitive closure, refuse `include`, or document primary-file-only and tell operators not to key rollouts on it — this overlay takes the second, and only within its own scope.
+    It is the option that keeps the annotation honest without changing what the daemon computes, and a managed deployment loses nothing by it: the file is generated from a manifest, so composing it is the manifest's job rather than the config loader's.
+    """
+    if INCLUDE_DIRECTIVE.search(contents):
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} uses `include = [...]`. The "
+            "checksum on GET /api/config/status covers this file's bytes only, "
+            "so an edit to an included file would leave it unchanged and the "
+            "checksum annotation would report a rollout that never happened. "
+            "Compose the configuration in the manifest — a kustomize patch, or "
+            "one ConfigMap key — so the file the daemon hashes is the whole of "
+            "what it reads."
+        )
+
+
+def check_checksum_annotation(
+    template: dict[str, Any], contents: str, failures: Failures
+) -> None:
+    """The rollout trigger and the rollout *proof* must be the same string.
+
+    `GET /api/config/status` reports `sha256:<hex>` over the config file's raw bytes, and the ConfigMap's data value is those bytes.
+    Pinning the annotation to the same digest means one comparison answers both "will editing the config roll the pod?" and "is the running daemon on the file I edited?" — and a stale annotation, which would silently skip the rollout, fails here instead of in production.
+    """
+    annotations = template.get("metadata", {}).get("annotations", {})
+    actual = annotations.get(CHECKSUM_ANNOTATION)
+    expected = f"sha256:{hashlib.sha256(contents.encode()).hexdigest()}"
+
+    if actual is None:
+        failures.fail(
+            f"the pod template has no {CHECKSUM_ANNOTATION!r} annotation. "
+            "Without it, editing the ConfigMap leaves the pod template "
+            "identical, so `kubectl apply -k` reports no change and the "
+            f"running daemon keeps the old file. Expected {expected!r}."
+        )
+        return
+
+    failures.check(
+        actual == expected,
+        f"{CHECKSUM_ANNOTATION} is {actual!r} but the rendered config hashes "
+        f"to {expected!r}. The config changed and the annotation did not, so "
+        "applying this would not roll the StatefulSet and the annotation would "
+        "no longer match the checksum GET /api/config/status reports.",
+    )
+
+
 def check_services(docs: list[dict[str, Any]], failures: Failures) -> None:
     services = [d for d in docs if d.get("kind") == "Service"]
     if not failures.check(
@@ -392,6 +655,7 @@ def main(argv: list[str]) -> int:
         failures.fail(f"expected exactly one StatefulSet; rendered kinds: {kinds!r}")
     else:
         check_statefulset(sts, failures)
+        check_managed_config(docs, sts, failures)
 
     check_services(docs, failures)
     check_no_inline_secrets(docs, failures)

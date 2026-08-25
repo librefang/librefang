@@ -1,0 +1,7 @@
+The daemon now resolves `config.toml` exactly once, at boot, and every surface reads that one answer.
+Previously the kernel loaded the file through `default_config_path()` — which honours `LIBREFANG_CONFIG_PATH` — while the API layer, the hot-reload watcher, and the CLI each re-derived it as `<home_dir>/config.toml`.
+The two agreed only by coincidence, so relocating the file made the daemon read one path and write another: `GET /api/config/status` named the mounted file while `POST /api/config/set` silently wrote a second copy into `LIBREFANG_HOME`, which the next reload never read.
+That made a mounted configuration — a Kubernetes ConfigMap, a Compose bind mount — a footgun rather than a deployment, which is why managed mode alone was not enough to support one.
+The resolved path now lives on the kernel as `config_path_boot`, is exposed as `KernelApi::config_path()`, and is what the `423 Locked` body reports, what the change watcher stats, and what every config-writing route and `librefang config` subcommand opens.
+A relocated file may now also carry a name other than `config.toml`; the three copies of a basename check that rejected one were meaningful when the path came from a request and were pure obstruction once it came from the operator's own environment.
+The one-time MCP layout migration takes the same path, so a first boot against a mounted config no longer deposits the migrated `[[mcp_servers]]` entries in a file nothing reads. (#7886) (@houko)

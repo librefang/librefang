@@ -92,7 +92,9 @@ pub fn requested_version_from_accept_header(accept: &str) -> Option<&str> {
     for part in accept.split(',') {
         let media_type = part.trim().split(';').next().unwrap_or("").trim();
         if let Some(rest) = media_type.strip_prefix(VENDOR_PREFIX) {
-            let (version, suffix) = rest.rsplit_once('+')?;
+            let Some((version, suffix)) = rest.rsplit_once('+') else {
+                continue;
+            };
             if suffix == "json" && !version.is_empty() {
                 return Some(version);
             }
@@ -217,6 +219,16 @@ mod tests {
         assert_eq!(
             requested_version_from_accept_header("application/vnd.librefang.v1"),
             None
+        );
+    }
+
+    #[test]
+    fn test_requested_version_from_accept_header_skips_malformed_vendor_type() {
+        assert_eq!(
+            requested_version_from_accept_header(
+                "application/vnd.librefang.v1, application/vnd.librefang.v1+json"
+            ),
+            Some("v1")
         );
     }
 

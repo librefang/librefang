@@ -20,13 +20,17 @@ on:
     branches: [main]
     paths:
       - 'Dockerfile'
-      - 'deploy/docker-entrypoint.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - 'crates/librefang-api/dashboard/package.json'
-      - 'crates/librefang-api/dashboard/pnpm-lock.yaml'
+      - '.dockerignore'
+      - 'crates/**'
+      - 'xtask/**'
+      - 'packages/**'
+      - 'sdk/python/librefang/**'
+      - 'deploy/**'
       - '.github/workflows/docker-build.yml'
+      - '.github/scripts/docker-smoke.sh'
+      - '.github/scripts/tests/docker-smoke.test.sh'
       # This workflow is the only place the Trivy composite action and its gate script actually execute — the ci.yml lane runs the script's self-test only.
       # Without these two entries an edit to either would first run on an unrelated future push that happens to touch the Dockerfile, turning `main` red with no link back to the change that broke it.
       - '.github/actions/trivy-image-scan/**'
@@ -64,22 +68,10 @@ jobs:
           cache-from: type=gha,scope=docker-build
           cache-to: type=gha,mode=max,scope=docker-build
 
-      - name: Boot container and probe /api/health
-        run: |
-          set -euo pipefail
-          docker run -d --name librefang-ci -p 4545:4545 librefang:ci
-          # Poll for up to 60s — first boot does `librefang init` which
-          # writes a config and seeds the registry.
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:4545/api/health >/dev/null; then
-              echo "✓ /api/health responded after ${i}s"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::/api/health never came up — dumping container logs"
-          docker logs librefang-ci
-          exit 1
+      - name: Boot container and probe liveness/readiness
+        # First boot writes config and seeds the registry. The helper checks
+        # liveness plus readiness and fails immediately if the process exits.
+        run: sh .github/scripts/docker-smoke.sh
 
       - name: Container logs (always)
         if: always()

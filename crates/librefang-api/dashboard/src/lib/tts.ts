@@ -24,8 +24,9 @@ export function stripMarkdown(text: string): string {
   // Remove LaTeX display blocks ($$...$$) before inline
   result = result.replace(/\$\$[\s\S]*?\$\$/g, "");
 
-  // Remove LaTeX inline ($...$)
-  result = result.replace(/\$[^$\n]+?\$/g, "");
+  // Remove inline LaTeX only when it contains a command. A broad `$...$`
+  // match also consumes ordinary currency ranges such as "$5 to $10".
+  result = result.replace(/\$[^$\n]*\\[a-zA-Z]+[^$\n]*\$/g, "");
 
   // Remove inline code
   result = result.replace(/`[^`]*`/g, "");
@@ -121,6 +122,12 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
         return;
       }
 
+      // A second click while synthesis is pending must not launch another
+      // request for the same message.
+      if (currentMessageIdRef.current === messageId && status === "loading") {
+        return;
+      }
+
       // Different message or idle -> stop current, start new
       stop();
 
@@ -143,9 +150,16 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
 
         try {
           const result = await synthesizeSpeech({ text: stripped, provider: config?.provider, voice: config?.voice, language: config?.language, speed: config?.speed });
+          if (currentMessageIdRef.current !== messageId) {
+            if (result.url.startsWith("blob:")) {
+              URL.revokeObjectURL(result.url);
+            }
+            return;
+          }
           objectUrl = result.url;
           cacheRef.current.set(messageId, objectUrl);
         } catch {
+          if (currentMessageIdRef.current !== messageId) return;
           setStatus("idle");
           setSpeakingMessageId(null);
           setError("tts_error");
@@ -158,28 +172,40 @@ export function useTtsManager(config?: TtsSpeechConfig): UseTtsManagerReturn {
       audioRef.current = audio;
       currentAudioUrlRef.current = objectUrl;
 
-      audio.addEventListener("ended", () => {
+      const onEnded = () => {
+        if (audioRef.current !== audio) return;
         setStatus("idle");
         setSpeakingMessageId(null);
+        audioRef.current = null;
         currentMessageIdRef.current = null;
         currentAudioUrlRef.current = null;
-      }, { once: true });
+      };
 
-      audio.addEventListener("error", () => {
+      const onError = () => {
+        if (audioRef.current !== audio) return;
         setStatus("idle");
         setSpeakingMessageId(null);
         setError("tts_error");
+        audioRef.current = null;
         currentMessageIdRef.current = null;
         currentAudioUrlRef.current = null;
-      }, { once: true });
+      };
+
+      audio.addEventListener("ended", onEnded, { once: true });
+      audio.addEventListener("error", onError, { once: true });
 
       try {
         await audio.play();
+        if (audioRef.current !== audio) return;
         setStatus("playing");
       } catch {
+        audio.removeEventListener("ended", onEnded);
+        audio.removeEventListener("error", onError);
+        if (audioRef.current !== audio) return;
         setStatus("idle");
         setSpeakingMessageId(null);
         setError("tts_error");
+        audioRef.current = null;
         currentMessageIdRef.current = null;
         currentAudioUrlRef.current = null;
       }

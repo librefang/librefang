@@ -173,7 +173,13 @@ Send a message to an agent and receive the complete response.
 }
 ```
 
-**Optional `session_id`**: per-request override of which session this message lands in. When omitted, the agent's current session is used. When supplied, the call is routed into that specific session (the session must already exist for the agent), letting one agent serve many parallel chats from a single client without `POST /sessions/{id}/switch` round-trips first. Useful for fan-out backends and multi-tab dashboards.
+**Optional `session_id`**: per-request override of which session this message lands in.
+When omitted, the agent's current session is used.
+When supplied, the call is routed into that specific session, letting one agent serve many parallel chats from a single client without `POST /sessions/{id}/switch` round-trips first.
+The session need not exist yet — an unknown id materialises a new session under exactly that id, which is what makes a caller-generated per-conversation UUID work.
+It must not belong to a *different* agent: that is rejected rather than read, so one agent's id can never surface another's history.
+Useful for fan-out backends, multi-tab dashboards, and public multi-user front-ends.
+The same field is available from the CLI as `librefang message <agent> <text> --session-id <UUID>`.
 
 **Response** `200 OK`:
 

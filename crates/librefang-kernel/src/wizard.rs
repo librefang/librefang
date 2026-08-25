@@ -74,8 +74,12 @@ impl SetupWizard {
                 }
                 "shell" => caps.shell.push("*".to_string()),
                 "memory" => {
-                    caps.memory_read.push("*".to_string());
-                    caps.memory_write.push("*".to_string());
+                    caps.memory_read
+                        .get_or_insert_with(Vec::new)
+                        .push("*".to_string());
+                    caps.memory_write
+                        .get_or_insert_with(Vec::new)
+                        .push("*".to_string());
                     for t in &["memory_store", "memory_recall"] {
                         let s = t.to_string();
                         if !caps.tools.contains(&s) {

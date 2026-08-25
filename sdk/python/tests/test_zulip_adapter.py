@@ -622,6 +622,42 @@ def test_poll_once_bad_event_queue_id_signals_reregister(monkeypatch):
     assert new_last == 9  # Watermark unchanged.
 
 
+def test_reregister_failures_keep_exponential_backoff(monkeypatch):
+    a = _adapter()
+    register_calls = 0
+    sleeps: list[float] = []
+
+    class _StopProducer(BaseException):
+        pass
+
+    monkeypatch.setattr(a, "_validate", lambda: (1, "Bot"))
+
+    def _register():
+        nonlocal register_calls
+        register_calls += 1
+        if register_calls == 1:
+            return "expired-queue", 0
+        raise RuntimeError("register unavailable")
+
+    monkeypatch.setattr(a, "_register_queue", _register)
+    monkeypatch.setattr(
+        a, "_poll_once",
+        lambda emit, queue_id, last_event_id: (last_event_id, "reregister"),
+    )
+
+    def _sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise _StopProducer()
+
+    monkeypatch.setattr(zu.time, "sleep", _sleep)
+
+    with pytest.raises(_StopProducer):
+        a._producer_blocking(lambda _event: None)
+
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
 def test_poll_once_other_400_raises(monkeypatch):
     """A 400 with a different code is a real error → raise so the
     producer backs off (e.g. malformed query)."""

@@ -120,7 +120,11 @@ class WebSocketClient:
         )
         if is_tls:
             ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
+            try:
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            except BaseException:
+                sock.close()
+                raise
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         lines = [
             f"GET {path} HTTP/1.1",
@@ -164,6 +168,9 @@ class WebSocketClient:
         if got != expected:
             sock.close()
             raise RuntimeError("ws handshake Sec-WebSocket-Accept mismatch")
+        # ``create_connection`` leaves its handshake timeout installed.
+        # Steady-state reads are gated by ``wait_readable`` instead.
+        sock.settimeout(None)
         self._sock = sock
         self._leftover = leftover
         return self
@@ -226,15 +233,19 @@ class WebSocketClient:
                 buf.extend(self._leftover[:take])
                 self._leftover = self._leftover[take:]
                 continue
-            assert self._sock is not None
-            chunk = self._sock.recv(n - len(buf))
+            sock = self._sock
+            if sock is None:
+                raise RuntimeError("websocket not connected")
+            chunk = sock.recv(n - len(buf))
             if not chunk:
                 raise EOFError("websocket closed mid-frame")
             buf.extend(chunk)
         return bytes(buf)
 
     def _send_frame(self, opcode: int, payload: bytes) -> None:
-        assert self._sock is not None
+        sock = self._sock
+        if sock is None:
+            raise RuntimeError("websocket not connected")
         header = bytearray([0x80 | (opcode & 0x0F)])
         ln = len(payload)
         if ln < 126:
@@ -249,7 +260,7 @@ class WebSocketClient:
         header.extend(mask)
         masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         with self._send_lock:
-            self._sock.sendall(bytes(header) + masked)
+            sock.sendall(bytes(header) + masked)
 
     def send_text(self, s: str) -> None:
         self._send_frame(OP_TEXT, s.encode("utf-8"))
@@ -260,13 +271,8 @@ class WebSocketClient:
         except OSError:
             pass
 
-    def recv_frame(self) -> tuple[Optional[str], Optional[tuple[int, bytes]]]:
-        """Read one frame and return either ``(text, None)`` for a
-        completed text message, or ``(None, (close_code, reason))``
-        for a close frame the server sent. Pings are answered inline
-        and skipped. Returns ``(None, None)`` for non-text frames we
-        ignore (binary, pong).
-        """
+    def _recv_raw_frame(self) -> tuple[bool, int, bytes]:
+        """Read one complete wire frame with the per-frame size cap."""
         h2 = self._recv_exact(2)
         fin = (h2[0] & 0x80) != 0
         opcode = h2[0] & 0x0F
@@ -287,45 +293,74 @@ class WebSocketClient:
             payload = bytes(
                 b ^ mask_key[i % 4] for i, b in enumerate(payload)
             )
+        return fin, opcode, payload
+
+    @staticmethod
+    def _decode_close(payload: bytes) -> tuple[int, bytes]:
+        if len(payload) < 2:
+            return 1005, b""
+        return struct.unpack(">H", payload[:2])[0], payload[2:]
+
+    def _continue_message(
+        self, buf: bytearray,
+    ) -> Optional[tuple[int, bytes]]:
+        """Append continuations while servicing interleaved controls.
+
+        Returns a decoded close frame when the peer closes mid-message.
+        """
+        while True:
+            fin, opcode, payload = self._recv_raw_frame()
+            if opcode == OP_PING:
+                self._send_frame(OP_PONG, payload)
+                continue
+            if opcode == OP_PONG:
+                continue
+            if opcode == OP_CLOSE:
+                return self._decode_close(payload)
+            if opcode != OP_CONT:
+                raise RuntimeError(
+                    f"ws unexpected interleaved opcode {opcode}"
+                )
+            if len(buf) + len(payload) > MAX_FRAME_PAYLOAD:
+                raise RuntimeError(
+                    "websocket reassembled message exceeds cap "
+                    f"{MAX_FRAME_PAYLOAD}; failing the stream"
+                )
+            buf.extend(payload)
+            if fin:
+                return None
+
+    def recv_frame(self) -> tuple[Optional[str], Optional[tuple[int, bytes]]]:
+        """Read one frame and return either ``(text, None)`` for a
+        completed text message, or ``(None, (close_code, reason))``
+        for a close frame the server sent. Pings are answered inline
+        and skipped. Returns ``(None, None)`` for non-text frames we
+        ignore (binary, pong).
+        """
+        fin, opcode, payload = self._recv_raw_frame()
         if opcode == OP_PING:
             self._send_frame(OP_PONG, payload)
             return None, None
         if opcode == OP_PONG:
             return None, None
         if opcode == OP_CLOSE:
-            code = 1005  # "no status received" if payload < 2 bytes
-            reason = b""
-            if len(payload) >= 2:
-                code = struct.unpack(">H", payload[:2])[0]
-                reason = payload[2:]
-            return None, (code, reason)
+            return None, self._decode_close(payload)
         if opcode == OP_TEXT:
             buf = bytearray(payload)
-            while not fin:
-                h2 = self._recv_exact(2)
-                fin = (h2[0] & 0x80) != 0
-                opcode2 = h2[0] & 0x0F
-                masked2 = (h2[1] & 0x80) != 0
-                ln2 = h2[1] & 0x7F
-                if ln2 == 126:
-                    ln2 = struct.unpack(">H", self._recv_exact(2))[0]
-                elif ln2 == 127:
-                    ln2 = struct.unpack(">Q", self._recv_exact(8))[0]
-                if ln2 > MAX_FRAME_PAYLOAD:
-                    raise RuntimeError("ws continuation payload too large")
-                mk = self._recv_exact(4) if masked2 else None
-                payload2 = self._recv_exact(ln2)
-                if mk is not None:
-                    payload2 = bytes(
-                        b ^ mk[i % 4] for i, b in enumerate(payload2)
-                    )
-                if opcode2 != OP_CONT:
-                    # Unexpected interleaved frame — bail.
-                    raise RuntimeError(
-                        f"ws unexpected interleaved opcode {opcode2}"
-                    )
-                buf.extend(payload2)
+            if not fin:
+                close = self._continue_message(buf)
+                if close is not None:
+                    return None, close
             return buf.decode("utf-8", "replace"), None
+        if opcode == OP_BIN:
+            # This API intentionally ignores binary messages, but it still
+            # has to consume every continuation so the next call starts on a
+            # new message boundary and the aggregate size cap is enforced.
+            buf = bytearray(payload)
+            if not fin:
+                close = self._continue_message(buf)
+                if close is not None:
+                    return None, close
         # Binary / unknown — ignore.
         return None, None
 
@@ -340,63 +375,20 @@ class WebSocketClient:
         (Feishu gateway, etc.) use this; everyone else uses
         ``recv_frame`` which keeps the simpler 2-tuple shape.
         """
-        h2 = self._recv_exact(2)
-        fin = (h2[0] & 0x80) != 0
-        opcode = h2[0] & 0x0F
-        masked = (h2[1] & 0x80) != 0
-        ln = h2[1] & 0x7F
-        if ln == 126:
-            ln = struct.unpack(">H", self._recv_exact(2))[0]
-        elif ln == 127:
-            ln = struct.unpack(">Q", self._recv_exact(8))[0]
-        if ln > MAX_FRAME_PAYLOAD:
-            raise RuntimeError(
-                f"websocket frame payload {ln} exceeds cap "
-                f"{MAX_FRAME_PAYLOAD}; failing the stream"
-            )
-        mask_key = self._recv_exact(4) if masked else None
-        payload = self._recv_exact(ln)
-        if mask_key is not None:
-            payload = bytes(
-                b ^ mask_key[i % 4] for i, b in enumerate(payload)
-            )
+        fin, opcode, payload = self._recv_raw_frame()
         if opcode == OP_PING:
             self._send_frame(OP_PONG, payload)
             return None, None, None
         if opcode == OP_PONG:
             return None, None, None
         if opcode == OP_CLOSE:
-            code = 1005
-            reason = b""
-            if len(payload) >= 2:
-                code = struct.unpack(">H", payload[:2])[0]
-                reason = payload[2:]
-            return None, None, (code, reason)
+            return None, None, self._decode_close(payload)
         if opcode in (OP_TEXT, OP_BIN):
             buf = bytearray(payload)
-            while not fin:
-                h2 = self._recv_exact(2)
-                fin = (h2[0] & 0x80) != 0
-                opcode2 = h2[0] & 0x0F
-                masked2 = (h2[1] & 0x80) != 0
-                ln2 = h2[1] & 0x7F
-                if ln2 == 126:
-                    ln2 = struct.unpack(">H", self._recv_exact(2))[0]
-                elif ln2 == 127:
-                    ln2 = struct.unpack(">Q", self._recv_exact(8))[0]
-                if ln2 > MAX_FRAME_PAYLOAD:
-                    raise RuntimeError("ws continuation payload too large")
-                mk = self._recv_exact(4) if masked2 else None
-                payload2 = self._recv_exact(ln2)
-                if mk is not None:
-                    payload2 = bytes(
-                        b ^ mk[i % 4] for i, b in enumerate(payload2)
-                    )
-                if opcode2 != OP_CONT:
-                    raise RuntimeError(
-                        f"ws unexpected interleaved opcode {opcode2}"
-                    )
-                buf.extend(payload2)
+            if not fin:
+                close = self._continue_message(buf)
+                if close is not None:
+                    return None, None, close
             if opcode == OP_TEXT:
                 return buf.decode("utf-8", "replace"), None, None
             return None, bytes(buf), None

@@ -11,6 +11,7 @@ export type TFunc = (key: string, opts?: Record<string, unknown>) => string;
  * Every state is derived from a fact the backend can substantiate — see `sidecar_channel_rows` in `crates/librefang-api/src/routes/channels.rs`.
  */
 export type ChannelLivenessState =
+  | "unconfigured"
   | "not_supervised"
   | "failed"
   | "stopped"
@@ -37,38 +38,46 @@ export interface ChannelLiveness {
  *
  * The mapping, in evaluation order, and why each state has the colour it does:
  *
- * 1. `not_supervised` — amber.
+ * 1. `unconfigured` — neutral.
+ *    The catalog knows the adapter, but the operator has not configured it.
+ * 2. `not_supervised` — amber.
  *    Configured in `config.toml` but no adapter is registered: the sidecar was never started, or its start failed and the registration was rolled back.
  *    Amber rather than grey deliberately — grey reads as "fine, just quiet", which is exactly the misreading this fix exists to remove.
- * 2. `failed` — red.
+ * 3. `failed` — red.
  *    Down, and the supervisor recorded why.
- * 3. `stopped` — red.
+ * 4. `stopped` — red.
  *    Down after having been up (`started_at` is set) with no error recorded — a silent exit.
- * 4. `starting` — amber.
+ * 5. `starting` — amber.
  *    Registered, never yet connected, nothing wrong reported.
  *    The transient window between registration and first spawn.
- * 5. `degraded` — amber.
+ * 6. `degraded` — amber.
  *    Connected, but carrying an error.
  *    `last_error` is sticky (the supervisor never clears it, not even on the successful respawn that follows), so this means "failed at least once since the adapter was created", not "broken right now".
  *    Amber, not red — but it must not read as healthy either.
- * 6. `active` — green.
+ * 7. `active` — green.
  *    Connected with messages in either direction.
- * 7. `connected` — green.
+ * 8. `connected` — green.
  *    Connected, no traffic yet.
  *    Distinguished from `active` by label, not colour: a quiet channel is healthy, and colouring it differently is what made a healthy-but-quiet bot look dead.
  *
  * Traffic here is the supervisor's own per-instance counters, which are since-adapter-creation.
  * The 24h figure on the payload is per channel type and deliberately plays no part in this mapping.
  *
- * Only meaningful for a `configured` row.
- * An unconfigured catalog row carries none of these fields and would read `not_supervised`, which is wrong — it is not broken, it was never set up.
- * Callers that list unconfigured rows must branch on `configured` first; see `CommsPage.tsx`.
+ * Unconfigured catalog rows are classified explicitly so every caller gets a
+ * neutral setup state without needing to duplicate a guard.
  */
 export function channelLiveness(c: ChannelItem): ChannelLiveness {
-  const error =
-    typeof c.last_error === "string" && c.last_error.trim().length > 0
-      ? c.last_error
-      : null;
+  if (c.configured === false) {
+    return { state: "unconfigured", variant: "default", error: null };
+  }
+
+  let error: string | null = null;
+  if (typeof c.last_error === "string") {
+    error = c.last_error.trim() || null;
+  } else if (c.last_error != null) {
+    console.warn("Channel last_error has an invalid non-string payload", c.last_error);
+    error = "Invalid last_error payload";
+  }
   if (!c.supervised) {
     return { state: "not_supervised", variant: "warning", error };
   }
@@ -91,6 +100,8 @@ export function channelLiveness(c: ChannelItem): ChannelLiveness {
  */
 export function livenessLabel(state: ChannelLivenessState, t: TFunc): string {
   switch (state) {
+    case "unconfigured":
+      return t("common.setup", { defaultValue: "Setup" });
     case "active":
       return t("channels.liveness.active", { defaultValue: "Active" });
     case "connected":
@@ -107,5 +118,7 @@ export function livenessLabel(state: ChannelLivenessState, t: TFunc): string {
       return t("channels.liveness.not_supervised", {
         defaultValue: "Not started",
       });
+    default:
+      return state;
   }
 }

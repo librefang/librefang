@@ -2,9 +2,10 @@
 //!
 //! All audit endpoints are deliberately gated to `UserRole::Admin+` with an actual credential because audit access leaks sensitive identity / action data — the role check happens in-handler (the global auth middleware only enforces "is this a recognised token", not "may this caller see audit").
 //!
-//! Filtering is done at the SQLite layer with parameterised queries —
-//! all filter values come straight from the URL and are bound through
-//! `rusqlite::params!` to keep the SQL injection surface zero.
+//! Filtering is performed against the complete retained in-memory window.
+//! When SQLite contains an older prefix evicted by the memory soft cap,
+//! query responses and export headers disclose that the visible history is
+//! truncated. No filter value is interpolated into SQL.
 
 use super::AppState;
 use crate::middleware::{AuthenticatedApiUser, TrustedNoAuthCaller, UserRole};
@@ -156,10 +157,15 @@ fn require_admin(
 /// SQL injection surface is zero because we never build SQL from user
 /// input here. `rusqlite::params!` is used in `librefang-memory` for
 /// the DB-backed paths.
-fn apply_filter(entry: &AuditEntry, f: &AuditFilter, bounds: TimeBounds) -> bool {
+fn apply_filter(
+    entry: &AuditEntry,
+    f: &AuditFilter,
+    bounds: TimeBounds,
+    derived_user_id: Option<&str>,
+) -> bool {
     if let Some(ref u) = f.user {
         let uid_str = entry.user_id.map(|u| u.to_string()).unwrap_or_default();
-        if uid_str != *u && !user_matches_loose(u, &uid_str) {
+        if uid_str != *u && derived_user_id != Some(uid_str.as_str()) {
             return false;
         }
     }
@@ -203,13 +209,16 @@ fn apply_filter(entry: &AuditEntry, f: &AuditFilter, bounds: TimeBounds) -> bool
     true
 }
 
-/// Allow `?user=Alice` to match either the stringified UUID or the raw
-/// name (re-derived via `UserId::from_name`). Saves the operator from
-/// having to round-trip through the user-list endpoint just to get a
-/// uuid for filtering.
-fn user_matches_loose(query: &str, recorded_uuid: &str) -> bool {
-    let derived = UserId::from_name(query).to_string();
-    derived == recorded_uuid
+/// Resolve the optional user-name form once per request instead of once
+/// per audit entry. UUID input continues to match directly in
+/// [`apply_filter`]; deriving a second UUID here is harmless and keeps the
+/// filter representation uniform.
+fn derived_filter_user_id(filter: &AuditFilter) -> Option<String> {
+    filter
+        .user
+        .as_deref()
+        .map(UserId::from_name)
+        .map(|id| id.to_string())
 }
 
 /// GET /api/audit/query — admin-only filtered audit log.
@@ -249,19 +258,21 @@ pub async fn audit_query(
         .unwrap_or(DEFAULT_AUDIT_QUERY_LIMIT)
         .clamp(1, MAX_AUDIT_QUERY_LIMIT);
 
-    // Pull the full in-memory window and filter, then truncate.
-    // `MAX_AUDIT_QUERY_LIMIT * 4` gives the filter some headroom when
-    // the operator narrows by user / channel without losing the recency
-    // ordering that callers expect (newest first).
-    let pool_size = (MAX_AUDIT_QUERY_LIMIT as usize).saturating_mul(4);
-    let pool = state.kernel.audit().recent(pool_size);
+    // Scan the complete retained chain before applying filters. A fixed
+    // look-back window silently omitted older matches while presenting the
+    // response as complete. Audit retention already bounds this collection.
+    let audit = state.kernel.audit();
+    let (pool, persisted_len) = audit.retained_snapshot();
+    let history_truncated = persisted_len > pool.len();
+    let derived_user_id = derived_filter_user_id(&filter);
 
     let mut filtered: Vec<&AuditEntry> = pool
         .iter()
-        .filter(|e| apply_filter(e, &filter, bounds))
+        .filter(|e| apply_filter(e, &filter, bounds, derived_user_id.as_deref()))
         .collect();
     // `recent` returns oldest-first within the slice; reverse for newest-first.
     filtered.reverse();
+    let total = filtered.len();
     filtered.truncate(limit as usize);
 
     let items: Vec<serde_json::Value> = filtered
@@ -281,12 +292,12 @@ pub async fn audit_query(
         })
         .collect();
 
-    let total = items.len();
     Json(serde_json::json!({
         "items": items,
         "total": total,
         "offset": 0,
         "limit": limit,
+        "history_truncated": history_truncated,
     }))
     .into_response()
 }
@@ -342,17 +353,20 @@ pub async fn audit_export(
     const EXPORT_MAX: u32 = 50_000;
     let limit = filter.limit.unwrap_or(EXPORT_DEFAULT).clamp(1, EXPORT_MAX);
 
-    let pool = state.kernel.audit().recent(EXPORT_MAX as usize * 2);
+    let audit = state.kernel.audit();
+    let (pool, persisted_len) = audit.retained_snapshot();
+    let history_truncated = persisted_len > pool.len();
+    let derived_user_id = derived_filter_user_id(&filter);
     let mut filtered: Vec<AuditEntry> = pool
         .into_iter()
-        .filter(|e| apply_filter(e, &filter, bounds))
+        .filter(|e| apply_filter(e, &filter, bounds, derived_user_id.as_deref()))
         .collect();
     filtered.reverse();
     filtered.truncate(limit as usize);
 
     match fmt.format.as_deref().unwrap_or("json") {
-        "csv" => stream_csv(filtered),
-        "json" => stream_json(filtered),
+        "csv" => stream_csv(filtered, history_truncated),
+        "json" => stream_json(filtered, history_truncated),
         other => {
             ApiErrorResponse::bad_request(format!("Unsupported format: {other}")).into_response()
         }
@@ -362,7 +376,7 @@ pub async fn audit_export(
 /// Stream JSON array as a chunked body. Each entry is encoded
 /// independently and joined with `,` so we never hold the full Vec<Value>
 /// in a single serde_json buffer at once.
-fn stream_json(entries: Vec<AuditEntry>) -> Response {
+fn stream_json(entries: Vec<AuditEntry>, history_truncated: bool) -> Response {
     use futures::stream;
 
     // Pre-build the chunks. The body remains chunked over the wire — the
@@ -416,6 +430,10 @@ fn stream_json(entries: Vec<AuditEntry>) -> Response {
         .status(StatusCode::OK)
         .header("content-type", "application/json")
         .header("content-disposition", "attachment; filename=\"audit.json\"")
+        .header(
+            "x-librefang-audit-history-truncated",
+            if history_truncated { "true" } else { "false" },
+        )
         .body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| {
             ApiErrorResponse::internal("Failed to build streaming response").into_response()
@@ -427,7 +445,7 @@ fn stream_json(entries: Vec<AuditEntry>) -> Response {
 /// comma, quote, CR, or LF (RFC 4180). Existing quotes inside a cell are
 /// doubled. This pins the format so downstream parsers (Excel, csv-rs,
 /// pandas) all parse the export identically.
-pub(crate) fn stream_csv(entries: Vec<AuditEntry>) -> Response {
+pub(crate) fn stream_csv(entries: Vec<AuditEntry>, history_truncated: bool) -> Response {
     use futures::stream;
 
     let mut chunks: Vec<Result<Vec<u8>, std::io::Error>> = Vec::with_capacity(entries.len() + 1);
@@ -459,6 +477,10 @@ pub(crate) fn stream_csv(entries: Vec<AuditEntry>) -> Response {
         .status(StatusCode::OK)
         .header("content-type", "text/csv; charset=utf-8")
         .header("content-disposition", "attachment; filename=\"audit.csv\"")
+        .header(
+            "x-librefang-audit-history-truncated",
+            if history_truncated { "true" } else { "false" },
+        )
         .body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| {
             ApiErrorResponse::internal("Failed to build streaming response").into_response()
@@ -542,7 +564,7 @@ pub async fn audit_recent(
                 "seq": e.seq,
                 "timestamp": e.timestamp,
                 "agent_id": e.agent_id,
-                "action": format!("{:?}", e.action),
+                "action": e.action.to_string(),
                 "detail": e.detail,
                 "outcome": e.outcome,
                 "hash": e.hash,
@@ -606,11 +628,11 @@ pub async fn audit_verify(
             Json(body).into_response()
         }
         Err(msg) => {
-            // verify_integrity() returns Err when the chain is broken
-            // OR when the anchor file diverges from the in-DB tip.
-            // Surface "diverged" so the UI can distinguish anchor
-            // failure from chain failure even though both are fatal.
-            let anchor_status = if anchor_enabled { "diverged" } else { "none" };
+            // verify_integrity() does not distinguish a broken chain from an
+            // anchor mismatch. Report a neutral error state rather than
+            // asserting that the anchor diverged when the chain itself may
+            // be the failure.
+            let anchor_status = if anchor_enabled { "error" } else { "none" };
             Json(serde_json::json!({
                 "valid": false,
                 "error": msg,
@@ -655,6 +677,11 @@ mod tests {
         (None, None)
     }
 
+    fn filter_matches(entry: &AuditEntry, filter: &AuditFilter, bounds: TimeBounds) -> bool {
+        let derived_user_id = derived_filter_user_id(filter);
+        apply_filter(entry, filter, bounds, derived_user_id.as_deref())
+    }
+
     #[test]
     fn test_filter_by_user_uuid_and_name() {
         let alice = UserId::from_name("Alice");
@@ -672,21 +699,21 @@ mod tests {
             user: Some(alice.to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Name match (re-derived via UserId::from_name)
         let f = AuditFilter {
             user: Some("Alice".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Different name must NOT match
         let f = AuditFilter {
             user: Some("Bob".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -696,12 +723,12 @@ mod tests {
             action: Some("permissiondenied".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
         let f = AuditFilter {
             action: Some("ToolInvoke".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 
     #[test]
@@ -721,14 +748,14 @@ mod tests {
             channel: Some("telegram".to_string()),
             ..Default::default()
         };
-        assert!(apply_filter(&e, &f, no_bounds()));
+        assert!(filter_matches(&e, &f, no_bounds()));
 
         // Agent mismatch
         let f = AuditFilter {
             agent: Some("agent-9".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
 
         // Time range — `from` is inclusive, compared as parsed instants.
         let f = AuditFilter {
@@ -737,13 +764,13 @@ mod tests {
             ..Default::default()
         };
         let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
-        assert!(apply_filter(&e, &f, bounds));
+        assert!(filter_matches(&e, &f, bounds));
         let f = AuditFilter {
             from: Some("2027-01-01T00:00:00+00:00".to_string()),
             ..Default::default()
         };
         let bounds = parse_time_bounds(&f).expect("valid RFC-3339");
-        assert!(!apply_filter(&e, &f, bounds));
+        assert!(!filter_matches(&e, &f, bounds));
     }
 
     #[test]
@@ -769,7 +796,7 @@ mod tests {
         };
         let bounds = parse_time_bounds(&f).expect("Z-suffixed RFC-3339 must parse");
         assert!(
-            apply_filter(&e, &f, bounds),
+            filter_matches(&e, &f, bounds),
             "Z-suffixed bound equal to entry instant must include the entry"
         );
     }
@@ -857,7 +884,7 @@ mod tests {
             e.hash = format!("{:0>64}", i);
             entries.push(e);
         }
-        let resp = stream_json(entries);
+        let resp = stream_json(entries, false);
         let body = body_to_string(resp).await;
         // The full document must parse as `Vec<Value>` without any
         // `,,` or trailing-comma artefacts.
@@ -882,7 +909,7 @@ mod tests {
         e.prev_hash = "a".repeat(64);
         e.hash = "b".repeat(64);
 
-        let resp = stream_json(vec![e]);
+        let resp = stream_json(vec![e], false);
         let body = body_to_string(resp).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid JSON array");
         let first = &parsed[0];
@@ -903,7 +930,7 @@ mod tests {
         e.prev_hash = "a".repeat(64);
         e.hash = "b".repeat(64);
 
-        let resp = stream_csv(vec![e]);
+        let resp = stream_csv(vec![e], false);
         let body = body_to_string(resp).await;
         let mut lines = body.lines();
         let header = lines.next().unwrap_or("");
@@ -919,6 +946,19 @@ mod tests {
     }
 
     #[test]
+    fn audit_exports_disclose_incomplete_in_memory_history() {
+        for response in [stream_json(Vec::new(), true), stream_csv(Vec::new(), true)] {
+            assert_eq!(
+                response
+                    .headers()
+                    .get("x-librefang-audit-history-truncated")
+                    .and_then(|value| value.to_str().ok()),
+                Some("true")
+            );
+        }
+    }
+
+    #[test]
     fn test_filter_does_not_match_via_sql_injection_attempt() {
         // The filter is a Rust string compare — there is no SQL anywhere
         // in this path. A classic injection probe must just be treated
@@ -928,6 +968,6 @@ mod tests {
             agent: Some("' OR 1=1 --".to_string()),
             ..Default::default()
         };
-        assert!(!apply_filter(&e, &f, no_bounds()));
+        assert!(!filter_matches(&e, &f, no_bounds()));
     }
 }
