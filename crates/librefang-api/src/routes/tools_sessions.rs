@@ -19,6 +19,10 @@ use librefang_kernel::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
+fn session_storage_error(error: impl std::fmt::Display) -> ApiErrorResponse {
+    ApiErrorResponse::internal_scrub(error)
+}
+
 /// Build the tools + sessions sub-router. Mounted via `.merge(...)` from
 /// `system::router()` so all paths remain rooted at `/api/...` exactly as
 /// before.
@@ -48,6 +52,24 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/agents/{id}/sessions/by-label/{label}",
             axum::routing::get(find_session_by_label),
         )
+}
+
+#[cfg(test)]
+mod session_storage_error_tests {
+    use super::*;
+
+    #[test]
+    fn internal_session_storage_errors_are_scrubbed() {
+        let response = session_storage_error(
+            "database is locked; UNIQUE constraint failed: sessions.id at /srv/private.db",
+        );
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.error, "Internal server error");
+        let body = serde_json::to_string(&response).expect("serialize error response");
+        assert!(!body.contains("sessions.id"));
+        assert!(!body.contains("/srv/private.db"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,10 +525,7 @@ pub async fn get_session(
             {
                 Ok(u) => u,
                 Err(e) => {
-                    return ApiErrorResponse::internal(
-                        t.t_args("api-error-generic", &[("error", &e.to_string())]),
-                    )
-                    .into_json_tuple();
+                    return session_storage_error(e).into_json_tuple();
                 }
             };
             let duration_ms = librefang_memory::session::session_duration_ms(&session.messages);
@@ -535,10 +554,7 @@ pub async fn get_session(
         Ok(None) => {
             ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
         }
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-        }
+        Err(e) => session_storage_error(e).into_json_tuple(),
     }
 }
 
@@ -567,11 +583,7 @@ pub async fn delete_session(
     // dead session.
     match state.kernel.delete_session(session_id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-                .into_response()
-        }
+        Err(e) => session_storage_error(e).into_json_tuple().into_response(),
     }
 }
 
@@ -617,10 +629,7 @@ pub async fn set_session_label(
                 "label": label,
             })),
         ),
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-        }
+        Err(e) => session_storage_error(e).into_json_tuple(),
     }
 }
 
@@ -723,12 +732,7 @@ pub async fn patch_session_model(
             return ApiErrorResponse::not_found(t.t("api-error-session-not-found"))
                 .into_json_tuple();
         }
-        Err(e) => {
-            return ApiErrorResponse::internal(
-                t.t_args("api-error-generic", &[("error", &e.to_string())]),
-            )
-            .into_json_tuple();
-        }
+        Err(e) => return session_storage_error(e).into_json_tuple(),
         Ok(Some(_)) => {}
     }
 
@@ -745,10 +749,7 @@ pub async fn patch_session_model(
                 "model_override": model_override,
             })),
         ),
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-        }
+        Err(e) => session_storage_error(e).into_json_tuple(),
     }
 }
 
@@ -791,10 +792,7 @@ pub async fn find_session_by_label(
         Ok(None) => {
             ApiErrorResponse::not_found(t.t("api-error-session-no-label")).into_json_tuple()
         }
-        Err(e) => {
-            ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
-                .into_json_tuple()
-        }
+        Err(e) => session_storage_error(e).into_json_tuple(),
     }
 }
 
@@ -807,11 +805,7 @@ pub async fn find_session_by_label(
 /// Runs both expired-session and excess-session cleanup using the configured
 /// `[session]` policy. Returns `{"sessions_deleted": N}`.
 #[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = crate::types::JsonObject)))]
-pub async fn session_cleanup(
-    State(state): State<Arc<AppState>>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let kcfg = state.kernel.config_ref();
     let cfg = &kcfg.session;
     let mut total: u64 = 0;
@@ -823,13 +817,7 @@ pub async fn session_cleanup(
             .cleanup_expired_sessions(cfg.retention_days)
         {
             Ok(n) => total += n,
-            Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-expired-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple();
-            }
+            Err(e) => return session_storage_error(e).into_json_tuple(),
         }
     }
 
@@ -840,13 +828,7 @@ pub async fn session_cleanup(
             .cleanup_excess_sessions(cfg.max_sessions_per_agent)
         {
             Ok(n) => total += n,
-            Err(e) => {
-                return ApiErrorResponse::internal(t.t_args(
-                    "api-error-session-cleanup-excess-failed",
-                    &[("error", &e.to_string())],
-                ))
-                .into_json_tuple();
-            }
+            Err(e) => return session_storage_error(e).into_json_tuple(),
         }
     }
 

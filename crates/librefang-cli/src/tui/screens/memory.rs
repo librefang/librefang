@@ -17,6 +17,25 @@ pub struct KvPair {
     pub value: String,
 }
 
+/// What `GET /api/memory/config` reports, in the shape the screen shows it.
+///
+/// `extraction_model` is deliberately not stored alone: unset means "inherit
+/// the kernel default", so on its own it answers "nobody chose one" rather
+/// than "this one is doing the work". The resolved name and its provenance
+/// are what an operator actually needs — a slow model inherited here runs
+/// after every reply and delays every answer.
+#[derive(Clone, Default)]
+pub struct MemoryConfigView {
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub auto_memorize: bool,
+    pub auto_retrieve: bool,
+    /// The model extraction actually runs on, chosen or inherited.
+    pub effective_extraction_model: String,
+    /// True when nobody picked it and it fell through to `[default_model]`.
+    pub extraction_model_inherited: bool,
+}
+
 #[derive(Clone)]
 pub struct AgentEntry {
     pub id: String,
@@ -31,6 +50,7 @@ pub enum MemorySub {
     KvBrowser,
     EditKey,
     AddKey,
+    Config,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -53,11 +73,13 @@ pub struct MemoryState {
     pub tick: usize,
     pub confirm_delete: bool,
     pub status_msg: String,
+    pub config: Option<MemoryConfigView>,
 }
 
 pub enum MemoryUIAction {
     Continue,
     LoadAgents,
+    LoadConfig,
     LoadKv(String),
     SaveKv {
         agent_id: String,
@@ -86,6 +108,7 @@ impl MemoryState {
             tick: 0,
             confirm_delete: false,
             status_msg: String::new(),
+            config: None,
         }
     }
 
@@ -101,7 +124,19 @@ impl MemoryState {
             MemorySub::AgentSelect => self.handle_agent_select(key),
             MemorySub::KvBrowser => self.handle_kv_browser(key),
             MemorySub::EditKey | MemorySub::AddKey => self.handle_edit(key),
+            MemorySub::Config => self.handle_config(key),
         }
+    }
+
+    fn handle_config(&mut self, key: KeyEvent) -> MemoryUIAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.sub = MemorySub::AgentSelect;
+            }
+            KeyCode::Char('r') => return MemoryUIAction::LoadConfig,
+            _ => {}
+        }
+        MemoryUIAction::Continue
     }
 
     fn handle_agent_select(&mut self, key: KeyEvent) -> MemoryUIAction {
@@ -130,6 +165,11 @@ impl MemoryState {
                 }
             }
             KeyCode::Char('r') => return MemoryUIAction::LoadAgents,
+            KeyCode::Char('c') => {
+                self.sub = MemorySub::Config;
+                self.loading = self.config.is_none();
+                return MemoryUIAction::LoadConfig;
+            }
             _ => {}
         }
         MemoryUIAction::Continue
@@ -258,7 +298,96 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut MemoryState) {
         MemorySub::AgentSelect => draw_agent_select(f, inner, state),
         MemorySub::KvBrowser => draw_kv_browser(f, inner, state),
         MemorySub::EditKey | MemorySub::AddKey => draw_edit(f, inner, state),
+        MemorySub::Config => draw_config(f, inner, state),
     }
+}
+
+fn draw_config(f: &mut Frame, area: Rect, state: &MemoryState) {
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match &state.config {
+        None => {
+            lines.push(Line::from(Span::styled(
+                crate::i18n::t("tui-memory-config-loading"),
+                Style::default().fg(theme::TEXT_SECONDARY),
+            )));
+        }
+        Some(cfg) => {
+            let label = |k: &str| {
+                Span::styled(
+                    format!("  {k:<26}"),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )
+            };
+            let value = |v: &str| {
+                Span::styled(v.to_string(), Style::default().add_modifier(Modifier::BOLD))
+            };
+            let onoff = |b: bool| {
+                if b {
+                    crate::i18n::t("tui-memory-config-on")
+                } else {
+                    crate::i18n::t("tui-memory-config-off")
+                }
+            };
+
+            lines.push(Line::from(Span::styled(
+                crate::i18n::t("tui-memory-config-remembering"),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(vec![
+                label(&crate::i18n::t("tui-memory-config-auto-memorize")),
+                value(&onoff(cfg.auto_memorize)),
+            ]));
+            lines.push(Line::from(vec![
+                label(&crate::i18n::t("tui-memory-config-auto-retrieve")),
+                value(&onoff(cfg.auto_retrieve)),
+            ]));
+
+            // The point of this screen: name the model doing the extraction,
+            // and say whether anyone chose it. An inherited slow model runs
+            // after every reply and delays every answer, and nothing else in
+            // the terminal reported it.
+            let mut spans = vec![
+                label(&crate::i18n::t("tui-memory-config-extraction-model")),
+                value(&cfg.effective_extraction_model),
+            ];
+            if cfg.extraction_model_inherited {
+                spans.push(Span::styled(
+                    format!("  {}", crate::i18n::t("tui-memory-config-inherited")),
+                    Style::default().fg(theme::YELLOW),
+                ));
+            }
+            lines.push(Line::from(spans));
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                crate::i18n::t("tui-memory-config-searching"),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(vec![
+                label(&crate::i18n::t("tui-memory-config-embedding-provider")),
+                value(&cfg.embedding_provider),
+            ]));
+            lines.push(Line::from(vec![
+                label(&crate::i18n::t("tui-memory-config-embedding-model")),
+                value(&cfg.embedding_model),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            crate::i18n::t("tui-memory-config-hint"),
+            Style::default().fg(theme::TEXT_SECONDARY),
+        ))),
+        chunks[1],
+    );
 }
 
 fn draw_agent_select(f: &mut Frame, area: Rect, state: &mut MemoryState) {
@@ -532,4 +661,87 @@ fn draw_edit(f: &mut Frame, area: Rect, state: &MemoryState) {
         widgets::hint_bar(&crate::i18n::t("tui-memory-hints-edit")),
         chunks[6],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The terminal had no way at all to ask which model writes memories: the
+    /// screen was a key/value browser and nothing else. On a live deployment
+    /// that model was inherited from the system default, ran after every
+    /// reply, and could not finish inside its own ceiling — so every answer
+    /// was held for over two minutes and no surface named the cause.
+    #[test]
+    fn config_view_is_reachable_and_asks_for_its_data() {
+        let mut state = MemoryState::new();
+        assert!(matches!(state.sub, MemorySub::AgentSelect));
+
+        let action = state.handle_key(key(KeyCode::Char('c')));
+
+        assert!(matches!(state.sub, MemorySub::Config));
+        assert!(
+            matches!(action, MemoryUIAction::LoadConfig),
+            "opening the panel must fetch, or it shows a blank as if that were the configuration"
+        );
+    }
+
+    #[test]
+    fn config_view_returns_to_the_agent_list() {
+        let mut state = MemoryState::new();
+        state.handle_key(key(KeyCode::Char('c')));
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(matches!(state.sub, MemorySub::AgentSelect));
+    }
+
+    /// Reopening with data already loaded must not blank the panel behind a
+    /// spinner: the previous answer stays on screen while the refresh runs.
+    #[test]
+    fn reopening_with_data_does_not_show_a_spinner() {
+        let mut state = MemoryState::new();
+        state.config = Some(MemoryConfigView {
+            effective_extraction_model: "sensor-model-generic".to_string(),
+            ..Default::default()
+        });
+
+        state.handle_key(key(KeyCode::Char('c')));
+
+        assert!(
+            !state.loading,
+            "a cached config must not be hidden behind a load"
+        );
+    }
+
+    #[test]
+    fn refresh_from_inside_the_panel_refetches() {
+        let mut state = MemoryState::new();
+        state.handle_key(key(KeyCode::Char('c')));
+
+        let action = state.handle_key(key(KeyCode::Char('r')));
+        assert!(matches!(action, MemoryUIAction::LoadConfig));
+        assert!(
+            matches!(state.sub, MemorySub::Config),
+            "refresh must not leave the panel"
+        );
+    }
+
+    /// `c` on the agent list is the panel, not a stray key on the KV browser —
+    /// the browser uses its own bindings and must keep them.
+    #[test]
+    fn the_kv_browser_does_not_lose_its_own_bindings() {
+        let mut state = MemoryState::new();
+        state.sub = MemorySub::KvBrowser;
+
+        state.handle_key(key(KeyCode::Char('c')));
+        assert!(
+            !matches!(state.sub, MemorySub::Config),
+            "the config panel opens from the agent list, not from inside the browser"
+        );
+    }
 }

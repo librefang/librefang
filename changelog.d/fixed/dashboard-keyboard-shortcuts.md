@@ -1,0 +1,1 @@
+- Restore `g n` Channels navigation and type-check dashboard shortcut destinations against registered routes. (@xiaomo)

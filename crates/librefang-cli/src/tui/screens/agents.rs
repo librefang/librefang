@@ -54,6 +54,8 @@ pub enum AgentSubScreen {
     EditSkills,
     /// Edit MCP servers for existing agent
     EditMcpServers,
+    /// Edit the channel allowlist for an existing agent
+    EditChannels,
     /// Spawning agent (waiting for result)
     Spawning,
 }
@@ -95,6 +97,11 @@ pub struct AgentSelectState {
     pub skill_cursor: usize,
     pub available_mcp: Vec<(String, bool)>,
     pub mcp_cursor: usize,
+    // Channel allowlist editor. Detail-only: agent creation writes no `channels`
+    // key, which the kernel reads as "every channel", the same default a new
+    // agent has always had.
+    pub available_channels: Vec<(String, bool)>,
+    pub channel_cursor: usize,
 
     // Result
     pub spawned_toml: Option<String>,
@@ -136,6 +143,8 @@ pub struct AgentDetail {
     pub skills_mode: String,
     pub mcp_servers: Vec<String>,
     pub mcp_servers_mode: String,
+    pub channels: Vec<String>,
+    pub channels_mode: String,
 }
 
 /// What the agent screen decided.
@@ -154,10 +163,20 @@ pub enum AgentAction {
     UpdateSkills { id: String, skills: Vec<String> },
     /// Update MCP servers for an agent.
     UpdateMcpServers { id: String, servers: Vec<String> },
+    /// Update the channel allowlist for an agent.
+    UpdateChannels { id: String, channels: Vec<String> },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
     FetchAgentMcpServers(String),
+    /// Fetch channel allowlist data for an agent.
+    FetchAgentChannels(String),
+    /// Opened the detail pane for an agent — load the three allowlists it displays.
+    ///
+    /// Before #7742 the pane rendered `AgentDetail::skills` / `mcp_servers` straight out of
+    /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
+    /// and "no MCP servers" no matter what its manifest said.
+    LoadAgentDetail(String),
 }
 
 impl AgentSelectState {
@@ -182,6 +201,8 @@ impl AgentSelectState {
             available_skills: Vec::new(),
             skill_cursor: 0,
             available_mcp: Vec::new(),
+            available_channels: Vec::new(),
+            channel_cursor: 0,
             mcp_cursor: 0,
             spawned_toml: None,
             status_msg: String::new(),
@@ -202,6 +223,8 @@ impl AgentSelectState {
         self.skill_cursor = 0;
         self.available_mcp.clear();
         self.mcp_cursor = 0;
+        self.available_channels.clear();
+        self.channel_cursor = 0;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -377,6 +400,7 @@ impl AgentSelectState {
             AgentSubScreen::CustomMcpServers => self.handle_custom_mcp_servers(key),
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
+            AgentSubScreen::EditChannels => self.handle_edit_channels(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -449,6 +473,9 @@ impl AgentSelectState {
                                 }
                             }
                             self.sub = AgentSubScreen::AgentDetail;
+                            if let Some(ref detail) = self.detail {
+                                return AgentAction::LoadAgentDetail(detail.id.clone());
+                            }
                         }
                         None => {
                             // "Create new"
@@ -497,6 +524,14 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditMcpServers;
                     return AgentAction::FetchAgentMcpServers(id);
+                }
+            }
+            KeyCode::Char('n') => {
+                // Edit the channel allowlist for this agent
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.sub = AgentSubScreen::EditChannels;
+                    return AgentAction::FetchAgentChannels(id);
                 }
             }
             _ => {}
@@ -802,6 +837,48 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    /// Channel allowlist editor for an existing agent.
+    ///
+    /// Same shape as `handle_edit_mcp_servers`, with one difference that matters: an empty
+    /// selection here means "every configured channel", not "none" (`AgentManifest::channels`
+    /// documents empty as the backward-compatible all-channels default), so saving with nothing
+    /// checked is a widening rather than a lockout.
+    fn handle_edit_channels(&mut self, key: KeyEvent) -> AgentAction {
+        let len = self.available_channels.len();
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.channel_cursor > 0 => {
+                self.channel_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j') if len > 0 && self.channel_cursor < len - 1 => {
+                self.channel_cursor += 1;
+            }
+            KeyCode::Char(' ') if len > 0 => {
+                let checked = &mut self.available_channels[self.channel_cursor].1;
+                *checked = !*checked;
+            }
+            KeyCode::Enter => {
+                if let Some(ref detail) = self.detail {
+                    let channels: Vec<String> = self
+                        .available_channels
+                        .iter()
+                        .filter(|(_, checked)| *checked)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    return AgentAction::UpdateChannels {
+                        id: detail.id.clone(),
+                        channels,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn build_custom_toml(&self) -> String {
         let tools_str: String = TOOL_OPTIONS
             .iter()
@@ -875,7 +952,9 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_agent_list_full(f, area, state);
             return;
         }
-        AgentSubScreen::EditSkills | AgentSubScreen::EditMcpServers => {
+        AgentSubScreen::EditSkills
+        | AgentSubScreen::EditMcpServers
+        | AgentSubScreen::EditChannels => {
             draw_edit_allowlist(f, area, state);
             return;
         }
@@ -886,7 +965,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         AgentSubScreen::AgentList
         | AgentSubScreen::AgentDetail
         | AgentSubScreen::EditSkills
-        | AgentSubScreen::EditMcpServers => unreachable!(),
+        | AgentSubScreen::EditMcpServers
+        | AgentSubScreen::EditChannels => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
         AgentSubScreen::CustomName => crate::i18n::t("tui-agents-title-custom-name"),
@@ -1244,6 +1324,29 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
+            // Channel allowlist (#7742). Empty is the all-channels default, the
+            // opposite of the MCP list directly above it.
+            if detail.channels.is_empty() || detail.channels_mode == "all" {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-channels"),
+                        Style::default(),
+                    ),
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-all-channels"),
+                        Style::default().fg(theme::GREEN),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        crate::i18n::t("tui-agents-detail-channels"),
+                        Style::default(),
+                    ),
+                    Span::styled(detail.channels.join(", "), Style::default().fg(theme::CYAN)),
+                ]));
+            }
+
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
@@ -1450,7 +1553,20 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
             &state.available_mcp,
             state.mcp_cursor,
         ),
+        AgentSubScreen::EditChannels => (
+            crate::i18n::t("tui-agents-title-edit-channels"),
+            &state.available_channels,
+            state.channel_cursor,
+        ),
         _ => return,
+    };
+
+    // The channel editor gets its own prompt because its empty state inverts the other two:
+    // checking nothing grants every channel instead of revoking them.
+    let prompt = if state.sub == AgentSubScreen::EditChannels {
+        crate::i18n::t("tui-agents-prompt-edit-channels")
+    } else {
+        crate::i18n::t("tui-agents-prompt-edit-skills")
     };
 
     let inner = widgets::render_screen_block(f, area, title.trim());
@@ -1458,7 +1574,7 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     draw_checkbox_list(
         f,
         inner,
-        &crate::i18n::t("tui-agents-prompt-edit-skills"),
+        &prompt,
         items,
         cursor,
         &crate::i18n::t("tui-agents-hints-save"),

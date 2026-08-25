@@ -4,9 +4,14 @@
 
 ## 模板端点
 
+*智能体类型*是可重复使用的智能体清单。
+目录有两个来源：位于 `~/.librefang/agent-types/{name}.toml` 的操作者自建类型，以及每个运行中智能体自身的 `agent.toml`。
+只有前者可以在此写入，后者通过 `/api/agents` 编辑。
+每一行都会用 `source` 与 `editable` 说明自己属于哪一种。
+
 ### GET /api/templates
 
-列出 agents 目录中的可用 Agent 模板。
+按名称排序列出两个来源中的全部智能体类型。
 
 **响应** `200 OK`：
 
@@ -14,23 +19,54 @@
 {
   "templates": [
     {
-      "name": "hello-world",
-      "description": "A friendly greeting agent",
-      "path": "/home/user/.librefang/workspaces/agents/hello-world/agent.toml"
-    },
-    {
       "name": "coder",
       "description": "Expert coding assistant",
-      "path": "/home/user/.librefang/workspaces/agents/coder/agent.toml"
+      "provider": "anthropic",
+      "model": "claude-sonnet-4",
+      "source": "agent-type",
+      "editable": true
+    },
+    {
+      "name": "hello-world",
+      "description": "A friendly greeting agent",
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile",
+      "source": "agent",
+      "editable": false
     }
   ],
-  "total": 30
+  "total": 2
 }
 ```
 
+### POST /api/templates
+
+创建操作者自建的智能体类型，`name` 为必填。
+名称已被其他智能体类型占用时返回 `409`（`template_exists`），属于运行中智能体时同样返回 `409`（`template_name_taken`）。
+
+### PUT /api/templates/&lbrace;name&rbrace;
+
+以**补丁**方式把扁平结构合并到已存储的清单上。
+
+请求体只承载清单五十八个字段中的七个，因此处理器会先读取磁盘上的文档再合并，而不是重新构造。
+未发送的键保持磁盘上的原值——`[[triggers]]`、`[compaction]`、`max_history_messages`、`mcp_servers`、`tool_allowlist`、`session_mode`、`[workspaces]`、`channels`、`[exec_policy]` 与 `fallback_models` 都能在这种编辑中保留下来。
+
+由此得出三条规则：
+
+- 「未发送」与「发送空值」含义不同。`"system_prompt": ""` 会清空提示词，省略该键则保留原值；你真正发送的值不会被任何默认文案替换。
+- 未知键返回 `422` 而不是被忽略，避免拼写错误被当作「保留原值」而悄悄丢弃这次编辑。
+- 请求体中的 `name` 会被忽略，URL 路径段才是身份标识。
+
+找不到该智能体类型时返回 `404`；名称指向运行中智能体的工作区时返回 `409` 与 `template_not_editable`。
+
+### DELETE /api/templates/&lbrace;name&rbrace;
+
+删除操作者自建的智能体类型，已据此创建的智能体不受影响。
+对运行中智能体的条目返回 `409` 与 `template_not_editable`，这类条目请通过 `DELETE /api/agents/&lbrace;id&rbrace;` 删除。
+
 ### GET /api/templates/&lbrace;name&rbrace;
 
-获取指定模板的清单和原始 TOML 内容。
+获取指定智能体类型的清单和原始 TOML 内容。`spec` 是扁平的编辑器投影，恰好就是 `PUT` 接受的那些键。
 
 **响应** `200 OK`：
 
@@ -430,9 +466,19 @@ API 版本发现。返回所有可用的 API 版本及其稳定性状态。
 
 ```json
 {
-  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "keep_config": true,
+  "components": ["cron_jobs", "data"]
 }
 ```
+
+`keep_config`（布尔值，默认 `false`）会跳过 `config.toml`，使目标机器保留自己的 API 密钥、监听端口和路径——这正是把一套配置克隆到第二台机器时所需要的。
+
+`components`（字符串数组）把恢复范围限制为指定组件：`config`、`cron_jobs`、`hand_state`、`custom_models`、`agents`、`skills`、`workflows`、`data`。
+**省略该字段即恢复全部组件。**
+空数组会返回 `400`，因为“什么都不恢复”和“全部恢复”相差太远，不应由服务端猜测；无法识别的名称同样返回 `400` 并列出有效取值，这样拼写错误不会变成一次悄无声息什么都没写的恢复。
+不属于任何组件的归档条目无论如何都会被恢复。
+`data` 覆盖 `data/` 下的每个条目，包括同时拥有各自组件名的 `cron_jobs`、`hand_state` 和 `custom_models` 文件。
 
 ---
 

@@ -553,6 +553,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn spawn_ephemeral_agent(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", "spawn-ephemeral"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -2766,6 +2778,42 @@ impl ModelsResource {
         .await
     }
 
+    pub async fn get_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "models", "overrides", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_model_overrides(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "models", "overrides", id],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "models", "overrides", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_model(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -3448,6 +3496,7 @@ impl ProactiveMemoryResource {
     pub async fn memory_list(
         &self,
         category: Option<&str>,
+        level: Option<&str>,
         offset: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
@@ -3457,7 +3506,12 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory"],
             None,
-            &[("category", category), ("offset", offset), ("limit", limit)],
+            &[
+                ("category", category),
+                ("level", level),
+                ("offset", offset),
+                ("limit", limit),
+            ],
         )
         .await
     }
@@ -3478,6 +3532,7 @@ impl ProactiveMemoryResource {
         &self,
         id: &str,
         category: Option<&str>,
+        level: Option<&str>,
         offset: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
@@ -3487,7 +3542,12 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory", "agents", id],
             None,
-            &[("category", category), ("offset", offset), ("limit", limit)],
+            &[
+                ("category", category),
+                ("level", level),
+                ("offset", offset),
+                ("limit", limit),
+            ],
         )
         .await
     }
@@ -3614,6 +3674,7 @@ impl ProactiveMemoryResource {
         &self,
         id: &str,
         q: Option<&str>,
+        level: Option<&str>,
         limit: Option<&str>,
     ) -> Result<Value> {
         do_req(
@@ -3622,7 +3683,7 @@ impl ProactiveMemoryResource {
             reqwest::Method::GET,
             &["api", "memory", "agents", id, "search"],
             None,
-            &[("q", q), ("limit", limit)],
+            &[("q", q), ("level", level), ("limit", limit)],
         )
         .await
     }
@@ -3711,14 +3772,19 @@ impl ProactiveMemoryResource {
         .await
     }
 
-    pub async fn memory_search(&self, q: Option<&str>, limit: Option<&str>) -> Result<Value> {
+    pub async fn memory_search(
+        &self,
+        q: Option<&str>,
+        level: Option<&str>,
+        limit: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "memory", "search"],
             None,
-            &[("q", q), ("limit", limit)],
+            &[("q", q), ("level", level), ("limit", limit)],
         )
         .await
     }
@@ -4716,11 +4782,47 @@ impl SystemResource {
         .await
     }
 
+    pub async fn create_agent_type(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
+            &["api", "templates", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_agent_type(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_agent_type(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
             &["api", "templates", name],
             None,
             &[],

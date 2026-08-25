@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Database, Moon, Search, X } from "lucide-react";
 import type { AgentItem, AutoDreamStatus } from "../../api";
@@ -31,6 +31,9 @@ export function AgentRail({
 }: Props) {
   const { t } = useTranslation();
   const [filter, setFilter] = useState("");
+  const filterLabel = t("memory.rail_filter_placeholder", { defaultValue: "Filter agents" });
+  const formatSubtitle = (records: number, kv: number) =>
+    `${records} ${t("memory.rail_records_short", { defaultValue: "mem" })} · ${kv} ${t("memory.rail_kv_short", { defaultValue: "KV" })}`;
 
   const dreamByAgentId = useMemo(() => {
     const m = new Map<string, boolean>();
@@ -62,14 +65,15 @@ export function AgentRail({
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder={t("memory.rail_filter_placeholder", { defaultValue: "Filter agents" })}
+          placeholder={filterLabel}
+          aria-label={filterLabel}
           className="w-full rounded-lg border border-border-subtle bg-main pl-8 pr-7 py-1.5 text-xs outline-none focus:border-brand"
         />
         {filter && (
           <button
             onClick={() => setFilter("")}
             className="absolute right-2 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-main"
-          aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
+            aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
           >
             <X className="w-3 h-3" />
           </button>
@@ -81,7 +85,7 @@ export function AgentRail({
         <AgentRailRow
           icon={<Database className="w-3.5 h-3.5" />}
           name={t("memory.rail_all_agents", { defaultValue: "All agents" })}
-          subtitle={`${totalRecords} ${t("memory.rail_records_short", { defaultValue: "mem" })} · ${totalKv} ${t("memory.rail_kv_short", { defaultValue: "KV" })}`}
+          subtitle={formatSubtitle(totalRecords, totalKv)}
           selected={selectedAgentId === undefined}
           onClick={() => onSelect(undefined)}
         />
@@ -107,7 +111,7 @@ export function AgentRail({
                 }
                 name={agent.name}
                 idHint={agent.id.slice(0, 6)}
-                subtitle={`${records} ${t("memory.rail_records_short", { defaultValue: "mem" })} · ${kv} ${t("memory.rail_kv_short", { defaultValue: "KV" })}`}
+                subtitle={formatSubtitle(records, kv)}
                 selected={selectedAgentId === agent.id}
                 onClick={() => onSelect(agent.id)}
               />
@@ -120,7 +124,7 @@ export function AgentRail({
 }
 
 interface RowProps {
-  icon: React.ReactNode;
+  icon: ReactNode;
   name: string;
   idHint?: string;
   subtitle: string;

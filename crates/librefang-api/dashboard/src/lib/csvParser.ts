@@ -18,7 +18,7 @@
 export type CsvParseResult = {
   /** One entry per record (= one row of cells), header row included. */
   records: string[][];
-  /** Soft errors. Currently always empty — caller validates semantics. */
+  /** Soft syntax errors. Records are retained so callers can preview them. */
   errors: string[];
 };
 
@@ -41,6 +41,7 @@ export function parseCsvText(input: string): CsvParseResult {
   let cur = "";
   let row: string[] = [];
   let quoted = false;
+  let closedQuote = false;
   let sawAnyChar = false;
 
   for (let i = 0; i < raw.length; i++) {
@@ -52,6 +53,7 @@ export function parseCsvText(input: string): CsvParseResult {
           i++;
         } else {
           quoted = false;
+          closedQuote = true;
         }
       } else {
         // Inside quotes, newlines and commas are literal.
@@ -62,15 +64,20 @@ export function parseCsvText(input: string): CsvParseResult {
     }
 
     if (c === '"') {
-      // Opening quote. RFC-4180 only allows quotes at the start of a field,
-      // but real files sometimes have `foo"bar"baz` — we treat any quote
-      // outside a quoted field as start/continuation of one, mirroring the
-      // permissive behaviour of papaparse.
-      quoted = true;
+      if (cur.length > 0) {
+        errors.push(
+          `Record ${records.length + 1}: unexpected quote in an unquoted field; treating it literally.`,
+        );
+        cur += c;
+        closedQuote = false;
+      } else {
+        quoted = true;
+      }
       sawAnyChar = true;
     } else if (c === ",") {
       row.push(cur);
       cur = "";
+      closedQuote = false;
       sawAnyChar = true;
     } else if (c === "\r" || c === "\n") {
       // End of record. Consume CRLF as a single delimiter.
@@ -78,11 +85,18 @@ export function parseCsvText(input: string): CsvParseResult {
       records.push(row);
       row = [];
       cur = "";
+      closedQuote = false;
       sawAnyChar = false;
       if (c === "\r" && raw[i + 1] === "\n") {
         i++;
       }
     } else {
+      if (closedQuote) {
+        errors.push(
+          `Record ${records.length + 1}: unexpected character after a closing quote; treating it literally.`,
+        );
+        closedQuote = false;
+      }
       cur += c;
       sawAnyChar = true;
     }
@@ -92,6 +106,9 @@ export function parseCsvText(input: string): CsvParseResult {
   // did but we have buffered content (impossible after the branch above, but
   // covered for safety).
   if (sawAnyChar || cur.length > 0 || row.length > 0) {
+    if (quoted) {
+      errors.push(`Record ${records.length + 1}: unterminated quoted field.`);
+    }
     row.push(cur);
     records.push(row);
   }
@@ -127,17 +144,26 @@ export function parseUsersCsv(
   raw: string,
   validRoles: readonly string[],
 ): ParseUsersCsvResult {
-  const { records } = parseCsvText(raw);
+  const { records, errors: syntaxErrors } = parseCsvText(raw);
 
   // Drop blank records (entirely empty cells, e.g. trailing newlines or
   // blank lines between rows). A record like `[""]` is one empty cell.
-  const nonBlank = records.filter(r => r.some(cell => cell.trim() !== ""));
+  const nonBlank = records
+    .map((cells, index) => ({ cells, sourceRow: index + 1 }))
+    .filter(({ cells }) => cells.some(cell => cell.trim() !== ""));
   if (nonBlank.length === 0) {
-    return { rows: [], errors: [] };
+    return { rows: [], errors: syntaxErrors };
   }
 
-  const errors: string[] = [];
-  const header = nonBlank[0].map(h => h.trim().toLowerCase());
+  const errors = [...syntaxErrors];
+  const header = nonBlank[0].cells.map(h => h.trim().toLowerCase());
+  const seenHeaders = new Set<string>();
+  for (const column of header) {
+    if (seenHeaders.has(column)) {
+      errors.push(`Header: duplicate column '${column}'.`);
+    }
+    seenHeaders.add(column);
+  }
 
   if (!header.includes("name")) {
     errors.push("Header must include a `name` column.");
@@ -150,20 +176,20 @@ export function parseUsersCsv(
 
   const rows: UserCsvRow[] = [];
   for (let i = 1; i < nonBlank.length; i++) {
-    const cells = nonBlank[i];
+    const { cells, sourceRow } = nonBlank[i];
     const get = (key: string): string => {
       const idx = header.indexOf(key);
       return idx >= 0 ? cells[idx] ?? "" : "";
     };
     const name = get("name").trim();
     if (!name) {
-      errors.push(`Row ${i + 1}: missing name`);
+      errors.push(`Row ${sourceRow}: missing name`);
       continue;
     }
     const role = (get("role") || "user").trim().toLowerCase();
     if (!validRoles.includes(role)) {
       errors.push(
-        `Row ${i + 1}: invalid role '${role}' (expected one of ${validRoles.join(
+        `Row ${sourceRow}: invalid role '${role}' (expected one of ${validRoles.join(
           ", ",
         )})`,
       );

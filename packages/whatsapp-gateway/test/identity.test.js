@@ -60,8 +60,8 @@ describe('normalizeDeviceScopedJid', () => {
   it('passthrough plain phone JID', () => {
     assert.equal(normalizeDeviceScopedJid('123@s.whatsapp.net'), '123@s.whatsapp.net');
   });
-  it('strips :<device> from LID', () => {
-    assert.equal(normalizeDeviceScopedJid('123:45@lid'), '123@lid');
+  it('does not rewrite colon-bearing non-phone JIDs', () => {
+    assert.equal(normalizeDeviceScopedJid('123:45@lid'), '123:45@lid');
   });
   it('leaves group JID untouched', () => {
     assert.equal(normalizeDeviceScopedJid('123-456@g.us'), '123-456@g.us');
@@ -108,6 +108,20 @@ describe('phoneToJid', () => {
   it('already-formed phone JID passthrough', () => {
     assert.equal(phoneToJid('123@s.whatsapp.net'), '123@s.whatsapp.net');
   });
+  it('known LID and hosted LID shapes passthrough', () => {
+    assert.equal(phoneToJid('123@lid'), '123@lid');
+    assert.equal(phoneToJid('123@hosted.lid'), '123@hosted.lid');
+    assert.equal(phoneToJid('123:45@lid'), '123:45@lid');
+  });
+  it('legacy and modern group JID shapes passthrough', () => {
+    assert.equal(phoneToJid('123-456@g.us'), '123-456@g.us');
+    assert.equal(phoneToJid('120363000000000000@g.us'), '120363000000000000@g.us');
+  });
+  it('rejects unknown or malformed JIDs and non-numeric phones', () => {
+    for (const value of ['x@evil.com', '@bad', '<script>@x', 'abc', '+', '123-@g.us']) {
+      assert.equal(phoneToJid(value), '', value);
+    }
+  });
   it('empty / null -> empty', () => {
     assert.equal(phoneToJid(''), '');
     assert.equal(phoneToJid(null), '');
@@ -150,6 +164,12 @@ describe('resolvePeerId', () => {
   });
   it('step 3: LID in cache -> cache', () => {
     const cache = new Map([['123@lid', '391234@s.whatsapp.net']]);
+    const r = resolvePeerId('123@lid', { lidToPnCache: cache });
+    assert.equal(r.confidence, 'cache');
+    assert.equal(r.peer, '391234@s.whatsapp.net');
+  });
+  it('step 3: normalizes a device-scoped cached phone JID', () => {
+    const cache = new Map([['123@lid', '391234:45@s.whatsapp.net']]);
     const r = resolvePeerId('123@lid', { lidToPnCache: cache });
     assert.equal(r.confidence, 'cache');
     assert.equal(r.peer, '391234@s.whatsapp.net');

@@ -46,11 +46,12 @@ mod workflow;
 use self::a2a::{tool_a2a_discover, tool_a2a_send};
 use self::agent::{
     tool_agent_find, tool_agent_kill, tool_agent_list, tool_agent_send, tool_agent_spawn,
+    tool_agent_type_create,
 };
 use self::artifact::tool_read_artifact;
 pub use self::canvas::sanitize_canvas_html;
 use self::canvas::tool_canvas_present;
-use self::channel::tool_channel_send;
+use self::channel::{tool_channel_dm, tool_channel_members, tool_channel_send};
 use self::cron::{tool_cron_cancel, tool_cron_create, tool_cron_enable, tool_cron_list};
 pub(crate) use self::definitions::tool_name;
 pub use self::definitions::{builtin_tool_definitions, select_native_tools, ALWAYS_NATIVE_TOOLS};
@@ -77,7 +78,11 @@ use self::media::{
     tool_image_generate, tool_media_describe, tool_media_transcribe, tool_music_generate,
     tool_speech_to_text, tool_text_to_speech, tool_video_generate, tool_video_status,
 };
-use self::memory::{tool_memory_list, tool_memory_recall, tool_memory_store};
+use self::memory::{
+    tool_memory_list, tool_memory_recall, tool_memory_semantic_add,
+    tool_memory_semantic_consolidate, tool_memory_semantic_duplicates, tool_memory_semantic_forget,
+    tool_memory_semantic_search, tool_memory_semantic_stats, tool_memory_store,
+};
 use self::meta::{tool_meta_load, tool_meta_search};
 use self::notify::tool_notify_owner;
 use self::process::{
@@ -114,8 +119,8 @@ use self::workflow::{
     build_workflow_run_result, prepare_workflow_input, resolve_workflow_input_artifacts,
 };
 use self::workflow::{
-    tool_workflow_cancel, tool_workflow_describe, tool_workflow_list, tool_workflow_run,
-    tool_workflow_start, tool_workflow_status,
+    tool_workflow_cancel, tool_workflow_create, tool_workflow_describe, tool_workflow_list,
+    tool_workflow_run, tool_workflow_start, tool_workflow_status,
 };
 
 /// Maximum inter-agent call depth to prevent infinite recursion (A->B->C->...).

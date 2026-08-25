@@ -1,0 +1,1 @@
+Preserve heading links, section-scoped headers and footers, list block structure, Unicode characters, and prose budget during browser extraction, while allowing click-by-text fallback for invalid CSS selectors, rejecting empty click selectors, and bounding displayed long URLs without changing their actionable destinations (#7026) (@houko)

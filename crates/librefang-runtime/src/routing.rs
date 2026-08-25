@@ -34,6 +34,14 @@ pub struct ModelRouter {
     config: ModelRoutingConfig,
 }
 
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn add_weighted_score(score: u64, count: u64, weight: u64) -> u64 {
+    score.saturating_add(count.saturating_mul(weight))
+}
+
 impl ModelRouter {
     /// Create a new model router with the given routing configuration.
     pub fn new(config: ModelRoutingConfig) -> Self {
@@ -49,21 +57,16 @@ impl ModelRouter {
     /// - **Conversation depth**: more messages = more context = harder reasoning
     /// - **System prompt length**: longer prompts often imply complex tasks
     pub fn score(&self, request: &CompletionRequest) -> TaskComplexity {
-        let mut score: u32 = 0;
-
         // 1. Total message content length (rough token proxy: ~4 chars per token)
-        let total_chars: usize = request
-            .messages
-            .iter()
-            .map(|m| m.content.text_length())
-            .sum();
-        let approx_tokens = (total_chars / 4) as u32;
-        score += approx_tokens;
+        let total_chars = request.messages.iter().fold(0u64, |total, message| {
+            total.saturating_add(usize_to_u64_saturating(message.content.text_length()))
+        });
+        let mut score = total_chars / 4;
 
         // 2. Tool availability adds complexity
-        let tool_count = request.tools.len() as u32;
+        let tool_count = usize_to_u64_saturating(request.tools.len());
         if tool_count > 0 {
-            score += tool_count * 20;
+            score = add_weighted_score(score, tool_count, 20);
         }
 
         // 3. Code markers in the last user message
@@ -83,31 +86,33 @@ impl ModelRouter {
                 "impl ",
                 "return ",
             ];
-            let code_score: u32 = code_markers
-                .iter()
-                .filter(|marker| text_lower.contains(*marker))
-                .count() as u32;
-            score += code_score * 30;
+            let code_score = usize_to_u64_saturating(
+                code_markers
+                    .iter()
+                    .filter(|marker| text_lower.contains(*marker))
+                    .count(),
+            );
+            score = add_weighted_score(score, code_score, 30);
         }
 
         // 4. Conversation depth
-        let msg_count = request.messages.len() as u32;
+        let msg_count = usize_to_u64_saturating(request.messages.len());
         if msg_count > 10 {
-            score += (msg_count - 10) * 15;
+            score = add_weighted_score(score, msg_count - 10, 15);
         }
 
         // 5. System prompt complexity
         if let Some(ref system) = request.system {
-            let sys_len = system.len() as u32;
+            let sys_len = usize_to_u64_saturating(system.len());
             if sys_len > 500 {
-                score += (sys_len - 500) / 10;
+                score = add_weighted_score(score, (sys_len - 500) / 10, 1);
             }
         }
 
         // Classify
-        if score < self.config.simple_threshold {
+        if score < u64::from(self.config.simple_threshold) {
             TaskComplexity::Simple
-        } else if score >= self.config.complex_threshold {
+        } else if score >= u64::from(self.config.complex_threshold) {
             TaskComplexity::Complex
         } else {
             TaskComplexity::Medium
@@ -267,6 +272,11 @@ mod tests {
         let complexity = router.score(&request);
         // 15 tools * 20 = 300 — should be at least Medium
         assert_ne!(complexity, TaskComplexity::Simple);
+    }
+
+    #[test]
+    fn test_complexity_score_arithmetic_saturates() {
+        assert_eq!(add_weighted_score(u64::MAX - 5, u64::MAX, 20), u64::MAX);
     }
 
     #[test]

@@ -5,15 +5,6 @@ category = "devtools"
 icon = "🌿"
 tags = ["git", "version-control", "commits", "diff", "history", "blame"]
 
-[transport]
-type = "stdio"
-command = "uvx"
-args = ["mcp-server-git", "--repository", "."]
-
-[health_check]
-interval_secs = 60
-unhealthy_threshold = 3
-
 setup_instructions = """
 Requires `uv` (Python package manager):
 - macOS/Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
@@ -32,6 +23,14 @@ args = ["mcp-server-git", "--repository", "/path/to/your/repo"]
 ```
 """
 
+[transport]
+type = "stdio"
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 
 [i18n.zh]
 name = "Git"

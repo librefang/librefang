@@ -258,15 +258,11 @@ impl PiiFilter {
     fn pseudonymize(&self, text: &str) -> String {
         let mut result = text.to_string();
         for (label, re) in &self.patterns {
-            // Collect matches first to avoid borrow issues
-            let matches: Vec<String> = re
-                .find_iter(&result)
-                .map(|m| m.as_str().to_string())
-                .collect();
-            for matched in matches {
-                let pseudonym = self.get_or_create_pseudonym(&matched, label);
-                result = result.replace(&matched, &pseudonym);
-            }
+            result = re
+                .replace_all(&result, |captures: &regex::Captures<'_>| {
+                    self.get_or_create_pseudonym(&captures[0], label)
+                })
+                .into_owned();
         }
         result
     }
@@ -372,6 +368,17 @@ mod tests {
         assert!(!result.contains("bob@example.com"));
         assert!(result.contains("[Email-A]"));
         assert!(result.contains("[Email-B]"));
+    }
+
+    #[test]
+    fn test_pseudonymize_replaces_only_regex_match_spans() {
+        let filter = PiiFilter::new(&[r"\bSECRET\b".to_string()]);
+        let result = filter.filter_message(
+            "SECRET stays private; XSECRETY stays intact",
+            &PrivacyMode::Pseudonymize,
+        );
+
+        assert_eq!(result, "[Custom_0-A] stays private; XSECRETY stays intact");
     }
 
     // -- Phone detection --

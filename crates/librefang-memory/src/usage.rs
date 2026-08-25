@@ -45,6 +45,29 @@ pub struct UsageRecord {
     /// and for pre-v30 records that pre-date this column.
     #[serde(default)]
     pub session_id: Option<SessionId>,
+    /// #7714: the agent this call's cost rolls up to, when it differs from
+    /// the agent that made it.
+    ///
+    /// A worker spawned by another agent spends on its spawner's behalf, so
+    /// the spawner needs that cost on its own budget line rather than
+    /// scattered across throwaway children it cannot enumerate.
+    /// Call sites set it to `entry.parent.unwrap_or(agent_id)`, so a
+    /// top-level agent bills to itself.
+    ///
+    /// This is deliberately a *separate* column from [`Self::agent_id`]
+    /// rather than a rewrite of it. `agent_id` stays the quota subject: the
+    /// pre-call `check_quota` and the post-call `check_all_and_record` both
+    /// evaluate the executing agent against that agent's own
+    /// `manifest.resources`, so the two checks keep asking the same question
+    /// about the same agent. Re-pointing `agent_id` at the parent would have
+    /// made the pre-call check read the child's spend and the post-call check
+    /// read the parent's, both against the child's ceiling — the attribution
+    /// dimension and the enforcement dimension have to stay independent.
+    ///
+    /// `None` on pre-v49 records, which the read path treats as "bills to
+    /// `agent_id`".
+    #[serde(default)]
+    pub billed_agent_id: Option<AgentId>,
 }
 
 impl UsageRecord {
@@ -80,6 +103,7 @@ impl UsageRecord {
             user_id: None,
             channel: None,
             session_id: None,
+            billed_agent_id: None,
         }
     }
 }
@@ -182,6 +206,33 @@ pub struct DailyBreakdown {
     pub calls: u64,
 }
 
+fn validate_usage_record(record: &UsageRecord) -> LibreFangResult<()> {
+    if !record.cost_usd.is_finite() || record.cost_usd < 0.0 {
+        return Err(LibreFangError::memory_msg(
+            "usage record cost_usd must be finite and non-negative",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_cost_limits(limits: &[f64]) -> LibreFangResult<()> {
+    if limits
+        .iter()
+        .any(|limit| !limit.is_finite() || *limit < 0.0)
+    {
+        return Err(LibreFangError::memory_msg(
+            "usage cost limits must be finite and non-negative",
+        ));
+    }
+    Ok(())
+}
+
+fn cost_limit_exceeded(current: f64, incoming: f64, limit: f64) -> bool {
+    let total = current + incoming;
+    let tolerance = total.abs().max(limit.abs()).max(1.0) * 1e-12;
+    total - limit > tolerance
+}
+
 /// Usage store backed by SQLite.
 #[derive(Clone)]
 pub struct UsageStore {
@@ -203,6 +254,7 @@ impl UsageStore {
     /// Insert a usage record into the database (helper used by both `record`
     /// and the atomic `check_quota_and_record`).
     fn insert_record(conn: &Connection, record: &UsageRecord) -> LibreFangResult<()> {
+        validate_usage_record(record)?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         // RBAC M5 + session attribution: persist user_id/channel/session_id
@@ -210,8 +262,8 @@ impl UsageStore {
         // v30 added session_id — all are NULL-able so missing attribution
         // round-trips as NULL.
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id, billed_agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -226,6 +278,7 @@ impl UsageStore {
                 record.user_id.map(|u| u.to_string()),
                 record.channel.as_deref(),
                 record.session_id.map(|s| s.0.to_string()),
+                record.billed_agent_id.map(|a| a.0.to_string()),
             ],
         )
         .map_err(LibreFangError::memory)?;
@@ -246,10 +299,8 @@ impl UsageStore {
         max_daily: f64,
         max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        validate_cost_limits(&[max_hourly, max_daily, max_monthly])?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         // IMMEDIATE transaction acquires a reserved lock up-front, ensuring no
         // other writer can interleave between our SELECT and INSERT.  The RAII
@@ -271,7 +322,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_hourly {
+            if cost_limit_exceeded(cost, record.cost_usd, max_hourly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_hourly
@@ -289,7 +340,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_daily {
+            if cost_limit_exceeded(cost, record.cost_usd, max_daily) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_daily
@@ -307,7 +358,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_monthly {
+            if cost_limit_exceeded(cost, record.cost_usd, max_monthly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, max_monthly
@@ -332,10 +383,8 @@ impl UsageStore {
         max_daily: f64,
         max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        validate_cost_limits(&[max_hourly, max_daily, max_monthly])?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -351,7 +400,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_hourly {
+            if cost_limit_exceeded(cost, record.cost_usd, max_hourly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_hourly
@@ -369,7 +418,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_daily {
+            if cost_limit_exceeded(cost, record.cost_usd, max_daily) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_daily
@@ -387,7 +436,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= max_monthly {
+            if cost_limit_exceeded(cost, record.cost_usd, max_monthly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, max_monthly
@@ -415,10 +464,15 @@ impl UsageStore {
         global_max_daily: f64,
         global_max_monthly: f64,
     ) -> LibreFangResult<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        validate_cost_limits(&[
+            agent_max_hourly,
+            agent_max_daily,
+            agent_max_monthly,
+            global_max_hourly,
+            global_max_daily,
+            global_max_monthly,
+        ])?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -436,7 +490,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= agent_max_hourly {
+            if cost_limit_exceeded(cost, record.cost_usd, agent_max_hourly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_hourly
@@ -453,7 +507,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= agent_max_daily {
+            if cost_limit_exceeded(cost, record.cost_usd, agent_max_daily) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_daily
@@ -470,7 +524,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= agent_max_monthly {
+            if cost_limit_exceeded(cost, record.cost_usd, agent_max_monthly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, cost, record.cost_usd, agent_max_monthly
@@ -488,7 +542,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= global_max_hourly {
+            if cost_limit_exceeded(cost, record.cost_usd, global_max_hourly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_hourly
@@ -505,7 +559,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= global_max_daily {
+            if cost_limit_exceeded(cost, record.cost_usd, global_max_daily) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_daily
@@ -522,7 +576,7 @@ impl UsageStore {
                     |row| row.get(0),
                 )
                 .map_err(LibreFangError::memory)?;
-            if cost + record.cost_usd >= global_max_monthly {
+            if cost_limit_exceeded(cost, record.cost_usd, global_max_monthly) {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     cost, record.cost_usd, global_max_monthly
@@ -558,10 +612,18 @@ impl UsageStore {
         provider_max_monthly: f64,
         provider_max_tokens_per_hour: u64,
     ) -> LibreFangResult<()> {
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        validate_cost_limits(&[
+            agent_max_hourly,
+            agent_max_daily,
+            agent_max_monthly,
+            global_max_hourly,
+            global_max_daily,
+            global_max_monthly,
+            provider_max_hourly,
+            provider_max_daily,
+            provider_max_monthly,
+        ])?;
+        let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -610,13 +672,17 @@ impl UsageStore {
             || (has_provider && provider_max_hourly > 0.0);
         if need_hourly {
             let costs = window_costs("datetime(timestamp) > datetime('now', '-1 hour')")?;
-            if agent_max_hourly > 0.0 && costs.agent + record.cost_usd >= agent_max_hourly {
+            if agent_max_hourly > 0.0
+                && cost_limit_exceeded(costs.agent, record.cost_usd, agent_max_hourly)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, costs.agent, record.cost_usd, agent_max_hourly
                 )));
             }
-            if global_max_hourly > 0.0 && costs.global + record.cost_usd >= global_max_hourly {
+            if global_max_hourly > 0.0
+                && cost_limit_exceeded(costs.global, record.cost_usd, global_max_hourly)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     costs.global, record.cost_usd, global_max_hourly
@@ -624,7 +690,7 @@ impl UsageStore {
             }
             if has_provider
                 && provider_max_hourly > 0.0
-                && costs.provider + record.cost_usd >= provider_max_hourly
+                && cost_limit_exceeded(costs.provider, record.cost_usd, provider_max_hourly)
             {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly cost budget: ${:.4} + ${:.4} / ${:.4}",
@@ -638,13 +704,17 @@ impl UsageStore {
             || (has_provider && provider_max_daily > 0.0);
         if need_daily {
             let costs = window_costs("datetime(timestamp) > datetime('now', 'start of day')")?;
-            if agent_max_daily > 0.0 && costs.agent + record.cost_usd >= agent_max_daily {
+            if agent_max_daily > 0.0
+                && cost_limit_exceeded(costs.agent, record.cost_usd, agent_max_daily)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, costs.agent, record.cost_usd, agent_max_daily
                 )));
             }
-            if global_max_daily > 0.0 && costs.global + record.cost_usd >= global_max_daily {
+            if global_max_daily > 0.0
+                && cost_limit_exceeded(costs.global, record.cost_usd, global_max_daily)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     costs.global, record.cost_usd, global_max_daily
@@ -652,7 +722,7 @@ impl UsageStore {
             }
             if has_provider
                 && provider_max_daily > 0.0
-                && costs.provider + record.cost_usd >= provider_max_daily
+                && cost_limit_exceeded(costs.provider, record.cost_usd, provider_max_daily)
             {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded daily cost budget: ${:.4} + ${:.4} / ${:.4}",
@@ -666,13 +736,17 @@ impl UsageStore {
             || (has_provider && provider_max_monthly > 0.0);
         if need_monthly {
             let costs = window_costs("datetime(timestamp) > datetime('now', 'start of month')")?;
-            if agent_max_monthly > 0.0 && costs.agent + record.cost_usd >= agent_max_monthly {
+            if agent_max_monthly > 0.0
+                && cost_limit_exceeded(costs.agent, record.cost_usd, agent_max_monthly)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
                     record.agent_id, costs.agent, record.cost_usd, agent_max_monthly
                 )));
             }
-            if global_max_monthly > 0.0 && costs.global + record.cost_usd >= global_max_monthly {
+            if global_max_monthly > 0.0
+                && cost_limit_exceeded(costs.global, record.cost_usd, global_max_monthly)
+            {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
                     costs.global, record.cost_usd, global_max_monthly
@@ -680,7 +754,7 @@ impl UsageStore {
             }
             if has_provider
                 && provider_max_monthly > 0.0
-                && costs.provider + record.cost_usd >= provider_max_monthly
+                && cost_limit_exceeded(costs.provider, record.cost_usd, provider_max_monthly)
             {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded monthly cost budget: ${:.4} + ${:.4} / ${:.4}",
@@ -702,7 +776,7 @@ impl UsageStore {
                 .map_err(LibreFangError::memory)?;
             let current = tokens.max(0) as u64;
             let incoming = record.input_tokens.saturating_add(record.output_tokens);
-            if current.saturating_add(incoming) >= provider_max_tokens_per_hour {
+            if current.saturating_add(incoming) > provider_max_tokens_per_hour {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Provider '{}' exceeded hourly token budget: {} + {} / {}",
                     record.provider, current, incoming, provider_max_tokens_per_hour
@@ -1026,6 +1100,34 @@ impl UsageStore {
         Ok(summary)
     }
 
+    /// Query the usage that rolls up to one agent's budget line (#7714).
+    ///
+    /// "Bills to `agent_id`" means `COALESCE(billed_agent_id, agent_id) = agent_id`: a call the agent made for itself (no `billed_agent_id`, or one pointing at itself) plus every call a worker it spawned made on its behalf.
+    /// This is the query that gives a spawner the budget visibility it loses when its children each spend under their own id.
+    ///
+    /// Distinct from [`Self::query_summary`], which answers "what did this agent execute" and stays the right question for quota enforcement.
+    pub fn query_billed_summary(&self, agent_id: AgentId) -> LibreFangResult<UsageSummary> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let summary = conn
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
+                 FROM usage_events WHERE COALESCE(billed_agent_id, agent_id) = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| {
+                    Ok(UsageSummary {
+                        total_input_tokens: row.get::<_, i64>(0)? as u64,
+                        total_output_tokens: row.get::<_, i64>(1)? as u64,
+                        total_cost_usd: row.get(2)?,
+                        call_count: row.get::<_, i64>(3)? as u64,
+                        total_tool_calls: row.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .map_err(LibreFangError::memory)?;
+        Ok(summary)
+    }
+
     /// Query usage grouped by model.
     pub fn query_by_model(&self) -> LibreFangResult<Vec<ModelUsage>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
@@ -1113,21 +1215,22 @@ impl UsageStore {
     pub fn query_daily_breakdown(&self, days: u32) -> LibreFangResult<Vec<DailyBreakdown>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
+        let modifier = format!("-{days} days");
         let mut stmt = conn
-            .prepare(&format!(
+            .prepare(
                 "SELECT date(timestamp) as day,
                             COALESCE(SUM(cost_usd), 0.0),
                             COALESCE(SUM(input_tokens) + SUM(output_tokens), 0),
                             COUNT(*)
                      FROM usage_events
-                     WHERE datetime(timestamp) > datetime('now', '-{days} days')
+                     WHERE datetime(timestamp) > datetime('now', ?1)
                      GROUP BY day
-                     ORDER BY day ASC"
-            ))
+                     ORDER BY day ASC",
+            )
             .map_err(LibreFangError::memory)?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map([modifier], |row| {
                 Ok(DailyBreakdown {
                     date: row.get(0)?,
                     cost_usd: row.get(1)?,
@@ -1196,9 +1299,12 @@ impl UsageStore {
         let mut results = Vec::new();
         for row in rows {
             let (id_str, cost) = row.map_err(LibreFangError::memory)?;
-            if let Ok(agent_id) = id_str.parse::<AgentId>() {
-                results.push((agent_id, cost));
-            }
+            let agent_id = id_str.parse::<AgentId>().map_err(|e| {
+                LibreFangError::memory_msg(format!(
+                    "invalid agent_id '{id_str}' in usage rollup: {e}"
+                ))
+            })?;
+            results.push((agent_id, cost));
         }
         Ok(results)
     }
@@ -1284,12 +1390,11 @@ impl UsageStore {
     /// Delete usage events older than the given number of days.
     pub fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let modifier = format!("-{days} days");
         let deleted = conn
             .execute(
-                &format!(
-                    "DELETE FROM usage_events WHERE datetime(timestamp) < datetime('now', '-{days} days')"
-                ),
-                [],
+                "DELETE FROM usage_events WHERE datetime(timestamp) < datetime('now', ?1)",
+                [modifier],
             )
             .map_err(LibreFangError::memory)?;
         Ok(deleted)
@@ -1347,6 +1452,90 @@ mod tests {
         assert_eq!(summary.total_output_tokens, 250);
         assert!((summary.total_cost_usd - 0.011).abs() < 0.0001);
         assert_eq!(summary.total_tool_calls, 3);
+    }
+
+    #[test]
+    fn spawned_worker_spend_rolls_up_to_the_parent_budget_line() {
+        // #7714: a worker spawned by another agent spends on its spawner's
+        // behalf. The spawner must be able to see that cost on its own budget
+        // line, which is what `query_billed_summary` answers.
+        let store = setup();
+        let parent = AgentId::new();
+        let worker = AgentId::new();
+
+        // The parent's own turn: no `billed_agent_id`, so it bills to itself.
+        store
+            .record(&UsageRecord {
+                agent_id: parent,
+                cost_usd: 1.0,
+                input_tokens: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        // The worker's turn, billed to the parent.
+        store
+            .record(&UsageRecord {
+                agent_id: worker,
+                billed_agent_id: Some(parent),
+                cost_usd: 0.25,
+                input_tokens: 5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(parent).unwrap();
+        assert_eq!(
+            billed.call_count, 2,
+            "the parent's budget line must include the worker's call"
+        );
+        assert!(
+            (billed.total_cost_usd - 1.25).abs() < 1e-9,
+            "expected 1.25 rolled up, got {}",
+            billed.total_cost_usd
+        );
+        assert_eq!(billed.total_input_tokens, 15);
+
+        // The worker bills nothing to itself — its spend belongs to the parent.
+        let worker_billed = store.query_billed_summary(worker).unwrap();
+        assert_eq!(
+            worker_billed.call_count, 0,
+            "a worker whose spend rolls up must not also carry it itself"
+        );
+
+        // Enforcement is a separate dimension: `agent_id` is untouched, so the
+        // quota subject each call is checked against is still the agent that
+        // actually made it. This is what keeps the pre-call and post-call
+        // quota checks asking about the same agent.
+        assert_eq!(
+            store.query_summary(Some(worker)).unwrap().call_count,
+            1,
+            "the executing agent must remain the quota subject for its own call"
+        );
+        assert_eq!(
+            store.query_summary(Some(parent)).unwrap().call_count,
+            1,
+            "attribution must not retroactively move the child's call onto the parent's quota"
+        );
+    }
+
+    #[test]
+    fn usage_record_without_billed_agent_bills_to_itself() {
+        // Every pre-#7714 call site leaves `billed_agent_id` unset. Those rows
+        // must keep rolling up to `agent_id`, or the migration would silently
+        // drop historical spend out of every budget view.
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .record(&UsageRecord {
+                agent_id,
+                cost_usd: 0.5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(agent_id).unwrap();
+        assert_eq!(billed.call_count, 1);
+        assert!((billed.total_cost_usd - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1552,6 +1741,37 @@ mod tests {
     }
 
     #[test]
+    fn parameterized_day_windows_filter_and_cleanup_old_events() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let conn = store.pool.get().unwrap();
+        for (id, timestamp, cost) in [
+            ("recent", Utc::now().to_rfc3339(), 1.0),
+            (
+                "old",
+                (Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
+                2.0,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO usage_events \
+                 (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+                 VALUES (?1, ?2, ?3, 'model', 'provider', 1, 1, ?4, 0, 0)",
+                rusqlite::params![id, agent_id.0.to_string(), timestamp, cost],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let breakdown = store.query_daily_breakdown(7).unwrap();
+        assert_eq!(breakdown.len(), 1);
+        assert!((breakdown[0].cost_usd - 1.0).abs() < f64::EPSILON);
+
+        assert_eq!(store.cleanup_old(7).unwrap(), 1);
+        assert_eq!(store.query_summary(None).unwrap().call_count, 1);
+    }
+
+    #[test]
     fn test_empty_summary() {
         let store = setup();
         let summary = store.query_summary(None).unwrap();
@@ -1642,6 +1862,99 @@ mod tests {
     }
 
     #[test]
+    fn exact_cost_limits_are_allowed_by_every_atomic_entry_point() {
+        let record = |agent_id, provider: &str| UsageRecord {
+            agent_id,
+            provider: provider.to_string(),
+            cost_usd: 1.0,
+            input_tokens: 4,
+            output_tokens: 6,
+            ..Default::default()
+        };
+
+        let store = setup();
+        store
+            .check_quota_and_record(&record(AgentId::new(), ""), 1.0, 1.0, 1.0)
+            .unwrap();
+
+        let store = setup();
+        store
+            .check_global_budget_and_record(&record(AgentId::new(), ""), 1.0, 1.0, 1.0)
+            .unwrap();
+
+        let store = setup();
+        store
+            .check_all_and_record(&record(AgentId::new(), ""), 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+            .unwrap();
+
+        let store = setup();
+        store
+            .check_all_with_provider_and_record(
+                &record(AgentId::new(), "openai"),
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                10,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn decimal_rounding_does_not_reject_an_exact_cost_limit() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let first = UsageRecord {
+            agent_id,
+            cost_usd: 0.1,
+            ..Default::default()
+        };
+        store.record(&first).unwrap();
+
+        let second = UsageRecord {
+            agent_id,
+            cost_usd: 0.2,
+            ..Default::default()
+        };
+        store
+            .check_quota_and_record(&second, 0.3, 0.3, 0.3)
+            .unwrap();
+
+        assert_eq!(store.query_summary(None).unwrap().call_count, 2);
+    }
+
+    #[test]
+    fn invalid_costs_and_limits_are_rejected() {
+        let store = setup();
+        for cost_usd in [-1.0, f64::NAN, f64::INFINITY] {
+            let record = UsageRecord {
+                agent_id: AgentId::new(),
+                cost_usd,
+                ..Default::default()
+            };
+            assert!(store.record(&record).is_err());
+        }
+
+        let record = UsageRecord {
+            agent_id: AgentId::new(),
+            cost_usd: 0.1,
+            ..Default::default()
+        };
+        assert!(store
+            .check_quota_and_record(&record, f64::NAN, 1.0, 1.0)
+            .is_err());
+        assert!(store
+            .check_global_budget_and_record(&record, -1.0, 1.0, 1.0)
+            .is_err());
+        assert_eq!(store.query_summary(None).unwrap().call_count, 0);
+    }
+
+    #[test]
     fn test_check_quota_and_record_exceeds_hourly() {
         let store = setup();
         let agent_id = AgentId::new();
@@ -1724,7 +2037,7 @@ mod tests {
             1.0,   // agent hourly (fine)
             10.0,  // agent daily (fine)
             100.0, // agent monthly (fine)
-            0.01,  // global hourly (exceeded: 0.008 + 0.005 >= 0.01)
+            0.01,  // global hourly (exceeded: 0.008 + 0.005 > 0.01)
             10.0,  // global daily
             100.0, // global monthly
         );
@@ -1849,6 +2162,24 @@ mod tests {
         assert!(
             store.query_user_ranking(Some(10)).is_err(),
             "malformed ranking rows must fail the query instead of disappearing"
+        );
+    }
+
+    #[test]
+    fn query_all_agents_daily_surfaces_invalid_agent_ids() {
+        let store = setup();
+        let conn = store.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+             VALUES ('bad-agent-row', 'not-an-agent-id', datetime('now'), 'model', 'provider', 0, 0, 1.0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            store.query_all_agents_daily().is_err(),
+            "invalid agent IDs must not disappear from budget rollups"
         );
     }
 }
