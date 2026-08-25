@@ -814,6 +814,15 @@
         }
       ]
     },
+    "memory_fact_budget_percent": {
+      "description": "Share of the prompt memory section's character budget reserved for extracted facts, as a percentage; the remainder goes to raw dialogue.\n\nThe two classes differ by roughly nine to one in row size, so a single ranked list spends the section on dialogue by size alone and leaves a large fraction of turns with no extracted fact in the prompt at all (#7920). Neither share is wasted: whatever one class does not use spills to the other, so a turn with only one class still fills the whole budget.\n\n`None` means \"use the compiled-in default\" (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the measurement, which could not separate 30/50/70 from run-to-run noise). Values above 100 are clamped down. Lower it when raw dialogue carries narrative continuity your agents depend on; raise it when the store is dominated by per-turn dialogue rows. The section's total character budget is unaffected either way.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint8",
+      "minimum": 0.0
+    },
     "memory_wiki": {
       "description": "Memory wiki: durable markdown knowledge vault with provenance and optional Obsidian-friendly export. Off by default; see `librefang-memory-wiki` and issue #3329 for the runbook.",
       "default": {

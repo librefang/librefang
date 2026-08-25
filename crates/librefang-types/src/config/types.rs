@@ -3358,23 +3358,15 @@ pub struct KernelConfig {
     /// emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
-    /// Share of the prompt memory section's character budget reserved for
-    /// extracted facts, as a percentage; the remainder goes to raw dialogue.
+    /// Share of the prompt memory section's character budget reserved for extracted facts, as a percentage; the remainder goes to raw dialogue.
     ///
-    /// The two classes differ by roughly nine to one in row size, so a single
-    /// ranked list spends the section on dialogue by size alone and leaves a
-    /// large fraction of turns with no extracted fact in the prompt at all
-    /// (#7920). Neither share is wasted: whatever one class does not use
-    /// spills to the other, so a turn with only one class still fills the
-    /// whole budget.
+    /// The two classes differ by roughly nine to one in row size, so a single ranked list spends the section on dialogue by size alone and leaves a large fraction of turns with no extracted fact in the prompt at all (#7920).
+    /// Neither share is wasted: whatever one class does not use spills to the other, so a turn with only one class still fills the whole budget.
     ///
-    /// `None` means "use the compiled-in default"
-    /// (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the
-    /// measurement, which could not separate 30/50/70 from run-to-run noise).
-    /// Values above 100 are clamped down. Lower it when raw dialogue carries
-    /// narrative continuity your agents depend on; raise it when the store is
-    /// dominated by per-turn dialogue rows. The section's total character
-    /// budget is unaffected either way.
+    /// `None` means "use the compiled-in default" (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the measurement, which could not separate 30/50/70 from run-to-run noise).
+    /// Values above 100 are clamped down.
+    /// Lower it when raw dialogue carries narrative continuity your agents depend on; raise it when the store is dominated by per-turn dialogue rows.
+    /// The section's total character budget is unaffected either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_fact_budget_percent: Option<u8>,
     /// Kernel-wide Smart Model Router defaults applied to any agent whose

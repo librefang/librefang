@@ -847,9 +847,7 @@ pub fn build_reload_plan_with_caps(
             old.max_history_messages != new.max_history_messages,
             "max_history_messages",
         );
-        // Read live per turn: the kernel copies it into `LoopOptions` from
-        // `self.config.load()` at every `send_message_full` / spawn site, so the
-        // ArcSwap swap is the whole reapply action.
+        // Read live per turn: the kernel copies it into `LoopOptions` from `self.config.load()` at every `send_message_full` / spawn site, so the ArcSwap swap is the whole reapply action.
         noop_if_changed(
             old.memory_fact_budget_percent != new.memory_fact_budget_percent,
             "memory_fact_budget_percent",

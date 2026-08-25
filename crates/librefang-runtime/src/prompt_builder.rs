@@ -765,12 +765,10 @@ fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     format!("{}{}", window[..cut].trim_end(), MEMORY_TRUNCATION_MARKER)
 }
 
-/// The framing that introduces the recalled-memory bullets in both the system prompt and the
-/// stand-alone context message.
+/// The framing that introduces the recalled-memory bullets in both the system prompt and the stand-alone context message.
 ///
-/// Soft hint only — actual enforcement against cascade scaffolding leaks is
-/// `agent_loop::is_cascade_leak`. Do not delete that runtime guard on the assumption that this
-/// prompt clause is sufficient.
+/// Soft hint only — actual enforcement against cascade scaffolding leaks is `agent_loop::is_cascade_leak`.
+/// Do not delete that runtime guard on the assumption that this prompt clause is sufficient.
 const MEMORY_PERSONAL_CONTEXT_PREAMBLE: &str = "You have the following understanding of this person from previous conversations. \
          This is knowledge you have — not a list to recite. Let it naturally shape how you \
          respond:\n\
@@ -873,9 +871,7 @@ fn format_memory_items_by_class_within_budget(
     }
     let percent = resolve_fact_budget_percent(fact_budget_percent) as usize;
     let fact_ceiling = section_max_chars.saturating_mul(percent) / 100;
-    // One counter for both classes: the ceilings below differ, but every bullet either class
-    // renders is charged against the same total, which is what keeps the section inside
-    // `section_max_chars` however the split falls.
+    // One counter for both classes: the ceilings below differ, but every bullet either class renders is charged against the same total, which is what keeps the section inside `section_max_chars` however the split falls.
     let mut spent = 0usize;
     let (mut fact_bullets, mut facts_rendered) = fill_memory_bullets(
         facts,
@@ -884,8 +880,7 @@ fn format_memory_items_by_class_within_budget(
         fact_ceiling,
         &mut spent,
     );
-    // Dialogue's ceiling is the whole section, not the complement of the fact share — whatever
-    // facts did not spend is dialogue's to use rather than lost.
+    // Dialogue's ceiling is the whole section, not the complement of the fact share — whatever facts did not spend is dialogue's to use rather than lost.
     let (dialogue_bullets, dialogue_rendered) = fill_memory_bullets(
         dialogue,
         bullet_limit,
@@ -893,8 +888,7 @@ fn format_memory_items_by_class_within_budget(
         section_max_chars,
         &mut spent,
     );
-    // And the same in the other direction: facts held back by their own ceiling get a second
-    // pass over whatever dialogue left, so an absent or small dialogue class is not a wasted share.
+    // And the same in the other direction: facts held back by their own ceiling get a second pass over whatever dialogue left, so an absent or small dialogue class is not a wasted share.
     if facts_rendered < facts.len() {
         let (extra_bullets, extra_rendered) = fill_memory_bullets(
             &facts[facts_rendered..],
@@ -907,9 +901,7 @@ fn format_memory_items_by_class_within_budget(
         facts_rendered += extra_rendered;
     }
     let mut out = String::from(MEMORY_PERSONAL_CONTEXT_PREAMBLE);
-    // Facts before dialogue, each class contiguous, both in their own rank order: a fixed
-    // arrangement of a fixed input, so the rendered section is byte-identical across processes
-    // and the provider prompt cache still hits (#3298).
+    // Facts before dialogue, each class contiguous, both in their own rank order: a fixed arrangement of a fixed input, so the rendered section is byte-identical across processes and the provider prompt cache still hits (#3298).
     out.push_str(&fact_bullets);
     out.push_str(&dialogue_bullets);
     push_memory_omission_note(
@@ -921,9 +913,8 @@ fn format_memory_items_by_class_within_budget(
 
 /// Render memories as bullets, front to back, while the running total `spent` stays under `ceiling`.
 ///
-/// Returns the rendered bullets and how many memories they consumed; the caller reports the
-/// remainder. `spent` is shared across every call that contributes to one section, so a class
-/// filled later sees the characters an earlier class already took.
+/// Returns the rendered bullets and how many memories they consumed; the caller reports the remainder.
+/// `spent` is shared across every call that contributes to one section, so a class filled later sees the characters an earlier class already took.
 fn fill_memory_bullets(
     memories: &[(String, String)],
     bullet_limit: usize,
@@ -959,8 +950,7 @@ fn fill_memory_bullets(
 
 /// Say what was dropped rather than dropping it silently.
 ///
-/// The count is the only signal the model gets that its recalled context was clipped, whether by
-/// a bullet limit or by the character budget.
+/// The count is the only signal the model gets that its recalled context was clipped, whether by a bullet limit or by the character budget.
 fn push_memory_omission_note(out: &mut String, omitted: usize) {
     if omitted > 0 {
         out.push_str(&format!(

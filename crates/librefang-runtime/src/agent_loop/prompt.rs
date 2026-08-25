@@ -661,13 +661,9 @@ pub(super) fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
     }
 
     let memory_context_msg = if !ctx.memories.is_empty() {
-        // Split by class before the section is built. Recall ranks both classes in one list and
-        // that ranking is sound — raw dialogue takes slightly *under* its base rate of the slots —
-        // but a dialogue row inlines a whole exchange and outweighs an extracted fact by roughly
-        // nine to one in characters, so one shared budget hands the section to dialogue on size
-        // alone and leaves 29 % of turns with no fact in the prompt at all (#7920).
-        // `partition` preserves rank order within each class, so the section stays a fixed
-        // arrangement of a fixed input (#3298).
+        // Split by class before the section is built.
+        // Recall ranks both classes in one list and that ranking is sound — raw dialogue takes slightly *under* its base rate of the slots — but a dialogue row inlines a whole exchange and outweighs an extracted fact by roughly nine to one in characters, so one shared budget hands the section to dialogue on size alone and leaves 29 % of turns with no fact in the prompt at all (#7920).
+        // `partition` preserves rank order within each class, so the section stays a fixed arrangement of a fixed input (#3298).
         let (dialogue, facts): (Vec<&MemoryFragment>, Vec<&MemoryFragment>) =
             ctx.memories.iter().partition(|m| m.is_raw_dialogue());
         let to_pairs = |frags: &[&MemoryFragment]| -> Vec<(String, String)> {
