@@ -4,9 +4,12 @@
 //! moves to the next driver in the chain.
 
 use crate::drivers::fallback_chain::{exhaustion_reason_for, exhaustion_until_for};
-use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CompletionRequest, CompletionResponse, LlmDriver, LlmError, ProviderExhaustionDetail,
+    StreamEvent,
+};
 use async_trait::async_trait;
-use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
+use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -266,44 +269,79 @@ impl FallbackDriver {
     /// Record an exhaustion-class failure against the shared store, if
     /// any. Mirrors `FallbackChain`'s policy so both wrappers stamp
     /// slots with consistent reason/backoff.
-    fn record_exhaustion(&self, entry: &DriverEntry, err: &LlmError) {
+    fn record_exhaustion(&self, entry: &DriverEntry, err: &LlmError) -> Option<ExhaustionReason> {
         let Some(store) = &self.exhaustion_store else {
-            return;
+            return None;
         };
         if entry.provider_name.is_empty() {
-            return;
+            return None;
         }
         let reason = err.failover_reason();
-        if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
-            let until = exhaustion_until_for(err, &reason);
-            store.mark_exhausted(entry.provider_name.clone(), exhaust_reason, until);
-        }
+        let exhaust_reason = exhaustion_reason_for(&reason)?;
+        let until = exhaustion_until_for(err, &reason);
+        store.mark_exhausted(entry.provider_name.clone(), exhaust_reason, until);
+        Some(exhaust_reason)
     }
 
-    /// Should this slot be pre-skipped? Returns `true` when an attached
-    /// store reports the slot exhausted; no-ops otherwise.
-    fn is_slot_exhausted(&self, entry: &DriverEntry) -> bool {
+    /// Return why this slot should be pre-skipped when an attached store reports it exhausted; no-op otherwise.
+    fn slot_exhaustion(&self, entry: &DriverEntry) -> Option<ExhaustionReason> {
         let Some(store) = &self.exhaustion_store else {
-            return false;
+            return None;
         };
         if entry.provider_name.is_empty() {
-            return false;
+            return None;
         }
-        store.record_skip(&entry.provider_name).is_some()
+        store
+            .record_skip(&entry.provider_name)
+            .map(|rec| rec.reason)
+    }
+
+    fn terminal_error(
+        &self,
+        mut details: Vec<ProviderExhaustionDetail>,
+        last_exhaustion_error: Option<LlmError>,
+        last_unaccounted_error: Option<LlmError>,
+    ) -> LlmError {
+        if let Some(err) = last_unaccounted_error {
+            return err;
+        }
+        if self.exhaustion_store.is_some() && details.len() == self.drivers.len() {
+            details.sort_by(|a, b| {
+                a.provider_id
+                    .cmp(&b.provider_id)
+                    .then_with(|| a.reason.as_metric_label().cmp(b.reason.as_metric_label()))
+            });
+            return LlmError::AllProvidersExhausted {
+                details,
+                cause: last_exhaustion_error.map(Box::new),
+            };
+        }
+
+        last_exhaustion_error.unwrap_or_else(|| LlmError::Api {
+            status: 0,
+            message: "FallbackDriver: all providers exhausted".to_string(),
+            code: None,
+        })
     }
 }
 
 #[async_trait]
 impl LlmDriver for FallbackDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut last_error = None;
+        let mut last_exhaustion_error = None;
+        let mut last_unaccounted_error = None;
+        let mut exhaustion_details = Vec::new();
         let order = self.health_order();
 
         for &i in &order {
             let entry = &self.drivers[i];
 
             // Pre-attempt skip: store reports the slot exhausted (#4807).
-            if self.is_slot_exhausted(entry) {
+            if let Some(reason) = self.slot_exhaustion(entry) {
+                exhaustion_details.push(ProviderExhaustionDetail {
+                    provider_id: entry.provider_name.clone(),
+                    reason,
+                });
                 continue;
             }
 
@@ -351,17 +389,24 @@ impl LlmDriver for FallbackDriver {
                         consecutive_errors = entry.consecutive_errors.load(Ordering::Relaxed),
                         "Fallback driver failed, trying next"
                     );
-                    self.record_exhaustion(entry, &e);
-                    last_error = Some(e);
+                    if let Some(reason) = self.record_exhaustion(entry, &e) {
+                        exhaustion_details.push(ProviderExhaustionDetail {
+                            provider_id: entry.provider_name.clone(),
+                            reason,
+                        });
+                        last_exhaustion_error = Some(e);
+                    } else {
+                        last_unaccounted_error = Some(e);
+                    }
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
-            status: 0,
-            message: "No drivers configured in fallback chain".to_string(),
-            code: None,
-        }))
+        Err(self.terminal_error(
+            exhaustion_details,
+            last_exhaustion_error,
+            last_unaccounted_error,
+        ))
     }
 
     async fn stream(
@@ -369,13 +414,19 @@ impl LlmDriver for FallbackDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let mut last_error = None;
+        let mut last_exhaustion_error = None;
+        let mut last_unaccounted_error = None;
+        let mut exhaustion_details = Vec::new();
         let order = self.health_order();
 
         for &i in &order {
             let entry = &self.drivers[i];
 
-            if self.is_slot_exhausted(entry) {
+            if let Some(reason) = self.slot_exhaustion(entry) {
+                exhaustion_details.push(ProviderExhaustionDetail {
+                    provider_id: entry.provider_name.clone(),
+                    reason,
+                });
                 continue;
             }
 
@@ -464,17 +515,24 @@ impl LlmDriver for FallbackDriver {
                         consecutive_errors = entry.consecutive_errors.load(Ordering::Relaxed),
                         "Fallback driver (stream) failed, trying next"
                     );
-                    self.record_exhaustion(entry, &e);
-                    last_error = Some(e);
+                    if let Some(reason) = self.record_exhaustion(entry, &e) {
+                        exhaustion_details.push(ProviderExhaustionDetail {
+                            provider_id: entry.provider_name.clone(),
+                            reason,
+                        });
+                        last_exhaustion_error = Some(e);
+                    } else {
+                        last_unaccounted_error = Some(e);
+                    }
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
-            status: 0,
-            message: "No drivers configured in fallback chain".to_string(),
-            code: None,
-        }))
+        Err(self.terminal_error(
+            exhaustion_details,
+            last_exhaustion_error,
+            last_unaccounted_error,
+        ))
     }
 }
 
@@ -1144,5 +1202,203 @@ mod tests {
         assert!(resp.actual_provider.is_none());
         // And the store stays empty even after the call.
         assert_eq!(store.live_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn all_pre_skipped_complete_returns_typed_exhaustion_details() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+        use std::time::{Duration, Instant};
+
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::AuthFailed,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        store.mark_exhausted(
+            "p2",
+            ExhaustionReason::RateLimited,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(store);
+
+        let err = fb.complete(test_request()).await.unwrap_err();
+        match err {
+            LlmError::AllProvidersExhausted { details, cause } => {
+                assert_eq!(details.len(), 2);
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::AuthFailed);
+                assert_eq!(details[1].provider_id, "p2");
+                assert_eq!(details[1].reason, ExhaustionReason::RateLimited);
+                assert!(cause.is_none());
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn all_pre_skipped_stream_returns_typed_exhaustion_details() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+        use std::time::{Duration, Instant};
+
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::BudgetExceeded,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        let fb = FallbackDriver::with_models_and_providers(vec![(
+            Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+            "model-a".to_string(),
+            "p1".to_string(),
+        )])
+        .with_exhaustion_store(store);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+
+        let err = fb.stream(test_request(), tx).await.unwrap_err();
+        match err {
+            LlmError::AllProvidersExhausted { details, cause } => {
+                assert_eq!(details.len(), 1);
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::BudgetExceeded);
+                assert!(cause.is_none());
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempted_exhaustion_preserves_details_and_last_cause() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+        use std::time::{Duration, Instant};
+
+        struct RateLimitDriver;
+
+        #[async_trait]
+        impl LlmDriver for RateLimitDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                    message: None,
+                })
+            }
+        }
+
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::AuthFailed,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(RateLimitDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(store);
+
+        let err = fb.complete(test_request()).await.unwrap_err();
+        match err {
+            LlmError::AllProvidersExhausted { details, cause } => {
+                assert_eq!(details.len(), 2);
+                assert_eq!(details[0].provider_id, "p1");
+                assert_eq!(details[0].reason, ExhaustionReason::AuthFailed);
+                assert_eq!(details[1].provider_id, "p2");
+                assert_eq!(details[1].reason, ExhaustionReason::RateLimited);
+                assert!(matches!(
+                    cause.as_deref(),
+                    Some(LlmError::RateLimited { .. })
+                ));
+            }
+            other => panic!("expected AllProvidersExhausted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_exhaustion_failure_is_not_wrapped_as_chain_exhaustion() {
+        use librefang_llm_driver::exhaustion::{ExhaustionReason, ProviderExhaustionStore};
+        use std::time::{Duration, Instant};
+
+        let store = ProviderExhaustionStore::new();
+        store.mark_exhausted(
+            "p1",
+            ExhaustionReason::BudgetExceeded,
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(OkDriver) as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(store);
+
+        let err = fb.complete(test_request()).await.unwrap_err();
+        assert!(matches!(err, LlmError::Api { status: 500, .. }));
+    }
+
+    #[tokio::test]
+    async fn later_exhaustion_does_not_overwrite_non_exhaustion_failure() {
+        use librefang_llm_driver::exhaustion::ProviderExhaustionStore;
+
+        struct RateLimitDriver;
+
+        #[async_trait]
+        impl LlmDriver for RateLimitDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                    message: None,
+                })
+            }
+        }
+
+        let fb = FallbackDriver::with_models_and_providers(vec![
+            (
+                Arc::new(FailDriver) as Arc<dyn LlmDriver>,
+                "model-a".to_string(),
+                "p1".to_string(),
+            ),
+            (
+                Arc::new(RateLimitDriver) as Arc<dyn LlmDriver>,
+                "model-b".to_string(),
+                "p2".to_string(),
+            ),
+        ])
+        .with_exhaustion_store(ProviderExhaustionStore::new());
+
+        let err = fb.complete(test_request()).await.unwrap_err();
+        assert!(matches!(err, LlmError::Api { status: 500, .. }));
     }
 }

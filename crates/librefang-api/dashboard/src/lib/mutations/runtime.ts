@@ -55,7 +55,8 @@ export function useCreateBackup() {
 export function useRestoreBackup() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: restoreBackup,
+    mutationFn: (vars: { filename: string; keepConfig?: boolean; components?: string[] }) =>
+      restoreBackup(vars.filename, { keepConfig: vars.keepConfig, components: vars.components }),
     onSuccess: () => {
       qc.invalidateQueries();
     },

@@ -99,6 +99,7 @@ jobs:
       - name: Generate coverage (LCOV)
         env:
           RUST_TEST_THREADS: "1"
+          NEXTEST_PROFILE: ci
         run: |
           # pipefail: tee always exits 0, so without this the cargo failure
           # would be masked and the job would falsely succeed.

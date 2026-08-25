@@ -4,6 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createDedupTracker } = require('../lib/dedup-tracker');
 
+test('windowMs must be finite and positive', () => {
+  for (const windowMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '100']) {
+    assert.throws(() => createDedupTracker({ windowMs }), RangeError);
+  }
+});
+
 test('wasProcessed is false on first sight and does NOT mark', () => {
   const t = createDedupTracker();
   assert.equal(t.wasProcessed('abc'), false);

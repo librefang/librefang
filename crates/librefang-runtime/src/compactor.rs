@@ -15,6 +15,7 @@ use crate::session_repair::{message_has_tool_use, message_is_only_tool_results};
 use crate::str_utils::safe_truncate_str;
 use librefang_memory::session::Session;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+use librefang_types::model_catalog::ContextWindowSource;
 use librefang_types::tool::ToolDefinition;
 use librefang_types::tool_class::ToolApprovalClass;
 use serde::Serialize;
@@ -358,6 +359,16 @@ pub struct ContextBreakdown {
 pub struct ContextReport {
     pub estimated_tokens: usize,
     pub context_window: usize,
+    /// Which layer of the precedence chain produced [`Self::context_window`]
+    /// (refs #7774).
+    ///
+    /// The denominator of every percentage in this report, so an operator
+    /// reading a pressure level needs to know whether it was measured against
+    /// the model's real window or against a number the runtime assumed.
+    /// [`ContextWindowSource::Fallback`] is the reported failure: a 16K
+    /// conversation compared against a guessed 8192 overflows on paper and
+    /// nowhere else.
+    pub context_window_source: ContextWindowSource,
     pub usage_percent: f64,
     pub pressure: ContextPressure,
     pub message_count: usize,
@@ -366,11 +377,17 @@ pub struct ContextReport {
 }
 
 /// Generate a context window usage report.
+///
+/// `context_window_source` names the layer `context_window` came from; callers
+/// that resolve the window through the kernel's `resolve_context_window` pass
+/// the source it returned, and a caller applying its own default passes
+/// [`ContextWindowSource::Fallback`].
 pub fn generate_context_report(
     messages: &[Message],
     system_prompt: Option<&str>,
     tools: Option<&[ToolDefinition]>,
     context_window: usize,
+    context_window_source: ContextWindowSource,
 ) -> ContextReport {
     // Break down token estimates by source (CJK-aware)
     let sp_tokens = system_prompt.map_or(0, estimate_str_tokens);
@@ -417,6 +434,7 @@ pub fn generate_context_report(
     ContextReport {
         estimated_tokens: total,
         context_window: cw,
+        context_window_source,
         usage_percent: (pct * 10.0).round() / 10.0, // 1 decimal
         pressure,
         message_count: messages.len(),
@@ -438,8 +456,21 @@ pub fn format_context_report(report: &ContextReport) -> String {
         .chain(std::iter::repeat_n('░', empty))
         .collect();
 
+    // Name the window's provenance whenever it is not a plain catalog fact, and
+    // say outright that it is assumed when nothing knew it (refs #7774).
+    // A percentage is only as trustworthy as its denominator, and the reported
+    // failure was an operator reading an overflow off a denominator the runtime
+    // had invented.
+    let window_note = match report.context_window_source {
+        ContextWindowSource::Fallback => " — assumed, no source knows this model's window",
+        ContextWindowSource::SessionHint => " — carried over from an earlier turn",
+        ContextWindowSource::AgentOverride => " — from agent.toml",
+        ContextWindowSource::ModelOverride => " — from the model override",
+        ContextWindowSource::Catalog => "",
+    };
+
     format!(
-        "**Context Usage:** {bar} {:.1}% ({} / {} tokens)\n\n\
+        "**Context Usage:** {bar} {:.1}% ({} / {} tokens{})\n\n\
          **Breakdown:**\n\
          - System prompt: ~{} tokens\n\
          - Messages ({}, estimated, retained messages only): ~{} tokens\n\
@@ -449,6 +480,7 @@ pub fn format_context_report(report: &ContextReport) -> String {
         report.usage_percent,
         report.estimated_tokens,
         report.context_window,
+        window_note,
         report.breakdown.system_prompt_tokens,
         report.message_count,
         report.breakdown.message_tokens,
@@ -2404,7 +2436,13 @@ mod tests {
     #[test]
     fn test_generate_context_report_basic() {
         let messages = vec![Message::user("Hello world"), Message::assistant("Hi there")];
-        let report = generate_context_report(&messages, Some("You are helpful."), None, 200_000);
+        let report = generate_context_report(
+            &messages,
+            Some("You are helpful."),
+            None,
+            200_000,
+            ContextWindowSource::Catalog,
+        );
         assert!(report.estimated_tokens > 0);
         assert!(report.usage_percent < 1.0); // tiny messages
         assert_eq!(report.pressure, ContextPressure::Low);
@@ -2418,7 +2456,8 @@ mod tests {
         // Create enough messages to push past 85%
         let big_msg = "x".repeat(800_000); // 200K tokens at chars/4
         let messages = vec![Message::user(big_msg)];
-        let report = generate_context_report(&messages, None, None, 200_000);
+        let report =
+            generate_context_report(&messages, None, None, 200_000, ContextWindowSource::Catalog);
         assert_eq!(report.pressure, ContextPressure::Critical);
         assert!(report.usage_percent > 85.0);
     }
@@ -2426,11 +2465,70 @@ mod tests {
     #[test]
     fn test_format_context_report() {
         let messages = vec![Message::user("hi")];
-        let report = generate_context_report(&messages, Some("system"), None, 200_000);
+        let report = generate_context_report(
+            &messages,
+            Some("system"),
+            None,
+            200_000,
+            ContextWindowSource::Catalog,
+        );
         let formatted = format_context_report(&report);
         assert!(formatted.contains("Context Usage"));
         assert!(formatted.contains("Breakdown"));
         assert!(formatted.contains("Pressure"));
+    }
+
+    /// Refs #7774. A window nobody knows has to be named as assumed in the
+    /// report itself.
+    ///
+    /// `/context` is where an operator goes when an agent refuses a message for
+    /// an overflow, and the reported incident is an overflow measured against a
+    /// denominator the runtime invented. A catalog-backed window says nothing
+    /// extra, because there is nothing to warn about.
+    #[test]
+    fn format_context_report_says_when_the_window_is_assumed() {
+        let messages = vec![Message::user("hi")];
+        let assumed = format_context_report(&generate_context_report(
+            &messages,
+            Some("system"),
+            None,
+            8_192,
+            ContextWindowSource::Fallback,
+        ));
+        assert!(
+            assumed.contains("assumed"),
+            "an assumed window must say so: {assumed}"
+        );
+
+        let known = format_context_report(&generate_context_report(
+            &messages,
+            Some("system"),
+            None,
+            200_000,
+            ContextWindowSource::Catalog,
+        ));
+        assert!(
+            !known.contains("assumed"),
+            "a catalog window must not be labelled a guess: {known}"
+        );
+    }
+
+    /// The report carries the source through, so every surface reading it
+    /// reports the same provenance rather than re-deriving one.
+    #[test]
+    fn the_report_carries_the_window_source() {
+        let report = generate_context_report(
+            &[Message::user("hi")],
+            None,
+            None,
+            16_384,
+            ContextWindowSource::ModelOverride,
+        );
+        assert_eq!(
+            report.context_window_source,
+            ContextWindowSource::ModelOverride
+        );
+        assert!(!report.context_window_source.is_assumed());
     }
 
     #[test]

@@ -813,24 +813,39 @@ pub fn strip_html_tags(s: &str) -> String {
 
 /// Simple percent-decode for URLs.
 pub fn urldecode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
-            } else {
-                result.push('%');
-                result.push_str(&hex);
-            }
-        } else if ch == '+' {
-            result.push(' ');
-        } else {
-            result.push(ch);
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
         }
     }
-    result
+
+    let input = s.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < input.len() {
+        if input[index] == b'%' && index + 2 < input.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(input[index + 1]), hex_value(input[index + 2]))
+            {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(if input[index] == b'+' {
+            b' '
+        } else {
+            input[index]
+        });
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Resolve an API key from an environment variable name.
@@ -877,6 +892,19 @@ mod tests {
         let results = parse_ddg_results(html, 5);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, "https://example.com");
+    }
+
+    #[test]
+    fn test_urldecode_reconstructs_utf8_sequences() {
+        assert_eq!(
+            urldecode("https%3A%2F%2Fexample.com%2Fcaf%C3%A9%2F%E6%97%A5%E6%9C%AC+news"),
+            "https://example.com/café/日本 news"
+        );
+    }
+
+    #[test]
+    fn test_urldecode_preserves_invalid_percent_escapes() {
+        assert_eq!(urldecode("100%25-%GG-%A"), "100%-%GG-%A");
     }
 
     // ── Jina provider tests ──────────────────────────────────

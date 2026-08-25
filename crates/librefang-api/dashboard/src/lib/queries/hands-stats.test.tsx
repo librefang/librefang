@@ -4,6 +4,7 @@ import type { HandInstanceItem, HandInstanceStatus } from "../../api";
 import {
   useHandStats,
   useHandStatsBatch,
+  HandStatsBatchError,
   useHandSession,
   useHandInstanceStatus,
   useHandManifestToml,
@@ -140,15 +141,36 @@ describe("useHandStatsBatch", () => {
     expect(result.current.data).not.toHaveProperty("h2");
   });
 
-  it("should fetch all requests in parallel", async () => {
-    const resolveOrder: string[] = [];
+  it("surfaces an error when every stats request fails", async () => {
+    vi.mocked(client.getHandStats).mockRejectedValue(new Error("offline"));
+
+    const { result } = renderHook(() => useHandStatsBatch(["h1", "h2"]), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(result.current.error).toBeInstanceOf(HandStatsBatchError);
+    expect((result.current.error as HandStatsBatchError).instanceIds).toEqual([
+      "h1",
+      "h2",
+    ]);
+  });
+
+  it("limits parallel stats requests", async () => {
+    let active = 0;
+    let maxActive = 0;
     vi.mocked(client.getHandStats).mockImplementation(async (id: string) => {
-      await new Promise((r) => setTimeout(r, Math.random() * 10));
-      resolveOrder.push(id);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
       return { instance_id: id };
     });
 
-    const { result } = renderHook(() => useHandStatsBatch(["a", "b", "c"]), {
+    const ids = Array.from({ length: 14 }, (_, index) => `hand-${index}`);
+
+    const { result } = renderHook(() => useHandStatsBatch(ids), {
       wrapper: createQueryClientWrapper().wrapper,
     });
 
@@ -156,8 +178,8 @@ describe("useHandStatsBatch", () => {
       expect(result.current.data).toBeDefined();
     });
 
-    // All 3 calls should have been made (parallel, not sequential)
-    expect(client.getHandStats).toHaveBeenCalledTimes(3);
+    expect(client.getHandStats).toHaveBeenCalledTimes(14);
+    expect(maxActive).toBe(6);
   });
 });
 

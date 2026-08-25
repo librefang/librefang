@@ -178,7 +178,11 @@ function AgentPromptRepoModal({
 
   const handleBind = (version: PromptVersion) => {
     bindMutation.mutate(
-      { agentId: item.agent_id, version },
+      {
+        agentId: item.agent_id,
+        version,
+        previousSystemPrompt: item.live_system_prompt,
+      },
       {
         onSuccess: () =>
           addToast(

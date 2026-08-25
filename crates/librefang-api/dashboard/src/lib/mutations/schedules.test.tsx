@@ -126,7 +126,7 @@ describe("useUpdateTrigger", () => {
     vi.mocked(http.updateTrigger).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates triggerKeys.all and cronKeys.all", async () => {
+  it("invalidates only the independent trigger namespace", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -135,14 +135,12 @@ describe("useUpdateTrigger", () => {
     await result.current.mutateAsync({ id: "trig-1", data: { enabled: true } });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: cronKeys.all,
-    });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: cronKeys.all });
   });
 });
 
@@ -151,23 +149,23 @@ describe("useDeleteTrigger", () => {
     vi.mocked(http.deleteTrigger).mockResolvedValue(actionResponse);
   });
 
-  it("invalidates triggerKeys.all and cronKeys.all", async () => {
+  it("evicts the detail and invalidates only the trigger namespace", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const removeSpy = vi.spyOn(queryClient, "removeQueries");
 
     const { result } = renderHook(() => useDeleteTrigger(), { wrapper });
 
     await result.current.mutateAsync({ id: "trig-1" });
 
     await waitFor(() => {
-      expect(invalidateSpy).toHaveBeenCalledTimes(2);
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
     });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: triggerKeys.all,
     });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: cronKeys.all,
-    });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: cronKeys.all });
+    expect(removeSpy).toHaveBeenCalledWith({ queryKey: triggerKeys.detail("trig-1") });
   });
 });
 
@@ -225,7 +223,6 @@ describe("useUpdateCronJob", () => {
 
     await result.current.mutateAsync({
       id: "job-1",
-      agentId: "agent-1",
       data: { name: "renamed" },
     });
 
@@ -248,7 +245,7 @@ describe("useDeleteCronJob", () => {
 
     const { result } = renderHook(() => useDeleteCronJob(), { wrapper });
 
-    await result.current.mutateAsync({ id: "job-1", agentId: "agent-1" });
+    await result.current.mutateAsync({ id: "job-1" });
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledTimes(2);
@@ -269,7 +266,7 @@ describe("useToggleCronJob", () => {
 
     const { result } = renderHook(() => useToggleCronJob(), { wrapper });
 
-    await result.current.mutateAsync({ id: "job-1", enabled: false, agentId: "agent-1" });
+    await result.current.mutateAsync({ id: "job-1", enabled: false });
 
     expect(http.toggleCronJob).toHaveBeenCalledWith("job-1", false);
     await waitFor(() => {

@@ -31,29 +31,9 @@ class ErrorBoundaryImpl extends Component<ErrorBoundaryImplProps, State> {
   componentDidCatch(error: Error, info: ErrorInfo) {
     // eslint-disable-next-line no-console
     console.error('LibreFang UI error:', error, info.componentStack)
-    // Fire-and-forget report to the worker. sendBeacon has the nice property
-    // that the request survives page unload if the user reloads. If anything
-    // throws here (no network, CSP block, serialization weirdness), swallow
-    // — reporting must never cascade a crash.
-    try {
-      const body = JSON.stringify({
-        message: error.message || String(error),
-        stack: error.stack || info.componentStack || '',
-        pathname: typeof window !== 'undefined' ? window.location.pathname : '',
-        lang: typeof document !== 'undefined' ? document.documentElement.lang : '',
-        ua: typeof navigator !== 'undefined' ? navigator.userAgent.slice(0, 256) : '',
-      })
-      const url = 'https://stats.librefang.ai/api/errors'
-      if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
-        navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))
-      } else if (typeof fetch !== 'undefined') {
-        fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {})
-      }
-    } catch { /* reporting must not crash */ }
   }
 
   handleReload = () => {
-    this.setState({ error: null })
     window.location.reload()
   }
 

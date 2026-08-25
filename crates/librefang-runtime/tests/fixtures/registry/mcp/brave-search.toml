@@ -5,6 +5,12 @@ category = "ai"
 icon = "lucide:shield"
 tags = ["search", "web", "brave", "api", "information-retrieval"]
 
+setup_instructions = """
+1. Go to https://brave.com/search/api/ and sign up for a Brave Search API plan (free tier available).
+2. Generate an API key from your Brave Search API dashboard.
+3. Paste the API key into the BRAVE_API_KEY field above.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,13 +26,6 @@ get_url = "https://brave.com/search/api/"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://brave.com/search/api/ and sign up for a Brave Search API plan (free tier available).
-2. Generate an API key from your Brave Search API dashboard.
-3. Paste the API key into the BRAVE_API_KEY field above.
-"""
-
 
 [i18n.zh]
 name = "Brave Search"

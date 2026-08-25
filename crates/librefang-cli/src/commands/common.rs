@@ -220,7 +220,7 @@ pub(crate) fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonC
 
 /// Load just the `update_channel` field from config.toml without fully deserializing.
 pub(crate) fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateChannel> {
-    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let config_path = cli_config_path();
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config
@@ -242,7 +242,7 @@ pub(crate) fn load_update_channel_from_config() -> Option<librefang_types::confi
 pub(crate) fn load_skill_env_policy_from_config(
 ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
     let cfg = (|| -> Option<librefang_types::config::SkillsConfig> {
-        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let config_path = cli_config_path();
         let content = std::fs::read_to_string(&config_path).ok()?;
         let value: toml::Value = toml::from_str(&content).ok()?;
         let skills = value.get("skills")?.clone();
@@ -978,6 +978,14 @@ pub(crate) fn start_daemon_background() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The `config.toml` this CLI reads and writes.
+///
+/// Delegates to the kernel's resolver so `LIBREFANG_CONFIG_PATH` relocates the file for `librefang config set` exactly as it does for the daemon that will reload it (#6695).
+/// A CLI that resolves the path on its own writes a file the daemon never reads.
+pub(crate) fn cli_config_path() -> PathBuf {
+    librefang_kernel::config::default_config_path()
+}
 
 pub(crate) fn librefang_home() -> PathBuf {
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {

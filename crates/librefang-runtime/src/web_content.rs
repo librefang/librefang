@@ -322,19 +322,43 @@ fn strip_all_tags(s: &str) -> String {
 
 /// Decode common HTML entities.
 fn decode_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
-        .replace("&mdash;", "\u{2014}")
-        .replace("&ndash;", "\u{2013}")
-        .replace("&hellip;", "\u{2026}")
-        .replace("&copy;", "\u{00a9}")
-        .replace("&reg;", "\u{00ae}")
-        .replace("&trade;", "\u{2122}")
+    const ENTITIES: &[(&str, &str)] = &[
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#x27;", "'"),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+        ("&mdash;", "\u{2014}"),
+        ("&ndash;", "\u{2013}"),
+        ("&hellip;", "\u{2026}"),
+        ("&copy;", "\u{00a9}"),
+        ("&reg;", "\u{00ae}"),
+        ("&trade;", "\u{2122}"),
+    ];
+
+    let mut output = String::with_capacity(s.len());
+    let mut remaining = s;
+
+    while let Some(entity_start) = remaining.find('&') {
+        output.push_str(&remaining[..entity_start]);
+        remaining = &remaining[entity_start..];
+
+        if let Some((entity, replacement)) = ENTITIES
+            .iter()
+            .find(|(entity, _)| remaining.starts_with(entity))
+        {
+            output.push_str(replacement);
+            remaining = &remaining[entity.len()..];
+        } else {
+            output.push('&');
+            remaining = &remaining[1..];
+        }
+    }
+
+    output.push_str(remaining);
+    output
 }
 
 /// Collapse runs of whitespace: multiple blank lines → double newline, trim lines.
@@ -396,6 +420,22 @@ mod tests {
         assert!(md.contains("# Title"), "Expected heading, got: {md}");
         assert!(md.contains("**world**"), "Expected bold, got: {md}");
         assert!(md.contains("Hello"), "Expected text, got: {md}");
+    }
+
+    #[test]
+    fn test_decode_entities_does_not_decode_emitted_entities_again() {
+        assert_eq!(
+            decode_entities("&amp;lt;script&amp;gt; &amp;amp;"),
+            "&lt;script&gt; &amp;"
+        );
+    }
+
+    #[test]
+    fn test_decode_entities_preserves_unknown_entities() {
+        assert_eq!(
+            decode_entities("known:&copy; unknown:&custom;"),
+            "known:© unknown:&custom;"
+        );
     }
 
     #[test]
