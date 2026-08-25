@@ -1257,7 +1257,7 @@ fn save_config(state: &mut State) {
 
     let routing_section = build_routing_section(state.routing_enabled, &state.routing_models);
 
-    let config_path = librefang_dir.join("config.toml");
+    let config_path = crate::commands::common::cli_config_path();
     let api_key_line = build_api_key_line(p.env_var);
 
     let config = render_init_wizard_config(p.name, model, &api_key_line, &routing_section);

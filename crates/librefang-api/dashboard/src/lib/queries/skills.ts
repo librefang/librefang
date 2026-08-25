@@ -84,6 +84,7 @@ export const skillQueries = {
       queryKey: clawhubCnKeys.detail(slug),
       queryFn: () => clawhubCnGetSkill(slug),
       enabled: !!slug,
+      staleTime: BROWSE_STALE_MS,
     }),
   skillhubBrowse: (sort?: string) =>
     queryOptions({

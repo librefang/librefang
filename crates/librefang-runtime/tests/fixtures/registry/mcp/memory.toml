@@ -5,15 +5,6 @@ category = "ai"
 icon = "🧠"
 tags = ["memory", "knowledge-graph", "persistence", "facts", "entities"]
 
-[transport]
-type = "stdio"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-memory@latest"]
-
-[health_check]
-interval_secs = 60
-unhealthy_threshold = 3
-
 setup_instructions = """
 No API key required. Stores a knowledge graph locally in JSON format.
 
@@ -31,6 +22,14 @@ args = ["-y", "@modelcontextprotocol/server-memory@latest"]
 ```
 """
 
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory@latest"]
+
+[health_check]
+interval_secs = 60
+unhealthy_threshold = 3
 
 [i18n.zh]
 name = "Memory (知识图谱)"

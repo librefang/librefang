@@ -440,15 +440,22 @@ curl -H "Authorization: Bearer your-api-key" http://127.0.0.1:4545/api/agents
 rate_limit_per_second = 20  # Increase if needed
 ```
 
-### 浏览器中出现 CORS 错误
+### 浏览器中出现 CORS 错误，或 Agent WebSocket 返回 403
 
-**原因**：尝试从不同的源访问 API。
+**原因**：尝试从守护进程无法识别的源访问 API。
 
-**解决方案**：在 CORS 配置中添加你的源：
+**解决方案**：将你的源添加到 `cors_origin`。该键位于**顶层**，不属于 `[api]`，且为单数形式：
 ```toml
-[api]
-cors_origins = ["http://localhost:5173", "https://your-app.com"]
+cors_origin = ["http://localhost:5173", "https://your-app.com"]
 ```
+
+同一份列表也适用于 Agent 聊天 WebSocket。无需配置即可放行的源只有两类：监听端口上的回环地址，以及请求本身所指向的**字面 IP 地址**和端口（因此绑定在 `0.0.0.0:4545` 的守护进程通过 `http://192.168.1.161:4545` 打开时，可以正常提供自己的仪表盘）。
+通过**主机名**访问的守护进程（包括位于 TLS 终结代理之后的部署）必须在此列出，因为“某个主机名解析到本机地址”并不能证明页面是由本守护进程提供的。
+
+<Note>
+`allowed_origins` 是另一个设置：它属于 `[terminal]`，仅作用于终端路由。
+把它写在 `[api]` 下不会有任何效果，因为 `config.toml` 中并不存在 `[api]` 这个表。
+</Note>
 
 ### WebSocket 断开连接
 

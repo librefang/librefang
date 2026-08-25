@@ -28,8 +28,8 @@ export function useUninstallPlugin() {
 export function useScaffoldPlugin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, desc, runtime }: { name: string; desc: string; runtime?: string }) =>
-      scaffoldPlugin(name, desc, runtime),
+    mutationFn: ({ name, description, runtime }: { name: string; description: string; runtime?: string }) =>
+      scaffoldPlugin(name, description, runtime),
     onSuccess: () => qc.invalidateQueries({ queryKey: pluginKeys.all }),
   });
 }

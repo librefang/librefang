@@ -91,6 +91,9 @@ export function TerminalTabs({
   const settleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editingIdRef = useRef<string | null>(null);
   const windowsRef = useRef<TerminalWindow[]>([]);
+  const deletingIdsRef = useRef(new Set<string>());
+  const onSwitchWindowRef = useRef(onSwitchWindow);
+  const addToast = useUIStore((s) => s.addToast);
 
   useEffect(() => {
     windowsRef.current = windows;
@@ -99,6 +102,14 @@ export function TerminalTabs({
   useEffect(() => {
     editingIdRef.current = editingId;
   }, [editingId]);
+
+  useEffect(() => {
+    onSwitchWindowRef.current = onSwitchWindow;
+  }, [onSwitchWindow]);
+
+  useEffect(() => {
+    saveOrder(tabOrder);
+  }, [tabOrder]);
 
   // Keep tab order in sync with server windows list.
   // Skip when windows is empty (query still loading) to avoid wiping persisted order.
@@ -110,17 +121,20 @@ export function TerminalTabs({
       const filteredSet = new Set(filtered);
       const newIds = windows.map(w => w.id).filter(id => !filteredSet.has(id));
       const next = [...filtered, ...newIds];
-      saveOrder(next);
+      if (next.length === prev.length && next.every((id, index) => id === prev[index])) {
+        return prev;
+      }
       return next;
     });
   }, [windows]);
 
-  const addToast = useUIStore((s) => s.addToast);
-
   const handleTabClick = useCallback(
     (windowId: string) => {
       if (editingIdRef.current === windowId) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        addToast(t("terminal.tabs.switch_unavailable"), "error");
+        return;
+      }
       ws.send(JSON.stringify({ type: "switch_window", window: windowId }));
       onSwitchWindow(windowId);
 
@@ -137,7 +151,7 @@ export function TerminalTabs({
         if (size) ws.send(JSON.stringify({ type: "resize", ...size }));
       }, SETTLE_TIMEOUT_MS);
     },
-    [ws, onSwitchWindow, terminalRef, fitAddonRef]
+    [ws, onSwitchWindow, terminalRef, fitAddonRef, addToast, t]
   );
 
   useEffect(() => {
@@ -151,8 +165,8 @@ export function TerminalTabs({
   useEffect(() => {
     if (displayedActiveWindowId !== null || windows.length === 0) return;
     const active = windows.find((w) => w.active);
-    onSwitchWindow(active ? active.id : windows[0].id);
-  }, [windows, displayedActiveWindowId, onSwitchWindow]);
+    onSwitchWindowRef.current(active ? active.id : windows[0].id);
+  }, [windows, displayedActiveWindowId]);
 
   useEffect(() => {
     if (editingId) {
@@ -212,12 +226,14 @@ export function TerminalTabs({
   const handleCloseTab = useCallback(
     async (windowId: string, e: React.MouseEvent | React.KeyboardEvent) => {
       e.stopPropagation();
-      const currentWindows = windowsRef.current;
-      if (currentWindows.length <= 1) return;
+      if (windowsRef.current.length <= 1 || deletingIdsRef.current.has(windowId)) return;
+      deletingIdsRef.current.add(windowId);
       try {
         await deleteMutation.mutateAsync(windowId);
         if (displayedActiveWindowId === windowId) {
-          const remaining = currentWindows.filter((w) => w.id !== windowId);
+          const remaining = windowsRef.current.filter(
+            (w) => w.id !== windowId && !deletingIdsRef.current.has(w.id),
+          );
           if (remaining.length > 0) {
             const next = remaining[0];
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -230,6 +246,8 @@ export function TerminalTabs({
         }
       } catch {
         addToast(t("terminal.tabs.delete_failed"), "error");
+      } finally {
+        deletingIdsRef.current.delete(windowId);
       }
     },
     [deleteMutation, displayedActiveWindowId, ws, onSwitchWindow, addToast, t]
@@ -310,12 +328,14 @@ export function TerminalTabs({
       {sortedWindows.map((w) => {
         const isActive = w.id === displayedActiveWindowId;
         const isEditing = editingId === w.id;
+        const socketReady = !!ws && ws.readyState === WebSocket.OPEN;
         return (
           <div
             key={w.id}
             role="tab"
             tabIndex={0}
             aria-selected={isActive}
+            aria-disabled={!socketReady}
             onClick={() => handleTabClick(w.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleTabClick(w.id); }
@@ -343,18 +363,19 @@ export function TerminalTabs({
                 if (fromIdx < 0 || toIdx < 0) return prev;
                 next.splice(fromIdx, 1);
                 next.splice(toIdx, 0, dragId);
-                saveOrder(next);
                 return next;
               });
               setDragId(null);
             }}
             onDragEnd={() => setDragId(null)}
             title={isEditing ? undefined : t("terminal.tabs.rename_hint")}
-            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors cursor-pointer select-none rounded-t-md border-t border-x ${
+            className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs whitespace-nowrap transition-colors select-none rounded-t-md border-t border-x ${
               isActive
                 ? "bg-[#0d1117] text-gray-200 border-gray-700/70 -mb-px pb-[7px]"
                 : "text-gray-500 border-transparent hover:text-gray-300 hover:bg-gray-800/40 mb-0"
-            } ${dragId === w.id ? "opacity-50" : ""}`}
+            } ${dragId === w.id ? "opacity-50" : ""} ${
+              socketReady ? "cursor-pointer" : "cursor-not-allowed"
+            }`}
           >
             {isEditing ? (
               <input

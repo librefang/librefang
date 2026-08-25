@@ -45,8 +45,12 @@ fn has_cargo_subcommand(sub: &str) -> bool {
 fn run_cargo_audit(root: &Path, ignore_ids: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     if !has_cargo_subcommand("audit") {
         println!("  Installing cargo-audit...");
+        // `--locked` builds the tool from its own published Cargo.lock.
+        // Without it cargo re-resolves to the newest semver-compatible
+        // dependencies, which can demand a rustc newer than the toolchain
+        // this workspace pins and fail the install outright.
         let status = Command::new("cargo")
-            .args(["install", "cargo-audit"])
+            .args(["install", "cargo-audit", "--locked"])
             .status()?;
         if !status.success() {
             return Err("failed to install cargo-audit".into());
@@ -69,7 +73,7 @@ fn run_cargo_outdated(root: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     if !has_cargo_subcommand("outdated") {
         println!("  Installing cargo-outdated...");
         let status = Command::new("cargo")
-            .args(["install", "cargo-outdated"])
+            .args(["install", "cargo-outdated", "--locked"])
             .status()?;
         if !status.success() {
             return Err("failed to install cargo-outdated".into());

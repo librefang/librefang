@@ -1,4 +1,6 @@
 // Curated Lucide entrypoint. Keep production builds tree-shakeable.
+// These internal paths are version-coupled, so package.json intentionally
+// pins lucide-react exactly and lucide.test.ts imports every mapping.
 export { default as Activity } from "lucide-react/dist/esm/icons/activity.mjs";
 export { default as AlertCircle } from "lucide-react/dist/esm/icons/circle-alert.mjs";
 export { default as AlertTriangle } from "lucide-react/dist/esm/icons/triangle-alert.mjs";
@@ -27,6 +29,7 @@ export { default as ChevronUp } from "lucide-react/dist/esm/icons/chevron-up.mjs
 export { default as ClipboardPaste } from "lucide-react/dist/esm/icons/clipboard-paste.mjs";
 export { default as Clock } from "lucide-react/dist/esm/icons/clock.mjs";
 export { default as Cloud } from "lucide-react/dist/esm/icons/cloud.mjs";
+export { default as CloudOff } from "lucide-react/dist/esm/icons/cloud-off.mjs";
 export { default as Code } from "lucide-react/dist/esm/icons/code.mjs";
 export { default as Copy } from "lucide-react/dist/esm/icons/copy.mjs";
 export { default as Cpu } from "lucide-react/dist/esm/icons/cpu.mjs";
