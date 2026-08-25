@@ -555,7 +555,9 @@ pub async fn update_budget(
             // surfaces a 400 instead of a misleading 500.
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
-            PersistBudgetError::Managed => crate::routes::managed_config_response(),
+            PersistBudgetError::Managed => {
+                crate::routes::managed_config_response(state.kernel.config_path())
+            }
         };
     }
 
@@ -627,19 +629,12 @@ async fn persist_budget_locked(
     new_budget: &librefang_types::config::BudgetConfig,
     _guard: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), PersistBudgetError> {
-    if crate::routes::guard_config_write().is_some() {
+    if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistBudgetError::Managed);
     }
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(PersistBudgetError::Internal(
-            "invalid config file path".to_string(),
-        ));
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Read the existing file. A read failure on an existing file MUST
     // abort — falling back to "" would silently drop every other section
@@ -1422,7 +1417,9 @@ pub async fn update_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
-        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(super::users::PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -1512,7 +1509,9 @@ pub async fn delete_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
-        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(super::users::PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -1817,7 +1816,9 @@ pub async fn update_provider_budget(
         return match e {
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
-            PersistBudgetError::Managed => crate::routes::managed_config_response(),
+            PersistBudgetError::Managed => {
+                crate::routes::managed_config_response(state.kernel.config_path())
+            }
         };
     }
 

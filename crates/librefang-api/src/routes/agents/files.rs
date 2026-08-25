@@ -110,6 +110,77 @@ mod identity_file_list_tests {
         assert_eq!(soul["size_bytes"], 7);
         assert!(files.iter().any(|file| file["exists"] == false));
     }
+
+    /// Concurrent writers to the same identity file previously shared one
+    /// staging path (`.{filename}.tmp`), so each `fs::write` truncated whatever
+    /// the other had staged and the surviving file could hold interleaved
+    /// bytes from both payloads rather than either one intact.
+    ///
+    /// The payloads differ in length so a torn result is detectable: a
+    /// prefix-length match would still fail the whole-content comparison.
+    #[test]
+    fn concurrent_writes_leave_one_payload_intact() {
+        const WRITERS: usize = 8;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+
+        let payloads: Vec<String> = (0..WRITERS)
+            .map(|index| format!("payload-{index}").repeat(index * 500 + 1))
+            .collect();
+
+        std::thread::scope(|scope| {
+            for payload in &payloads {
+                let workspace = workspace.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    write_identity_file(&workspace, "SOUL.md", payload)
+                        .expect("write must succeed");
+                });
+            }
+        });
+
+        let written = std::fs::read_to_string(workspace.join(".identity/SOUL.md")).unwrap();
+        assert!(
+            payloads.contains(&written),
+            "content must equal exactly one payload, not a mix; got {} bytes",
+            written.len()
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(workspace.join(".identity"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "SOUL.md")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staging file may survive a successful write; found {leftovers:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_file_helpers_reject_symlink_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join(".identity")).unwrap();
+        let outside_file = outside.path().join("secret");
+        std::fs::write(&outside_file, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside_file, workspace.path().join(".identity/SOUL.md"))
+            .unwrap();
+
+        assert!(matches!(
+            read_identity_file(workspace.path(), "SOUL.md"),
+            Err(IdentityFileMutationError::Forbidden)
+        ));
+        assert!(matches!(
+            delete_identity_file(workspace.path(), "SOUL.md"),
+            Err(IdentityFileMutationError::Forbidden)
+        ));
+        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "secret");
+    }
 }
 
 /// GET /api/agents/{id}/files/{filename} — Read a workspace identity file.
@@ -178,54 +249,36 @@ pub async fn get_agent_file(
         }
     };
 
-    // Resolve canonical path: prefer .identity/ (current layout), fall back to workspace root
-    let ws_canonical = match workspace.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+    let filename_for_read = filename.clone();
+    drop(t);
+    let read_result =
+        tokio::task::spawn_blocking(move || read_identity_file(&workspace, &filename_for_read))
+            .await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
+        Ok(Ok(content)) => content,
+        Ok(Err(IdentityFileMutationError::Workspace)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
-    };
-
-    let identity_path = workspace.join(".identity").join(&filename);
-    let file_path = if identity_path.exists() {
-        identity_path
-    } else {
-        workspace.join(&filename)
-    };
-
-    let canonical = match file_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
+        Ok(Err(IdentityFileMutationError::NotFound | IdentityFileMutationError::Io(_))) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
-    };
-
-    if !canonical.starts_with(&ws_canonical) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
-        );
-    }
-
-    // Off-runtime read so this axum handler never parks a tokio worker
-    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
-    // must be dropped before the `.await` and re-created afterwards or
-    // axum's `Handler` bound fails to compile.
-    drop(t);
-    let read_result = tokio::fs::read_to_string(&canonical).await;
-    let t = ErrorTranslator::new(resolved_lang);
-    let content = match read_result {
-        Ok(c) => c,
-        Err(_) => {
+        Ok(Err(IdentityFileMutationError::Forbidden)) => {
             return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
+            );
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": scrub_500(&error, &t)})),
             );
         }
     };
@@ -256,6 +309,36 @@ enum IdentityFileMutationError {
     Io(std::io::Error),
 }
 
+fn resolve_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<std::path::PathBuf, IdentityFileMutationError> {
+    let ws_canonical = workspace
+        .canonicalize()
+        .map_err(|_| IdentityFileMutationError::Workspace)?;
+    let identity_candidate = ws_canonical.join(".identity").join(filename);
+    let file_path = if identity_candidate.exists() {
+        identity_candidate
+    } else {
+        ws_canonical.join(filename)
+    };
+    let canonical = file_path
+        .canonicalize()
+        .map_err(|_| IdentityFileMutationError::NotFound)?;
+    if !canonical.starts_with(&ws_canonical) {
+        return Err(IdentityFileMutationError::Forbidden);
+    }
+    Ok(canonical)
+}
+
+fn read_identity_file(
+    workspace: &std::path::Path,
+    filename: &str,
+) -> Result<String, IdentityFileMutationError> {
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::read_to_string(path).map_err(IdentityFileMutationError::Io)
+}
+
 fn write_identity_file(
     workspace: &std::path::Path,
     filename: &str,
@@ -275,37 +358,23 @@ fn write_identity_file(
         return Err(IdentityFileMutationError::Forbidden);
     }
 
-    let tmp_path = identity_dir.join(format!(".{filename}.tmp"));
-    std::fs::write(&tmp_path, content).map_err(IdentityFileMutationError::Io)?;
-    if let Err(error) = std::fs::rename(&tmp_path, &file_path) {
-        if let Err(cleanup_error) = std::fs::remove_file(&tmp_path) {
-            tracing::warn!(error = %cleanup_error, "Failed to remove temporary identity file");
-        }
-        return Err(IdentityFileMutationError::Io(error));
-    }
-    Ok(())
+    // Staging through `.{filename}.tmp` gave every writer of the same identity
+    // file the same staging path, so two concurrent `PUT`s truncated each
+    // other's staged bytes before either rename — the surviving content was
+    // whichever write happened to finish last, interleaved. The shared
+    // `atomic_write` derives its temp name from the process ID and a
+    // per-process counter, and additionally fsyncs the staged file before the
+    // rename and the parent directory after it, which the plain
+    // `fs::write` + `rename` here did neither of.
+    crate::atomic_write(&file_path, content.as_bytes()).map_err(IdentityFileMutationError::Io)
 }
 
 fn delete_identity_file(
     workspace: &std::path::Path,
     filename: &str,
 ) -> Result<(), IdentityFileMutationError> {
-    let ws_canonical = workspace
-        .canonicalize()
-        .map_err(|_| IdentityFileMutationError::Workspace)?;
-    let identity_candidate = workspace.join(".identity").join(filename);
-    let file_path = if identity_candidate.exists() {
-        identity_candidate
-    } else {
-        workspace.join(filename)
-    };
-    let canonical = file_path
-        .canonicalize()
-        .map_err(|_| IdentityFileMutationError::NotFound)?;
-    if !canonical.starts_with(&ws_canonical) {
-        return Err(IdentityFileMutationError::Forbidden);
-    }
-    std::fs::remove_file(canonical).map_err(IdentityFileMutationError::Io)
+    let path = resolve_identity_file(workspace, filename)?;
+    std::fs::remove_file(path).map_err(IdentityFileMutationError::Io)
 }
 
 /// PUT /api/agents/{id}/files/{filename} — Write a workspace identity file.
@@ -407,7 +476,10 @@ pub async fn set_agent_file(
             );
         }
         Ok(Err(IdentityFileMutationError::NotFound)) => {
-            unreachable!("write never returns NotFound")
+            return ApiErrorResponse::internal_scrub(
+                "identity-file write unexpectedly resolved as not found",
+            )
+            .into_json_tuple();
         }
         Err(error) => {
             return (

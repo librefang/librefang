@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.7.31"
+    "version": "2026.8.19"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -173,13 +173,13 @@
         "tags": [
           "a2a"
         ],
-        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.",
+        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by URL or name.",
         "operationId": "a2a_get_external_agent",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "Id",
+            "description": "Canonical URL or agent name",
             "required": true,
             "schema": {
               "type": "string"
@@ -196,6 +196,9 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "No external A2A agent found for the given identity"
           }
         }
       }
@@ -229,6 +232,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "The pending-agent identity is not a valid HTTP(S) URL"
           },
           "404": {
             "description": "No pending agent found for the given URL"
@@ -644,6 +650,77 @@
         }
       }
     },
+    "/api/agents/spawn-ephemeral": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/spawn-ephemeral — run one ephemeral worker turn and return its result.",
+        "operationId": "spawn_ephemeral_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnEphemeralRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The worker ran and returned its result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnEphemeralResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, unknown agent type, or a tool the parent cannot call",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The parent is suspended, or the spawn depth ceiling was reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such parent agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The parent's resource quota or the global budget is exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "tags": [
@@ -794,6 +871,7 @@
           "agents"
         ],
         "summary": "PUT /api/agents/{id}/channels — Update an agent's channel allowlist.",
+        "description": "Body shape mirrors the sibling `mcp_servers` route rather than the bare array the OpenAPI\nannotation used to advertise (#7742).\nThe old handler read `body[\"channels\"]` out of an untyped `Value` and fell back to `Vec::new()`\nfor anything it did not recognise, so the documented bare-array body — and any typo in the key —\nsilently cleared the allowlist and reopened the agent to every channel.\nWidening an allowlist is not a defensible interpretation of a malformed request, so a body that\ndoes not deserialize is now a 400.",
         "operationId": "set_agent_channels",
         "parameters": [
           {
@@ -807,11 +885,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of channel_type strings",
+          "description": "Object containing the channel allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentChannelsRequest"
               }
             }
           },
@@ -820,6 +898,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's channel allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -1548,7 +1636,6 @@
         "tags": [
           "agents"
         ],
-        "summary": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
         "operationId": "set_agent_mcp_servers",
         "parameters": [
           {
@@ -1562,11 +1649,11 @@
           }
         ],
         "requestBody": {
-          "description": "Array of MCP server names",
+          "description": "Object containing the MCP server allowlist",
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonArray"
+                "$ref": "#/components/schemas/SetAgentMcpServersRequest"
               }
             }
           },
@@ -1575,6 +1662,16 @@
         "responses": {
           "200": {
             "description": "Update an agent's MCP server allowlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
             "content": {
               "application/json": {
                 "schema": {
@@ -2445,7 +2542,7 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE).",
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's\nin-flight stream events (SSE or WebSocket).",
         "description": "Any client can subscribe to the events emitted by an active turn on this\nsession: the originating client (CLI, Tauri desktop, web) plus any number\nof additional clients. Late attachers begin receiving events from the\nmoment they subscribe — partial-turn snapshots are not replayed.\n\nReturns 404 if the session does not exist or belongs to a different agent.",
         "operationId": "attach_session_stream",
         "parameters": [
@@ -2469,6 +2566,9 @@
           }
         ],
         "responses": {
+          "101": {
+            "description": "WebSocket session event stream"
+          },
           "200": {
             "description": "Server-sent events stream of session events"
           },
@@ -2794,7 +2894,7 @@
           }
         ],
         "requestBody": {
-          "description": "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609).",
+          "description": "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742).",
           "content": {
             "application/json": {
               "schema": {
@@ -2806,7 +2906,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.",
+            "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3747,7 +3847,7 @@
           "auth"
         ],
         "summary": "Change the dashboard password and/or username.",
-        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.",
+        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.\n\nRefused with `423 Locked` in managed mode (#6695): the new username and password hash are persisted as top-level `dashboard_user` / `dashboard_pass_hash` keys in `config.toml`, so a deployment that owns the file owns the dashboard credential too.\nIn such a deployment the credential is rotated by changing the manifest and rolling, which is also the only way the change survives the next rollout.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -3775,6 +3875,16 @@
           },
           "401": {
             "description": "Current password is incorrect"
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; rotate the credential in the manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5148,6 +5258,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the entry from the manifest instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5213,6 +5333,16 @@
           },
           "409": {
             "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the sidecar in the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5541,6 +5671,16 @@
         "responses": {
           "200": {
             "description": "SSE stream of inter-agent events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The process-wide communication stream limit is exhausted",
             "content": {
               "application/json": {
                 "schema": {
@@ -6203,6 +6343,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/install — Install a catalog entry (alias for\nPOST /api/mcp/servers with template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), and refused **unconditionally** rather than per-store the way `persist_mcp_upsert` is.\nThe difference is not a policy choice: this handler calls `upsert_mcp_server_config` directly, with no `mcp_runtime_store` check, so it rewrites `config.toml` even when the store is `\"db\"`.\nWhile that remains true the guard has to be unconditional or it would miss the write it exists to stop.\nThe route it aliases (`POST /api/mcp/servers`) honours the store, so a managed deployment that wants an install surface sets `mcp_runtime_store = \"db\"` and uses that route.",
         "operationId": "install_extension",
         "requestBody": {
           "content": {
@@ -6224,6 +6365,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the server in the manifest, or use POST /api/mcp/servers with `mcp_runtime_store = \"db\"`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -6234,6 +6385,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/uninstall — Uninstall by catalog id (template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), unconditionally, for the same reason as `install_extension`: it calls `remove_mcp_server_config` without consulting `mcp_runtime_store`.\nWithout the guard an uninstall would delete a `[[mcp_servers]]` entry the manifest declares and the next rollout would restore it, which is drift in both directions.",
         "operationId": "uninstall_extension",
         "requestBody": {
           "content": {
@@ -6248,6 +6400,16 @@
         "responses": {
           "200": {
             "description": "Uninstall a catalog-backed MCP server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the server from the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7689,6 +7851,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7719,6 +7890,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -7779,6 +7953,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "offset",
             "in": "query",
             "description": "Pagination offset (default 0)",
@@ -7809,6 +7992,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       },
@@ -8345,6 +8531,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8365,6 +8560,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -8646,6 +8844,15 @@
             }
           },
           {
+            "name": "level",
+            "in": "query",
+            "description": "Optional memory level filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Max results (default 10)",
@@ -8666,6 +8873,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid memory level filter"
           }
         }
       }
@@ -8977,6 +9187,105 @@
         "responses": {
           "200": {
             "description": "Custom model removed"
+          }
+        }
+      }
+    },
+    "/api/models/overrides/{id}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/models/overrides/{id} — Get inference parameter overrides for a model.",
+        "operationId": "get_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The model's stored overrides, or `{}` when none are set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "models"
+        ],
+        "summary": "PUT /api/models/overrides/{id} — Set inference parameter overrides for a model.",
+        "description": "The body is a whole `ModelOverrides` document, not a patch: a field omitted\nfrom the body is cleared. Alongside the inference parameters it carries the\noperator's capacity-limit corrections, `context_window` and\n`max_output_tokens` (#7774) — both editable at any time, and both surviving a\nregistry sync because they live in `model_overrides.json` rather than on the\ncatalog entry the sync rewrites.",
+        "operationId": "set_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The persisted overrides",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Overrides could not be persisted"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.",
+        "operationId": "delete_model_overrides",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Override key, `provider:model_id`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Overrides removed"
           }
         }
       }
@@ -10393,7 +10702,7 @@
           "system"
         ],
         "summary": "POST /api/restore — Restore kernel state from a backup archive.",
-        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
+        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\nTwo optional fields narrow what gets written:\n\n- `keep_config` (bool, default `false`) skips `config.toml`, so the target\n  keeps its own API key, bind port and paths (clone mode).\n- `components` (array of strings) limits the restore to the named\n  components — `config`, `cron_jobs`, `hand_state`, `custom_models`,\n  `agents`, `skills`, `workflows`, `data`. **Omit the field** to restore\n  everything; `[]` and any unrecognised name are rejected with `400` rather\n  than quietly restoring nothing. Archive entries no component owns are\n  restored regardless of the selection.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
         "operationId": "restore_backup",
         "requestBody": {
           "content": {
@@ -11731,6 +12040,42 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates — Create an operator-authored agent type.",
+        "description": "The body is the flat editor shape; `name` is required here because there is no URL segment to take it from.",
+        "operationId": "create_agent_type",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Agent type created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid name"
+          },
+          "409": {
+            "description": "Name already taken by an agent type or a live agent"
+          }
+        }
       }
     },
     "/api/templates/{name}": {
@@ -11753,7 +12098,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Template details",
+            "description": "Template details, plus the flat editor projection and a read-only privacy pass over the manifest for registry promotion",
             "content": {
               "application/json": {
                 "schema": {
@@ -11761,6 +12106,90 @@
                 }
               }
             }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name — Apply the flat editor shape as a **patch** over the stored manifest.",
+        "description": "This is a read-modify-write, and that is load-bearing rather than incidental (#7740).\nThe flat shape carries seven of `AgentManifest`'s fifty-eight fields.\nRebuilding the document from the request body and writing it over the file — which is what the endpoint did on the branch this replaces — resets the other fifty-one to their defaults and answers 200: `[[triggers]]`, `[compaction]`, `max_history_messages`, `mcp_servers`, `tool_allowlist`, `session_mode`, `[workspaces]`, `channels`, `[exec_policy]` and `fallback_models` all disappear the first time anyone opens the editor and saves.\n\nSo the stored manifest is parsed first and the body applied over it.\nA key the client did not send leaves its field untouched; a key it did send is written through verbatim, including an empty string, because \"the operator cleared this\" and \"the client did not mention it\" are different instructions and only a typed `Option` can tell them apart.",
+        "operationId": "update_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent type updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "The name belongs to a live agent, which is edited through /api/agents"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/templates/:name — Remove an operator-authored agent type.",
+        "description": "Only reaches `agent-types/`. A name that resolves to a live agent is refused with the same\nmanaged-elsewhere conflict `PUT` uses — deleting an agent is `DELETE /api/agents/{id}`.",
+        "operationId": "delete_agent_type",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "The name belongs to a live agent, which is deleted through /api/agents"
           }
         }
       }
@@ -11959,7 +12388,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Trigger created",
             "content": {
               "application/json": {
@@ -11971,6 +12400,15 @@
           },
           "400": {
             "description": "Invalid trigger definition"
+          },
+          "404": {
+            "description": "Owner or target agent not found"
+          },
+          "500": {
+            "description": "Unexpected kernel failure"
+          },
+          "503": {
+            "description": "Trigger registration temporarily unavailable"
           }
         }
       }
@@ -12122,9 +12560,45 @@
         "summary": "GET /api/usage — Get per-agent usage statistics.",
         "description": "The per-agent rollup is materialized from the in-memory agent registry\nand returned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Per-agent usage statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12143,9 +12617,45 @@
         ],
         "summary": "GET /api/usage/by-model — Get usage grouped by model.",
         "operationId": "usage_by_model",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Usage grouped by model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12164,9 +12674,45 @@
         ],
         "summary": "GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.",
         "operationId": "usage_by_model_performance",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Model performance metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12185,9 +12731,128 @@
         ],
         "summary": "GET /api/usage/daily — Get daily usage breakdown for the last 7 days.",
         "operationId": "usage_daily",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "How many days back from now to report on. Defaults to 7, capped at 366.\nMutually exclusive with `start_date` / `end_date`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Daily usage breakdown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed range, out-of-bounds `days`, or `days` combined with a date range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/export": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/export — Stream raw usage events for a date range as CSV.",
+        "operationId": "usage_export",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the export window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the export window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Output format. Only `csv` is supported; omitted means `csv`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV stream of usage events",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range, or unsupported format",
             "content": {
               "application/json": {
                 "schema": {
@@ -12206,9 +12871,45 @@
         ],
         "summary": "GET /api/usage/summary — Get overall usage summary from UsageStore.",
         "operationId": "usage_summary",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Overall usage summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12737,6 +13438,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -12772,6 +13476,9 @@
           },
           "404": {
             "description": "Template not found"
+          },
+          "500": {
+            "description": "Template serialization failed"
           }
         }
       }
@@ -14581,6 +15288,8 @@
         "required": [
           "used_tokens",
           "max_context_tokens",
+          "max_context_tokens_source",
+          "max_context_tokens_assumed",
           "pct",
           "model",
           "pressure"
@@ -14590,6 +15299,14 @@
             "type": "integer",
             "description": "Resolved model context window. Falls back to\n`UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is\nalways positive.",
             "minimum": 0
+          },
+          "max_context_tokens_assumed": {
+            "type": "boolean",
+            "description": "True when `max_context_tokens` is a guess rather than a fact about the\nmodel — i.e. the source is `fallback` (refs #7774).\n\nThe condition behind the report that opened the issue: a gateway-served\nmodel reports no window, the runtime assumes 8192, and a conversation\nwell inside the model's real window is refused for an overflow that\nexists only in that assumption.\nClients render the warning off this flag rather than string-matching the\nsource."
+          },
+          "max_context_tokens_source": {
+            "type": "string",
+            "description": "Which layer of the precedence chain produced `max_context_tokens`\n(refs #7774): `agent_override`, `model_override`, `catalog`,\n`session_hint` or `fallback`.\n\nWithout this the number is unreadable: a window an operator set, one the\nregistry declared and one the runtime invented are all the same integer."
           },
           "model": {
             "type": "string",
@@ -14611,6 +15328,23 @@
           }
         }
       },
+      "SetAgentChannelsRequest": {
+        "type": "object",
+        "description": "Body of `PUT /api/agents/{id}/channels`.",
+        "required": [
+          "channels"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`channel_type` strings the agent may receive messages from.\nAn empty list clears the allowlist, which means \"all channels\" (`mode = \"all\"`)."
+          }
+        },
+        "additionalProperties": false
+      },
       "SetAgentFileRequest": {
         "type": "object",
         "description": "Request body for writing a workspace identity file.",
@@ -14620,6 +15354,23 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetAgentMcpServersRequest": {
+        "type": "object",
+        "description": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
+        "required": [
+          "mcp_servers"
+        ],
+        "properties": {
+          "mcp_servers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "MCP server names assigned to the agent.\nAn empty list disables MCP servers for the agent; `[\"*\"]` enables all connected servers."
           }
         },
         "additionalProperties": false
@@ -14637,6 +15388,13 @@
               "type": "string"
             },
             "description": "Declared tools (capabilities.tools) — the grant surface.\nA builtin or skill tool has to be admitted here to reach the agent at all.\n`None` = no change, `Some([])` = unrestricted.\nGlob patterns allowed."
+          },
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
           },
           "tool_allowlist": {
             "type": [
@@ -14721,6 +15479,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "sdk_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `librefang-sdk` version the adapter reported on `--describe`."
           }
         }
       },
@@ -14793,6 +15558,119 @@
           }
         },
         "additionalProperties": false
+      },
+      "SpawnEphemeralRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/agents/spawn-ephemeral`.\n\n`provider` and `model` are flat rather than a nested object because that is the shape every other authoring surface already speaks — the agent-type editor, `AgentTypeSpec`, `PATCH /api/agents/{id}/model`.\nThey are assembled into an [`EphemeralModelOverride`] here, which deliberately carries only those two fields: a `base_url` / `api_key_env` reachable from this endpoint would let a caller name any environment variable and any destination host.",
+        "required": [
+          "parent",
+          "message"
+        ],
+        "properties": {
+          "agent_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent type whose template manifest supplies the worker's system prompt, model and declared tools."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short human-meaningful label for the mission, used to name the mission workspace and the worker.\n\nDefaults to `agent_type` when one is given, and to `worker` otherwise, so the common \"run this type on this task\" call needs only two fields."
+          },
+          "max_iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Iteration ceiling, clamped down to the operator's configured `agent_max_iterations`.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "The task the worker is being asked to perform."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model id override."
+          },
+          "parent": {
+            "type": "string",
+            "description": "The agent the worker runs on behalf of — UUID or name.\n\nNot optional: it names the ledger the spend is billed to, the `[resources]` quota that is enforced, and the ceiling on the worker's tool set."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider id override (`anthropic`, `openai`, …)."
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "System prompt for the worker; overrides the agent type's when both are given."
+          },
+          "tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names the worker may use. Omit for \"everything the effective manifest grants\", which is itself capped by the parent's own set."
+          }
+        }
+      },
+      "SpawnEphemeralResponse": {
+        "type": "object",
+        "description": "What one ephemeral worker turn produced.\n\nMirrors `librefang_types::ephemeral::EphemeralSpawnResult` field for field.\nIt is restated here rather than annotated there because `librefang-types` does not depend on `utoipa`, and adding a web-documentation dependency to the crate every other crate depends on to buy one schema is the wrong trade.",
+        "required": [
+          "name",
+          "response",
+          "iterations",
+          "tools"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Cost billed to the parent, when one could be estimated."
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Loop iterations consumed.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name the worker ran under (`<label>-<8 hex>`), also its mission workspace directory name."
+          },
+          "response": {
+            "type": "string",
+            "description": "The worker's final assistant text."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names the worker was given — which, by construction, is also the set it could execute."
+          }
+        }
       },
       "SpawnRequest": {
         "type": "object",

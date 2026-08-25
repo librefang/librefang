@@ -1,1 +1,0 @@
-Manual schedule runs now deliver successful agent and workflow output through configured primary and fan-out targets, matching timed cron fires instead of returning output only to the API caller (#6708) (@Kvitral)

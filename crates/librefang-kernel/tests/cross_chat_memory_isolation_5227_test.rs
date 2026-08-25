@@ -144,6 +144,7 @@ async fn auto_memorize_stamps_chat_scope_metadata_5227() {
             })],
             Some(SHARED_PEER),
             Some(GROUP_CHANNEL),
+            None,
         )
         .await
         .expect("auto_memorize must succeed");
@@ -179,6 +180,7 @@ async fn auto_memorize_stamps_chat_scope_metadata_5227() {
             })],
             Some(SHARED_PEER),
             None,
+            None,
         )
         .await
         .expect("auto_memorize must succeed");
@@ -212,6 +214,7 @@ async fn unscoped_caller_preserves_legacy_recall_5227() {
             })],
             Some(SHARED_PEER),
             Some(DM_CHANNEL),
+            None,
         )
         .await
         .expect("auto_memorize must succeed");
@@ -222,6 +225,7 @@ async fn unscoped_caller_preserves_legacy_recall_5227() {
             "dark mode",
             Some(SHARED_PEER),
             None, // no chat scope — filter is a no-op
+            None, // no session scope — same
         )
         .await
         .expect("auto_retrieve must succeed");

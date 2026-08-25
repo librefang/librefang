@@ -170,6 +170,16 @@ pub struct PluginEventBus {
 }
 
 impl PluginEventBus {
+    fn lock_drop_warning_timestamp(&self) -> std::sync::MutexGuard<'_, std::time::Instant> {
+        self.last_drop_warn.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "Plugin event bus drop-warning lock poisoned; recovering rate-limit state"
+            );
+            self.last_drop_warn.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(capacity);
         // Initialise the rate-limit timestamp far enough in the past that
@@ -212,17 +222,16 @@ impl PluginEventBus {
             .dropped_count
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
             + n;
-        if let Ok(mut last) = self.last_drop_warn.lock() {
-            if last.elapsed() >= std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS) {
-                tracing::error!(
-                    lagged = n,
-                    total_dropped = total,
-                    context = context,
-                    "Plugin event bus: consumer lagged behind broadcast queue, events dropped — \
-                     receiver should be drained faster or buffer increased",
-                );
-                *last = std::time::Instant::now();
-            }
+        let mut last = self.lock_drop_warning_timestamp();
+        if last.elapsed() >= std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS) {
+            tracing::error!(
+                lagged = n,
+                total_dropped = total,
+                context = context,
+                "Plugin event bus: consumer lagged behind broadcast queue, events dropped — \
+                 receiver should be drained faster or buffer increased",
+            );
+            *last = std::time::Instant::now();
         }
     }
 }

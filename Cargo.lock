@@ -3355,9 +3355,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.13"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-acp"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4513,7 +4513,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "axum",
@@ -4523,6 +4523,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dashmap",
+ "fs2",
  "futures",
  "image",
  "include_dir",
@@ -4551,7 +4552,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -4598,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "axum",
  "clap",
@@ -4631,7 +4632,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "aes-gcm",
  "argon2 0.5.3",
@@ -4665,7 +4666,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4690,7 +4691,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "librefang-types",
  "reqwest",
@@ -4702,7 +4703,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-import"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4720,7 +4721,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4781,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4794,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "librefang-llm-driver",
  "librefang-memory",
@@ -4806,7 +4807,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -4822,7 +4823,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4836,7 +4837,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4873,7 +4874,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4896,7 +4897,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory-wiki"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "chrono",
  "librefang-kernel-handle",
@@ -4912,7 +4913,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-rl-export"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -4927,12 +4928,13 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "uuid",
  "wiremock",
 ]
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4994,13 +4996,14 @@ dependencies = [
  "url",
  "uuid",
  "wasmtime",
+ "windows-sys 0.61.2",
  "wiremock",
  "zeroize",
 ]
 
 [[package]]
 name = "librefang-runtime-audit"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "chrono",
  "hex",
@@ -5018,7 +5021,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5047,7 +5050,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-media"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -5067,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-sandbox-docker"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "chrono",
  "dashmap",
@@ -5079,7 +5082,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "aho-corasick",
  "base64 0.23.1",
@@ -5108,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-subprocess"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "metrics",
  "serde_json",
@@ -5120,7 +5123,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -5128,7 +5131,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -5150,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5176,7 +5179,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -7984,14 +7987,16 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "2.2.0"
+version = "3.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14db48ee17a9ba61810ab1a9c1beb7d06d8136ae39ac25a1137f10d357af01af"
+checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
 dependencies = [
- "async-trait",
+ "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
  "http",
+ "indexmap 2.14.0",
  "pin-project-lite",
  "process-wrap",
  "reqwest",
@@ -12680,7 +12685,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.7.31"
+version = "2026.8.19"
 dependencies = [
  "base64 0.23.1",
  "chrono",

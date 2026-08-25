@@ -13,22 +13,32 @@ identify cycle. This sidecar runs proper periodic heartbeats so
 sessions survive long-running idle periods.
 """
 
-import io
 import json
 import os
-import urllib.error
-import urllib.parse
 
 import pytest
 
+from librefang.sidecar.adapters import discord as da
 
-os.environ.setdefault("DISCORD_BOT_TOKEN", "test-bot-token")
-from librefang.sidecar.adapters import discord as da  # noqa: E402
-
-from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+from _sidecar_fakes import _FakeUrlopen
 
 
 # ---- _FakeUrlopen scaffolding (shared shape with reddit tests) -----
+
+
+@pytest.fixture(autouse=True)
+def _isolated_discord_env(monkeypatch):
+    defaults = {
+        "DISCORD_BOT_TOKEN": "test-bot-token",
+        "DISCORD_ALLOWED_GUILDS": "",
+        "DISCORD_ALLOWED_USERS": "",
+        "DISCORD_INTENTS": "",
+        "DISCORD_IGNORE_BOTS": "",
+        "DISCORD_MENTION_PATTERNS": "",
+        "DISCORD_ACCOUNT_ID": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -61,12 +71,11 @@ def test_default_api_base_and_intents():
     assert a.account_id is None
 
 
-def test_missing_token_exits_2():
-    os.environ["DISCORD_BOT_TOKEN"] = ""
+def test_missing_token_exits_2(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "")
     with pytest.raises(SystemExit) as exc:
         da.DiscordAdapter()
     assert exc.value.code == 2
-    os.environ["DISCORD_BOT_TOKEN"] = "test-bot-token"
 
 
 def test_custom_intents_and_account_id():
@@ -869,7 +878,7 @@ async def test_on_send_drops_when_no_channel_id(monkeypatch):
 # ---- _run_session uses the heartbeat scheduling path --------------
 
 
-def test_run_session_sends_identify_when_no_session(monkeypatch):
+def test_run_session_sends_identify_when_no_session():
     """After HELLO, with no saved session, the adapter must send
     IDENTIFY (not RESUME). Captured via FakeWs.sent_text[0]."""
     a = _adapter()
@@ -898,7 +907,7 @@ def test_run_session_sends_identify_when_no_session(monkeypatch):
     assert first["d"]["properties"]["browser"] == "librefang"
 
 
-def test_run_session_sends_resume_when_session_known(monkeypatch):
+def test_run_session_sends_resume_when_session_known():
     a = _adapter()
     a.session_id = "sess-1"
     a.last_seq = 7
@@ -917,7 +926,7 @@ def test_run_session_sends_resume_when_session_known(monkeypatch):
     assert first["d"]["seq"] == 7
 
 
-def test_run_session_emits_message_create(monkeypatch):
+def test_run_session_emits_message_create():
     """End-to-end: HELLO + READY + MESSAGE_CREATE → one emit."""
     a = _adapter()
     a.session_id = None

@@ -478,19 +478,53 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
         None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
     };
 
-    match librefang_kernel::plugin_manager::remove_plugin(name) {
-        Ok(()) => (
+    let plugin_name = name.to_string();
+    let remove_result = tokio::task::spawn_blocking(move || {
+        librefang_kernel::plugin_manager::remove_plugin(&plugin_name)
+    })
+    .await;
+    match remove_result {
+        Ok(Ok(())) => (
             StatusCode::OK,
             Json(serde_json::json!({"removed": true, "name": name})),
         ),
-        Err(e) => {
-            let status = if e.contains("not installed") || e.contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(serde_json::json!({"error": e})))
+        Ok(Err(error)) if error.contains("not installed") || error.contains("not found") => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": error})),
+        ),
+        Ok(Err(error)) => {
+            tracing::error!(%error, plugin = name, "failed to uninstall plugin");
+            plugin_internal_error()
         }
+        Err(error) => {
+            tracing::error!(%error, plugin = name, "plugin uninstall task failed");
+            plugin_internal_error()
+        }
+    }
+}
+
+fn plugin_internal_error() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "Internal server error"})),
+    )
+}
+
+#[cfg(test)]
+mod plugin_error_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn internal_plugin_errors_are_scrubbed_from_http_body() {
+        let response = plugin_internal_error().into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains("plugin.toml"));
+        assert!(!body.contains("permission denied"));
     }
 }
 
@@ -1584,10 +1618,11 @@ pub async fn plugin_update_check(
         .build()
     {
         Ok(c) => c,
-        Err(e) => {
+        Err(error) => {
+            tracing::error!(%error, plugin = %name, "failed to build plugin registry HTTP client");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": format!("HTTP client error: {e}")})),
+                Json(serde_json::json!({"error": "Plugin registry is unavailable"})),
             )
                 .into_response();
         }
@@ -1835,12 +1870,9 @@ pub async fn plugin_registry_search(
         .build()
     {
         Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("HTTP client error: {e}")})),
-            )
-                .into_response();
+        Err(error) => {
+            tracing::error!(%error, %registry, "failed to build plugin registry search HTTP client");
+            return plugin_internal_error().into_response();
         }
     };
 

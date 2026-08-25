@@ -1,5 +1,17 @@
-import { describe, expect, it } from 'vitest'
-import { parseEntries, escapeXml, renderEntry, buildFeed } from './gen-rss'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  buildFeed,
+  escapeCdata,
+  escapeXml,
+  generateFeed,
+  parseEntries,
+  renderEntry,
+} from './gen-rss'
+
+afterEach(() => vi.restoreAllMocks())
 
 const SAMPLE = `# Changelog
 
@@ -43,6 +55,19 @@ describe('parseEntries', () => {
   it('returns empty on no matches', () => {
     expect(parseEntries('# Just a heading', 5)).toEqual([])
   })
+
+  it('warns on non-versioned h2 headings and keeps them out of entry bodies', () => {
+    const warn = vi.fn()
+    const entries = parseEntries(
+      '## [1.0.0] - 2026-01-01\nrelease body\n## [Unreleased]\ndraft body',
+      5,
+      warn,
+    )
+
+    expect(entries).toHaveLength(1)
+    expect(entries[0]?.body).toBe('release body')
+    expect(warn).toHaveBeenCalledWith('Skipping non-versioned changelog heading: ## [Unreleased]')
+  })
 })
 
 describe('escapeXml', () => {
@@ -56,6 +81,24 @@ describe('renderEntry', () => {
     const r = renderEntry({ version: '1.0.0', date: '2026-01-01', body: '## body' })
     expect(r).toContain('<![CDATA[## body]]>')
     expect(r).toContain('<updated>2026-01-01T00:00:00Z</updated>')
+  })
+
+  it('splits CDATA terminators without changing the text payload', () => {
+    const body = 'before ]]> after'
+    const rendered = renderEntry({ version: '1.0.0', date: '2026-01-01', body })
+
+    expect(escapeCdata(body)).toBe('before ]]]]><![CDATA[> after')
+    expect(rendered).toContain('<![CDATA[before ]]]]><![CDATA[> after]]>')
+  })
+
+  it('uses the configured site for entry ids and links', () => {
+    const rendered = renderEntry(
+      { version: '1.0.0', date: '2026-01-01', body: '' },
+      'https://example.com/',
+    )
+
+    expect(rendered).toContain('<id>https://example.com/changelog/#1-0-0</id>')
+    expect(rendered).toContain('href="https://example.com/changelog/#1-0-0"')
   })
 })
 
@@ -72,9 +115,19 @@ describe('buildFeed', () => {
   it('custom site/author are threaded through and XML-escaped', () => {
     const { xml } = buildFeed(SAMPLE, { site: 'https://example.com', author: 'X <x@y.z>', max: 1 })
     expect(xml).toContain('https://example.com/feed.xml')
-    // Author name is XML-escaped so angle brackets in the default
-    // `LibreFang <noreply@…>` string don't produce invalid Atom.
-    expect(xml).toContain('<name>X &lt;x@y.z&gt;</name>')
+    expect(xml).toContain('<author><name>X</name><email>x@y.z</email></author>')
+    expect(xml).toContain('https://example.com/changelog/#2026-4-15')
+  })
+
+  it('renders structured author fields according to Atom', () => {
+    const { xml } = buildFeed(SAMPLE, {
+      author: { name: 'R&D <team>', email: 'feed&alerts@example.com' },
+      max: 1,
+    })
+
+    expect(xml).toContain(
+      '<author><name>R&amp;D &lt;team&gt;</name><email>feed&amp;alerts@example.com</email></author>',
+    )
   })
 
   it('empty changelog yields a feed with zero entries', () => {
@@ -82,5 +135,28 @@ describe('buildFeed', () => {
     expect(entries).toHaveLength(0)
     expect(xml).toContain('<feed')
     expect(xml.match(/<entry>/g)).toBeNull()
+  })
+})
+
+describe('generateFeed', () => {
+  it('adds path context to changelog read failures', () => {
+    const missing = join(tmpdir(), 'librefang-rss-missing', 'CHANGELOG.md')
+
+    expect(() => generateFeed(missing)).toThrow(`Unable to read changelog at ${missing}:`)
+  })
+
+  it('adds path context to output write failures', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const dir = mkdtempSync(join(tmpdir(), 'librefang-rss-'))
+    const changelog = join(dir, 'CHANGELOG.md')
+    writeFileSync(changelog, SAMPLE)
+
+    try {
+      expect(() => generateFeed(changelog, dir)).toThrow(
+        `Unable to write Atom feed at ${dir}:`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
