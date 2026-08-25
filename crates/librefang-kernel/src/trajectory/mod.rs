@@ -488,20 +488,12 @@ impl TrajectoryExporter {
         out
     }
 
-    /// Redact every string inside a JSON value. Keys are left untouched
-    /// (they're typically not secret-bearing in tool inputs).
+    /// Redact every string inside a JSON value. Keys are left untouched (they're typically not secret-bearing in tool inputs).
     ///
-    /// The traversal is an explicit work stack rather than recursion, and the
-    /// over-depth value is dropped iteratively too. `librefang-rl-export`'s
-    /// `redact_metadata` was hardened this way and this function was not, which
-    /// left two functions doing the same job in the same repository with only
-    /// one of them safe on a deeply nested input.
+    /// The traversal is an explicit work stack rather than recursion, and the over-depth value is dropped iteratively too.
+    /// `librefang-rl-export`'s `redact_metadata` was hardened this way and this function was not, which left two functions doing the same job in the same repository with only one of them safe on a deeply nested input.
     ///
-    /// A `Value` that arrived through `serde_json::from_str` cannot exceed the
-    /// parser's own 128-deep limit, but the tool inputs and outputs reaching
-    /// here are not all parsed — a programmatically constructed value nests as
-    /// far as its builder chose, and both the recursive walk and the recursive
-    /// `Drop` glue for such a value run on the same stack frame budget.
+    /// A `Value` that arrived through `serde_json::from_str` cannot exceed the parser's own 128-deep limit, but the tool inputs and outputs reaching here are not all parsed — a programmatically constructed value nests as far as its builder chose, and both the recursive walk and the recursive `Drop` glue for such a value run on the same stack frame budget.
     fn redact_json(&self, v: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
 
@@ -560,10 +552,8 @@ impl TrajectoryExporter {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Depth past which a nested JSON value is replaced by a sentinel rather than
-/// walked. Matches `MAX_METADATA_DEPTH` in `librefang-rl-export`, and matches
-/// `serde_json`'s own parser limit, so nothing that arrived over the wire is
-/// affected.
+/// Depth past which a nested JSON value is replaced by a sentinel rather than walked.
+/// Matches `MAX_METADATA_DEPTH` in `librefang-rl-export`, and matches `serde_json`'s own parser limit, so nothing that arrived over the wire is affected.
 const MAX_REDACT_DEPTH: usize = 128;
 
 /// Stand-in for a subtree that exceeded `MAX_REDACT_DEPTH`.
@@ -571,9 +561,7 @@ const TOO_DEEP_SENTINEL: &str = "<REDACTED:TOO_DEEP>";
 
 /// Drop a `Value` without recursing.
 ///
-/// Dropping a deeply nested value recurses through `Drop` glue, so a value too
-/// deep to walk is also too deep to drop the ordinary way — replacing the walk
-/// alone would move the overflow from the traversal to the end of the scope.
+/// Dropping a deeply nested value recurses through `Drop` glue, so a value too deep to walk is also too deep to drop the ordinary way — replacing the walk alone would move the overflow from the traversal to the end of the scope.
 fn drop_value_iteratively(value: serde_json::Value) {
     use serde_json::Value;
     let mut pending = vec![value];
@@ -734,10 +722,8 @@ mod tests {
         assert_eq!(levels, MAX_REDACT_DEPTH, "cap applied at the wrong depth");
     }
 
-    /// The recursive walk this replaced overflowed the stack on a value this
-    /// deep, taking the whole daemon with it rather than returning an error.
-    /// A recursion-based implementation cannot pass this test at any depth cap,
-    /// because the recursive `Drop` glue overflows even if the walk is bounded.
+    /// The recursive walk this replaced overflowed the stack on a value this deep, taking the whole daemon with it rather than returning an error.
+    /// A recursion-based implementation cannot pass this test at any depth cap, because the recursive `Drop` glue overflows even if the walk is bounded.
     #[test]
     fn redact_json_survives_a_value_far_deeper_than_any_stack() {
         let exp = dummy_exporter(RedactionPolicy::default());
