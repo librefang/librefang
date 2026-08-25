@@ -45,7 +45,23 @@ pub struct MemorySubstrate {
     channel_bindings: ChannelBindingStore,
     workflow_store: WorkflowStore,
     chunk_config: ChunkConfig,
+    /// Upper bound, in characters, on the text of a single episodic memory row
+    /// written by the agent loop's per-turn writer (#7911). Zero disables the cap.
+    ///
+    /// Held here rather than threaded through `LoopOptions` because the runtime's
+    /// per-turn writer already holds the substrate, and `[memory]` is
+    /// restart-required in `build_reload_plan` — so a value read once at boot
+    /// cannot go stale relative to the config on disk.
+    max_episodic_chars: usize,
 }
+
+/// Fallback episodic character cap for substrates constructed without a
+/// kernel config — every `open_in_memory*` test helper and any embedder that
+/// never calls [`MemorySubstrate::set_max_episodic_chars`].
+///
+/// Matches `MemoryConfig::default().max_episodic_chars` so a test store and a
+/// default-configured daemon agree.
+pub const DEFAULT_MAX_EPISODIC_CHARS: usize = 8_000;
 
 /// Canonical PRAGMA set applied to every SqliteConnectionManager
 /// connection on first checkout. Extracted as a `pub(crate)` const
@@ -237,6 +253,7 @@ impl MemorySubstrate {
             workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
+            max_episodic_chars: DEFAULT_MAX_EPISODIC_CHARS,
         })
     }
 
@@ -274,6 +291,7 @@ impl MemorySubstrate {
             workflow_store: WorkflowStore::new(pool.clone()),
             consolidation: ConsolidationEngine::new(pool, decay_rate),
             chunk_config,
+            max_episodic_chars: DEFAULT_MAX_EPISODIC_CHARS,
         })
     }
 
@@ -334,6 +352,20 @@ impl MemorySubstrate {
         self.consolidation.set_duplicate_threshold(threshold);
     }
 
+    /// Set the per-row character cap the runtime applies to episodic memory
+    /// writes (#7911). Called once from the kernel boot path with
+    /// `[memory] max_episodic_chars`.
+    pub fn set_max_episodic_chars(&mut self, max_chars: usize) {
+        self.max_episodic_chars = max_chars;
+    }
+
+    /// The per-row character cap for episodic memory writes. Zero means
+    /// "no cap" and restores the pre-#7911 behaviour of storing whatever the
+    /// turn produced, including an inlined attachment.
+    pub fn max_episodic_chars(&self) -> usize {
+        self.max_episodic_chars
+    }
+
     /// Get a clone of the connection pool (for constructing stores from outside).
     pub fn pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
@@ -344,6 +376,7 @@ impl MemorySubstrate {
     /// - USER scope: never decays
     /// - SESSION scope: decays after `session_ttl_days` of no access
     /// - AGENT scope: decays after `agent_ttl_days` of no access
+    /// - EPISODIC scope: decays after `episodic_ttl_days` of no access (#7911)
     ///
     /// Returns the number of memories deleted.
     pub fn run_decay(
