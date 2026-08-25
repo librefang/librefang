@@ -94,6 +94,12 @@ pub struct MemoryItem {
     /// conflating the two makes an unranked result look like a measured miss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
+    /// The storage `scope` string of the fragment this item came from, carried out of the conversion instead of being discarded (#7920).
+    ///
+    /// [`level`](Self::level) is not a substitute: `MemoryLevel::from` folds every scope it does not recognise — [`EPISODIC_SCOPE`] among them — into `MemoryLevel::Session`, so a raw-dialogue row round-tripped through `MemoryItem` came back labelled `session_memory` and any consumer that classifies by scope filed it as an extracted fact.
+    /// `None` means the item was not built from a stored fragment (a freshly extracted candidate, a sidecar reply) and has no storage scope yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl MemoryItem {
@@ -112,6 +118,7 @@ impl MemoryItem {
             access_count: None,
             agent_id: None,
             similarity: None,
+            scope: None,
         }
     }
 
@@ -165,6 +172,7 @@ impl MemoryItem {
             created_at: frag.created_at,
             similarity: frag.similarity,
             metadata: frag.metadata,
+            scope: Some(frag.scope),
         }
     }
 }
@@ -1015,6 +1023,7 @@ fn push_memory(
         access_count: None,
         agent_id: None,
         similarity: None,
+        scope: None,
     });
 }
 
