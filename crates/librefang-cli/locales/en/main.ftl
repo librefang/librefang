@@ -318,6 +318,7 @@ automation-workflow-created-id =   ID: { $id }
 automation-workflow-create-failed = Failed to create workflow: { $error }
 automation-workflow-completed = Workflow completed!
 automation-workflow-run-id =   Run ID: { $id }
+automation-workflow-still-running = Workflow started; it is still running.
 automation-workflow-failed = Workflow failed: { $error }
 automation-trigger-none = No triggers registered.
 automation-trigger-invalid-pattern = Invalid pattern JSON: { $error }
@@ -1396,6 +1397,8 @@ chat-runner-press-esc-to-exit =   Press Esc to exit.
 
 # tui/event.rs
 tui-event-workflow-completed = Workflow completed
+tui-event-workflow-still-running = Workflow started; still running (run { $id })
+tui-event-workflow-run-failed = Workflow run failed ({ $status }): { $detail }
 tui-event-workflow-exec-not-available-in-process = Workflow execution not available in in-process mode
 tui-event-workflow-create-not-available-in-process = Workflow creation not available in in-process mode
 tui-event-workflow-steps-empty = Steps are required: enter a JSON array of step objects
