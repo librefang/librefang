@@ -1582,6 +1582,10 @@ func (r *SystemResource) EffectivePermissions(user_id string) (interface{}, erro
 	return r.client.request("GET", fmt.Sprintf("/api/authz/effective/%s", user_id), nil, nil)
 }
 
+func (r *SystemResource) Whoami() (interface{}, error) {
+	return r.client.request("GET", "/api/authz/whoami", nil, nil)
+}
+
 func (r *SystemResource) CreateBackup() (interface{}, error) {
 	return r.client.request("POST", "/api/backup", nil, nil)
 }

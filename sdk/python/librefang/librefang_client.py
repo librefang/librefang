@@ -1208,6 +1208,9 @@ class _SystemResource(_Resource):
     def effective_permissions(self, user_id: str):
         return self._c._request("GET", f"/api/authz/effective/{user_id}")
 
+    def whoami(self):
+        return self._c._request("GET", "/api/authz/whoami")
+
     def create_backup(self):
         return self._c._request("POST", "/api/backup")
 

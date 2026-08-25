@@ -1486,6 +1486,10 @@ class SystemResource {
     return this._c._request("GET", `/api/authz/effective/${user_id}`);
   }
 
+  async whoami() {
+    return this._c._request("GET", "/api/authz/whoami");
+  }
+
   async createBackup() {
     return this._c._request("POST", "/api/backup");
   }
