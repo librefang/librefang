@@ -278,6 +278,7 @@ fn make_ctx<'a>(kernel: &'a Arc<dyn KernelHandle>, caller: Option<&'a str>) -> T
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
+        acting_principal: None,
     }
 }
 

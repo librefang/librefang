@@ -7301,6 +7301,7 @@ mod tests {
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -7352,6 +7353,7 @@ mod tests {
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -7651,6 +7653,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -7988,6 +7991,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -8086,6 +8090,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -8150,6 +8155,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8196,6 +8202,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -8249,6 +8256,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8307,6 +8315,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8364,6 +8373,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8447,6 +8457,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -8531,6 +8542,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8700,6 +8712,7 @@ prompt_template = "go"
                     description: None,
                 },
             ]),
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -8797,6 +8810,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let input_json = serde_json::json!({
@@ -9142,6 +9156,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -9942,6 +9957,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -10089,6 +10105,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -10459,6 +10476,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -10515,6 +10533,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -11485,6 +11504,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -11942,6 +11962,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12054,6 +12075,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12212,6 +12234,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12300,6 +12323,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -12354,6 +12378,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -13021,6 +13046,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -13488,6 +13514,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -13958,6 +13985,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "topic".to_string()).await.unwrap();

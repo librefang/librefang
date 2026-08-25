@@ -425,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn schedule_create_without_kernel_returns_unavailable() {
-        let r = tool_schedule_create(&json!({}), None, Some("agent-a"), None).await;
+        let r = tool_schedule_create(&json!({}), None, Some("agent-a"), None, None).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 

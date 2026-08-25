@@ -141,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn cron_create_without_kernel_returns_unavailable() {
-        let r = tool_cron_create(&json!({}), None, Some("agent-a"), None).await;
+        let r = tool_cron_create(&json!({}), None, Some("agent-a"), None, None).await;
         match r {
             Err(ToolError::Unavailable(cap)) => assert_eq!(cap, "Kernel handle"),
             other => panic!("expected Unavailable, got {other:?}"),
