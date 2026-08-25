@@ -148,6 +148,7 @@ classified differently — the row note spells out which is which.
 | `context_engine` | R | Pluggable context-engine config. |
 | `tool_results` | N | Tool-result context budget + artifact spill config. |
 | `max_history_messages` | N | Global message-history trim cap (see arch doc). |
+| `memory_fact_budget_percent` | N | Share of the prompt memory section budget reserved for extracted facts (#7920). |
 | `agent_max_iterations` | N | Operator override for the agent-loop iteration cap. |
 | `max_agent_call_depth` | N | Maximum inter-agent call depth. |
 

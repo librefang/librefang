@@ -79,7 +79,7 @@ pub(super) async fn remember_interaction_best_effort(
                         agent_id,
                         interaction_text,
                         MemorySource::Conversation,
-                        "episodic",
+                        librefang_types::memory::EPISODIC_SCOPE,
                         HashMap::new(),
                         Some(&vec),
                         peer_id,
@@ -104,7 +104,7 @@ pub(super) async fn remember_interaction_best_effort(
                         agent_id,
                         interaction_text,
                         MemorySource::Conversation,
-                        "episodic",
+                        librefang_types::memory::EPISODIC_SCOPE,
                         HashMap::new(),
                         peer_id,
                     )
@@ -123,7 +123,7 @@ pub(super) async fn remember_interaction_best_effort(
             agent_id,
             interaction_text,
             MemorySource::Conversation,
-            "episodic",
+            librefang_types::memory::EPISODIC_SCOPE,
             HashMap::new(),
             peer_id,
         )
@@ -234,6 +234,10 @@ pub(super) struct PromptSetupContext<'a> {
     pub(super) experiment_context: Option<&'a ExperimentContext>,
     pub(super) running_experiment: Option<&'a librefang_types::agent::PromptExperiment>,
     pub(super) memories: &'a [MemoryFragment],
+    /// Operator override for the share of the prompt memory section's character budget reserved for extracted facts, as a percentage.
+    ///
+    /// Kernel populates this from `KernelConfig.memory_fact_budget_percent`; `None` uses `prompt_builder::MEMORY_FACT_BUDGET_PERCENT`.
+    pub(super) memory_fact_budget_percent: Option<u8>,
     pub(super) stable_prefix_mode: bool,
     pub(super) streaming: bool,
 }
@@ -657,17 +661,36 @@ pub(super) fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
     }
 
     let memory_context_msg = if !ctx.memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = ctx
-            .memories
-            .iter()
-            .map(|m| (String::new(), m.content.clone()))
-            .collect();
+        // Split by class before the section is built. Recall ranks both classes in one list and
+        // that ranking is sound — raw dialogue takes slightly *under* its base rate of the slots —
+        // but a dialogue row inlines a whole exchange and outweighs an extracted fact by roughly
+        // nine to one in characters, so one shared budget hands the section to dialogue on size
+        // alone and leaves 29 % of turns with no fact in the prompt at all (#7920).
+        // `partition` preserves rank order within each class, so the section stays a fixed
+        // arrangement of a fixed input (#3298).
+        let (dialogue, facts): (Vec<&MemoryFragment>, Vec<&MemoryFragment>) =
+            ctx.memories.iter().partition(|m| m.is_raw_dialogue());
+        let to_pairs = |frags: &[&MemoryFragment]| -> Vec<(String, String)> {
+            frags
+                .iter()
+                .map(|m| (String::new(), m.content.clone()))
+                .collect()
+        };
+        let fact_pairs = to_pairs(&facts);
+        let dialogue_pairs = to_pairs(&dialogue);
         if ctx.stable_prefix_mode {
-            let personal_ctx =
-                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            let personal_ctx = crate::prompt_builder::format_memory_items_by_class(
+                &fact_pairs,
+                &dialogue_pairs,
+                ctx.memory_fact_budget_percent,
+            );
             Some(personal_ctx)
         } else {
-            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            let section = crate::prompt_builder::build_memory_section_by_class(
+                &fact_pairs,
+                &dialogue_pairs,
+                ctx.memory_fact_budget_percent,
+            );
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&section);
             None
