@@ -1,23 +1,14 @@
 //! `parent_agent_id` must survive a daemon restart (#7930).
 //!
-//! `AgentEntry.parent` had no column in the `agents` table, so every hydration site in
-//! `librefang-memory`'s `StructuredStore` reconstructed it as `None`.
-//! `routes/agents/mod.rs` serialises that field as `parent_agent_id`, which made the defect
-//! user-visible rather than merely dead: after any restart the API positively asserted that every
-//! agent had no parent, whatever its real lineage.
-//! The pre-fix kernel test (`kernel::tests`, `assert_eq!(entry.parent, Some(parent))`) passed
-//! throughout, because it reads the in-memory registry and never round-trips through the store.
+//! `AgentEntry.parent` had no column in the `agents` table, so every hydration site in `librefang-memory`'s `StructuredStore` reconstructed it as `None`.
+//! `routes/agents/mod.rs` serialises that field as `parent_agent_id`, which made the defect user-visible rather than merely dead: after any restart the API positively asserted that every agent had no parent, whatever its real lineage.
+//! The pre-fix kernel test (`kernel::tests`, `assert_eq!(entry.parent, Some(parent))`) passed throughout, because it reads the in-memory registry and never round-trips through the store.
 //!
-//! These tests close that gap the only way that actually proves it: two `LibreFangKernel::boot_with_config`
-//! calls against the same `home_dir` / `data_dir`, with the production router
-//! (`server::build_router`) in front of each.
-//! Nothing in the second boot has ever seen the first boot's registry, so a `parent_agent_id` that
-//! is still correct on the far side can only have come off disk.
+//! These tests close that gap the only way that actually proves it: two `LibreFangKernel::boot_with_config` calls against the same `home_dir` / `data_dir`, with the production router (`server::build_router`) in front of each.
+//! Nothing in the second boot has ever seen the first boot's registry, so a `parent_agent_id` that is still correct on the far side can only have come off disk.
 //!
-//! `reload_agent_from_disk` — the in-process restart stand-in used by
-//! `agent_manifest_persist_test.rs` — is deliberately NOT used here. It re-reads `agent.toml` and
-//! swaps only the manifest, and lineage is not a manifest field, so a test built on it would pass
-//! vacuously against the broken code.
+//! `reload_agent_from_disk` — the in-process restart stand-in used by `agent_manifest_persist_test.rs` — is deliberately NOT used here.
+//! It re-reads `agent.toml` and swaps only the manifest, and lineage is not a manifest field, so a test built on it would pass vacuously against the broken code.
 //!
 //! No test here reaches an LLM: every assertion lands on registry and store state.
 //!
@@ -39,9 +30,7 @@ const TEST_TOKEN: &str = "test-secret";
 // Harness
 // ---------------------------------------------------------------------------
 
-/// One booted daemon: the concrete kernel (for `spawn_agent_with_parent`, which is an inherent
-/// method and therefore not reachable through `AppState`'s `Arc<dyn KernelApi>`), the production
-/// router, and the shared state.
+/// One booted daemon: the concrete kernel (for `spawn_agent_with_parent`, which is an inherent method and therefore not reachable through `AppState`'s `Arc<dyn KernelApi>`), the production router, and the shared state.
 struct Daemon {
     kernel: Arc<LibreFangKernel>,
     app: axum::Router,
@@ -88,9 +77,8 @@ async fn boot_at(home: &std::path::Path) -> Daemon {
     }
 }
 
-/// A manifest with enough capability surface to be a legal parent. `spawn_agent_inner` enforces
-/// that a child's capabilities are a subset of its parent's, so the parent must be the broader of
-/// the two.
+/// A manifest with enough capability surface to be a legal parent.
+/// `spawn_agent_inner` enforces that a child's capabilities are a subset of its parent's, so the parent must be the broader of the two.
 fn parent_manifest(name: &str) -> AgentManifest {
     AgentManifest {
         name: name.to_string(),
@@ -111,8 +99,8 @@ fn child_manifest(name: &str) -> AgentManifest {
     }
 }
 
-/// `GET /api/agents`, returning the `items` array. `enrich_agent_json` — and therefore
-/// `parent_agent_id` — is reached from the list route; `GET /api/agents/{id}` does not emit it.
+/// `GET /api/agents`, returning the `items` array.
+/// `enrich_agent_json` — and therefore `parent_agent_id` — is reached from the list route; `GET /api/agents/{id}` does not emit it.
 async fn list_agents(app: &axum::Router) -> Vec<serde_json::Value> {
     let req = Request::builder()
         .method(Method::GET)
@@ -149,8 +137,7 @@ fn agent_named<'a>(items: &'a [serde_json::Value], name: &str) -> &'a serde_json
 
 /// The exact regression from #7930.
 ///
-/// Before the fix the second boot's `GET /api/agents` reported `parent_agent_id: null` for the
-/// child, because `load_all_agents` had no column to read and hardcoded `parent: None`.
+/// Before the fix the second boot's `GET /api/agents` reported `parent_agent_id: null` for the child, because `load_all_agents` had no column to read and hardcoded `parent: None`.
 #[tokio::test(flavor = "multi_thread")]
 async fn parent_agent_id_survives_a_daemon_restart() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -163,15 +150,14 @@ async fn parent_agent_id_survives_a_daemon_restart() {
             .kernel
             .spawn_agent(parent_manifest("lineage-parent"))
             .expect("parent spawn");
-        // A child agent gets a random id rather than a name-derived one, so it has to be captured
-        // from the spawn return value.
+        // A child agent gets a random id rather than a name-derived one, so it has to be captured from the spawn return value.
         let child_id = daemon
             .kernel
             .spawn_agent_with_parent(child_manifest("lineage-child"), Some(parent_id))
             .expect("child spawn");
 
-        // Baseline: the live registry already had this right before the fix. Asserting it here is
-        // what makes the post-restart assertion below a persistence claim rather than a spawn one.
+        // Baseline: the live registry already had this right before the fix.
+        // Asserting it here is what makes the post-restart assertion below a persistence claim rather than a spawn one.
         let items = list_agents(&daemon.app).await;
         assert_eq!(
             agent_named(&items, "lineage-child")["parent_agent_id"].as_str(),
@@ -204,8 +190,7 @@ async fn parent_agent_id_survives_a_daemon_restart() {
         "a row written after schema v54 has authoritative lineage"
     );
 
-    // `children` is derived from the stored `parent_id` edges rather than persisted, so this is
-    // only correct if the derivation ran on the reload path.
+    // `children` is derived from the stored `parent_id` edges rather than persisted, so this is only correct if the derivation ran on the reload path.
     let parent = agent_named(&items, "lineage-parent");
     assert_eq!(
         parent["children"],
@@ -228,11 +213,9 @@ async fn parent_agent_id_survives_a_daemon_restart() {
 
 /// A row written before schema v54 must come back as "lineage unknown", never as a root agent.
 ///
-/// The bug produced `parent_agent_id: null`, which is wrong. Reading a pre-v54 row as a root agent
-/// would replace that with a *confidently* wrong answer — the API would be asserting a fact about
-/// lineage that was never recorded. The `parent_recorded INTEGER NOT NULL DEFAULT 0` column exists
-/// exactly so that the two cases stay distinguishable, and this test reproduces the on-disk state
-/// that the `ALTER TABLE` leaves behind for a row that already existed.
+/// The bug produced `parent_agent_id: null`, which is wrong.
+/// Reading a pre-v54 row as a root agent would replace that with a *confidently* wrong answer — the API would be asserting a fact about lineage that was never recorded.
+/// The `parent_recorded INTEGER NOT NULL DEFAULT 0` column exists exactly so that the two cases stay distinguishable, and this test reproduces the on-disk state that the `ALTER TABLE` leaves behind for a row that already existed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pre_v54_row_is_reported_as_unknown_lineage_not_as_a_root_agent() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -249,13 +232,11 @@ async fn a_pre_v54_row_is_reported_as_unknown_lineage_not_as_a_root_agent() {
             .spawn_agent_with_parent(child_manifest("legacy-child"), Some(parent_id))
             .expect("child spawn");
         daemon.shutdown();
-        // `boot.rs` resolves the substrate to `data_dir/librefang.db` when
-        // `[memory] sqlite_path` is unset, which `test_config` leaves at its default.
+        // `boot.rs` resolves the substrate to `data_dir/librefang.db` when `[memory] sqlite_path` is unset, which `test_config` leaves at its default.
         home.join("data").join("librefang.db")
     };
 
-    // Rewind the child's row to exactly what a pre-v54 database holds: no recorded parent, and the
-    // `DEFAULT 0` provenance flag the migration backfilled.
+    // Rewind the child's row to exactly what a pre-v54 database holds: no recorded parent, and the `DEFAULT 0` provenance flag the migration backfilled.
     {
         let conn = rusqlite::Connection::open(&db_path).expect("open agents db");
         let touched = conn

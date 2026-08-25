@@ -2098,28 +2098,23 @@ pub struct AgentEntry {
     /// Parent agent (if spawned by another agent).
     ///
     /// Persisted since schema v54 (#7930) as the `agents.parent_id` column.
-    /// Read `None` together with [`Self::parent_unknown`]: `None` means "this agent has no parent"
-    /// only when `parent_unknown` is `false`.
+    /// Read `None` together with [`Self::parent_unknown`]: `None` means "this agent has no parent" only when `parent_unknown` is `false`.
     pub parent: Option<AgentId>,
     /// Child agents spawned by this agent.
     ///
-    /// **Derived, never stored.** There is no `children` column; the store reconstructs this from
-    /// the `parent_id` of every other row (`WHERE parent_id = ?`, served by `idx_agents_parent_id`).
-    /// Two stored copies of one relationship can disagree, and this pair already would have:
-    /// `spawn_agent_inner` pushes onto the parent's in-memory list but persists only the child row.
+    /// **Derived, never stored.**
+    /// There is no `children` column; the store reconstructs this from the `parent_id` of every other row (`WHERE parent_id = ?`, served by `idx_agents_parent_id`).
+    /// Two stored copies of one relationship can disagree, and this pair already would have: `spawn_agent_inner` pushes onto the parent's in-memory list but persists only the child row.
     /// Sorted by agent id so the list is byte-identical across reloads (#3298).
     pub children: Vec<AgentId>,
-    /// `true` when [`Self::parent`] is `None` because nothing was ever recorded, as opposed to
-    /// because the agent genuinely has no parent.
+    /// `true` when [`Self::parent`] is `None` because nothing was ever recorded, as opposed to because the agent genuinely has no parent.
     ///
-    /// Set only by the store, and only for a row written before schema v54 (#7930) added
-    /// `agents.parent_id`. Such a row has `parent_recorded = 0` and its lineage is unrecoverable —
-    /// it must not be reported as a root agent, which is what a bare `parent: None` would imply.
+    /// Set only by the store, and only for a row written before schema v54 (#7930) added `agents.parent_id`.
+    /// Such a row has `parent_recorded = 0` and its lineage is unrecoverable — it must not be reported as a root agent, which is what a bare `parent: None` would imply.
     ///
-    /// The polarity is deliberate. `false` (the `Default` / `#[serde(default)]` value) means
-    /// "recorded and authoritative", which is correct for every entry built in memory by the
-    /// kernel, since it knows the lineage it just assigned. A `parent_recorded`-style field would
-    /// have defaulted to the unsafe answer and silently mislabelled live agents as unknown.
+    /// The polarity is deliberate.
+    /// `false` (the `Default` / `#[serde(default)]` value) means "recorded and authoritative", which is correct for every entry built in memory by the kernel, since it knows the lineage it just assigned.
+    /// A `parent_recorded`-style field would have defaulted to the unsafe answer and silently mislabelled live agents as unknown.
     #[serde(default)]
     pub parent_unknown: bool,
     /// Active session ID.
@@ -2199,8 +2194,8 @@ impl Default for AgentEntry {
             last_active: now,
             parent: None,
             children: Vec::new(),
-            // `false` = "parent is recorded and authoritative". Only the store's
-            // hydration path flips this, and only for a pre-v54 row (#7930).
+            // `false` = "parent is recorded and authoritative".
+            // Only the store's hydration path flips this, and only for a pre-v54 row (#7930).
             parent_unknown: false,
             session_id: SessionId::default(),
             source_toml_path: None,

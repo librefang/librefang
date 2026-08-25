@@ -334,14 +334,12 @@ impl StructuredStore {
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
 
-        // Lineage (#7930, schema v54). `parent_recorded` is written as `1`
-        // unconditionally: reaching this line means a live `AgentEntry` stated
-        // its parentage, so `parent_id IS NULL` on this row from now on means
-        // "no parent", not "never asked". Rows still carrying the migration's
-        // `DEFAULT 0` are the ones written before v54, and only those.
+        // Lineage (#7930, schema v54).
+        // `parent_recorded` is written as `1` unconditionally: reaching this line means a live `AgentEntry` stated its parentage, so `parent_id IS NULL` on this row from now on means "no parent", not "never asked".
+        // Rows still carrying the migration's `DEFAULT 0` are the ones written before v54, and only those.
         //
-        // `entry.children` is deliberately NOT written anywhere — it is derived
-        // from other rows' `parent_id` on read. See `migrate_v54`, decision 2.
+        // `entry.children` is deliberately NOT written anywhere — it is derived from other rows' `parent_id` on read.
+        // See `migrate_v54`, decision 2.
         let parent_id = entry.parent.as_ref().map(|p| p.0.to_string());
 
         conn.execute(
@@ -367,14 +365,10 @@ impl StructuredStore {
 
     /// Agent ids whose `parent_id` is `agent_id`, sorted for a stable snapshot.
     ///
-    /// This is the derivation behind [`AgentEntry::children`] (#7930): there is no `children`
-    /// column, so the child list is recomputed from the authoritative `parent_id` edges on every
-    /// read. `idx_agents_parent_id` (schema v54) makes it an index lookup rather than the
-    /// full-table blob scan it would be if lineage lived inside the `manifest` msgpack.
+    /// This is the derivation behind [`AgentEntry::children`] (#7930): there is no `children` column, so the child list is recomputed from the authoritative `parent_id` edges on every read.
+    /// `idx_agents_parent_id` (schema v54) makes it an index lookup rather than the full-table blob scan it would be if lineage lived inside the `manifest` msgpack.
     ///
-    /// Sorted by id text so repeated reads of an unchanged database produce byte-identical
-    /// output — child lists reach LLM prompts via the topology view, and unordered iteration
-    /// there silently invalidates provider prompt caches (#3298).
+    /// Sorted by id text so repeated reads of an unchanged database produce byte-identical output — child lists reach LLM prompts via the topology view, and unordered iteration there silently invalidates provider prompt caches (#3298).
     fn child_ids_of(conn: &rusqlite::Connection, agent_id: &str) -> LibreFangResult<Vec<AgentId>> {
         let mut stmt = conn
             .prepare("SELECT id FROM agents WHERE parent_id = ?1 ORDER BY id")
@@ -396,11 +390,8 @@ impl StructuredStore {
     pub fn load_agent(&self, agent_id: AgentId) -> LibreFangResult<Option<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Widest form first, narrowing on prepare failure. `parent_id` /
-        // `parent_recorded` (schema v54, #7930) are the newest pair, so they
-        // head the fallback chain; a database that has not crossed v54 falls
-        // through to the pre-existing 9-column form and reports every agent's
-        // lineage as unknown rather than as root.
+        // Widest form first, narrowing on prepare failure.
+        // `parent_id` / `parent_recorded` (schema v54, #7930) are the newest pair, so they head the fallback chain; a database that has not crossed v54 falls through to the pre-existing 9-column form and reports every agent's lineage as unknown rather than as root.
         let mut stmt = conn
             .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents WHERE id = ?1")
             .or_else(|_| {
@@ -439,8 +430,7 @@ impl StructuredStore {
             } else {
                 None
             };
-            // #7930: absent columns (pre-v54 DB) and a row carrying the
-            // migration's `DEFAULT 0` both mean "lineage never recorded".
+            // #7930: absent columns (pre-v54 DB) and a row carrying the migration's `DEFAULT 0` both mean "lineage never recorded".
             let parent_id_str: Option<String> = if col_count >= 10 {
                 row.get(9).ok().flatten()
             } else {
@@ -503,8 +493,7 @@ impl StructuredStore {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
                 let is_hand = manifest.is_hand;
-                // #7930: `parent` comes from the column; `children` is derived
-                // from the inverse edges, never stored.
+                // #7930: `parent` comes from the column; `children` is derived from the inverse edges, never stored.
                 let parent = parent_id_str
                     .as_deref()
                     .and_then(|s| uuid::Uuid::parse_str(s).ok())
@@ -574,10 +563,8 @@ impl StructuredStore {
     pub fn load_all_agents(&self) -> LibreFangResult<Vec<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Try the widest column set first, falling back gracefully. The
-        // `parent_id` / `parent_recorded` pair (schema v54, #7930) is newest and
-        // therefore first; a database that has not crossed v54 falls through and
-        // every agent hydrates with `parent_unknown: true`.
+        // Try the widest column set first, falling back gracefully.
+        // The `parent_id` / `parent_recorded` pair (schema v54, #7930) is newest and therefore first; a database that has not crossed v54 falls through and every agent hydrates with `parent_unknown: true`.
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents",
@@ -619,8 +606,7 @@ impl StructuredStore {
                 } else {
                     None
                 };
-                // #7930: a missing column (pre-v54 DB) and a `DEFAULT 0` row
-                // both mean "lineage never recorded for this agent".
+                // #7930: a missing column (pre-v54 DB) and a `DEFAULT 0` row both mean "lineage never recorded for this agent".
                 let parent_id_str: Option<String> = if col_count >= 10 {
                     row.get(9).ok().flatten()
                 } else {
@@ -745,9 +731,8 @@ impl StructuredStore {
                 .unwrap_or_default();
 
             let is_hand = manifest.is_hand;
-            // #7930: `parent` from the column. `children` is filled in below,
-            // once every row has been read, by inverting these edges in memory —
-            // there is no `children` column to disagree with them.
+            // #7930: `parent` from the column.
+            // `children` is filled in below, once every row has been read, by inverting these edges in memory — there is no `children` column to disagree with them.
             let parent = parent_id_str
                 .as_deref()
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
@@ -776,15 +761,10 @@ impl StructuredStore {
 
         // Derive `children` by inverting the `parent` edges just read (#7930).
         //
-        // Doing it here rather than with a per-agent `WHERE parent_id = ?` keeps the whole
-        // rehydration at one table scan, and — more importantly — derives the child lists from
-        // exactly the set of rows that survived the skip-and-continue filters above. A row dropped
-        // for a bad UUID or an undeserialisable manifest therefore cannot appear as somebody's
-        // child, which a second independent query against the table would have let happen.
+        // Doing it here rather than with a per-agent `WHERE parent_id = ?` keeps the whole rehydration at one table scan, and — more importantly — derives the child lists from exactly the set of rows that survived the skip-and-continue filters above.
+        // A row dropped for a bad UUID or an undeserialisable manifest therefore cannot appear as somebody's child, which a second independent query against the table would have let happen.
         //
-        // `BTreeMap` rather than `HashMap`: child lists reach LLM prompts through the topology
-        // view, and HashMap iteration order varies per process, which invalidates provider prompt
-        // caches on unchanged content (#3298).
+        // `BTreeMap` rather than `HashMap`: child lists reach LLM prompts through the topology view, and HashMap iteration order varies per process, which invalidates provider prompt caches on unchanged content (#3298).
         // Keyed by the inner `Uuid` because `AgentId` is deliberately not `Ord`.
         let mut children_by_parent: std::collections::BTreeMap<uuid::Uuid, Vec<AgentId>> =
             std::collections::BTreeMap::new();
@@ -1215,9 +1195,7 @@ mod tests {
         }
     }
 
-    /// The exact regression from #7930: before schema v54 there was no column
-    /// for `parent`, so this round-trip returned `None` for a child agent and
-    /// the API reported `parent_agent_id: null` for it after every restart.
+    /// The exact regression from #7930: before schema v54 there was no column for `parent`, so this round-trip returned `None` for a child agent and the API reported `parent_agent_id: null` for it after every restart.
     #[test]
     fn agent_parent_survives_a_store_round_trip() {
         let store = setup();
@@ -1251,9 +1229,7 @@ mod tests {
         );
     }
 
-    /// A root agent saved after v54 reports `None` *authoritatively*: the API
-    /// may render it as a top-level agent, which it may not do for a pre-v54
-    /// row (see `pre_v54_agent_row_reports_unknown_lineage_not_root`).
+    /// A root agent saved after v54 reports `None` *authoritatively*: the API may render it as a top-level agent, which it may not do for a pre-v54 row (see `pre_v54_agent_row_reports_unknown_lineage_not_root`).
     #[test]
     fn root_agent_saved_after_v54_is_a_known_root() {
         let store = setup();
@@ -1307,10 +1283,7 @@ mod tests {
     }
 
     /// Re-pointing a child at a new parent must move it, not duplicate it.
-    /// This is what a stored `children` column could not have guaranteed:
-    /// `spawn_agent_inner` appends to the parent's in-memory list and persists
-    /// only the child row, so the old parent's stored list would have kept the
-    /// child forever.
+    /// This is what a stored `children` column could not have guaranteed: `spawn_agent_inner` appends to the parent's in-memory list and persists only the child row, so the old parent's stored list would have kept the child forever.
     #[test]
     fn reparenting_moves_the_child_rather_than_duplicating_it() {
         let store = setup();
@@ -1347,8 +1320,7 @@ mod tests {
     }
 
     /// A row written before schema v54 must report lineage as *unknown*.
-    /// Reading it as a root agent would replace #7930's wrong `null` with a
-    /// confidently wrong "this agent has no parent".
+    /// Reading it as a root agent would replace #7930's wrong `null` with a confidently wrong "this agent has no parent".
     #[test]
     fn pre_v54_agent_row_reports_unknown_lineage_not_root() {
         let store = setup();
@@ -1357,8 +1329,7 @@ mod tests {
             .save_agent(&lineage_entry(id, "legacy", None))
             .unwrap();
 
-        // Reproduce exactly what `ALTER TABLE agents ADD COLUMN parent_recorded
-        // INTEGER NOT NULL DEFAULT 0` leaves behind for a row that already existed.
+        // Reproduce exactly what `ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0` leaves behind for a row that already existed.
         {
             let conn = store.pool.get().unwrap();
             conn.execute(
@@ -1383,8 +1354,7 @@ mod tests {
         );
     }
 
-    /// Saving a pre-v54 row again promotes it out of "unknown": the caller
-    /// just stated its lineage, so `parent_recorded` flips to 1.
+    /// Saving a pre-v54 row again promotes it out of "unknown": the caller just stated its lineage, so `parent_recorded` flips to 1.
     #[test]
     fn re_saving_a_pre_v54_row_records_its_lineage() {
         let store = setup();
