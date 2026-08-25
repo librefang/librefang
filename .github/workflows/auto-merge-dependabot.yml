@@ -40,6 +40,7 @@ jobs:
       && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Resolve the PR number from the workflow_run head SHA.  The commits
       # → pulls endpoint returns every PR whose head matches; in practice

@@ -87,14 +87,10 @@ struct HandTomlWrapper {
 }
 
 /// Resolve the agents registry directory from a home directory.
-/// Returns `Some(path)` if `{home_dir}/registry/agents/` exists and is a directory.
+///
+/// Delegates to [`librefang_types::registry_paths::resolve_agent_templates_dir`] so this lookup cannot drift from the runtime's fan-out and the kernel router's hand scan, and so a missing directory is reported at error level in one place rather than dropping `base = "<template>"` resolution silently (#7767).
 fn resolve_agents_dir(home_dir: &Path) -> Option<std::path::PathBuf> {
-    let dir = home_dir.join("registry").join("agents");
-    if dir.is_dir() {
-        Some(dir)
-    } else {
-        None
-    }
+    librefang_types::registry_paths::resolve_agent_templates_dir(&home_dir.join("registry"))
 }
 
 /// Parse a HAND.toml into a HandDefinition with its skill content attached.
@@ -438,6 +434,7 @@ impl HandRegistry {
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
         let _guard = self.persist_lock.lock().unwrap_or_else(|e| {
             warn!("persist_state: persist_lock poisoned, recovering: {e}");
+            self.persist_lock.clear_poison();
             e.into_inner()
         });
         let instances: Vec<PersistedInstance> = self
@@ -1836,6 +1833,55 @@ fn check_option_available(provider_env: Option<&str>, binary: Option<&str>) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hand `base = "<template>"` resolution must read the agent-templates directory through the shared resolver, so the missing-directory case is reported once at error level instead of silently failing the flat parse path (#7767).
+    #[test]
+    fn resolve_agents_dir_delegates_to_the_shared_resolver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path();
+        let registry_root = home_dir.join("registry");
+        std::fs::create_dir_all(registry_root.join("hands")).unwrap();
+
+        assert_eq!(resolve_agents_dir(home_dir), None);
+        assert_eq!(
+            resolve_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+
+        std::fs::create_dir_all(registry_root.join("agents")).unwrap();
+
+        assert_eq!(
+            resolve_agents_dir(home_dir),
+            Some(registry_root.join("agents"))
+        );
+        assert_eq!(
+            resolve_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+    }
+
+    #[test]
+    fn poisoned_persist_lock_recovers_and_persistence_remains_usable() {
+        let reg = HandRegistry::new();
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = reg.persist_lock.lock().unwrap();
+                    panic!("poison hand persistence lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(reg.persist_lock.is_poisoned());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        assert!(!reg.persist_lock.is_poisoned());
+        assert!(state_path.is_file());
+        reg.persist_state(&state_path).unwrap();
+    }
 
     #[test]
     fn poisoned_activation_lock_recovers_and_activation_remains_usable() {

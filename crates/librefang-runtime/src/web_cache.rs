@@ -37,11 +37,16 @@ impl WebCache {
         let entry = self.entries.get(key)?;
         if entry.inserted_at.elapsed() > self.ttl {
             drop(entry); // release read lock before removing
-            self.entries.remove(key);
+            self.evict_key_if_expired(key);
             None
         } else {
             Some(entry.value.clone())
         }
+    }
+
+    fn evict_key_if_expired(&self, key: &str) {
+        self.entries
+            .remove_if(key, |_, entry| entry.inserted_at.elapsed() > self.ttl);
     }
 
     /// Store a value in the cache. No-op if TTL is zero.
@@ -124,6 +129,25 @@ mod tests {
         cache.put("key1".to_string(), "old".to_string());
         cache.put("key1".to_string(), "new".to_string());
         assert_eq!(cache.get("key1"), Some("new".to_string()));
+    }
+
+    #[test]
+    fn stale_expiry_cleanup_preserves_replacement() {
+        let cache = WebCache::new(Duration::from_secs(60));
+        cache.put("key1".to_string(), "expired".to_string());
+        cache.entries.get_mut("key1").unwrap().inserted_at =
+            Instant::now() - Duration::from_secs(61);
+        assert!(cache
+            .entries
+            .get("key1")
+            .is_some_and(|entry| entry.inserted_at.elapsed() > cache.ttl));
+
+        // Simulate a concurrent put after get() observed the old entry but
+        // before its cleanup acquired the map's write path.
+        cache.put("key1".to_string(), "fresh".to_string());
+        cache.evict_key_if_expired("key1");
+
+        assert_eq!(cache.get("key1"), Some("fresh".to_string()));
     }
 
     #[test]

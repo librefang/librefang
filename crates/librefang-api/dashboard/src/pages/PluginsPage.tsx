@@ -549,7 +549,7 @@ export function PluginsPage() {
           <div className="flex gap-2 pt-2">
             <Button variant="primary" className="flex-1"
               onClick={() => scaffoldMutation.mutate(
-                { name: scaffoldName, desc: scaffoldDesc, runtime: scaffoldRuntime },
+                { name: scaffoldName, description: scaffoldDesc, runtime: scaffoldRuntime },
                 {
                   onSuccess: () => {
                     setShowScaffold(false);

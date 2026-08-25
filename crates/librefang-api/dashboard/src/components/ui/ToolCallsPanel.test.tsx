@@ -85,4 +85,35 @@ describe("ToolCallsPanel", () => {
     expect(within(dialog).getByRole("button", { name: /Fs Read/i })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: /Memory Recall/i })).toBeInTheDocument();
   });
+
+  it("does not serialize a circular input while the modal is closed", () => {
+    const input: Record<string, unknown> = {};
+    input.self = input;
+
+    expect(() =>
+      render(<ToolCallsPanel tools={[makeTool({ input })]} />),
+    ).not.toThrow();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("preserves fallback tool card state when an earlier tool is inserted", async () => {
+    const user = userEvent.setup();
+    const first = makeTool({ name: "first.tool", input: { order: 1 } });
+    const second = makeTool({
+      name: "second.tool",
+      input: { order: 2 },
+      result: "second result",
+    });
+    const inserted = makeTool({ name: "inserted.tool", input: { order: 0 } });
+    const { rerender } = render(<ToolCallsPanel tools={[first, second]} />);
+
+    await user.click(screen.getByRole("button", { name: /chat\.tool_calls:2/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /Second Tool/i }));
+    expect(screen.getByText("second result")).toBeInTheDocument();
+
+    rerender(<ToolCallsPanel tools={[inserted, first, second]} />);
+
+    expect(screen.getByText("second result")).toBeInTheDocument();
+  });
 });

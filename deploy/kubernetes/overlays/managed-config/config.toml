@@ -1,0 +1,81 @@
+# ══════════════════════════════════════════════════════════════
+# LibreFang — deployment-managed configuration (#6695)
+# ══════════════════════════════════════════════════════════════
+#
+# This file is the source of truth for the daemon's configuration.
+# It is rendered into a ConfigMap, mounted read-only at /etc/librefang/config.toml, and locked server-side by LIBREFANG_CONFIG_MODE=managed: every API route that would persist into it answers 423 Locked instead.
+#
+# To change a setting: edit this file, update the checksum annotation in statefulset-managed-config.yaml, and re-apply.
+# See ../../README.md ("Managed configuration") for the exact commands and the rollback procedure.
+#
+# NO SECRET BELONGS IN THIS FILE.
+# A ConfigMap is stored unencrypted in etcd and readable by anything with `get configmaps` in the namespace, and this copy lives in version control besides.
+# Credentials reach the daemon as environment variables sourced from Secrets — see ../../secrets.example.yaml for the key names.
+# What may appear here is the *name* of the variable a provider reads (`api_key_env`), which is a reference and not a value.
+
+config_version = 2
+
+# ── Server ────────────────────────────────────────────────────
+# LIBREFANG_LISTEN in the StatefulSet overrides this after load, so the two agree by construction.
+# It is written out anyway because a config an operator reads should state the port the daemon actually serves.
+api_listen = "0.0.0.0:4545"
+log_level = "info"
+mode = "default"
+
+# `api_key`, `dashboard_user` and `dashboard_pass` are deliberately absent.
+# They arrive as LIBREFANG_API_KEY / LIBREFANG_DASHBOARD_USER / LIBREFANG_DASHBOARD_PASS from the librefang-auth Secret.
+# A non-loopback bind refuses to start without configured authentication (#3572), so those Secret keys are load-bearing rather than hardening.
+
+# ── MCP runtime writes go to SQLite, not to this file ─────────
+# The default (`file`) makes POST/PUT/DELETE /api/mcp/servers rewrite config.toml, which managed mode then has to refuse.
+# `db` persists them to the SQLite `mcp_server_configs` table on the PVC instead, so the dashboard keeps its MCP install surface with no drift against this file — the store was added for exactly this deployment shape (#6021).
+mcp_runtime_store = "db"
+
+# ── Performance ──────────────────────────────────────────────
+prompt_caching = true
+stable_prefix_mode = true
+
+# ── Default LLM ──────────────────────────────────────────────
+# Replace `model` with whatever your deployment actually runs — this is an example, not a recommendation, and the model catalogue moves faster than this file will.
+# `api_key_env` names the environment variable the driver reads.
+# The value comes from the librefang-providers Secret; nothing sensitive is stored here.
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+api_key_env = "ANTHROPIC_API_KEY"
+
+# ── Shell Execution Policy ───────────────────────────────────
+# `deny` is the shipped default and is restated here because a cluster-hosted daemon exposes its shell surface to everyone who can reach the Service.
+[exec_policy]
+mode = "deny"
+timeout_secs = 30
+max_output_bytes = 102400
+
+# ── Config Hot-Reload ────────────────────────────────────────
+# `off`, not the default `hybrid`, because rollout is the only supported update path here and the two would otherwise race.
+#
+# The kubelet syncs an edited ConfigMap into the mount within about a minute, whether or not anyone bumped the checksum annotation.
+# Under `hybrid` the change watcher would see that swap and hot-apply part of it, leaving a pod running configuration that matches neither the annotation on its own template nor any rollout anyone performed — the exact drift managed mode exists to prevent.
+#
+# `POST /api/config/reload` still answers in this mode: it re-reads the file, validates it, and reports the plan.
+# It just does not swap the live config, which is what "rollout-only" means made mechanical rather than documented.
+[reload]
+mode = "off"
+
+# ── Task Queue ───────────────────────────────────────────────
+[queue.concurrency]
+main_lane = 3
+cron_lane = 2
+subagent_lane = 3
+trigger_lane = 8
+default_per_agent = 1
+
+# ── Memory ───────────────────────────────────────────────────
+[memory]
+decay_rate = 0.05
+
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10

@@ -17,12 +17,27 @@ import pytest
 
 from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim  # noqa: F401
 
-os.environ.setdefault("FEISHU_APP_ID", "cli_test_app")
-os.environ.setdefault("FEISHU_APP_SECRET", "secret-shh")
-from librefang.sidecar.adapters import feishu as fs  # noqa: E402
+from librefang.sidecar.adapters import feishu as fs
 
 
 # ---- Test helpers ----------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_feishu_env(monkeypatch):
+    defaults = {
+        "FEISHU_APP_ID": "cli_test_app",
+        "FEISHU_APP_SECRET": "secret-shh",
+        "FEISHU_REGION": "",
+        "FEISHU_RECEIVE_MODE": "",
+        "FEISHU_WEBHOOK_PORT": "",
+        "FEISHU_VERIFICATION_TOKEN": "",
+        "FEISHU_ENCRYPT_KEY": "",
+        "FEISHU_ACCOUNT_ID": "",
+        "FEISHU_API_BASE_OVERRIDE": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -191,20 +206,18 @@ def test_webhook_port_garbage_falls_back():
     assert a.webhook_port == 8453
 
 
-def test_missing_app_id_exits_2():
-    os.environ["FEISHU_APP_ID"] = ""
+def test_missing_app_id_exits_2(monkeypatch):
+    monkeypatch.setenv("FEISHU_APP_ID", "")
     with pytest.raises(SystemExit) as e:
         fs.FeishuAdapter()
     assert e.value.code == 2
-    os.environ["FEISHU_APP_ID"] = "cli_test_app"
 
 
-def test_missing_app_secret_exits_2():
-    os.environ["FEISHU_APP_SECRET"] = ""
+def test_missing_app_secret_exits_2(monkeypatch):
+    monkeypatch.setenv("FEISHU_APP_SECRET", "")
     with pytest.raises(SystemExit) as e:
         fs.FeishuAdapter()
     assert e.value.code == 2
-    os.environ["FEISHU_APP_SECRET"] = "secret-shh"
 
 
 def test_account_id_passthrough():
@@ -316,13 +329,14 @@ def test_dedup_no_event_id_not_dedupable():
     assert d.is_duplicate("") is False
 
 
-def test_dedup_purges_when_over_cap():
-    d = fs._EventDedup(window_secs=0.001, max_entries=3)
+def test_dedup_purges_when_over_cap(monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(fs.time, "monotonic", lambda: now)
+    d = fs._EventDedup(window_secs=10.0, max_entries=3)
     d.is_duplicate("a")
     d.is_duplicate("b")
     d.is_duplicate("c")
-    import time as _t
-    _t.sleep(0.01)
+    now += 11.0
     # At max — next insert triggers purge of expired (which is all).
     assert d.is_duplicate("d") is False
     assert d.is_duplicate("a") is False  # expired, not duplicate
@@ -571,6 +585,7 @@ def test_token_cache_returns_set_value():
 def test_token_cache_returns_none_when_expired():
     c = fs._TokenCache()
     # ttl shorter than refresh buffer → already-expired
+    assert fs.TOKEN_REFRESH_BUFFER_SECS > 10
     c.set("abc", ttl_secs=10)
     assert c.get() is None
 
