@@ -683,6 +683,13 @@ fn redacted_config_json(
             "require_email_verified".into(),
             serde_json::json!(config.external_auth.require_email_verified),
         );
+        // Read-only for the same reason as `require_email_verified`, and readable for the same reason too (#7744).
+        // `role_map` is what turns a signed ID token into an API credential, so a caller who could write it could grant themselves Owner by naming a claim they already hold; it stays out of the writable sets.
+        // Reading it back is how an operator confirms which IdP groups currently carry privilege — the values are group names the operator chose, never secrets.
+        ea.insert(
+            "role_map".into(),
+            serde_json::json!(config.external_auth.role_map),
+        );
     }
 
     // ── Newly surfaced sections (#4678) ──

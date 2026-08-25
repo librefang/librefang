@@ -123,6 +123,21 @@ impl LibreFangKernel {
             let refreshed_raw = load_raw_config_toml(&config_path);
             self.raw_config_toml
                 .store(std::sync::Arc::new(refreshed_raw));
+            // Re-validate `[external_auth.role_map]` target roles on every
+            // reload that actually changed them (#7744). This edit carries no
+            // `HotAction` of its own — the OAuth layer reads `external_auth`
+            // live from the config swap — so without an explicit check here an
+            // operator who introduces a typo at reload time gets no signal at
+            // all, only SSO callers silently falling back to 401.
+            if old_cfg.external_auth.role_map != new_config.external_auth.role_map {
+                let typos = crate::auth::validate_oidc_role_map(&new_config.external_auth.role_map);
+                if typos > 0 {
+                    warn!(
+                        "Hot-reload: external_auth.role_map has {typos} unrecognized \
+                         LibreFang role string(s) — see WARN lines above"
+                    );
+                }
+            }
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits

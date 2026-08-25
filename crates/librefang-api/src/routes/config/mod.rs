@@ -1480,6 +1480,10 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path(
             "external_auth.require_email_verified"
         ));
+        // #7744: `role_map` is what turns a signed ID token into an API
+        // credential, so a caller who could write it could grant themselves
+        // Owner by naming an IdP group they already hold.
+        assert!(!super::is_writable_config_path("external_auth.role_map"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));
         assert!(!super::is_writable_config_path("audit.retention_days"));

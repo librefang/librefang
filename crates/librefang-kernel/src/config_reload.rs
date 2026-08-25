@@ -550,7 +550,7 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadExternalAuth);
     } else if field_changed(&old.external_auth, &new.external_auth) {
         // Non-IdP edits only (session_ttl_secs, allowed_domains, redirect_url,
-        // scopes, audience, require_email_verified). The OAuth layer reads
+        // scopes, audience, require_email_verified, role_map). The OAuth layer reads
         // these live from the ArcSwap config on every request (`oauth.rs`:
         // `config_ref()` / `config_snapshot()`), so the bare config swap makes
         // them effective on the next request — no restart, and no cache

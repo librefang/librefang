@@ -546,7 +546,8 @@
         "audience": "",
         "session_ttl_secs": 86400,
         "providers": [],
-        "require_email_verified": true
+        "require_email_verified": true,
+        "role_map": {}
       },
       "allOf": [
         {
@@ -3725,6 +3726,14 @@
           "description": "Require `email_verified = true` in the OIDC ID token before allowing login. Defaults to `true`. Set to `false` only if your identity provider does not set this claim. When `true`, logins where the claim is absent or false are rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).",
           "default": true,
           "type": "boolean"
+        },
+        "role_map": {
+          "description": "IdP role/group claim value → LibreFang role string (`owner` / `admin` / `user` / `viewer` / `guest`).\n\nEmpty by default, and an empty map means an OIDC bearer authorizes nothing — exactly the behaviour before #7744, where the validated `roles` claim was injected into request extensions and never read. Declaring an entry is what turns a signed ID token into an API credential, so the grant is always something the operator wrote down rather than something the identity provider decided unilaterally.\n\nA caller holding several mapped roles gets the **highest-privilege** match, mirroring `[channel_role_mapping.discord] role_map` — claim ordering is the IdP's business, and letting it pick the effective LibreFang role would put privilege outside operator control. A claim value that is absent from this map, or present but mapped to an unrecognised LibreFang role string, grants nothing: the caller falls through to the same 401 they get today rather than being demoted to `User`.\n\n```toml [external_auth.role_map] \"librefang-owners\" = \"owner\" \"librefang-operators\" = \"admin\" \"engineering\" = \"user\" ```\n\n`BTreeMap` rather than `HashMap` so `GET /api/config` renders the entries in a stable order and a diff of two config snapshots reflects real edits.",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "scopes": {
           "description": "OAuth2 scopes to request.",
