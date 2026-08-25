@@ -7,6 +7,8 @@ import {
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   resetAgentSession,
+  restoreBackup,
+  searchMemories,
   setApiKey,
   updateAgentTools,
   verifyStoredAuth,
@@ -87,6 +89,29 @@ describe("dashboard auth helpers", () => {
     expect(protocols).toEqual([]);
   });
 
+  it("sends memory level filters to the agent-scoped search endpoint", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ memories: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await expect(
+      searchMemories({
+        query: "needle",
+        agentId: "agent/one",
+        level: "user",
+        limit: 50,
+      }),
+    ).resolves.toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/memory/agents/agent%2Fone/search?q=needle&limit=50&level=user",
+    );
+  });
+
   it("stores the token in sessionStorage, not localStorage", () => {
     setApiKey("secret-token");
 
@@ -149,6 +174,49 @@ describe("dashboard auth helpers", () => {
     const body = JSON.parse(options.body);
     expect(body.temperature).toBe(1.5);
     expect(body.max_tokens).toBe(8192);
+  });
+
+  // `POST /api/restore` rejects `components: []` rather than guessing between
+  // "restore everything" and "restore nothing", so an untouched component
+  // checklist has to reach it as an absent field.
+  it("restoreBackup omits an empty component list instead of sending []", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ restored_files: 3 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await restoreBackup("librefang_backup_20260315_120000.zip", {
+      keepConfig: false,
+      components: [],
+    });
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/restore");
+    const body = JSON.parse(options.body);
+    expect(body.filename).toBe("librefang_backup_20260315_120000.zip");
+    expect("components" in body).toBe(false);
+  });
+
+  it("restoreBackup forwards a non-empty component selection", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ restored_files: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await restoreBackup("librefang_backup_20260315_120000.zip", {
+      keepConfig: true,
+      components: ["agents", "data"],
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.keep_config).toBe(true);
+    expect(body.components).toEqual(["agents", "data"]);
   });
 
   it("patchHandAgentRuntimeConfig trims tri-state string fields before sending", async () => {

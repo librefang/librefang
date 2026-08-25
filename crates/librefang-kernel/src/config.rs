@@ -13,6 +13,74 @@ use tracing::info;
 /// Maximum include nesting depth.
 const MAX_INCLUDE_DEPTH: u32 = 10;
 
+fn atomic_write_config(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    // Preserve a configured symlink. Renaming over `path` itself would replace
+    // the link rather than atomically updating the operator-owned target.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let original_permissions = match std::fs::metadata(&target) {
+        Ok(metadata) => {
+            // Atomic rename is governed by directory permissions and could
+            // otherwise replace an operator-owned read-only config that the
+            // previous direct-write path correctly refused to modify.
+            std::fs::OpenOptions::new().write(true).open(&target)?;
+            Some(metadata.permissions())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(".{}.{seq}.{timestamp}.tmp", std::process::id()));
+    let temp_path = target.with_file_name(temp_name);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        if let Some(permissions) = original_permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    if let Err(error) = std::fs::rename(&temp_path, &target) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    #[cfg(unix)]
+    {
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
 /// Load kernel configuration from a TOML file, with defaults.
 ///
 /// Returns `Err` when the config file exists but cannot be parsed as valid TOML
@@ -225,7 +293,7 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                                 let toml_str = toml::to_string_pretty(&config);
                                 match toml_str {
                                     Ok(s) => {
-                                        if let Err(e) = std::fs::write(&config_path, &s) {
+                                        if let Err(e) = atomic_write_config(&config_path, &s) {
                                             tracing::warn!(
                                                 error = %e,
                                                 path = %config_path.display(),
@@ -590,13 +658,30 @@ pub fn config_mode() -> ConfigMode {
 /// `LIBREFANG_CONFIG_PATH` relocates the file and nothing more.
 /// It is independent of [`config_mode`] on purpose: a Compose deployment may reasonably bind-mount the config directory somewhere outside `LIBREFANG_HOME` while still editing it from the dashboard, and inferring the lock from the path would hand that operator a read-only UI they never asked for.
 pub fn default_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var(CONFIG_PATH_ENV) {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    config_path_override().unwrap_or_else(|| librefang_home().join("config.toml"))
+}
+
+/// The `LIBREFANG_CONFIG_PATH` override, or `None` when it is unset, empty, or whitespace.
+///
+/// The single place that reads the variable, so relocation cannot be honoured by one resolver and ignored by another.
+fn config_path_override() -> Option<PathBuf> {
+    let raw = std::env::var(CONFIG_PATH_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
     }
-    librefang_home().join("config.toml")
+}
+
+/// Resolve the `config.toml` that backs an already-loaded [`KernelConfig`].
+///
+/// `LIBREFANG_CONFIG_PATH` wins exactly as it does in [`default_config_path`]; otherwise the file sits in the config's own `home_dir`.
+/// This is the resolver for [`crate::LibreFangKernel::boot_with_config`], where an embedder handed over a `KernelConfig` without saying where it came from — `boot` records the path it actually loaded from instead.
+///
+/// It deliberately reads `home_dir` from the config rather than from `LIBREFANG_HOME`: an embedder that builds a `KernelConfig` in memory and points `home_dir` at a scratch directory means that directory, and resolving to the real user's `~/.librefang/config.toml` would have such a process write over a config it never read.
+pub fn config_path_for(config: &KernelConfig) -> PathBuf {
+    config_path_override().unwrap_or_else(|| config.home_dir.join("config.toml"))
 }
 
 /// Provenance of the effective configuration, for the authenticated status endpoint.
@@ -670,6 +755,86 @@ mod tests {
     fn test_load_config_missing_file() {
         let config = load_config(Some(Path::new("/nonexistent/config.toml"))).unwrap();
         assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn atomic_config_write_never_exposes_partial_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let seed = "config_version = 2\n".to_string();
+        let payload_a = format!("marker = \"{}\"\n", "a".repeat(16 * 1024));
+        let payload_b = format!("marker = \"{}\"\n", "b".repeat(16 * 1024));
+        std::fs::write(&path, &seed).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let writer = |payload: String| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..30 {
+                    atomic_write_config(&path, &payload).unwrap();
+                }
+            })
+        };
+        let writer_a = writer(payload_a.clone());
+        let writer_b = writer(payload_b.clone());
+        barrier.wait();
+
+        for _ in 0..200 {
+            let observed = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                observed == seed || observed == payload_a || observed == payload_b,
+                "observed partial config: {} bytes",
+                observed.len()
+            );
+        }
+        writer_a.join().unwrap();
+        writer_b.join().unwrap();
+
+        let final_content = std::fs::read_to_string(path).unwrap();
+        assert!(final_content == payload_a || final_content == payload_b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_preserves_symlink_and_target_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("operator-config.toml");
+        let link = dir.path().join("config.toml");
+        std::fs::write(&target, "old = true\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        atomic_write_config(&link, "new = true\n").unwrap();
+
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new = true\n");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_config_write_refuses_a_read_only_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old = true\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let error = atomic_write_config(&path, "new = true\n").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old = true\n");
     }
 
     #[test]

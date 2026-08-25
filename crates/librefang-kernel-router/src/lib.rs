@@ -247,6 +247,13 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
     candidates
 }
 
+/// Resolve the registry's agent-templates directory for hand `base` resolution.
+///
+/// Delegates to [`librefang_types::registry_paths::resolve_agent_templates_dir`], the single resolver shared with the runtime's fan-out and the hands registry, so a missing directory is reported once at error level instead of quietly dropping every `base = "<template>"` hand out of routing (#7767).
+fn registry_agents_dir(home_dir: &Path) -> Option<PathBuf> {
+    librefang_types::registry_paths::resolve_agent_templates_dir(&home_dir.join("registry"))
+}
+
 fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
@@ -264,12 +271,8 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     // "requires agents registry directory" and emits a WARN on every
     // routing scan — and routing happens on every inbound message dispatch,
     // so the warning floods the log.
-    let agents_dir = home_dir.join("registry").join("agents");
-    let agents_dir_arg: Option<&Path> = if agents_dir.is_dir() {
-        Some(agents_dir.as_path())
-    } else {
-        None
-    };
+    let agents_dir = registry_agents_dir(home_dir);
+    let agents_dir_arg: Option<&Path> = agents_dir.as_deref();
 
     for hands_dir in &dirs {
         let Ok(entries) = fs::read_dir(hands_dir) else {
@@ -923,18 +926,22 @@ impl RegexCache {
 /// manifest pattern would otherwise live in the cache forever).
 static REGEX_CACHE: OnceLock<Mutex<RegexCache>> = OnceLock::new();
 
+fn cached_regex(cache: &Mutex<RegexCache>, pattern: &str) -> Option<Regex> {
+    let mut guard = lock_router_state(cache, "regex_cache");
+    guard.get_or_compile(pattern).cloned()
+}
+
 fn regex_matches(message: &str, pattern: &str) -> bool {
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(RegexCache::new()));
-    let mut guard = lock_router_state(cache, "regex_cache");
     // None == compile error → never matches. Mirrors the historical
     // "never-match sentinel" branch but without the panic-risk of
     // the previous `Regex::new("(?!x)x").unwrap()` (regex_lite
     // doesn't support look-around, so the sentinel would have
     // panicked the first time any invalid pattern reached this
-    // path).
-    guard
-        .get_or_compile(pattern)
-        .map(|r| r.is_match(message))
+    // path). Clone the compiled regex out of the cache so matching
+    // does not serialize every routing request on the global mutex.
+    cached_regex(cache, pattern)
+        .map(|regex| regex.is_match(message))
         .unwrap_or(false)
 }
 
@@ -1167,6 +1174,32 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Routing must resolve the agent-templates directory through the shared resolver so it cannot drift from the runtime fan-out and the hands registry, and so its absence is reported rather than dropping every `base = "<template>"` hand from routing in silence (#7767).
+    #[test]
+    fn registry_agents_dir_delegates_to_the_shared_resolver() {
+        let tmp = tempdir().unwrap();
+        let home_dir = tmp.path();
+        let registry_root = home_dir.join("registry");
+        std::fs::create_dir_all(registry_root.join("hands")).unwrap();
+
+        assert_eq!(registry_agents_dir(home_dir), None);
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+
+        std::fs::create_dir_all(registry_root.join("agents")).unwrap();
+
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            Some(registry_root.join("agents"))
+        );
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+    }
 
     #[test]
     fn poisoned_router_state_lock_recovers_and_remains_usable() {
@@ -1745,6 +1778,20 @@ system_prompt = "override"
             1,
             "exactly one entry for a single distinct pattern"
         );
+    }
+
+    #[test]
+    fn cached_regex_releases_lock_before_matching() {
+        let cache = Mutex::new(RegexCache::new());
+        let regex = cached_regex(&cache, "hello").expect("valid pattern compiles");
+
+        let guard = cache
+            .try_lock()
+            .expect("cache lock must be released after cloning the regex");
+        assert_eq!(guard.entries.len(), 1);
+        drop(guard);
+
+        assert!(regex.is_match("hello world"));
     }
 
     #[test]

@@ -33,6 +33,11 @@ pub struct SidecarSchema {
     pub display_name: String,
     pub description: String,
     pub fields: Vec<SidecarSchemaField>,
+    // `--describe` runs the same interpreter, with the same PYTHONPATH resolution, as the eventual sidecar spawn, so the version reported here is the version that will actually serve traffic — precisely what #7140 had no way to find out short of reading logs on the box.
+    // `None` for an adapter whose SDK predates the field, and for the compile-time fallback schema used when `--describe` fails outright.
+    /// The `librefang-sdk` version the adapter reported on `--describe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
 }
 
 /// Spawn `<command> <args> --describe`, parse stdout as JSON.

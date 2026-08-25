@@ -36,6 +36,36 @@ pub struct DiscoveredModelInfo {
     /// Newer Ollama versions (≥0.7) include this in /api/tags; older versions omit it.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub capabilities: Vec<String>,
+    /// Context window in tokens **as reported by the listing endpoint**, when it reports one at all.
+    ///
+    /// `None` means the endpoint said nothing, which is the common case: the bare OpenAI `/v1/models` shape carries only `id` / `object` / `created` / `owned_by`, and Ollama's `/api/tags` carries no token capacity either.
+    /// It MUST NOT be back-filled with a plausible default here — [`crate::model_catalog::ModelCatalog::merge_discovered_models`] records the absence as `limits_known: false` instead of inventing a number (#7780).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Maximum output tokens as reported by the listing endpoint.
+    /// `None` carries the same meaning as for [`Self::context_window`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+}
+
+impl DiscoveredModelInfo {
+    /// A discovered model for which the probe learned nothing but the name.
+    ///
+    /// Every optional field stays empty on purpose.
+    /// Callers holding only a list of model IDs use this instead of hand-writing the literal, so a future field cannot be quietly given a fabricated value at one of the several call sites (#7780).
+    pub fn bare(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parameter_size: None,
+            quantization_level: None,
+            family: None,
+            families: None,
+            size: None,
+            capabilities: Vec::new(),
+            context_window: None,
+            max_output_tokens: None,
+        }
+    }
 }
 
 /// Result of probing a provider endpoint.
@@ -594,6 +624,10 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
                 families,
                 size: m.get("size").and_then(|v| v.as_u64()),
                 capabilities,
+                // /api/tags reports on-disk size and quantization but never a token capacity — the context length lives in /api/show's `model_info`, which would cost one extra request per model.
+                // Report it as unknown rather than guessing from the family name.
+                context_window: None,
+                max_output_tokens: None,
             })
         })
         .collect();
@@ -604,12 +638,19 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
     }
 }
 
-/// Parse an OpenAI-compatible `/v1/models` response into discovered model IDs.
+/// Parse an OpenAI-compatible `/v1/models` response into discovered model IDs
+/// plus whatever token capacity the entries happen to report.
 ///
 /// `data[].id` is the only field required by spec. We don't try to derive
 /// capabilities from this shape because OpenAI-format `/v1/models` doesn't
 /// expose vision/tools flags — capability inference is left to whatever
 /// downstream consumer cares (e.g. `merge_discovered_models`).
+///
+/// Capacity is different: gateways and self-hosted servers *do* put it here, under a handful of non-standard keys (vLLM `max_model_len`, LM Studio and llama.cpp `context_length`, LiteLLM `max_input_tokens` / `max_output_tokens`, OpenRouter `context_length` and `top_provider.max_completion_tokens`).
+/// It used to be discarded, so every gateway-discovered catalog entry was built from a literal even when the gateway had answered the question.
+/// The shared parsers in [`crate::model_metadata`] are the single place that key priority is defined (#7780).
+///
+/// A model whose entry reports nothing yields `None` for both fields — the absence is propagated, never replaced with a default.
 fn parse_openai_models(body: &serde_json::Value) -> EndpointOutcome {
     let arr = match body.get("data").and_then(|v| v.as_array()) {
         Some(a) => a,
@@ -625,9 +666,21 @@ fn parse_openai_models(body: &serde_json::Value) -> EndpointOutcome {
         .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
         .collect();
 
+    let info: Vec<DiscoveredModelInfo> = arr
+        .iter()
+        .filter_map(|m| {
+            let name = m.get("id").and_then(|n| n.as_str())?;
+            Some(DiscoveredModelInfo {
+                context_window: crate::model_metadata::parse_openai_model(m),
+                max_output_tokens: crate::model_metadata::parse_openai_model_max_output(m),
+                ..DiscoveredModelInfo::bare(name)
+            })
+        })
+        .collect();
+
     EndpointOutcome::Ok {
         models: names,
-        model_info: vec![],
+        model_info: info,
     }
 }
 
@@ -907,6 +960,8 @@ mod tests {
             families: None,
             size: Some(1_928_000_000),
             capabilities: vec!["completion".to_string()],
+            context_window: None,
+            max_output_tokens: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "llama3.2:latest");
@@ -918,21 +973,16 @@ mod tests {
 
     #[test]
     fn test_discovered_model_info_skips_none_fields() {
-        let info = DiscoveredModelInfo {
-            name: "gpt-4".to_string(),
-            parameter_size: None,
-            quantization_level: None,
-            family: None,
-            families: None,
-            size: None,
-            capabilities: vec![],
-        };
+        let info = DiscoveredModelInfo::bare("gpt-4");
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "gpt-4");
         assert!(json.get("parameter_size").is_none());
         assert!(json.get("quantization_level").is_none());
         // Empty capabilities should be skipped
         assert!(json.get("capabilities").is_none());
+        // An unknown capacity is absent from the payload rather than rendered as a number a reader could mistake for a measurement (#7780).
+        assert!(json.get("context_window").is_none());
+        assert!(json.get("max_output_tokens").is_none());
     }
 
     #[test]
@@ -1032,8 +1082,56 @@ mod tests {
             models,
             vec!["Gemma-4-26B-A4B-it-GGUF", "nomic-embed-text-v2-moe-GGUF"]
         );
-        // OpenAI shape has no capability metadata.
-        assert!(info.is_empty());
+        // One info row per model, name only: the OpenAI shape carries no capability metadata, and this body carries no capacity either, so both capacity fields stay `None` rather than acquiring a default.
+        assert_eq!(info.len(), 2);
+        assert!(info.iter().all(|i| i.family.is_none()
+            && i.capabilities.is_empty()
+            && i.context_window.is_none()
+            && i.max_output_tokens.is_none()));
+    }
+
+    #[test]
+    fn test_parse_openai_models_reads_reported_capacity() {
+        // A LiteLLM / vLLM / OpenRouter-shaped listing does report capacity, under keys that differ per server.
+        // Every one of them must reach `DiscoveredModelInfo` — discarding them is what forced `merge_discovered_models` to invent a number (#7780).
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "vllm-model", "max_model_len": 32_768u64},
+                {"id": "litellm-model", "max_input_tokens": 200_000u64, "max_output_tokens": 8_192u64},
+                {"id": "openrouter-model", "context_length": 1_048_576u64,
+                 "top_provider": {"max_completion_tokens": 65_536u64}},
+                {"id": "silent-model"}
+            ]
+        });
+        let (_models, info) = ok_or_panic(parse_openai_models(&body));
+        let by_name = |n: &str| {
+            info.iter()
+                .find(|i| i.name == n)
+                .unwrap_or_else(|| panic!("missing {n}"))
+        };
+        assert_eq!(by_name("vllm-model").context_window, Some(32_768));
+        assert_eq!(by_name("vllm-model").max_output_tokens, None);
+        assert_eq!(by_name("litellm-model").context_window, Some(200_000));
+        assert_eq!(by_name("litellm-model").max_output_tokens, Some(8_192));
+        assert_eq!(by_name("openrouter-model").context_window, Some(1_048_576));
+        assert_eq!(by_name("openrouter-model").max_output_tokens, Some(65_536));
+        // The reproduction case from the issue: LiteLLM answering with the bare OpenAI shape.
+        // Nothing is reported, so nothing is claimed.
+        assert_eq!(by_name("silent-model").context_window, None);
+        assert_eq!(by_name("silent-model").max_output_tokens, None);
+    }
+
+    #[test]
+    fn test_parse_openai_models_rejects_zero_capacity() {
+        // `0` is the catalog's "unknown / not applicable" encoding, so a server reporting it must not be recorded as having answered.
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [{"id": "m", "max_model_len": 0u64, "max_output_tokens": 0u64}]
+        });
+        let (_models, info) = ok_or_panic(parse_openai_models(&body));
+        assert_eq!(info[0].context_window, None);
+        assert_eq!(info[0].max_output_tokens, None);
     }
 
     #[test]

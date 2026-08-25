@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from "react";
-import { Plus, Sparkles, X } from "lucide-react";
+import { Clock, Plus, Sparkles, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 /**
@@ -43,6 +43,13 @@ export interface AgentSkillItemProps {
   onRemove?: () => void;
   /** Disable the trailing affordance while a mutation is in flight. */
   busy?: boolean;
+  /**
+   * Declared in the agent manifest but absent from the daemon's skill registry
+   * (#7713). The row keeps its remove affordance — the assignment is real and
+   * still editable — but is marked so the operator can tell "assigned and
+   * working" from "assigned and contributing nothing yet".
+   */
+  pending?: boolean;
 }
 
 export function AgentSkillItem({
@@ -52,12 +59,20 @@ export function AgentSkillItem({
   action = "none",
   onRemove,
   busy = false,
+  pending = false,
 }: AgentSkillItemProps) {
   const { t } = useTranslation();
   const trimmedDescription = description?.trim();
-  const subtitle = trimmedDescription && trimmedDescription.length > 0
-    ? trimmedDescription
-    : t("agents.detail.skill_meta", { defaultValue: "installed" });
+  // A pending row's own description is the thing worth saying: whatever the
+  // registry would have told us about the skill is unavailable precisely
+  // because the skill is not there.
+  const subtitle = pending
+    ? t("agents.detail.skill_pending_desc", {
+        defaultValue: "not installed here — activates on the next skills reload",
+      })
+    : trimmedDescription && trimmedDescription.length > 0
+      ? trimmedDescription
+      : t("agents.detail.skill_meta", { defaultValue: "installed" });
   // The row is interactive when an onClick is provided. Mirror that to
   // keyboard + assistive tech with role/tabIndex/Enter+Space handling so
   // it isn't a mouse-only target.
@@ -81,11 +96,22 @@ export function AgentSkillItem({
       data-testid="agent-skill-item"
     >
       <div className="min-w-0 flex-1">
-        <div
-          className="font-mono text-[12.5px] font-medium text-text-main truncate"
-          data-testid="agent-skill-item-name"
-        >
-          {name}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div
+            className="font-mono text-[12.5px] font-medium text-text-main truncate"
+            data-testid="agent-skill-item-name"
+          >
+            {name}
+          </div>
+          {pending && (
+            <span
+              className="shrink-0 inline-flex items-center gap-1 rounded px-1 py-px font-mono text-[9.5px] uppercase tracking-[0.06em] text-amber-400 bg-amber-400/10 border border-amber-400/30"
+              data-testid="agent-skill-item-pending"
+            >
+              <Clock className="w-2.5 h-2.5" />
+              {t("agents.detail.skill_pending", { defaultValue: "pending" })}
+            </span>
+          )}
         </div>
         <div
           className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 line-clamp-2"

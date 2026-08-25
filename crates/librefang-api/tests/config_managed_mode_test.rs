@@ -92,6 +92,15 @@ fn auth_get(path: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn auth_delete(path: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::DELETE)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {API_KEY}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 fn auth_post_json(path: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
@@ -415,5 +424,246 @@ async fn set_default_provider_is_locked_in_managed_mode() {
     assert_eq!(
         effective_model, "test-model",
         "a refused request must not hot-switch the live default model"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Routes outside `config/*` that persist into config.toml (#6695)
+// ---------------------------------------------------------------------------
+//
+// The four write paths below were named as open gaps in `docs/operations/managed-config.md` and are locked here.
+// Each case asserts the shared refusal shape *and* that `config.toml` is byte-identical afterwards, because "answered 423" and "wrote nothing" are separate properties and only the second one is what managed mode promises.
+
+/// `POST /api/auth/change-password` persists `dashboard_user` / `dashboard_pass_hash` as top-level keys, so the deployment that owns the file owns the dashboard credential.
+///
+/// The guard sits ahead of the current-password verification, so this case deliberately sends a **wrong** current password: a `423` here proves the refusal is not reachable only via the success path, and that a caller cannot use the endpoint as a password oracle in managed mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn change_password_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_config(API_KEY, |c| {
+        c.dashboard_user = "operator".to_string();
+        c.dashboard_pass = "correct-horse-battery".to_string();
+    })
+    .await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\ndashboard_user = \"operator\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/auth/change-password",
+            serde_json::json!({
+                "current_password": "definitely-not-the-password",
+                "new_password": "managed-mode-must-refuse-this",
+            }),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "a refused credential change must not have rewritten the file"
+    );
+}
+
+/// `POST /api/channels/sidecar/{name}/configure` writes `[[sidecar_channels]]` into `config.toml` and the adapter's secrets into `secrets.env`, both inside one blocking call.
+/// It is therefore refused in full, like `set_provider_key`, and both files are asserted untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_sidecar_channel_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let config_seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &config_seed).expect("seed config.toml");
+
+    let secrets_path = h.home.join("secrets.env");
+    let secrets_seed = "PREEXISTING_TOKEN=untouched\n";
+    std::fs::write(&secrets_path, secrets_seed).expect("seed secrets.env");
+
+    // `telegram` is a real `SIDECAR_CATALOG` entry, so a 404 here would mean the guard never ran.
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/channels/sidecar/telegram/configure",
+            serde_json::json!({"values": {"bot_token": "managed-mode-must-refuse-this"}}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        config_seed,
+        "a refused sidecar configure must not have rewritten config.toml"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&secrets_path).expect("secrets.env still readable"),
+        secrets_seed,
+        "the refusal precedes the secrets.env write, so the credential file must be untouched too"
+    );
+}
+
+/// `DELETE /api/channels/sidecar/{name}` rewrites `config.toml` to drop the block.
+/// Without the guard it would delete an entry the manifest declares, which the next rollout would silently restore.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_sidecar_channel_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!(
+        "api_key = \"{API_KEY}\"\n\n[[sidecar_channels]]\nname = \"telegram\"\ncommand = \"python3\"\n"
+    );
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(h.app.clone(), auth_delete("/api/channels/sidecar/telegram")).await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "a refused sidecar delete must leave the declared block in place"
+    );
+}
+
+/// `POST /api/extensions/install` calls `upsert_mcp_server_config` directly, with no `mcp_runtime_store` check, so it is refused unconditionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_install_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/extensions/install",
+            serde_json::json!({"name": "managed-mode-must-refuse-this"}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed
+    );
+}
+
+/// `POST /api/extensions/uninstall` is the delete counterpart and is refused on the same terms.
+#[tokio::test(flavor = "multi_thread")]
+async fn extension_uninstall_is_locked_in_managed_mode() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/extensions/uninstall",
+            serde_json::json!({"name": "managed-mode-must-refuse-this"}),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers: locked per store, not per route (#6695 / #6021)
+// ---------------------------------------------------------------------------
+
+/// Under the default `mcp_runtime_store = "file"` the MCP write rewrites `config.toml`, so managed mode refuses it.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_mcp_server_is_locked_in_managed_mode_under_the_file_store() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_config(API_KEY, |c| {
+        c.mcp_runtime_store = librefang_types::config::McpRuntimeStore::File;
+    })
+    .await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/mcp/servers",
+            serde_json::json!({
+                "name": "managed-mode-must-refuse-this",
+                "transport": {"type": "http", "url": "https://example.invalid/mcp"},
+            }),
+        ),
+    )
+    .await;
+
+    assert_managed_refusal(status, &body);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "a refused write must not have opened, truncated, or rewritten the file"
+    );
+}
+
+/// The counterpart that stops managed mode from over-locking, and the reason the guard sits inside the store match rather than at the top of the handler.
+///
+/// With `mcp_runtime_store = "db"` the same request persists into SQLite and never opens `config.toml`.
+/// Refusing it would take the dashboard's MCP install surface away from a deployment that has already moved this persistence off the managed file — locking a write that is not happening.
+/// The case asserts both halves. "Not `423`" is the #6695 property; "succeeded" is what stops the first half from passing vacuously on some unrelated `400`, and it is the evidence that the escape hatch this exemption points operators at actually works.
+/// It asserts `is_success()` rather than a literal `201` so a later change to the created-vs-ok status is not a failure of this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_mcp_server_stays_writable_in_managed_mode_under_the_db_store() {
+    let _guard = ManagedModeGuard::set().await;
+
+    let h = boot_router_with_config(API_KEY, |c| {
+        c.mcp_runtime_store = librefang_types::config::McpRuntimeStore::Db;
+    })
+    .await;
+    let config_path = h.home.join("config.toml");
+    let seed = format!("api_key = \"{API_KEY}\"\n");
+    std::fs::write(&config_path, &seed).expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/mcp/servers",
+            serde_json::json!({
+                "name": "db-store-server",
+                "transport": {"type": "http", "url": "https://example.invalid/mcp"},
+            }),
+        ),
+    )
+    .await;
+
+    assert_ne!(
+        status,
+        StatusCode::LOCKED,
+        "the db store never writes config.toml, so managed mode must not refuse it: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        status.is_success(),
+        "the write must actually go through, not merely avoid the lock; got {status}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config.toml still readable"),
+        seed,
+        "and it must not have written config.toml either — that is what makes the exemption sound"
     );
 }

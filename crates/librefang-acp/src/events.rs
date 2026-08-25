@@ -73,15 +73,10 @@ impl EventTranslator {
                 ))]
             }
 
-            StreamEvent::OwnerNotice { text } => {
-                // Surface owner-private notices as a regular agent
-                // message chunk for now. Phase 2 may give them their own
-                // visual treatment when a dedicated SessionUpdate variant
-                // exists.
-                vec![SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new(text)),
-                ))]
-            }
+            // Owner notices are private side-channel messages for the agent owner's DM.
+            // ACP has no owner-authenticated update channel.
+            // Forwarding one as ordinary agent speech would disclose it to the editor session participant.
+            StreamEvent::OwnerNotice { .. } => Vec::new(),
 
             StreamEvent::ToolUseStart { id, name } => {
                 let tool_call_id = ToolCallId::new(id);
@@ -244,6 +239,15 @@ mod tests {
             text: "reasoning".into(),
         });
         assert!(matches!(out[0], SessionUpdate::AgentThoughtChunk(_)));
+    }
+
+    #[test]
+    fn owner_notice_is_not_forwarded_to_the_acp_session() {
+        let mut t = EventTranslator::new();
+        let out = t.translate(StreamEvent::OwnerNotice {
+            text: "owner-private policy notice".into(),
+        });
+        assert!(out.is_empty());
     }
 
     #[test]

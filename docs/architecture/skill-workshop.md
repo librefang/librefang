@@ -9,13 +9,11 @@ candidates are promoted into the active skill registry through the same
 artefact visible to the agent's prompt has crossed the same security
 boundary.
 
-The whole subsystem is **on by default with the conservative knob set**:
-heuristic-only review (no LLM call), pending policy (every candidate
-waits for human approve / reject), 20-candidate cap. An agent that
-omits the `[skill_workshop]` block in `agent.toml` gets exactly that.
-Operators that want LLM refinement set
-`[skill_workshop] review_mode = "threshold_llm"`; operators that want
-to disable the feature set `enabled = false`.
+The whole subsystem is **off by default and opted into per agent** with `[skill_workshop] enabled = true` in `agent.toml` (or the matching `[agents.<name>]` section of a `HAND.toml`).
+An agent that omits the block never runs the workshop at all.
+
+Once enabled, the remaining defaults are the conservative knob set: heuristic-only review (no LLM call), pending policy (every candidate waits for human approve / reject), 20-candidate cap.
+Operators that want LLM refinement additionally set `review_mode = "threshold_llm"`.
 
 The cost regression vs pre-#3328 is bounded: per turn, three regex
 scanners on the most recent message and a small toml file when a
@@ -92,14 +90,15 @@ stage logs `error!` and unwinds without taking down the agent loop.
 
 ## Per-agent configuration
 
-Agents that omit the `[skill_workshop]` block in `agent.toml` get the
-defaults shown below — heuristic-only capture into pending/. Override
-any subset; serde fills the rest from `Default`.
+The workshop is **default-OFF**.
+An agent that omits the `[skill_workshop]` block never runs it; opting in takes a single line, `enabled = true`.
+The remaining defaults shown below then apply — heuristic-only capture into pending/.
+Override any subset; serde fills the rest from `Default`.
 
 ```toml
-# agent.toml — explicit form, equivalent to omitting the block:
+# agent.toml — opt in, then take the defaults:
 [skill_workshop]
-enabled              = true        # default true
+enabled              = true        # default FALSE — this line is what turns the feature on
 auto_capture         = true        # default true
 approval_policy      = "pending"   # "pending" | "auto"
 review_mode          = "heuristic" # "heuristic" | "threshold_llm" | "none"
@@ -111,8 +110,7 @@ max_pending          = 20          # 0 disables writes (pipeline still runs)
                                    #   the historical "cap-LRU is the only
                                    #   aging mechanism" behaviour.
 
-# To turn the feature off entirely:
-# enabled = false
+# Omitting the block entirely (or `enabled = false`) leaves the feature off.
 
 # To get LLM refinement (cheap-tier provider chain):
 # review_mode = "threshold_llm"
@@ -120,7 +118,7 @@ max_pending          = 20          # 0 disables writes (pipeline still runs)
 
 | Field | Default | Effect |
 |-------|---------|--------|
-| `enabled` | `true` | Master switch. With `false`, the hook returns before scanners run. |
+| `enabled` | `false` | Master switch, default-OFF per the #3328 acceptance criteria (`SkillWorkshopConfig::default()` in `crates/librefang-types/src/agent.rs`). While `false` — including when the block is omitted — the hook returns before scanners run. |
 | `auto_capture` | `true` | Lets an enabled agent skip capture without disabling the whole hook (useful for live debugging of an agent that you don't want to disturb). |
 | `approval_policy` | `"pending"` | `"pending"` parks candidates in `~/.librefang/skills/pending/<agent>/`. `"auto"` writes the pending file (audit trail) and then promotes via `evolution::create_skill` + reloads the registry so the new skill is visible the next turn — the same security scan applies in both modes. |
 | `review_mode` | `"heuristic"` | `"heuristic"` is regex-only (no LLM cost). `"threshold_llm"` ALSO consults the cheap-tier LLM after the heuristic accepts. `"none"` runs the regex scan but discards every hit (testing path). `"both"` is a serde alias for `"threshold_llm"`. |
@@ -270,7 +268,7 @@ boundaries.
 
 Three cases, increasing in cost:
 
-**Default config (`enabled=true`, `review_mode="heuristic"`)**
+**Opted in, otherwise default (`enabled=true`, `review_mode="heuristic"`)**
 
 Per turn:
 1. Hook gating (`AgentLoopEnd` event compare, `is_fork` flag check, kernel `Weak::upgrade`).
@@ -284,7 +282,7 @@ No SQLite, no LLM. A turn that does not produce a hit pays only the regex scan; 
 
 Same as above, plus on each heuristic hit a single auxiliary LLM call (cheap-tier chain: haiku → gpt-4o-mini → openrouter-haiku). With `threshold_llm` the call only runs when heuristics already accepted; with `both` it runs even when heuristics rejected. If no cheap-tier provider is configured, the workshop returns `Indeterminate` rather than billing the call to the operator's primary provider — see [`AuxTask` routing](#auxiliary-llm-routing-auxtaskskillworkshopreview).
 
-**Disabled (`enabled=false`)**
+**Not opted in (`enabled=false`, the default)**
 
 Hook gating runs (steps 1–2 above), then short-circuits on `!cfg.enabled`. No regex scan, no FS, no LLM. The dashmap clone in step 2 is the only non-trivial cost; if it ever shows up in a flame graph, the fix is to peek at `entry().map(|e| e.manifest.skill_workshop.enabled)` without cloning the manifest. Currently below the noise floor.
 

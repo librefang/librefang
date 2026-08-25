@@ -34,9 +34,9 @@ feature-depth = 1
 db-path = "$CARGO_HOME/advisory-dbs"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
-# Each ignore entry links to the upstream advisory and (when applicable) is
-# scoped to the exact crate@version pulling it in, so a fresh occurrence in
-# a different dependency path will still fail the audit.
+# cargo-deny 0.20.2 advisory ignores are global by advisory ID; its schema
+# accepts only `id` and `reason`, not crate/version constraints. Re-review the
+# full dependency graph whenever an ignored advisory appears on a new path.
 ignore = [
     # ── gtk-rs GTK3 bindings, unmaintained ─────────────────────────────────
     # Transitive via tauri-runtime-wry on Linux only. Cannot upgrade until
@@ -53,7 +53,7 @@ ignore = [
     { id = "RUSTSEC-2024-0420", reason = "gdk-pixbuf unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0420" },
 
     # ── Other unmaintained transitive crates ───────────────────────────────
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; transitive, no upstream fix yet. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; reviewed 2026-08-14, RustSec still lists patched = []. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },
     { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0057" },
     { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0075" },
@@ -115,16 +115,10 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # unrelated PRs on a transitive bump. Promote to "deny" once the workspace
 # is consolidated.
 multiple-versions = "warn"
-# Wildcard version requirements (`*`) cannot be reproducibly resolved and
-# are always a mistake in a published crate. Workspace-internal crates
-# however depend on each other via `path = "..."` only, which cargo-deny
-# treats as `*` — those are safe and explicitly allowed.
 # Workspace-internal crates depend on each other via `path = "..."` only.
-# cargo-deny treats those as wildcard requirements (`*`). The
-# `allow-wildcard-paths = true` knob is meant to cover this, but the
-# action's cargo-deny version still flags every internal crate because
-# they declare a `version = "..."` field (which makes them "public" from
-# its perspective even though they're never published to crates.io).
+# cargo-deny treats those as wildcard requirements. Although
+# `allow-wildcard-paths = true` permits private path dependencies, versioned
+# workspace crates are considered public and remain visible as warnings.
 # Downgrade to `warn` so wildcards are visible in the log without
 # breaking CI; tighten back to `deny` once cargo-deny grows a "private
 # workspace" exception or we drop internal version pins.
@@ -138,7 +132,7 @@ deny = []
 skip = [
     # `zip` 4.x is pulled in by tauri-plugin-updater (transitive) while our
     # own code uses 8.x. Allow the duplicate until tauri upstream catches up.
-    { name = "zip" },
+    { name = "zip", version = "=4.6.1" },
 ]
 skip-tree = []
 

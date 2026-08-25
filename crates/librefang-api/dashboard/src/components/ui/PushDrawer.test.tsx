@@ -98,6 +98,29 @@ describe("PushDrawer breakpoint boundary (#4873)", () => {
     expect(matchMediaSpy).toHaveBeenCalledWith("(max-width: 999px)");
     matchMediaSpy.mockRestore();
   });
+
+  it("mounts drawer content only in the active viewport presentation", () => {
+    const matchMediaSpy = vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
+      matches: query === "(max-width: 999px)",
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+    useDrawerStore.setState({
+      isOpen: true,
+      content: { body: <p data-testid="drawer-body">body</p> },
+    });
+
+    const { container } = render(withI18n(<PushDrawer />));
+
+    expect(container.querySelectorAll("[data-testid='drawer-body']")).toHaveLength(1);
+    expect(container.querySelector("[data-drawer-root] [data-testid='drawer-body']")).not.toBeNull();
+    matchMediaSpy.mockRestore();
+  });
 });
 
 describe("PushDrawer nested-dialog Esc handling (#5254 Codex P2)", () => {
@@ -141,13 +164,8 @@ describe("PushDrawer nested-dialog Esc handling (#5254 Codex P2)", () => {
     // own Esc listener confounding the assertion — this test pins the
     // PushDrawer handler's `.closest()` logic, not Modal's behaviour.
     //
-    // NB: PushDrawer renders `content.body` TWICE in the DOM — once
-    // inside the desktop `<aside>` (hidden by `lg:flex` on mobile,
-    // but still mounted), once inside the mobile drawer-root overlay.
-    // The test must dispatch Esc from the *mobile* copy, which is
-    // the descendant of `[data-drawer-root]`. We use a
-    // `data-testid="nested-dialog"` on the dialog wrapper to scope
-    // querySelector to the mobile copy via the drawer-root subtree.
+    // Scope the query to the mobile drawer-root so this test pins the
+    // relevant ancestor relationship independently of presentation.
     useDrawerStore.setState({
       isOpen: true,
       content: {
@@ -165,11 +183,7 @@ describe("PushDrawer nested-dialog Esc handling (#5254 Codex P2)", () => {
 
     const drawerRoot = container.querySelector("[data-drawer-root]");
     expect(drawerRoot).not.toBeNull();
-    // Scope to the mobile copy that lives INSIDE the drawer-root.
-    // querySelector against the document tree returns the first
-    // match (which would be the desktop aside's copy on a real
-    // mobile-viewport browser too, but in jsdom both subtrees are
-    // mounted and DOM-order returns desktop first).
+    // Scope to the body that lives inside the mobile drawer-root.
     const pickerInput = drawerRoot!.querySelector(
       "[data-testid='picker-input']",
     ) as HTMLElement;

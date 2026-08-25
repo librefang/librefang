@@ -1099,7 +1099,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "memory_used_mb": memory_used_mb,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
-        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "config_exists": state.kernel.config_path().exists(),
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,
@@ -1480,6 +1480,10 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path(
             "external_auth.require_email_verified"
         ));
+        // #7744: `role_map` is what turns a signed ID token into an API
+        // credential, so a caller who could write it could grant themselves
+        // Owner by naming an IdP group they already hold.
+        assert!(!super::is_writable_config_path("external_auth.role_map"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));
         assert!(!super::is_writable_config_path("audit.retention_days"));

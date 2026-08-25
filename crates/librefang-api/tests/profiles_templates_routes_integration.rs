@@ -244,6 +244,104 @@ async fn templates_list_includes_seeded_template() {
     remove_template(unique);
 }
 
+/// The TUI templates screen renders provider/model per row and gates spawning on whether that provider is configured.
+/// Before #7760 it rendered a compiled-in list instead of calling this route at all; now that it does, the listing has to carry what each template actually declares rather than leaving the client to assume a default.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_carries_provider_and_model_from_the_manifest() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_list_provider";
+    write_template(
+        unique,
+        r#"name = "delta"
+version = "0.1.0"
+description = "Delta test template"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-test-9"
+
+[capabilities]
+tools = ["file_read"]
+"#,
+    );
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = body["templates"]
+        .as_array()
+        .expect("templates array")
+        .iter()
+        .find(|r| r["name"] == unique)
+        .unwrap_or_else(|| panic!("seeded template missing from list: {body}"))
+        .clone();
+    assert_eq!(row["provider"], "anthropic", "{body}");
+    assert_eq!(row["model"], "claude-test-9", "{body}");
+    assert_eq!(row["description"], "Delta test template", "{body}");
+
+    remove_template(unique);
+}
+
+/// A single unparseable manifest used to fail the whole listing with a 500, so one operator typo blanked every agent type for every client.
+/// It must be skipped instead, leaving the valid entries visible.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let good = "tmpl_skip_good";
+    let bad = "tmpl_skip_bad";
+    write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
+    write_template(bad, "this is not = = valid toml [[[");
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "one bad manifest must not fail the listing: {body}"
+    );
+    let templates = body["templates"].as_array().expect("templates array");
+    assert!(
+        templates.iter().any(|r| r["name"] == good),
+        "the valid template must still be listed: {body}"
+    );
+    assert!(
+        !templates.iter().any(|r| r["name"] == bad),
+        "the malformed template must be skipped, not rendered: {body}"
+    );
+
+    remove_template(good);
+    remove_template(bad);
+}
+
+/// The listing must not advertise a name that `/templates/{name}` and `/templates/{name}/toml` will reject — a row a client cannot fetch or spawn from is a dead end on the screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_list_omits_names_the_detail_routes_reject() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unusable = "tmpl.dotted.name";
+    write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body["templates"]
+            .as_array()
+            .expect("templates array")
+            .iter()
+            .any(|r| r["name"] == unusable),
+        "a name the validator rejects must not be listed: {body}"
+    );
+
+    remove_template(unusable);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn templates_get_known_template_returns_manifest() {
     let _g = templates_lock().lock().await;
@@ -347,4 +445,242 @@ async fn templates_toml_unknown_returns_plaintext_404() {
         "404 path must also serve text/plain to match success shape: {ct:?}"
     );
     assert!(!bytes.is_empty(), "404 plaintext body must be non-empty");
+}
+
+// ---------------------------------------------------------------------------
+// /api/templates/{name} — registry-promotion privacy pass (refs #7771).
+//
+// An agent type an operator built on their own install is an `AgentManifest` written against one machine.
+// Contributing it to a shared registry publishes that machine's details unless something strips them first, and the registry validator requires only `name` / `description` / `module`, so nothing downstream catches it.
+// The detail endpoint carries the read-only half of that pass; these tests pin its shape and its two directions — what must not survive, and what must.
+// ---------------------------------------------------------------------------
+
+/// A template manifest with one host-specific or secret-adjacent value per category, each a distinctive sentinel so the assertions are unambiguous.
+fn leaky_manifest_toml(name: &str) -> String {
+    format!(
+        r#"name = "{name}"
+version = "0.1.0"
+description = "Reads sources and writes briefs."
+author = "jane.doe@acme-internal.example"
+module = "builtin:chat"
+workspace = "/Users/janedoe/.librefang/workspaces/{name}-a1b2"
+is_hand = true
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+system_prompt = "You are a research assistant."
+api_key_env = "ACME_PROD_ANTHROPIC_KEY"
+base_url = "https://llm-gateway.acme.internal/v1"
+
+[capabilities]
+tools = ["web_fetch"]
+network = ["vault.acme.internal:443"]
+shell = ["/opt/acme/bin/deploy"]
+
+[metadata]
+cost_centre = "SENTINEL_COST_CENTRE"
+
+[workspaces]
+contracts = {{ mount = "/Volumes/acme-legal/contracts", mode = "r" }}
+
+[[context_injection]]
+name = "runbook"
+content = "Escalate via SENTINEL_RUNBOOK."
+"#
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_get_reports_what_promotion_would_strip() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_promo_leaky";
+    write_template(unique, &leaky_manifest_toml("researcher"));
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let preview = &body["promotion_preview"];
+    assert!(
+        preview.is_object(),
+        "the detail response must carry the promotion privacy pass: {body}"
+    );
+
+    let findings = preview["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings must be an array: {body}"));
+    let stripped: Vec<&str> = findings
+        .iter()
+        .filter(|finding| finding["removed_by_sanitizer"] == true)
+        .map(|finding| finding["field"].as_str().unwrap_or_default())
+        .collect();
+
+    // One assertion per category of sensitive field, so a regression names which category stopped being reported.
+    for expected in [
+        "author",            // operator identity
+        "model.api_key_env", // credential binding
+        "model.base_url",    // private endpoint
+        "capabilities.network",
+        "capabilities.shell", // host policy
+        "metadata",           // operator key/value bag
+        "workspace",          // absolute host path
+        "workspaces",         // named mount into the host filesystem
+        "context_injection",  // operator free text
+        "is_hand",            // local provenance
+    ] {
+        assert!(
+            stripped.contains(&expected),
+            "'{expected}' must be reported as dropped by promotion: {body}"
+        );
+    }
+
+    for finding in findings {
+        assert!(
+            finding["category"].is_string(),
+            "every finding names its category: {finding}"
+        );
+        let preview_text = finding["preview"].as_str().unwrap_or_default();
+        assert!(
+            preview_text.chars().count() <= 97,
+            "previews must stay bounded: {finding}"
+        );
+    }
+
+    remove_template(unique);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_get_promotion_preview_omits_host_specifics_and_keeps_the_portable_half() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_promo_scrub";
+    write_template(unique, &leaky_manifest_toml("researcher"));
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let publishable = body["promotion_preview"]["manifest_toml"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the publishable manifest must render as TOML: {body}"));
+
+    for sentinel in [
+        "/Users/janedoe",
+        "/Volumes/acme-legal",
+        "/opt/acme/bin/deploy",
+        "ACME_PROD_ANTHROPIC_KEY",
+        "llm-gateway.acme.internal",
+        "vault.acme.internal",
+        "SENTINEL_COST_CENTRE",
+        "SENTINEL_RUNBOOK",
+        "jane.doe@acme-internal.example",
+    ] {
+        assert!(
+            !publishable.contains(sentinel),
+            "'{sentinel}' must not reach the publishable manifest: {publishable}"
+        );
+    }
+
+    // Stripping everything would leave nothing worth publishing, so pin the half that has to survive.
+    for kept in [
+        "researcher",
+        "Reads sources and writes briefs.",
+        "builtin:chat",
+        "You are a research assistant.",
+        "anthropic",
+        "claude-sonnet-4-20250514",
+        "web_fetch",
+    ] {
+        assert!(
+            publishable.contains(kept),
+            "'{kept}' must survive promotion: {publishable}"
+        );
+    }
+
+    // The raw file is still returned verbatim — this endpoint reports on the operator's manifest, it does not rewrite it.
+    assert!(
+        body["manifest_toml"]
+            .as_str()
+            .map(|raw| raw.contains("ACME_PROD_ANTHROPIC_KEY"))
+            .unwrap_or(false),
+        "the operator's own manifest must be returned unmodified: {body}"
+    );
+
+    remove_template(unique);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_get_promotion_preview_flags_a_secret_inside_a_retained_prompt() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    // A credential pasted into the system prompt sits inside a field promotion has to keep, so the operator has to edit it by hand.
+    // The detector exists to say so rather than to silently keep it.
+    let unique = "tmpl_promo_review";
+    write_template(
+        unique,
+        r#"name = "leaky-prompt"
+version = "0.1.0"
+description = "Fetches build status."
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+system_prompt = "Authenticate with sk-ant-api03-QQQQWWWWEEEERRRRTTTTYYYY before calling."
+"#,
+    );
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let preview = &body["promotion_preview"];
+    assert_eq!(
+        preview["requires_review"], true,
+        "a secret inside a retained field must require operator review: {body}"
+    );
+    let flagged = preview["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings must be an array: {body}"))
+        .iter()
+        .any(|finding| {
+            finding["field"] == "model.system_prompt"
+                && finding["category"] == "secret_literal"
+                && finding["removed_by_sanitizer"] == false
+        });
+    assert!(flagged, "the pasted key must be flagged: {body}");
+
+    remove_template(unique);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn templates_get_promotion_preview_is_quiet_for_an_already_portable_template() {
+    let _g = templates_lock().lock().await;
+    let _ = templates_root();
+
+    let unique = "tmpl_promo_clean";
+    write_template(unique, &minimal_manifest_toml("charlie", "Charlie type"));
+
+    let h = boot().await;
+    let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let preview = &body["promotion_preview"];
+    assert_eq!(
+        preview["findings"].as_array().map(Vec::len),
+        Some(0),
+        "a portable template must produce no findings: {body}"
+    );
+    assert_eq!(preview["requires_review"], false, "{body}");
+    assert!(
+        preview["manifest_toml"].is_string(),
+        "the publishable manifest must still be offered: {body}"
+    );
+
+    remove_template(unique);
 }

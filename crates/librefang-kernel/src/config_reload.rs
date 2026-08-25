@@ -434,6 +434,13 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.media, &new.media) {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "media config changed (MediaEngine is boot-captured; restart required)".to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -543,7 +550,7 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadExternalAuth);
     } else if field_changed(&old.external_auth, &new.external_auth) {
         // Non-IdP edits only (session_ttl_secs, allowed_domains, redirect_url,
-        // scopes, audience, require_email_verified). The OAuth layer reads
+        // scopes, audience, require_email_verified, role_map). The OAuth layer reads
         // these live from the ArcSwap config on every request (`oauth.rs`:
         // `config_ref()` / `config_snapshot()`), so the bare config swap makes
         // them effective on the next request — no restart, and no cache
@@ -858,7 +865,6 @@ pub fn build_reload_plan_with_caps(
             "notification",
         );
         noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
-        noop_if_changed(field_changed(&old.media, &new.media), "media");
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -1849,6 +1855,24 @@ mod tests {
         assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn media_config_change_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.media.audio_provider = Some("openai".to_string());
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|reason| reason.contains("media config changed")));
+        assert!(!plan
+            .noop_changes
+            .iter()
+            .any(|change| change.contains("media")));
     }
 
     #[test]

@@ -6,8 +6,9 @@
 // chunk alongside fresh RegistryPage chunk, triggering "Cannot read
 // properties of null (reading 'useCallback')". Don't do that.
 const CACHE_NAME = 'librefang-v3'
+const ROOT_HTML = '/'
 const STATIC_ASSETS = [
-  '/',
+  ROOT_HTML,
   '/logo.png',
   '/favicon.svg',
   '/og-image.svg',
@@ -16,18 +17,22 @@ const STATIC_ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(STATIC_ASSETS))
+      .then(() => self.skipWaiting())
   )
-  self.skipWaiting()
 })
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+      )
+      .then(() => self.clients.claim())
   )
-  self.clients.claim()
 })
 
 self.addEventListener('fetch', (event) => {
@@ -43,10 +48,26 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname === '/registry.json' || url.pathname === '/feed.xml') return
 
   // Network-first for HTML so deploys propagate immediately; fall back to
-  // cache only when offline.
+  // the latest cached SPA shell when offline. All navigation paths receive
+  // the same index.html from the Pages worker, so keep one bounded root entry
+  // instead of growing the cache with arbitrary paths and query strings.
   if (event.request.headers.get('accept')?.includes('text/html')) {
+    const networkResponse = fetch(event.request)
+    event.waitUntil(
+      networkResponse
+        .then((response) => {
+          if (!response.ok) return
+          return caches.open(CACHE_NAME).then((cache) =>
+            cache.put(ROOT_HTML, response.clone())
+          )
+        })
+        .catch(() => undefined)
+    )
     event.respondWith(
-      fetch(event.request).catch(() => caches.match(event.request))
+      networkResponse
+        .catch(() =>
+          caches.match(event.request).then((cached) => cached || caches.match(ROOT_HTML))
+        )
     )
     return
   }
@@ -54,7 +75,20 @@ self.addEventListener('fetch', (event) => {
   // Cache-first only for the tiny allowlisted set above.
   if (STATIC_ASSETS.includes(url.pathname)) {
     event.respondWith(
-      caches.match(event.request).then((cached) => cached || fetch(event.request))
+      caches.match(event.request).then((cached) => {
+        if (cached) return cached
+        return fetch(event.request).then((response) => {
+          if (response.ok) {
+            event.waitUntil(
+              caches
+                .open(CACHE_NAME)
+                .then((cache) => cache.put(event.request, response.clone()))
+                .catch(() => undefined)
+            )
+          }
+          return response
+        })
+      })
     )
     return
   }

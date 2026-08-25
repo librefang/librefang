@@ -96,23 +96,26 @@ mod cron_script;
 // this file (#4683 landing zone). Extracted as `pub(super) async fn`
 // so the body can be edited and reviewed in isolation.
 mod cron_tick;
+mod ephemeral_spawn;
 mod goal_lifecycle;
 mod hands_lifecycle;
 mod llm_drivers;
 mod mcp_setup;
 mod mcp_summary;
 mod messaging;
+pub mod mission_workspace;
 mod pooled_driver;
 mod prompt_context;
 mod provider_probe;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
+pub mod step_agent;
 mod subsystem_forwards;
 pub mod subsystems;
 mod task_registry;
 mod tools_and_skills;
-pub use tools_and_skills::SkillReloadOutcome;
+pub use tools_and_skills::{PendingSkillMcpDeclarations, SemanticMemoryAccess, SkillReloadOutcome};
 mod triggers_and_workflow;
 
 // `cron_deliver_response`, `cron_fan_out_targets`, and `cron_script_wake_gate`
@@ -784,6 +787,11 @@ pub(crate) struct RunningTask {
 pub struct LibreFangKernel {
     /// Boot-time home directory (immutable — cannot hot-reload).
     home_dir_boot: PathBuf,
+    /// Absolute path of the `config.toml` this kernel was booted from (immutable — cannot hot-reload).
+    ///
+    /// Resolved exactly once, in `boot` / `boot_with_config`, and read by every surface that re-reads or persists the configuration — hot-reload, the mtime watcher, and every API route that writes into the file (#6695).
+    /// Deriving it a second time from `home_dir_boot` is what let the daemon load `LIBREFANG_CONFIG_PATH` and then write somewhere else.
+    config_path_boot: PathBuf,
     /// Boot-time data directory (immutable — cannot hot-reload).
     data_dir_boot: PathBuf,
     /// Kernel configuration (atomically swappable for hot-reload).

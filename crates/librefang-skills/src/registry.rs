@@ -521,8 +521,46 @@ impl SkillRegistry {
     /// Names of on-disk skill directories under `skills_dir` that hold a `skill.toml` but are NOT currently loaded (compared by path, so a skill whose manifest name differs from its directory name is matched correctly).
     ///
     /// Used by the frozen (Stable-mode) reload path to report brand-new skill directories the registry deliberately will not pick up without a restart, instead of silently dropping them (#6540).
+    /// These are *directory* names, which is what an operator-facing "will not be picked up without a restart" report wants — see [`unloaded_on_disk_manifest_names`](Self::unloaded_on_disk_manifest_names) for the identifier an allowlist has to be validated against.
     /// Sorted for a deterministic report.
     pub fn unloaded_on_disk_dirs(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .unloaded_on_disk_entries()
+            .into_iter()
+            .map(|(dir_name, _)| dir_name)
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `[skill].name` of every on-disk-but-unloaded skill directory, read from that directory's `skill.toml`.
+    ///
+    /// This is the identifier a skill allowlist must be validated against, and it is not interchangeable with [`unloaded_on_disk_dirs`](Self::unloaded_on_disk_dirs).
+    /// The loaded registry is keyed by the manifest name — `load_skill` inserts under `manifest.skill.name`, not under the directory name — so a directory `package-dir/` whose `skill.toml` declares `name = "actual-skill"` will appear as `actual-skill` the moment it loads.
+    /// Checking a pending declaration against directory names therefore rejects `actual-skill`, the only value that can ever match, and accepts `package-dir`, which matches nothing after the skill loads.
+    ///
+    /// A directory whose `skill.toml` cannot be read or parsed is skipped: an unparseable manifest never loads, so it contributes no identifier that could match later.
+    /// Sorted and de-duplicated for a deterministic result.
+    pub fn unloaded_on_disk_manifest_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .unloaded_on_disk_entries()
+            .into_iter()
+            .filter_map(|(_, path)| {
+                let toml_str = std::fs::read_to_string(path.join("skill.toml")).ok()?;
+                let manifest: SkillManifest = toml::from_str(&toml_str).ok()?;
+                Some(manifest.skill.name)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Every directory under `skills_dir` that holds a `skill.toml` and is not currently loaded, as `(directory name, directory path)`.
+    ///
+    /// Shared by [`unloaded_on_disk_dirs`](Self::unloaded_on_disk_dirs) and [`unloaded_on_disk_manifest_names`](Self::unloaded_on_disk_manifest_names) so the two answers can never disagree about *which* directories are unloaded, only about which identifier they report.
+    /// Unsorted — each caller sorts its own projection.
+    fn unloaded_on_disk_entries(&self) -> Vec<(String, PathBuf)> {
         let loaded: std::collections::HashSet<PathBuf> =
             self.skills.values().map(|s| s.path.clone()).collect();
         let mut out = Vec::new();
@@ -547,10 +585,9 @@ impl SkillRegistry {
             // `InstalledSkill.path` is canonicalized at load time (load_skill), so canonicalize here too — otherwise a symlinked skills_dir (e.g. macOS `/var` -> `/private/var`) would make every loaded skill compare as new.
             let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             if !loaded.contains(&canonical) {
-                out.push(name.to_string());
+                out.push((name.to_string(), path));
             }
         }
-        out.sort();
         out
     }
 
@@ -958,6 +995,33 @@ entry = "main.py"
 
 [[tools.provided]]
 name = "{name}_tool"
+description = "A test tool"
+input_schema = {{ type = "object" }}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Like [`create_test_skill`], but with the directory name and the manifest's `[skill].name` given independently, so a test can exercise the case where the two differ.
+    fn create_test_skill_named(dir: &Path, dir_name: &str, manifest_name: &str) {
+        let skill_dir = dir.join(dir_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            format!(
+                r#"
+[skill]
+name = "{manifest_name}"
+version = "0.1.0"
+description = "Test skill"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[[tools.provided]]
+name = "{manifest_name}_tool"
 description = "A test tool"
 input_schema = {{ type = "object" }}
 "#
@@ -1483,6 +1547,63 @@ input_schema = { type = "object" }
         );
         // Still frozen — count unchanged (the new dir was NOT loaded).
         assert_eq!(registry.count(), 2);
+    }
+
+    #[test]
+    fn unloaded_on_disk_manifest_names_reports_manifest_name_not_directory_name() {
+        // #7772: a skill allowlist is validated against the identifier the loaded registry is keyed by, which is `[skill].name` — not the directory name.
+        // A directory whose manifest declares a different name is the case where the two answers diverge, so it is the only case that can catch a caller reaching for the wrong accessor.
+        let dir = TempDir::new().unwrap();
+        create_test_skill_named(dir.path(), "package-dir", "actual-skill");
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        assert_eq!(
+            registry.skill_names(),
+            vec!["actual-skill".to_string()],
+            "the loaded registry keys on the manifest name, which is what makes the two accessors differ"
+        );
+
+        // Unload it by rebuilding an empty registry over the same directory: the skill is on disk, nothing is loaded.
+        let registry = SkillRegistry::new(dir.path().to_path_buf());
+        assert_eq!(
+            registry.unloaded_on_disk_dirs(),
+            vec!["package-dir".to_string()],
+            "unloaded_on_disk_dirs must keep reporting directory names for the operator-facing restart report"
+        );
+        assert_eq!(
+            registry.unloaded_on_disk_manifest_names(),
+            vec!["actual-skill".to_string()],
+            "unloaded_on_disk_manifest_names must report the manifest name, the value that will match once the skill loads"
+        );
+        assert!(
+            !registry
+                .unloaded_on_disk_manifest_names()
+                .iter()
+                .any(|n| n == "package-dir"),
+            "the directory name must not be reported as a manifest name — it can never match after load"
+        );
+    }
+
+    #[test]
+    fn unloaded_on_disk_manifest_names_skips_unparseable_manifests() {
+        // An unparseable skill.toml never loads, so it contributes no identifier that could ever match; reporting its directory name would let a value through that is guaranteed to break later.
+        let dir = TempDir::new().unwrap();
+        create_test_skill_named(dir.path(), "good-dir", "good-skill");
+        let broken = dir.path().join("broken-dir");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("skill.toml"), "this is not valid toml [[[").unwrap();
+
+        let registry = SkillRegistry::new(dir.path().to_path_buf());
+        assert_eq!(
+            registry.unloaded_on_disk_manifest_names(),
+            vec!["good-skill".to_string()]
+        );
+        assert_eq!(
+            registry.unloaded_on_disk_dirs(),
+            vec!["broken-dir".to_string(), "good-dir".to_string()],
+            "the directory-name report is unchanged: an unparseable dir is still a dir the operator should see"
+        );
     }
 
     #[test]
