@@ -1,10 +1,13 @@
 """
 LibreFang Python SDK and Client.
 
-Three packages:
-- librefang.client: REST API client for controlling LibreFang remotely
-- librefang.sdk: Helper library for writing Python agents that run inside LibreFang
-- librefang.sidecar: Framework for writing out-of-process channel adapters
+Public APIs:
+- ``from librefang import Client`` controls LibreFang through its REST API.
+- ``from librefang import Agent`` writes Python agents that run inside LibreFang.
+- ``librefang.sidecar`` provides the out-of-process channel adapter framework.
+
+The implementation modules are ``librefang.librefang_client`` and
+``librefang.librefang_sdk``; applications should prefer the root re-exports.
 """
 
 import re

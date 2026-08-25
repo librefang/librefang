@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { RegistrySchema } from "../../api";
-import { useRegistrySchema, useRawConfigToml } from "./config";
+import { configQueries, useRegistrySchema, useRawConfigToml } from "./config";
 import * as client from "../http/client";
 import { registryKeys, configKeys } from "./keys";
 import { createQueryClientWrapper } from "../test/query-client";
@@ -61,6 +61,10 @@ describe("useRegistrySchema", () => {
 });
 
 describe("useRawConfigToml", () => {
+  it("keeps UI enablement out of the reusable query factory", () => {
+    expect(configQueries.rawToml().enabled).toBeUndefined();
+  });
+
   it("should not fetch when enabled is false", () => {
     const { result } = renderHook(() => useRawConfigToml(false), {
       wrapper: createQueryClientWrapper().wrapper,
@@ -89,6 +93,14 @@ describe("useRawConfigToml", () => {
 
     expect(result.current.fetchStatus).toBe("idle");
     expect(client.getRawConfigToml).toHaveBeenCalled();
+  });
+
+  it("allows callers to disable an otherwise enabled read", () => {
+    renderHook(() => useRawConfigToml(true, { enabled: false }), {
+      wrapper: createQueryClientWrapper().wrapper,
+    });
+
+    expect(client.getRawConfigToml).not.toHaveBeenCalled();
   });
 
   it("should use configKeys.rawToml() as queryKey", async () => {

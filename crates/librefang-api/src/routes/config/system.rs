@@ -125,7 +125,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "hostname": hostname,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
-        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "config_exists": state.kernel.config_path().exists(),
         "agents": agents,
     }))
 }
@@ -142,7 +142,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if tokio::fs::try_exists(&config_path).await.unwrap_or(false) {
         return Json(serde_json::json!({
             "status": "already_initialized",
@@ -187,13 +187,13 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         }
     };
 
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked.into_response();
     }
     let _config_guard = state.config_write_lock.lock().await;
     let home = state.kernel.home_dir().to_path_buf();
     let write_result = tokio::task::spawn_blocking(move || {
-        write_quick_init_config(&home, config_content.as_bytes())
+        write_quick_init_config(&home, &config_path, config_content.as_bytes())
     })
     .await;
     match write_result {
@@ -260,14 +260,24 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
     .into_response()
 }
 
-fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::Result<bool> {
-    let config_path = home.join("config.toml");
+/// Write the quick-init `config.toml`, refusing to overwrite one that already exists.
+///
+/// `config_path` is the kernel's resolved path rather than `home/config.toml`, so an init through a relocated (`LIBREFANG_CONFIG_PATH`) config writes the file the daemon will actually reload (#6695).
+/// `home` still governs the directory layout — `data/` belongs to the home directory whether or not the config file lives inside it.
+fn write_quick_init_config(
+    home: &std::path::Path,
+    config_path: &std::path::Path,
+    contents: &[u8],
+) -> std::io::Result<bool> {
     if config_path.exists() {
         return Ok(false);
     }
     std::fs::create_dir_all(home)?;
     std::fs::create_dir_all(home.join("data"))?;
-    crate::atomic_write(&config_path, contents)?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::atomic_write(config_path, contents)?;
     Ok(true)
 }
 
@@ -333,9 +343,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
 
-        assert!(write_quick_init_config(&home, b"first = true\n").unwrap());
+        assert!(
+            write_quick_init_config(&home, &home.join("config.toml"), b"first = true\n").unwrap()
+        );
         assert!(home.join("data").is_dir());
-        assert!(!write_quick_init_config(&home, b"second = true\n").unwrap());
+        assert!(
+            !write_quick_init_config(&home, &home.join("config.toml"), b"second = true\n").unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "first = true\n"

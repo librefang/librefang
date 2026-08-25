@@ -84,7 +84,7 @@ describe("useRestoreBackup", () => {
 
     const { result } = renderHook(() => useRestoreBackup(), { wrapper });
 
-    result.current.mutate("backup-1");
+    result.current.mutate({ filename: "backup-1" });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });

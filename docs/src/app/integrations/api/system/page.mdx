@@ -4,9 +4,14 @@ Endpoints for system health, configuration, templates, sessions, task queue, bac
 
 ## Template Endpoints
 
+An *agent type* is a reusable agent manifest you spawn from.
+The catalog has two sources: operator-authored types in `~/.librefang/agent-types/{name}.toml`, and every live agent's own `agent.toml`.
+Only the first is writable here — the second is edited through `/api/agents`.
+Every row says which it is via `source` and `editable`.
+
 ### GET /api/templates
 
-List available agent templates from the agents directory.
+List available agent types from both sources, sorted by name.
 
 **Response** `200 OK`:
 
@@ -14,29 +19,46 @@ List available agent templates from the agents directory.
 {
   "templates": [
     {
-      "name": "hello-world",
-      "description": "A friendly greeting agent",
-      "path": "/home/user/.librefang/workspaces/agents/hello-world/agent.toml"
-    },
-    {
       "name": "coder",
       "description": "Expert coding assistant",
-      "path": "/home/user/.librefang/workspaces/agents/coder/agent.toml"
+      "provider": "anthropic",
+      "model": "claude-sonnet-4",
+      "source": "agent-type",
+      "editable": true
+    },
+    {
+      "name": "hello-world",
+      "description": "A friendly greeting agent",
+      "provider": "groq",
+      "model": "llama-3.3-70b-versatile",
+      "source": "agent",
+      "editable": false
     }
   ],
-  "total": 30
+  "total": 2
 }
 ```
 
 ### GET /api/templates/&lbrace;name&rbrace;
 
-Get a specific template's manifest and raw TOML.
+Get a specific agent type. `spec` is the flat editor projection — exactly the keys `PUT` accepts back.
 
 **Response** `200 OK`:
 
 ```json
 {
   "name": "hello-world",
+  "source": "agent",
+  "editable": false,
+  "spec": {
+    "name": "hello-world",
+    "description": "A friendly greeting agent",
+    "system_prompt": "You greet people.",
+    "provider": "groq",
+    "model": "llama-3.3-70b-versatile",
+    "tools": ["file_read", "file_list", "web_fetch"],
+    "skills": []
+  },
   "manifest": {
     "name": "hello-world",
     "description": "A friendly greeting agent",
@@ -53,6 +75,53 @@ Get a specific template's manifest and raw TOML.
   },
   "manifest_toml": "name = \"hello-world\"\nversion = \"0.1.0\"\n..."
 }
+```
+
+### POST /api/templates
+
+Create an operator-authored agent type. `name` is required.
+Returns `409` when the name is already an agent type (`template_exists`) or belongs to a live agent (`template_name_taken`).
+
+**Request**:
+
+```json
+{
+  "name": "customer-support",
+  "description": "Answers billing questions",
+  "system_prompt": "Be concise and cite the policy.",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4",
+  "tools": ["web_search"],
+  "skills": ["billing-policy"]
+}
+```
+
+**Response** `201 Created` — same document as `GET /api/templates/&lbrace;name&rbrace;`.
+
+### PUT /api/templates/&lbrace;name&rbrace;
+
+Apply the flat shape as a **patch** over the stored manifest.
+
+The body carries seven of the manifest's fifty-eight fields, so the handler reads the stored document and merges rather than rebuilding it.
+A key you do not send keeps whatever is on disk — `[[triggers]]`, `[compaction]`, `max_history_messages`, `mcp_servers`, `tool_allowlist`, `session_mode`, `[workspaces]`, `channels`, `[exec_policy]` and `fallback_models` all survive an edit made through this shape.
+
+Three rules follow from that:
+
+- Absent and empty are different. `"system_prompt": ""` clears the prompt; omitting the key keeps it. Nothing is substituted for a value you actually sent.
+- Unknown keys are rejected with `422` rather than ignored, so a typo cannot silently read as "keep the old value".
+- `name` in the body is ignored; the URL segment is the identity.
+
+Returns `404` when no such agent type exists, and `409` with `template_not_editable` when the name resolves to a live agent's workspace.
+
+### DELETE /api/templates/&lbrace;name&rbrace;
+
+Remove an operator-authored agent type. Agents already spawned from it are unaffected.
+Returns `409` with `template_not_editable` for a live-agent row — those are removed through `DELETE /api/agents/&lbrace;id&rbrace;`.
+
+**Response** `200 OK`:
+
+```json
+{ "deleted": true, "name": "customer-support" }
 ```
 
 ---
@@ -430,9 +499,19 @@ Restore daemon state from a backup file.
 
 ```json
 {
-  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "keep_config": true,
+  "components": ["cron_jobs", "data"]
 }
 ```
+
+`keep_config` (boolean, default `false`) skips `config.toml`, so the target keeps its own API key, bind port and paths — this is what makes an archive usable for cloning a setup onto a second machine.
+
+`components` (array of strings) limits the restore to the named components: `config`, `cron_jobs`, `hand_state`, `custom_models`, `agents`, `skills`, `workflows`, `data`.
+**Omit the field to restore every component.**
+An empty array is rejected with `400`, because "restore nothing" and "restore everything" are too far apart to guess between; an unrecognised name is rejected with `400` naming the valid set, so a typo cannot become a restore that quietly writes nothing.
+Archive entries that belong to no component are restored regardless of the selection.
+`data` covers every entry under `data/`, including the `cron_jobs`, `hand_state` and `custom_models` files that also have components of their own.
 
 ---
 

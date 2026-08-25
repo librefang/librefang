@@ -430,9 +430,44 @@ fn parse_skill_md_frontmatter(content: &str) -> Option<SkillMdFrontmatter> {
 // ---------------------------------------------------------------------------
 const CLAWHUB_CN_BASE_URL: &str = "https://mirror-cn.clawhub.com/api/v1";
 
+/// Environment variable that repoints the ClawHub China mirror handlers.
+const ENV_CLAWHUB_CN_URL: &str = "LIBREFANG_CLAWHUB_CN_URL";
+
+/// The ClawHub China mirror base URL these handlers should use.
+///
+/// Read per request rather than cached in a `OnceLock` so a restart is enough to move off a dead mirror, matching how the ClawHub and Skillhub clients resolve their own overrides.
+fn clawhub_cn_base_url() -> String {
+    librefang_skills::clawhub::env_url_or(ENV_CLAWHUB_CN_URL, CLAWHUB_CN_BASE_URL)
+}
+
 /// Check whether a SkillError represents a ClawHub rate-limit (429).
 fn is_clawhub_rate_limit(err: &librefang_skills::SkillError) -> bool {
     matches!(err, librefang_skills::SkillError::RateLimited(_))
+}
+
+/// Check whether a SkillError means the marketplace answered but is not serving marketplace data.
+fn is_marketplace_unavailable(err: &librefang_skills::SkillError) -> bool {
+    matches!(err, librefang_skills::SkillError::MarketplaceUnavailable(_))
+}
+
+/// Map a marketplace error to an HTTP status, uniformly across every hub and every operation.
+///
+/// `fallback` is the status the handler used before this classification existed — `502` for the read endpoints, `404` for detail, `500` for install — and stays in force for every error that is not one of the two the caller can act on.
+///
+/// `503 Service Unavailable` is the answer for [`SkillError::MarketplaceUnavailable`] because the condition is exactly what that status describes: the daemon is healthy, the request was well-formed, the upstream is temporarily not a marketplace.
+/// It also has to be the *same* answer everywhere. A `404` from detail told the reader the skill does not exist, and a scrubbed `500` from install told them the daemon broke; both are wrong in the same way, and both sent the dashboard down a different render path for one underlying fault.
+/// The dashboard's `isMarketplaceUnavailable` (#7846) already accepts `502` alongside `503` and renders one offline state for either, so a handler that still returns its old `502` degrades gracefully rather than regressing — but detail and install, which returned neither, needed this to reach that state at all.
+fn marketplace_error_status(
+    err: &librefang_skills::SkillError,
+    fallback: StatusCode,
+) -> StatusCode {
+    if is_marketplace_unavailable(err) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if is_clawhub_rate_limit(err) {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        fallback
+    }
 }
 
 /// Convert a browse entry (nested stats/tags) to a flat JSON object for the frontend.

@@ -8,15 +8,22 @@ on:
 permissions:
   issues: write
 
+concurrency:
+  group: issue-inactive
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Remind inactive assigned issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          REPO="${{ github.repository }}"
+          set -euo pipefail
+
           CUTOFF=$(date -u -d '14 days ago' +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v-14d +%Y-%m-%dT00:00:00Z)
 
           # Find assigned issues with no activity for 14 days
@@ -24,7 +31,7 @@ jobs:
             "repos/$REPO/issues?state=open&per_page=100&since=2000-01-01T00:00:00Z" --jq '
             [flatten[] | select(.assignees | length > 0) | select(.pull_request == null) |
             {number, title, updated_at, assignee: .assignees[0].login}]
-          ' 2>/dev/null | jq -c '.[]' | while read -r line; do
+          ' | jq -c '.[]' | while read -r line; do
             NUMBER=$(echo "$line" | jq -r '.number')
             UPDATED=$(echo "$line" | jq -r '.updated_at')
             ASSIGNEE=$(echo "$line" | jq -r '.assignee')

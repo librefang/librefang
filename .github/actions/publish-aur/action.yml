@@ -16,10 +16,9 @@ inputs:
     required: true
   known-hosts:
     description: >
-      known_hosts entries for aur.archlinux.org. When empty they are fetched
-      with ssh-keyscan at runtime (trust-on-first-use).
-    required: false
-    default: ""
+      Pinned known_hosts entries for aur.archlinux.org. Publishing fails when
+      this input is empty; never acquire host keys on the credentialed runner.
+    required: true
   git-name:
     description: Commit author name for the AUR push.
     required: false
@@ -60,20 +59,19 @@ runs:
 
         ( umask 077; printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$KEY" )
 
-        if [[ -n "${AUR_KNOWN_HOSTS//[[:space:]]/}" ]]; then
-          printf '%s\n' "$AUR_KNOWN_HOSTS" > "$KNOWN"
-        else
-          ssh-keyscan -t rsa,ecdsa,ed25519 aur.archlinux.org > "$KNOWN" 2>/dev/null
+        if [[ -z "${AUR_KNOWN_HOSTS//[[:space:]]/}" ]]; then
+          echo "::error::AUR_KNOWN_HOSTS must pin aur.archlinux.org before publishing."
+          exit 1
         fi
-        [[ -s "$KNOWN" ]] || { echo "::error::empty known_hosts for aur.archlinux.org"; exit 1; }
+        ( umask 077; printf '%s\n' "$AUR_KNOWN_HOSTS" > "$KNOWN" )
 
         docker run --rm \
-          -v "$GITHUB_WORKSPACE":/repo \
+          -v "$GITHUB_WORKSPACE":/repo:ro \
           -v "$KEY":/keys/aur_key:ro \
           -v "$KNOWN":/keys/known_hosts:ro \
           -e RELEASE_TAG -e GITHUB_REPOSITORY -e GH_API_TOKEN \
           -e AUR_GIT_NAME -e AUR_GIT_EMAIL \
           -e AUR_KEY_FILE=/keys/aur_key \
           -e AUR_KNOWN_HOSTS_FILE=/keys/known_hosts \
-          archlinux:base-devel \
+          archlinux:base-devel@sha256:ee205c220399524a683cf495d411691b921baed8ab47cdc6d732efa782fae484 \
           bash /repo/packaging/aur/publish-to-aur.sh "$PACKAGE"

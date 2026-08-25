@@ -249,6 +249,39 @@ pub async fn execute_tool_raw(
             *sender_id,
             *channel,
         )),
+        // #7808: semantic (vector) memory. Dispatched here with the KV tools
+        // because they share the same soft-`Denied` contract — a per-user ACL
+        // refusal on the `proactive` namespace must not count toward the
+        // consecutive-hard-failure abort.
+        "memory_semantic_search" => Some(
+            tool_memory_semantic_search(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_add" => Some(
+            tool_memory_semantic_add(input, *kernel, *caller_agent_id, *sender_id, *channel).await,
+        ),
+        "memory_semantic_forget" => Some(
+            tool_memory_semantic_forget(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_stats" => Some(
+            tool_memory_semantic_stats(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_duplicates" => Some(
+            tool_memory_semantic_duplicates(input, *kernel, *caller_agent_id, *sender_id, *channel)
+                .await,
+        ),
+        "memory_semantic_consolidate" => Some(
+            tool_memory_semantic_consolidate(
+                input,
+                *kernel,
+                *caller_agent_id,
+                *sender_id,
+                *channel,
+            )
+            .await,
+        ),
         "wiki_get" => Some(tool_wiki_get(input, *kernel, *sender_id, *channel)),
         "wiki_search" => Some(tool_wiki_search(input, *kernel, *sender_id, *channel)),
         "wiki_write" => Some(tool_wiki_write(
@@ -979,6 +1012,8 @@ pub async fn execute_tool_raw(
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
+        // Authoring an agent type is an agent-lifecycle operation — it writes the manifest a later `agent_spawn` consumes — so it sits with the inter-agent tools rather than with the workflow tools it was modelled on (#7722).
+        "agent_type_create" => tool_agent_type_create(input, *kernel).await,
 
         // Shared memory (`memory_*`) and wiki (`wiki_*`) tools are dispatched
         // before this match, through the typed `ToolError` boundary, so their
@@ -1146,6 +1181,27 @@ pub async fn execute_tool_raw(
             .map_err(ToolError::upstream_msg)
         }
 
+        // Targeted delivery to one member of the current conversation (#7086).
+        // Deliberately takes no channel / chat_id / account_id: all three come
+        // from the turn, so the roster that authorizes the recipient is the one
+        // the model is actually talking in and cannot be chosen by the model.
+        "channel_dm" => tool_channel_dm(
+            input,
+            *kernel,
+            *sender_id,
+            *channel,
+            *chat_id,
+            *sender_account_id,
+            *caller_agent_id,
+        )
+        .await
+        .map_err(ToolError::upstream_msg),
+
+        // Roster read — the companion of `channel_send` (#7086).
+        // The bridge has been persisting group senders through `roster_upsert` all along; this is the first caller of the matching read.
+        "channel_members" => tool_channel_members(input, *kernel, *sender_id, *channel, *chat_id)
+            .map_err(ToolError::upstream_msg),
+
         // Persistent process tools.
         "process_start" => {
             tool_process_start(
@@ -1180,7 +1236,9 @@ pub async fn execute_tool_raw(
         "goal_update" => tool_goal_update(input, *kernel),
 
         // Workflow tools.
-        "workflow_run" => tool_workflow_run(input, *kernel).await,
+        // #7714: forward the caller so the kernel can stamp it on the run as
+        // the run's owner, exactly as `workflow_start` already forwards it.
+        "workflow_run" => tool_workflow_run(input, *kernel, *caller_agent_id).await,
         "workflow_list" => tool_workflow_list(*kernel).await,
         "workflow_describe" => tool_workflow_describe(input, *kernel).await,
         "workflow_status" => tool_workflow_status(input, *kernel).await,
@@ -1188,6 +1246,7 @@ pub async fn execute_tool_raw(
             tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
         }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
+        "workflow_create" => tool_workflow_create(input, *kernel, *caller_agent_id).await,
 
         // Browser automation tools
         #[cfg(feature = "browser")]

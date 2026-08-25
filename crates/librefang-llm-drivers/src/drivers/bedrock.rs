@@ -535,7 +535,7 @@ fn relocate_stray_tool_results(messages: &mut Vec<BedrockMessage>) {
 
         if target < messages.len() && messages[target].role == "user" {
             // Prepend tool results before any existing content (results come first).
-            let existing: Vec<BedrockContentBlock> = messages[target].content.drain(..).collect();
+            let existing: Vec<BedrockContentBlock> = std::mem::take(&mut messages[target].content);
             messages[target].content = blocks;
             messages[target].content.extend(existing);
         } else {

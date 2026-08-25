@@ -51,22 +51,29 @@ export function TomlViewer({
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [tab, setTab] = useState<"toml" | "markdown">("toml");
-  const revokeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingDownloadsRef = useRef(
+    new Map<ReturnType<typeof setTimeout>, string>(),
+  );
 
   // Edit state — only meaningful when `onSave` is provided.
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [externalConflict, setExternalConflict] = useState(false);
+  const editBaselineRef = useRef<string | null>(null);
 
   const body = tab === "toml" ? toml : markdown;
   const loading = body === undefined && !error;
   const canEdit = !!onSave && tab === "toml";
 
   useEffect(() => {
+    const pendingDownloads = pendingDownloadsRef.current;
     return () => {
-      if (revokeTimeoutRef.current !== null) {
-        clearTimeout(revokeTimeoutRef.current);
+      for (const [timeout, url] of pendingDownloads) {
+        clearTimeout(timeout);
+        URL.revokeObjectURL(url);
       }
+      pendingDownloads.clear();
     };
   }, []);
 
@@ -76,49 +83,64 @@ export function TomlViewer({
     if (!isOpen) {
       setEditing(false);
       setSaveError(null);
+      setExternalConflict(false);
+      editBaselineRef.current = null;
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (
+      editing &&
+      editBaselineRef.current !== null &&
+      (toml ?? "") !== editBaselineRef.current
+    ) {
+      setExternalConflict(true);
+    }
+  }, [editing, toml]);
 
   const startEdit = useCallback(() => {
     setDraft(toml ?? "");
     setSaveError(null);
+    setExternalConflict(false);
+    editBaselineRef.current = toml ?? "";
     setEditing(true);
   }, [toml]);
 
   const cancelEdit = useCallback(() => {
     setEditing(false);
     setSaveError(null);
+    setExternalConflict(false);
+    editBaselineRef.current = null;
   }, []);
 
   const handleSave = useCallback(async () => {
-    if (!onSave) return;
+    if (!onSave || externalConflict) return;
     setSaveError(null);
     try {
       await onSave(draft);
       setEditing(false);
+      editBaselineRef.current = null;
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     }
-  }, [onSave, draft]);
+  }, [onSave, draft, externalConflict]);
 
   // Branch on the helper's boolean rather than wrapping it in try/catch: it swallows its own failures and reports them through the return value, so a catch block would make the "copy failed" toast unreachable.
   const onCopy = useCallback(async () => {
-    const text = editing ? draft : body;
-    if (!text) return;
-    if (await copyToClipboard(text)) {
+    if (!body) return;
+    if (await copyToClipboard(body)) {
       addToast(t("toml_viewer.copied"), "success");
     } else {
       addToast(t("toml_viewer.copy_failed"), "error");
     }
-  }, [editing, draft, body, t, addToast]);
+  }, [body, t, addToast]);
 
   const onDownload = useCallback(() => {
-    const text = editing ? draft : body;
-    if (!text) return;
+    if (!body) return;
     const filename =
       tab === "markdown" ? downloadName.replace(/\.toml$/i, ".md") : downloadName;
     const mime = tab === "markdown" ? "text/markdown" : "text/x-toml";
-    const blob = new Blob([text], { type: mime });
+    const blob = new Blob([body], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -126,8 +148,12 @@ export function TomlViewer({
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    revokeTimeoutRef.current = setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [editing, draft, body, tab, downloadName]);
+    const timeout = setTimeout(() => {
+      URL.revokeObjectURL(url);
+      pendingDownloadsRef.current.delete(timeout);
+    }, 1000);
+    pendingDownloadsRef.current.set(timeout, url);
+  }, [body, tab, downloadName]);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="7xl">
@@ -142,6 +168,7 @@ export function TomlViewer({
                 aria-selected={tab === "toml"}
                 aria-controls="toml-viewer-panel"
                 onClick={() => setTab("toml")}
+                disabled={editing}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "toml" ? "bg-brand text-white" : "text-text-dim hover:text-text"
                 }`}
@@ -155,6 +182,7 @@ export function TomlViewer({
                 aria-selected={tab === "markdown"}
                 aria-controls="toml-viewer-panel"
                 onClick={() => setTab("markdown")}
+                disabled={editing}
                 className={`text-[10px] font-bold uppercase px-2 py-1 rounded ${
                   tab === "markdown" ? "bg-brand text-white" : "text-text-dim hover:text-text"
                 }`}
@@ -193,7 +221,7 @@ export function TomlViewer({
                 <button
                   type="button"
                   onClick={handleSave}
-                  disabled={saving}
+                  disabled={saving || externalConflict}
                   className="text-[10px] font-bold px-2 py-1 rounded bg-brand text-white hover:brightness-110 disabled:opacity-40 inline-flex items-center gap-1"
                 >
                   {saving && <Loader2 className="w-3 h-3 animate-spin" />}
@@ -229,6 +257,11 @@ export function TomlViewer({
         {saveError && (
           <p className="text-xs text-error rounded-lg border border-error/30 bg-error/5 px-3 py-2 whitespace-pre-wrap">
             {saveError}
+          </p>
+        )}
+        {externalConflict && (
+          <p className="text-xs text-warning rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 whitespace-pre-wrap">
+            {t("toml_viewer.source_changed")}
           </p>
         )}
         {error ? (

@@ -15,6 +15,8 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
 use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_types::agent::AgentManifest;
+use librefang_types::config::DefaultModelConfig;
 use librefang_wire::registry::{PeerEntry, PeerRegistry, PeerState};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -30,19 +32,15 @@ fn boot() -> Harness {
     boot_with(|_| {})
 }
 
-/// Boot a harness, allowing the caller to mutate the freshly-built
-/// `AppState` (e.g. to install a peer registry on the kernel) before the
-/// router clones it.
-fn boot_with<F: FnOnce(&mut AppState)>(mutator: F) -> Harness {
-    let mut test = TestAppState::with_builder(MockKernelBuilder::new());
+/// Boot a harness, allowing the caller to configure the freshly-built state
+/// (e.g. to install a peer registry on the kernel) before mounting the router.
+fn boot_with<F: FnOnce(&AppState)>(configure: F) -> Harness {
+    boot_with_builder(MockKernelBuilder::new(), configure)
+}
 
-    // Mutate the AppState in place. At this point the only outstanding Arc
-    // ref is the one inside `test.state`, so `Arc::get_mut` is guaranteed
-    // to succeed. We must do this BEFORE any `state.clone()` below.
-    {
-        let inner = Arc::get_mut(&mut test.state).expect("AppState must be uniquely owned at boot");
-        mutator(inner);
-    }
+fn boot_with_builder<F: FnOnce(&AppState)>(builder: MockKernelBuilder, configure: F) -> Harness {
+    let test = TestAppState::with_builder(builder);
+    configure(&test.state);
 
     let state = test.state.clone();
     let app = Router::new()
@@ -115,6 +113,48 @@ async fn json_request_with_user(
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, value)
+}
+
+fn nested_error_message(body: &serde_json::Value) -> &str {
+    body["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected canonical nested error envelope: {body}"))
+}
+
+fn flat_error_message(body: &serde_json::Value) -> &str {
+    body["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected flat error envelope: {body}"))
+}
+
+const MOCK_LLM_REPLY: &str = "message accepted by mock provider";
+
+async fn spawn_mock_openai() -> (String, tokio::task::JoinHandle<()>) {
+    async fn completions_handler() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "id": "chatcmpl-network-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": MOCK_LLM_REPLY },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9 }
+        }))
+    }
+
+    let app = Router::new().route(
+        "/chat/completions",
+        axum::routing::post(completions_handler),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock LLM");
+    let addr = listener.local_addr().expect("mock LLM address");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), handle)
 }
 
 fn sample_peer(node_id: &str, name: &str) -> PeerEntry {
@@ -194,10 +234,7 @@ async fn peers_get_returns_404_when_no_registry() {
     let (status, body) = json_request(&h, Method::GET, "/api/peers/anything", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        nested_error_message(&body)
             .to_lowercase()
             .contains("peer networking"),
         "expected 'peer networking' phrase: {body}"
@@ -218,10 +255,7 @@ async fn peers_get_returns_404_for_unknown_id() {
     let (status, body) = json_request(&h, Method::GET, "/api/peers/missing", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        nested_error_message(&body)
             .to_lowercase()
             .contains("not found"),
         "{body}"
@@ -377,10 +411,7 @@ async fn comms_send_rejects_invalid_from_agent_id() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        nested_error_message(&body)
             .to_lowercase()
             .contains("from_agent_id"),
         "{body}"
@@ -404,10 +435,7 @@ async fn comms_send_rejects_unknown_from_agent() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        nested_error_message(&body)
             .to_lowercase()
             .contains("source agent"),
         "{body}"
@@ -470,10 +498,7 @@ async fn comms_send_rejects_oversize_message() {
         json_request_as_owner(&h, Method::POST, "/api/comms/send", Some(request_body)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        flat_error_message(&body)
             .to_lowercase()
             .contains("too large"),
         "{body}"
@@ -531,10 +556,7 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(
-        body["error"]
-            .as_str()
-            .or_else(|| body["error"]["message"].as_str())
-            .unwrap_or("")
+        nested_error_message(&body)
             .to_lowercase()
             .contains("own from_agent_id"),
         "{body}"
@@ -550,24 +572,27 @@ async fn comms_send_refuses_impersonation_of_owned_from_agent() {
 /// it does not capture the from→to relationship.
 ///
 /// This test exercises the route end-to-end with an Owner extension matching
-/// the production auth middleware and inspects the audit log on success. It
-/// tolerates the kernel returning Err (no live LLM
-/// configured in the mock kernel) by asserting the failure path does
-/// NOT record `comms_send`, which is the other half of the contract:
-/// audit fires only on success.
+/// the production auth middleware and a local deterministic LLM endpoint.
+/// The target is a real spawned agent, so the success-only audit branch must
+/// execute rather than being optional based on ambient provider state.
 #[tokio::test(flavor = "multi_thread")]
-async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
-    let h = boot();
+async fn comms_send_records_audit_entry_on_success() {
+    let (llm_base_url, _llm_server) = spawn_mock_openai().await;
+    let h = boot_with_builder(
+        MockKernelBuilder::new().with_config(move |cfg| {
+            cfg.default_model = DefaultModelConfig {
+                provider: "librefang-network-test".to_string(),
+                model: "mock-model".to_string(),
+                base_url: Some(llm_base_url),
+                ..Default::default()
+            };
+        }),
+        |_| {},
+    );
 
     let agent_a = librefang_types::agent::AgentEntry {
         id: librefang_types::agent::AgentId::new(),
         name: "alice".into(),
-        state: librefang_types::agent::AgentState::Running,
-        ..Default::default()
-    };
-    let agent_b = librefang_types::agent::AgentEntry {
-        id: librefang_types::agent::AgentId::new(),
-        name: "bob".into(),
         state: librefang_types::agent::AgentState::Running,
         ..Default::default()
     };
@@ -576,11 +601,14 @@ async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
         .agent_registry()
         .register(agent_a.clone())
         .expect("register alice");
-    h.state
+    let agent_b_id = h
+        .state
         .kernel
-        .agent_registry()
-        .register(agent_b.clone())
-        .expect("register bob");
+        .spawn_agent_typed(AgentManifest {
+            name: "bob".into(),
+            ..Default::default()
+        })
+        .expect("spawn bob");
 
     // Snapshot the audit log before — there should be no `comms_send`
     // entries yet. We snapshot to avoid coupling to whatever the
@@ -600,13 +628,13 @@ async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
 
     let msg = "héllo 漢字 🎉"; // multi-byte; len-in-bytes != chars-count
     let expected_chars = msg.chars().count();
-    let (status, _body) = json_request_as_owner(
+    let (status, body) = json_request_as_owner(
         &h,
         Method::POST,
         "/api/comms/send",
         Some(serde_json::json!({
             "from_agent_id": agent_a.id.to_string(),
-            "to_agent_id": agent_b.id.to_string(),
+            "to_agent_id": agent_b_id.to_string(),
             "message": msg,
         })),
     )
@@ -621,53 +649,22 @@ async fn comms_send_records_audit_entry_on_success_or_skips_on_failure() {
         .filter(|e| e.detail.contains("comms_send"))
         .collect();
 
-    match status {
-        StatusCode::OK => {
-            assert_eq!(
-                comms_entries.len(),
-                1,
-                "exactly one comms_send audit row expected after a successful send"
-            );
-            let entry = &comms_entries[0];
-            assert_eq!(entry.outcome, "ok");
-            assert_eq!(entry.channel.as_deref(), Some("api"));
-            // The detail string carries a JSON object with from/to/len.
-            // We don't pin the exact serialization shape, just the
-            // substrings the doc and audit-doc recommendation specify.
-            let from_str = agent_a.id.to_string();
-            let to_str = agent_b.id.to_string();
-            assert!(
-                entry.detail.contains(&from_str),
-                "audit detail must record `from`; got: {}",
-                entry.detail
-            );
-            assert!(
-                entry.detail.contains(&to_str),
-                "audit detail must record `to`; got: {}",
-                entry.detail
-            );
-            assert!(
-                entry.detail.contains(&format!("\"len\":{expected_chars}")),
-                "audit detail must record character count ({expected_chars}, NOT byte count {}); \
-                 got: {}",
-                msg.len(),
-                entry.detail,
-            );
-        }
-        StatusCode::INTERNAL_SERVER_ERROR => {
-            // Failure path: the kernel's send_message returned Err
-            // (no LLM agent loop running in this mock kernel). The
-            // route MUST NOT record an audit row on failure — the
-            // chain documents what really happened, not what was
-            // attempted at the API boundary.
-            assert!(
-                comms_entries.is_empty(),
-                "comms_send audit row must NOT be recorded on Err path; \
-                 found {} entries: {:?}",
-                comms_entries.len(),
-                comms_entries,
-            );
-        }
-        other => panic!("unexpected status {other}: comms_send returned neither 200 nor 500"),
-    }
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["response"], MOCK_LLM_REPLY);
+    assert_eq!(comms_entries.len(), 1, "exactly one audit row expected");
+
+    let entry = &comms_entries[0];
+    assert_eq!(entry.outcome, "ok");
+    assert_eq!(entry.channel.as_deref(), Some("api"));
+    let from_str = agent_a.id.to_string();
+    let to_str = agent_b_id.to_string();
+    assert!(entry.detail.contains(&from_str), "{}", entry.detail);
+    assert!(entry.detail.contains(&to_str), "{}", entry.detail);
+    assert!(
+        entry.detail.contains(&format!("\"len\":{expected_chars}")),
+        "audit detail must record character count ({expected_chars}, NOT byte count {}); got: {}",
+        msg.len(),
+        entry.detail,
+    );
 }
