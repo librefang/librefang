@@ -1520,6 +1520,12 @@ url = "https://search.example.com"
         // credential, so a caller who could write it could grant themselves
         // Owner by naming an IdP group they already hold.
         assert!(!super::is_writable_config_path("external_auth.role_map"));
+        // #7746: same reasoning for the group side. Writing `group_map` would
+        // let a caller join themselves to any team — and a team owns artifacts
+        // and confers binding-rule role strings — while writing `claim_paths`
+        // would let them redirect both maps at a claim they control.
+        assert!(!super::is_writable_config_path("external_auth.group_map"));
+        assert!(!super::is_writable_config_path("external_auth.claim_paths"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));
         assert!(!super::is_writable_config_path("audit.retention_days"));
