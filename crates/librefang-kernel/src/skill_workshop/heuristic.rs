@@ -153,11 +153,11 @@ fn is_conversational_filler(sentence: &str, trigger: &str) -> bool {
     };
     // Look at up to the 2 words preceding the trigger.
     let prefix = lower[..idx].trim_end();
-    let preceding_words: Vec<&str> = prefix
-        .rsplit(|c: char| c.is_whitespace())
+    let has_narrative_subject = prefix
+        .rsplit(|c: char| !c.is_ascii_alphabetic() && c != '\'')
         .filter(|w| !w.is_empty())
-        .take(3)
-        .collect();
+        .take(2)
+        .any(|word| matches!(word, "i" | "we" | "you" | "he" | "she" | "they"));
     // If `trigger` itself starts with the subject ("you should always")
     // there's no filler to detect — the trigger already includes the
     // imperative subject.
@@ -172,10 +172,7 @@ fn is_conversational_filler(sentence: &str, trigger: &str) -> bool {
     }
     // Otherwise, "I/we/you/he/she/they … always run/do" is narrative
     // ("I always run into this issue") — drop.
-    matches!(
-        preceding_words.last().copied(),
-        Some("i") | Some("we") | Some("you") | Some("he") | Some("she") | Some("they")
-    )
+    has_narrative_subject
 }
 
 /// Inspect a user message for a correction relative to the previous
@@ -486,6 +483,41 @@ mod tests {
         assert!(
             extract_explicit_instruction("We always check our work, in my opinion.").is_none(),
             "we-narrative must not be captured"
+        );
+    }
+
+    #[test]
+    fn explicit_narrative_subject_with_leading_words_is_dropped() {
+        assert!(
+            extract_explicit_instruction("Well they always run the formatter before submitting.")
+                .is_none(),
+            "the immediately preceding narrative subject must be detected"
+        );
+        assert!(
+            extract_explicit_instruction(
+                "In practice we sometimes always check the generated output before publishing."
+            )
+            .is_none(),
+            "a narrative subject within the two-word lookback must be detected"
+        );
+        assert!(
+            extract_explicit_instruction("Well, they—always run the formatter before submitting.")
+                .is_none(),
+            "punctuation between the subject and trigger must remain a word boundary"
+        );
+        assert!(
+            extract_explicit_instruction("They don't always run the formatter before submitting.")
+                .is_none(),
+            "an apostrophe word must count as one lookback word"
+        );
+    }
+
+    #[test]
+    fn explicit_non_subject_prefix_remains_capturable() {
+        assert!(
+            extract_explicit_instruction("For this project always run cargo fmt before commit.")
+                .is_some(),
+            "a non-subject prefix must not be mistaken for conversational filler"
         );
     }
 

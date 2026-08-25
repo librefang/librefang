@@ -859,7 +859,12 @@ mod tests {
             tools_md: Some("tools".to_string()),
             peer_agents: vec![("peer".to_string(), "Idle".to_string(), "haiku".to_string())],
             current_date: Some("Friday, 2026-05-16".to_string()),
-            active_goals: vec![("goal".to_string(), "in_progress".to_string(), 50)],
+            active_goals: vec![crate::prompt_builder::ActiveGoalPrompt {
+                id: "cc016c43-b781-4434-aeb7-f87d56af1522".to_string(),
+                title: "goal".to_string(),
+                status: "in_progress".to_string(),
+                progress: 50,
+            }],
             context_md: Some("ctx-md".to_string()),
             dynamic_sections: vec![crate::hooks::DynamicSection {
                 provider: "test".to_string(),

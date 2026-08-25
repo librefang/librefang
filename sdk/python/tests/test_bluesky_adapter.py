@@ -15,6 +15,7 @@ explicitly-acknowledged improvements:
 import io
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -370,6 +371,64 @@ def test_refresh_session_falls_back_to_create_on_failure(monkeypatch):
     assert fake.calls[0]["url"].endswith("refreshSession")
     assert fake.calls[0]["headers"]["authorization"] == "Bearer stale-refresh"
     assert fake.calls[1]["url"].endswith("createSession")
+
+
+def test_concurrent_token_reads_share_one_rotating_refresh(monkeypatch):
+    a = _adapter()
+    a._access_jwt = "expired-access"
+    a._refresh_jwt = "refresh-1"
+    a._session_did = "did:plc:bot"
+    # Age the session past the refresh threshold relative to the clock
+    # `_get_token` actually reads. A literal 0.0 only reads as expired
+    # once the host's monotonic clock has passed SESSION_LIFE_SECS, so
+    # it silently short-circuits to the "still fresh" branch on a
+    # freshly-booted CI runner.
+    a._session_created_at = (ba.time.monotonic()
+                             - ba.SESSION_LIFE_SECS)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def _post_json(url, body, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.01)
+        assert kwargs["bearer"] == "refresh-1"
+        return (200, {
+            "accessJwt": "access-2",
+            "refreshJwt": "refresh-2",
+            "did": "did:plc:bot",
+        }, {})
+
+    monkeypatch.setattr(a, "_post_json", _post_json)
+    start = threading.Barrier(8)
+    results: list[tuple[str, str]] = []
+
+    def _reader():
+        start.wait()
+        results.append(a._get_token())
+
+    threads = [threading.Thread(target=_reader) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert calls == 1
+    assert results == [("access-2", "did:plc:bot")] * 8
+    assert a._refresh_jwt == "refresh-2"
+
+
+def test_stale_401_does_not_invalidate_new_access_token():
+    a = _adapter()
+    a._access_jwt = "access-2"
+
+    a._invalidate_access_token("access-1")
+
+    assert a._access_jwt == "access-2"
+    a._invalidate_access_token("access-2")
+    assert a._access_jwt is None
 
 
 # ---- _post_status: createRecord shape ----------------------------

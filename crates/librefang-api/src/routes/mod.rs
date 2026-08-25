@@ -358,7 +358,12 @@ pub struct AppState {
 ///
 /// The mode is read from the process environment on every call rather than cached at boot.
 /// It costs one `std::env::var`, and it means a mode set by an orchestrator that rewrites the environment mid-life cannot be stale.
-pub fn guard_config_write() -> Option<(
+///
+/// `source` must be the kernel's own [`config_path`](librefang_kernel::LibreFangKernel::config_path) — `state.kernel.config_path()` at every call site.
+/// Re-deriving it here would let the refusal name a different file from the one the handler would have written, which is precisely the confusion the `423` body exists to remove (#6695).
+pub fn guard_config_write(
+    source: &std::path::Path,
+) -> Option<(
     axum::http::StatusCode,
     axum::response::Json<serde_json::Value>,
 )> {
@@ -367,7 +372,6 @@ pub fn guard_config_write() -> Option<(
         return None;
     }
 
-    let source = librefang_kernel::config::default_config_path();
     Some((
         axum::http::StatusCode::LOCKED,
         axum::response::Json(serde_json::json!({
@@ -382,9 +386,9 @@ pub fn guard_config_write() -> Option<(
 /// The `423 Locked` body `guard_config_write` produces, as a ready `Response`.
 ///
 /// Handlers whose error type cannot carry a `Response` (the `PersistError` / `PersistBudgetError` enums are `Clone`-free but also `Debug`-matched in several places) store a unit `Managed` variant and call this at the point of conversion, so there is still exactly one place that decides the status code and the body shape.
-pub fn managed_config_response() -> axum::response::Response {
+pub fn managed_config_response(source: &std::path::Path) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match guard_config_write() {
+    match guard_config_write(source) {
         Some(parts) => parts.into_response(),
         // Unreachable in practice: only called from a `Managed` error arm, which is only constructed when the guard fired.
         // Falling back to the same body keeps the wire contract stable if that ever stops holding.
@@ -394,7 +398,7 @@ pub fn managed_config_response() -> axum::response::Response {
                 "ok": false,
                 "error": "configuration is managed by the deployment",
                 "code": "config_managed",
-                "source": librefang_kernel::config::default_config_path().display().to_string(),
+                "source": source.display().to_string(),
             })),
         )
             .into_response(),

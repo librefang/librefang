@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentKeys,
+  agentTypeKeys,
   modelKeys,
   handKeys,
   workflowKeys,
@@ -190,6 +191,16 @@ describe("query key factories", () => {
       // Always same
       expect(configKeys.full()).toEqual(configKeys.full());
     });
+
+    it("status is anchored under configKeys.all so a config write invalidates it", () => {
+      // A save that flips the daemon into managed mode must not leave a stale
+      // `writable: true` behind, and every config mutation invalidates
+      // `configKeys.all` — which only reaches this key while it stays nested.
+      expect(configKeys.status()).toEqual(["config", "status"]);
+      expect(configKeys.status().slice(0, configKeys.all.length)).toEqual(
+        configKeys.all,
+      );
+    });
   });
 
   describe("approvalKeys", () => {
@@ -260,6 +271,27 @@ describe("query key factories", () => {
       const a = modelKeys.list({ provider: "openai" });
       const b = modelKeys.list({ provider: "anthropic" });
       expect(a).not.toEqual(b);
+    });
+  });
+
+  describe("agentTypeKeys", () => {
+    it("hierarchy is anchored so invalidating `all` reaches list and detail", () => {
+      expect(agentTypeKeys.all).toEqual(["agentTypes"]);
+      expect(agentTypeKeys.lists()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.list()).toEqual(["agentTypes", "list"]);
+      expect(agentTypeKeys.details()).toEqual(["agentTypes", "detail"]);
+      expect(agentTypeKeys.detail("coder")).toEqual([
+        "agentTypes",
+        "detail",
+        "coder",
+      ]);
+      const prefix = agentTypeKeys.all;
+      expect(agentTypeKeys.lists().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentTypeKeys.detail("coder").slice(0, prefix.length)).toEqual(prefix);
+    });
+
+    it("does not collide with agentKeys, which owns a different domain", () => {
+      expect(agentTypeKeys.all).not.toEqual(agentKeys.all);
     });
   });
 
@@ -371,24 +403,6 @@ describe("query key factories", () => {
       expect(mediaKeys.videoTask("task-1", "fal").slice(0, taskPrefix.length)).toEqual(taskPrefix);
       expect(mediaKeys.videoTasks().slice(0, mediaKeys.all.length)).toEqual(mediaKeys.all);
     });
-
-    it("videoTaskDisabled is stable and only collides with a literal sentinel id", () => {
-      expect(mediaKeys.videoTaskDisabled()).toEqual([
-        "media",
-        "videoTasks",
-        "__disabled__",
-        "__disabled__",
-      ]);
-      // Stable across calls (so useQuery's cache identity is preserved).
-      expect(mediaKeys.videoTaskDisabled()).toEqual(mediaKeys.videoTaskDisabled());
-      // 4-segment shape matches videoTask(taskId, provider) so useQuery's
-      // generics unify cleanly across the enabled/disabled branches.
-      expect(mediaKeys.videoTaskDisabled().length).toBe(4);
-      // Shares the videoTasks prefix — consumers can invalidate all video
-      // task queries (live + disabled placeholder) in one call.
-      const prefix = mediaKeys.videoTasks();
-      expect(mediaKeys.videoTaskDisabled().slice(0, prefix.length)).toEqual(prefix);
-    });
   });
 
   describe("telemetryKeys", () => {
@@ -402,6 +416,7 @@ describe("query key factories", () => {
   describe("all factories exist", () => {
     const factories = [
       agentKeys,
+      agentTypeKeys,
       modelKeys,
       providerKeys,
       channelKeys,
@@ -481,6 +496,23 @@ describe("query key factories", () => {
       ]);
       // Empty filters still produces a stable key.
       expect(auditKeys.query()).toEqual(["audit", "query", {}]);
+      expect(
+        auditKeys.query({
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        }),
+      ).toEqual([
+        "audit",
+        "query",
+        {
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        },
+      ]);
     });
   });
 

@@ -56,6 +56,8 @@ export const commsQueries = {
       queryKey: commsKeys.events(limit),
       queryFn: () => listCommsEvents(limit),
       staleTime: EVENTS_STALE_MS,
+      refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 
@@ -88,12 +90,7 @@ export function useCommsTopology(options: QueryOverrides = {}) {
 
 export function useCommsEvents(
   limit = 200,
-  options: { enabled?: boolean; refetchInterval?: number | false } = {},
+  options: QueryOverrides = {},
 ) {
-  return useQuery({
-    ...commsQueries.events(limit),
-    enabled: options.enabled,
-    refetchInterval: options.refetchInterval ?? REFRESH_MS,
-    refetchIntervalInBackground: false, // #3393
-  });
+  return useQuery(withOverrides(commsQueries.events(limit), options));
 }

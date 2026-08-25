@@ -55,9 +55,9 @@ export function useUpdateMemoryConfig() {
     mutationFn: updateMemoryConfig,
     onSuccess: (entity) => {
       // PATCH now returns the canonical post-mutation entity (issue #3832),
-      // so seed the cache directly to avoid a follow-up GET round-trip.
+      // so seed the cache directly. Do not invalidate this same key: active
+      // observers would immediately refetch and defeat the canonical seed.
       qc.setQueryData(memoryKeys.config(), entity);
-      qc.invalidateQueries({ queryKey: memoryKeys.config() });
     },
   });
 }

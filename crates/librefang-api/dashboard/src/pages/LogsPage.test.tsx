@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { LogsPage } from "./LogsPage";
+import {
+  LogsPage,
+  auditLogKey,
+  auditLogLevel,
+  projectAuditLogExport,
+} from "./LogsPage";
 import { useAuditRecent } from "../lib/queries/runtime";
 import type { AuditEntry } from "../api";
 
@@ -141,6 +146,49 @@ describe("LogsPage", () => {
     const errorBadges = screen.getAllByText("error");
     expect(infoBadges).toHaveLength(2);
     expect(errorBadges).toHaveLength(1);
+  });
+
+  it("derives warning and debug levels from outcome prefixes", () => {
+    expect(auditLogLevel({ outcome: "warning: nearing limit" } as AuditEntry)).toBe(
+      "warn",
+    );
+    expect(auditLogLevel({ outcome: "debug: cache miss" } as AuditEntry)).toBe(
+      "debug",
+    );
+  });
+
+  it("projects exports to the log-view contract", () => {
+    const [entry] = sampleEntries();
+    const exported = projectAuditLogExport([
+      { ...entry, hash: "private-hash" },
+    ]);
+
+    expect(exported).toEqual([
+      {
+        timestamp: entry.timestamp,
+        level: "info",
+        module: entry.action,
+        message: entry.detail,
+        outcome: entry.outcome,
+      },
+    ]);
+    expect(exported[0]).not.toHaveProperty("agent_id");
+    expect(exported[0]).not.toHaveProperty("hash");
+  });
+
+  it("uses stable content keys when sequence numbers are absent", () => {
+    const entry = {
+      timestamp: "2026-05-02T12:00:00Z",
+      action: "tool.invoke",
+      detail: "ran command",
+      outcome: "ok",
+    } as AuditEntry;
+
+    expect(auditLogKey(entry)).toBe(auditLogKey({ ...entry }));
+    expect(auditLogKey({ ...entry, hash: "hash-1" })).toBe("hash:hash-1");
+    expect(auditLogKey({ ...entry, agent_id: "agent-2" })).not.toBe(
+      auditLogKey(entry),
+    );
   });
 
   it("filters entries by the search input (case-insensitive on detail)", () => {

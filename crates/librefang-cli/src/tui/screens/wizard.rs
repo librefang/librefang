@@ -219,15 +219,7 @@ const PROVIDERS: &[ProviderInfo] = &[
 
 /// Check if first-run setup is needed.
 pub fn needs_setup() -> bool {
-    let of_home = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
-        std::path::PathBuf::from(h)
-    } else {
-        match dirs::home_dir() {
-            Some(h) => h.join(".librefang"),
-            None => return true,
-        }
-    };
-    !of_home.join("config.toml").exists()
+    !crate::commands::common::cli_config_path().exists()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -485,7 +477,7 @@ listen_addr = "127.0.0.1:4545"
             provider = p.name,
         );
 
-        let config_path = librefang_dir.join("config.toml");
+        let config_path = crate::commands::common::cli_config_path();
         match std::fs::write(&config_path, &config) {
             Ok(()) => {
                 crate::restrict_file_permissions(&config_path);

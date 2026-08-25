@@ -155,7 +155,11 @@ pub async fn send_message(
     // attachment lands on the agent's most-recent registry session
     // (typically a warm group session for chat agents) and leaks across
     // chats — the 2026-05-20 incident this PR closes.
-    let sender_context = request_sender_context(&req);
+    let sender_context = request_sender_context(
+        &req,
+        api_user.as_ref().map(|u| &u.0),
+        state.kernel.auth_manager(),
+    );
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
@@ -543,8 +547,12 @@ pub async fn send_message_stream(
         },
     };
 
-    let (sender_context, incognito, session_override) =
-        build_streaming_kernel_args(&req, session_id_override);
+    let (sender_context, incognito, session_override) = build_streaming_kernel_args(
+        &req,
+        api_user.as_ref().map(|u| &u.0),
+        state.kernel.auth_manager(),
+        session_id_override,
+    );
 
     if !req.attachments.is_empty() {
         let image_blocks = match resolve_attachments(

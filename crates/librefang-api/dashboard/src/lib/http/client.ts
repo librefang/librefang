@@ -24,6 +24,7 @@ export {
   listAgentEvents,
   listAgentSessions,
   listAgentTemplates,
+  getAgentType,
   listPromptVersions,
   listPromptsOverview,
   listExperiments,
@@ -44,11 +45,13 @@ export {
   // config & registry
   getFullConfig,
   getConfigSchema,
+  getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
   // goals
   listGoals,
   listGoalTemplates,
+  getGoalRun,
   // hands
   listHands,
   listActiveHands,
@@ -136,6 +139,8 @@ export {
   getAgentTools,
   // per-agent skill assignment — read (#4917)
   getAgentSkills,
+  // per-agent MCP server assignment — read (#7713)
+  getAgentMcpServers,
   getAgentTemplateToml,
   // overview
   loadDashboardSnapshot,
@@ -186,6 +191,10 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   // agents
+  createAgentType,
+  updateAgentType,
+  deleteAgentType,
+  spawnEphemeral,
   spawnAgent,
   cloneAgent,
   stopAgent,
@@ -244,7 +253,6 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
-  getGoalRun,
   // hands
   activateHand,
   deactivateHand,

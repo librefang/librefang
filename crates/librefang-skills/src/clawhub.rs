@@ -19,6 +19,23 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
+/// Official ClawHub API base URL.
+pub const DEFAULT_CLAWHUB_URL: &str = "https://clawhub.ai/api/v1";
+
+/// Environment variable that repoints [`ClawHubClient::new`] at a ClawHub mirror.
+pub const ENV_CLAWHUB_URL: &str = "LIBREFANG_CLAWHUB_URL";
+
+/// Read a marketplace URL override from the environment, falling back to `default`.
+///
+/// An unset variable and one set to whitespace are treated alike: a blank override in a shell profile or compose file is an operator mistake, not a request to fetch from the empty string.
+pub fn env_url_or(var: &str, default: &str) -> String {
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Retry constants for ClawHub API rate-limit handling
 // ---------------------------------------------------------------------------
@@ -264,11 +281,14 @@ pub struct ClawHubClient {
 }
 
 impl ClawHubClient {
-    /// Create a new ClawHub client with default settings.
+    /// Create a new ClawHub client pointed at the configured ClawHub API.
     ///
-    /// Uses the official ClawHub API at `https://clawhub.ai/api/v1`.
+    /// Defaults to the official API at [`DEFAULT_CLAWHUB_URL`]; `LIBREFANG_CLAWHUB_URL` overrides it so an operator can move to a mirror without recompiling when the official host stops answering with JSON.
     pub fn new(cache_dir: PathBuf) -> Self {
-        Self::with_url("https://clawhub.ai/api/v1", cache_dir)
+        Self::with_url(
+            &crate::clawhub::env_url_or(ENV_CLAWHUB_URL, DEFAULT_CLAWHUB_URL),
+            cache_dir,
+        )
     }
 
     /// Create a ClawHub client with a custom API URL.
@@ -412,13 +432,11 @@ impl ClawHubClient {
         );
 
         let response = self.get_with_retry(&url, "ClawHub search").await?;
+        let body = response.bytes().await.map_err(|e| {
+            SkillError::Network(format!("Failed to read ClawHub search response: {e}"))
+        })?;
 
-        let results: ClawHubSearchResponse = response
-            .json()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub response: {e}")))?;
-
-        Ok(results)
+        crate::parse_marketplace_json::<ClawHubSearchResponse>("ClawHub search", &url, &body)
     }
 
     /// Browse skills by sort order (trending, downloads, stars, etc.).
@@ -442,13 +460,11 @@ impl ClawHubClient {
         }
 
         let response = self.get_with_retry(&url, "ClawHub browse").await?;
+        let body = response.bytes().await.map_err(|e| {
+            SkillError::Network(format!("Failed to read ClawHub browse response: {e}"))
+        })?;
 
-        let results: ClawHubBrowseResponse = response
-            .json()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub browse: {e}")))?;
-
-        Ok(results)
+        crate::parse_marketplace_json::<ClawHubBrowseResponse>("ClawHub browse", &url, &body)
     }
 
     /// Get detailed info about a specific skill.
@@ -460,13 +476,11 @@ impl ClawHubClient {
         let url = format!("{}/skills/{}", self.base_url, urlencoded(slug));
 
         let response = self.get_with_retry(&url, "ClawHub skill detail").await?;
+        let body = response.bytes().await.map_err(|e| {
+            SkillError::Network(format!("Failed to read ClawHub detail response: {e}"))
+        })?;
 
-        let detail: ClawHubSkillDetail = response
-            .json()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to parse ClawHub detail: {e}")))?;
-
-        Ok(detail)
+        crate::parse_marketplace_json::<ClawHubSkillDetail>("ClawHub skill detail", &url, &body)
     }
 
     /// Helper: extract the version string from a browse entry.
@@ -497,6 +511,14 @@ impl ClawHubClient {
             .text()
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read ClawHub file: {e}")))?;
+
+        // A hub serving its SPA shell answers `200` here too, and the caller would happily display that HTML as the skill's source.
+        // None of the three files this endpoint is asked for — `SKILL.md`, `package.json`, `skill.toml` — begins with `<`, so the same marker that identifies a dead JSON endpoint identifies a dead file endpoint.
+        if crate::looks_like_markup(text.as_bytes()) {
+            return Err(SkillError::MarketplaceUnavailable(format!(
+                "ClawHub file fetch at {url} answered with a webpage instead of {path} — the marketplace is unreachable or has moved. Skill source cannot be shown until it returns; skills already installed locally are unaffected."
+            )));
+        }
 
         Ok(text)
     }

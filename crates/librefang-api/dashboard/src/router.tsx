@@ -161,6 +161,7 @@ const SchedulerPage = lazyWithReload(() => import("./pages/SchedulerPage").then(
 const SessionsPage = lazyWithReload(() => import("./pages/SessionsPage").then(m => ({ default: m.SessionsPage })));
 const SettingsPage = lazyWithReload(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
 const SkillsPage = lazyWithReload(() => import("./pages/SkillsPage").then(m => ({ default: m.SkillsPage })));
+const AgentTypesPage = lazyWithReload(() => import("./pages/AgentTypesPage").then(m => ({ default: m.AgentTypesPage })));
 const PromptsPage = lazyWithReload(() => import("./pages/PromptsPage").then(m => ({ default: m.PromptsPage })));
 const WizardPage = lazyWithReload(() => import("./pages/WizardPage").then(m => ({ default: m.WizardPage })));
 const WorkflowsPage = lazyWithReload(() => import("./pages/WorkflowsPage").then(m => ({ default: m.WorkflowsPage })));
@@ -273,6 +274,12 @@ const skillsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/skills",
   component: () => <LazyRouteBoundary><SkillsPage /></LazyRouteBoundary>
+});
+
+const agentTypesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/agent-types",
+  component: () => <LazyRouteBoundary><AgentTypesPage /></LazyRouteBoundary>
 });
 
 const promptsRoute = createRoute({
@@ -501,6 +508,7 @@ const routeTree = rootRoute.addChildren([
   chatRoute,
   settingsRoute,
   skillsRoute,
+  agentTypesRoute,
   promptsRoute,
   wizardRoute,
   workflowsRoute,

@@ -7,7 +7,7 @@ import type { TFunction } from "i18next";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isCliProvider, isProviderAvailable } from "../lib/status";
 import { useCredentialPools, useProviders, useProviderStatus } from "../lib/queries/providers";
-import type { CredentialPoolStatus, CredentialPoolKeySnapshot } from "../api";
+import type { CredentialPoolStatus, CredentialPoolKeySnapshot, ModelOverrides } from "../api";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useUpdateModelOverrides } from "../lib/mutations/models";
 import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useEnableProvider, useSetProviderUrl, useSetProviderDiscovery, useSetDefaultProvider, useCreateRegistryContent, useConnectEveryApi, EVERYAPI_PROVIDER } from "../lib/mutations/providers";
@@ -163,8 +163,126 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault }: {
   );
 }
 
-// Uses max_tokens override (not context_window): context_window has no persistence path in ModelOverrides and is overwritten on registry sync.
-function ProviderMaxTokensSection({ providerId, addToast }: {
+/**
+ * One numeric limit on one model, editable at any time (#7774).
+ *
+ * Both limits the operator can correct share this shape: a field seeded from
+ * the value currently in force, a placeholder showing the catalog value, and a
+ * blank-or-equal-to-catalog input that clears the override rather than pinning
+ * a duplicate. The override lives in `model_overrides.json`, keyed by
+ * `provider:model_id`, so it is reachable after creation and survives a
+ * registry sync — which is what `context_window` could not do before.
+ */
+function ModelLimitEditor({ overrideKey, overrides, overridesLoading, field, catalogValue, label, placeholder, savedMessage, hintDefault, hintOverride, addToast }: {
+  overrideKey: string;
+  overrides: ModelOverrides | undefined;
+  overridesLoading: boolean;
+  /** Which `ModelOverrides` field this editor writes. */
+  field: "max_tokens" | "context_window";
+  /** The catalog value this field reverts to, or undefined when unknown. */
+  catalogValue?: number;
+  label: string;
+  placeholder: string;
+  savedMessage: string;
+  hintDefault: string;
+  hintOverride: string;
+  addToast: (msg: string, type?: "success" | "error" | "info") => void;
+}) {
+  const { t } = useTranslation();
+  const updateOverrides = useUpdateModelOverrides();
+
+  const overrideValue = overrides?.[field];
+  const effective = overrideValue ?? catalogValue;
+
+  // Local input state, seeded from the effective value once it resolves and
+  // re-seeded when the caller switches models (the key changes).
+  const [input, setInput] = useState("");
+  const [seededFor, setSeededFor] = useState("");
+  useEffect(() => {
+    if (overrideKey && overrideKey !== seededFor && !overridesLoading) {
+      setInput(effective != null ? String(effective) : "");
+      setSeededFor(overrideKey);
+    }
+  }, [overrideKey, seededFor, overridesLoading, effective]);
+
+  const [saving, setSaving] = useState(false);
+
+  const parsed = input.trim() === "" ? null : Number(input);
+  const invalid = parsed != null && (!Number.isInteger(parsed) || parsed <= 0);
+  // The override the value would resolve to once saved: an explicit number
+  // that already equals the catalog value needs no override row, so treat it as
+  // "clear". A blank input also clears.
+  const targetOverride = parsed != null && parsed !== catalogValue ? parsed : null;
+  const dirty = targetOverride !== (overrideValue ?? null);
+
+  const handleSave = async () => {
+    if (!overrideKey || invalid) return;
+    setSaving(true);
+    try {
+      const next: ModelOverrides = { ...overrides };
+      if (targetOverride == null) {
+        delete next[field];
+      } else {
+        next[field] = targetOverride;
+      }
+      await updateOverrides.mutateAsync({ modelKey: overrideKey, overrides: next });
+      addToast(savedMessage, "success");
+    } catch (e: unknown) {
+      addToast(getErrorMessage(e) || t("common.error"), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-1">
+      <label className="text-[10px] font-bold text-text-dim uppercase">{label}</label>
+      <div className="flex gap-2">
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder={catalogValue != null ? String(catalogValue) : placeholder}
+          aria-label={label}
+          className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
+          aria-invalid={invalid || undefined}
+        />
+        <Button
+          variant="secondary"
+          onClick={handleSave}
+          disabled={saving || invalid || !dirty || !overrideKey}
+          /* Three buttons read "Save" in this drawer (the key form plus one per
+             limit). Name each by the limit it saves so the accessible name is
+             unambiguous. */
+          aria-label={`${label} — ${t("common.save")}`}
+        >
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
+        </Button>
+      </div>
+      {invalid && (
+        <p className="text-[10px] text-error">{t("providers.limit_invalid")}</p>
+      )}
+      <p className="text-[10px] text-text-dim/60 leading-snug">
+        {overrideValue != null
+          ? hintOverride
+          : hintDefault}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Per-model capacity and output limits for one provider (#6209, #7774).
+ *
+ * The model picker is shared by both editors so switching model re-seeds them
+ * together. `limits_catalog` is the revert target rather than the row's own
+ * `context_window` / `max_output_tokens`, because those now carry the
+ * *effective* value — reading them would make an active override look like the
+ * catalog default and silently delete itself on the next save.
+ */
+function ProviderModelLimitsSection({ providerId, addToast }: {
   providerId: string;
   addToast: (msg: string, type?: "success" | "error" | "info") => void;
 }) {
@@ -174,7 +292,7 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
 
   const [selectedModelId, setSelectedModelId] = useState("");
   // Default the editor to the provider's representative (first) model so the
-  // field aligns with the card's headline value without an extra click.
+  // fields align with the card's headline value without an extra click.
   useEffect(() => {
     if (!selectedModelId && models.length > 0) {
       setSelectedModelId(models[0].id);
@@ -184,63 +302,17 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
   const selectedModel = models.find(m => m.id === selectedModelId);
   const overrideKey = selectedModelId ? `${providerId}:${selectedModelId}` : "";
   const overridesQuery = useModelOverrides(overrideKey);
-  const updateOverrides = useUpdateModelOverrides();
 
-  // The effective value: an explicit `max_tokens` override wins, else the
-  // model's catalog `max_output_tokens`. Mirrors the backend resolution.
-  const overrideMax = overridesQuery.data?.max_tokens;
-  const catalogMax = selectedModel?.max_output_tokens;
-  const effectiveMax = overrideMax ?? catalogMax;
-
-  // Local input state, seeded from the effective value once it resolves and
-  // re-seeded when the user switches models.
-  const [input, setInput] = useState("");
-  const [seededFor, setSeededFor] = useState("");
-  useEffect(() => {
-    if (overrideKey && overrideKey !== seededFor && !overridesQuery.isLoading) {
-      setInput(effectiveMax != null ? String(effectiveMax) : "");
-      setSeededFor(overrideKey);
-    }
-  }, [overrideKey, seededFor, overridesQuery.isLoading, effectiveMax]);
-
-  const [saving, setSaving] = useState(false);
-
-  const parsed = input.trim() === "" ? null : Number(input);
-  const invalid = parsed != null && (!Number.isInteger(parsed) || parsed <= 0);
-  // The override the value would resolve to once saved: an explicit number
-  // that already equals the catalog default needs no override row, so treat
-  // it as "clear". A blank input also clears.
-  const targetOverride = parsed != null && parsed !== catalogMax ? parsed : null;
-  const dirty = targetOverride !== (overrideMax ?? null);
-
-  const handleSave = async () => {
-    if (!overrideKey || invalid) return;
-    setSaving(true);
-    try {
-      if (targetOverride == null) {
-        // Reverts to the catalog default → drop any existing override.
-        if (overrideMax != null) {
-          const next = { ...overridesQuery.data };
-          delete next.max_tokens;
-          await updateOverrides.mutateAsync({ modelKey: overrideKey, overrides: next });
-        }
-      } else {
-        await updateOverrides.mutateAsync({
-          modelKey: overrideKey,
-          overrides: { ...overridesQuery.data, max_tokens: targetOverride },
-        });
-      }
-      addToast(t("providers.max_tokens_saved"), "success");
-    } catch (e: unknown) {
-      addToast(getErrorMessage(e) || t("common.error"), "error");
-    } finally {
-      setSaving(false);
-    }
-  };
+  // `0` is the catalog's documented "unknown" sentinel, not a limit — a model
+  // the registry has no window for (or a gateway that reports none) must show
+  // as unknown rather than as a zero-token window.
+  const positive = (v?: number) => (v != null && v > 0 ? v : undefined);
+  const catalogWindow = positive(selectedModel?.limits_catalog?.context_window);
+  const catalogMaxOut = positive(selectedModel?.limits_catalog?.max_output_tokens);
 
   return (
-    <div className="border-t border-border-subtle pt-3 mt-1 space-y-2">
-      <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.max_tokens")}</label>
+    <div className="border-t border-border-subtle pt-3 mt-1 space-y-3">
+      <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.model_limits")}</label>
       {modelsQuery.isLoading ? (
         <div className="w-full h-10 rounded-xl bg-bg-subtle animate-pulse" />
       ) : models.length === 0 ? (
@@ -250,7 +322,7 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
           {models.length > 1 && (
             <select
               value={selectedModelId}
-              onChange={e => { setSelectedModelId(e.target.value); setSeededFor(""); }}
+              onChange={e => setSelectedModelId(e.target.value)}
               className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
               aria-label={t("providers.max_tokens_model_label")}
             >
@@ -259,33 +331,39 @@ function ProviderMaxTokensSection({ providerId, addToast }: {
               ))}
             </select>
           )}
-          <div className="flex gap-2">
-            <input
-              type="number"
-              min={1}
-              step={1}
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              placeholder={catalogMax != null ? String(catalogMax) : t("providers.max_tokens_placeholder")}
-              className={`flex-1 rounded-xl border bg-main px-3 py-2 text-sm font-mono outline-none focus:ring-1 ${invalid ? "border-error focus:border-error focus:ring-error/20" : "border-border-subtle focus:border-brand focus:ring-brand/20"}`}
-              aria-invalid={invalid || undefined}
-            />
-            <Button
-              variant="secondary"
-              onClick={handleSave}
-              disabled={saving || invalid || !dirty || !overrideKey}
-            >
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : t("common.save")}
-            </Button>
-          </div>
-          {invalid && (
-            <p className="text-[10px] text-error">{t("providers.max_tokens_invalid")}</p>
+          {catalogWindow == null && (
+            <p className="text-[10px] text-warning leading-snug">
+              {t("providers.context_window_unknown")}
+            </p>
           )}
-          <p className="text-[10px] text-text-dim/60 leading-snug">
-            {overrideMax != null
-              ? t("providers.max_tokens_hint_override", { value: catalogMax != null ? catalogMax.toLocaleString() : "-" })
-              : t("providers.max_tokens_hint_default")}
-          </p>
+          <ModelLimitEditor
+            key={`${overrideKey}:context_window`}
+            overrideKey={overrideKey}
+            overrides={overridesQuery.data}
+            overridesLoading={overridesQuery.isLoading}
+            field="context_window"
+            catalogValue={catalogWindow}
+            label={t("providers.context_window")}
+            placeholder={t("providers.context_window_placeholder")}
+            savedMessage={t("providers.context_window_saved")}
+            hintDefault={t("providers.context_window_hint_default")}
+            hintOverride={t("providers.context_window_hint_override", { value: catalogWindow != null ? catalogWindow.toLocaleString() : "-" })}
+            addToast={addToast}
+          />
+          <ModelLimitEditor
+            key={`${overrideKey}:max_tokens`}
+            overrideKey={overrideKey}
+            overrides={overridesQuery.data}
+            overridesLoading={overridesQuery.isLoading}
+            field="max_tokens"
+            catalogValue={catalogMaxOut}
+            label={t("providers.max_tokens")}
+            placeholder={t("providers.max_tokens_placeholder")}
+            savedMessage={t("providers.max_tokens_saved")}
+            hintDefault={t("providers.max_tokens_hint_default")}
+            hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? catalogMaxOut.toLocaleString() : "-" })}
+            addToast={addToast}
+          />
         </>
       )}
     </div>
@@ -2121,7 +2199,7 @@ export function ProvidersPage() {
               />
             )}
 
-            <ProviderMaxTokensSection
+            <ProviderModelLimitsSection
               providerId={config.provider.id}
               addToast={addToast}
             />
