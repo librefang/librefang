@@ -8,6 +8,9 @@ It is the wrong model for a deployment where the configuration comes from a Kube
 There, the manifest is the source of truth, and a dashboard write is either lost on the next rollout or silently drifts the running config away from what the manifest says.
 Managed mode makes that ownership explicit and enforces it server-side.
 
+Resources that do not live in `config.toml` — agents — have their own deployment-owned contract: [`declarative-provisioning.md`](declarative-provisioning.md).
+The two features are independent and compose; a Kubernetes deployment normally wants both.
+
 ## The two environment variables
 
 | Variable | Effect | Default |
@@ -237,7 +240,8 @@ Stated plainly rather than left to be discovered:
 - **The lock is whole-config, not field-level.**
   There is no way to declare "the deployment owns `[external_auth]` but the dashboard may still edit `[channels]`".
   The existing `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` allowlist is already a field-level model and is already load-bearing for security; layering a second, orthogonal ownership axis over it would produce a matrix where the interesting cases are the corners.
-  Revisit when a deployment actually needs it.
+  Ownership is instead expressed at the *resource* level — see [`declarative-provisioning.md`](declarative-provisioning.md), where each declared agent is locked individually and everything else stays mutable.
+  That is the granularity a deployment has actually asked for; per-field ownership within `config.toml` stays out until one needs it.
 - **CLI writes are not gated.**
   `librefang config set` and friends still write the file — the file the daemon loaded, since #6695, but they write it.
   An operator running the CLI inside the pod is doing so deliberately; managed mode is about the API and dashboard surface that a user reaches without shell access.

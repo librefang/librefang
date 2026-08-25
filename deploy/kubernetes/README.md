@@ -175,6 +175,9 @@ curl -H "Authorization: Bearer $API_KEY" http://127.0.0.1:4545/api/config/status
 | `LIBREFANG_CONFIG_PATH=/etc/librefang/config.toml` | Relocation. Since #6695 every reader **and** writer resolves through it, so nothing deposits a second copy in `/data` that the daemon never reads. |
 | `LIBREFANG_CONFIG_MODE=managed` | The lock. Every API route that would persist into the file answers `423 Locked` with `code: "config_managed"`. |
 | `checksum/config` annotation on the pod template | Makes a config edit roll the StatefulSet, and is the same `sha256:` string `GET /api/config/status` reports back. |
+| `agents/*.toml` rendered into a second ConfigMap | The deployment declares its agents the same way it declares its configuration. |
+| `LIBREFANG_PROVISIONING_PATH=/etc/librefang/provisioning` | Switches declarative provisioning on. Each declared agent is locked individually with `code: "resource_provisioned"`; anything created at runtime stays editable. |
+| `checksum/provisioning` annotation | Same contract for the declarations. The tree is reconciled at boot only, so an edit that does not roll the pod changes nothing. |
 
 There is no init container, and nothing copies the file into `/data`.
 The daemon resolves `LIBREFANG_CONFIG_PATH` itself and boots straight off the read-only mount; `scripts/check-k8s-manifests.py` fails the build if an `initContainers` block appears, because a writable duplicate under `/data` would be a second source of truth the deployment does not control.
@@ -251,6 +254,45 @@ printf 'sha256:%s\n' "$( (cd deploy/kubernetes/overlays/managed-config && sha256
 ```
 
 `GET /api/config/status` reports that same string, and lists the included files in its `includes` field.
+
+### Provisioned agents
+
+The overlay also renders `agents/researcher.toml` into a `librefang-agents` ConfigMap and mounts it read-only at `/etc/librefang/provisioning/agents`.
+`LIBREFANG_PROVISIONING_PATH` points the daemon at the root; the mount is one level down because a ConfigMap exposes its keys flat in a single directory.
+
+The resource identifier is the manifest's `name`, not the file name.
+At boot the daemon creates each declared agent, applies a changed declaration to the agent that already exists, and leaves an unchanged one alone.
+Afterwards every API route that would rewrite that agent's manifest answers `423 Locked`; suspending, resuming and messaging it are untouched.
+
+Removing a declaration **releases** the agent by default — it keeps running and becomes editable again.
+Set `LIBREFANG_PROVISIONING_PRUNE=delete` (nothing else is destructive) if the tree should be the only source of agents.
+
+Add a second agent by dropping a file in `agents/` and listing it in the `configMapGenerator`:
+
+```yaml
+  - name: librefang-agents
+    files:
+      - agents/researcher.toml
+      - agents/triager.toml
+```
+
+Then regenerate the annotation over the whole set, in sorted key order:
+
+```bash
+printf 'sha256:%s\n' "$( (cd deploy/kubernetes/overlays/managed-config/agents && sha256sum *.toml) | sha256sum | awk '{print $1}')"
+```
+
+`scripts/check-k8s-manifests.py` recomputes it, and additionally fails the build on a declaration that is not valid TOML, declares no `name`, is not a `.toml` key, or assigns a credential a literal value — all of which the running daemon would otherwise turn into a missing agent visible only in `GET /api/provisioning/status`.
+
+Confirm a rollout landed:
+
+```bash
+curl -sS -H "Authorization: Bearer $LIBREFANG_API_KEY" \
+  http://127.0.0.1:4545/api/provisioning/status | jq '.resources[] | {name, drifted, present}'
+```
+
+`drifted: true` means the ConfigMap moved and the pod did not.
+Full semantics: [`docs/operations/declarative-provisioning.md`](../../docs/operations/declarative-provisioning.md).
 
 ### Updating a managed configuration
 

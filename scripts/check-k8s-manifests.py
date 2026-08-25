@@ -25,6 +25,7 @@ import hashlib
 import posixpath
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,14 @@ INCLUDE_ITEM = re.compile(r"""["']([^"']+)["']""")
 
 # Mirrors `MAX_INCLUDE_DEPTH` in crates/librefang-kernel/src/config.rs.
 MAX_INCLUDE_DEPTH = 10
+
+# Declarative resource provisioning (#6695).
+# `LIBREFANG_PROVISIONING_PATH` switches the feature on; unset means off, so the checks below stay silent for every manifest that has not opted in.
+# A ConfigMap mounts its keys flat in one directory, so the mount has to supply `<root>/agents` rather than the root itself.
+PROVISIONING_PATH_ENV = "LIBREFANG_PROVISIONING_PATH"
+PROVISIONING_PRUNE_ENV = "LIBREFANG_PROVISIONING_PRUNE"
+PROVISIONING_AGENTS_SUBDIR = "agents"
+PROVISIONING_CHECKSUM_ANNOTATION = "checksum/provisioning"
 
 
 class Failures:
@@ -658,6 +667,207 @@ def expected_config_digest(data: dict[str, str], chain: list[str]) -> str:
     return hashlib.sha256(manifest.encode()).hexdigest()
 
 
+def check_provisioning(
+    docs: list[dict[str, Any]], sts: dict[str, Any], failures: Failures
+) -> None:
+    """The declarative provisioning tree, when the manifest opts into one (#6695).
+
+    Silent unless the container sets `LIBREFANG_PROVISIONING_PATH`, so the base kustomization and every existing deployment pass unchanged.
+
+    The daemon reconciles this tree at boot and then locks each declared agent individually, which makes the manifest the only place those agents can be changed — so the same two things have to hold as for the managed config: the files have to actually reach the container, and editing them has to roll the pod.
+    """
+    template = sts.get("spec", {}).get("template", {})
+    pod_spec = template.get("spec", {})
+    containers = pod_spec.get("containers", [])
+    if len(containers) != 1:
+        return
+    container = containers[0]
+    env = {e.get("name"): e for e in container.get("env", []) if isinstance(e, dict)}
+
+    if PROVISIONING_PATH_ENV not in env:
+        return
+
+    entry = env[PROVISIONING_PATH_ENV]
+    if "value" not in entry:
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} must be set as a literal `value`, not "
+            "valueFrom. Which resources the deployment owns has to be readable "
+            "from the manifest rather than from another object."
+        )
+        return
+
+    root = entry["value"].strip()
+    if not root:
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} is empty, which the daemon reads as "
+            "provisioning being switched off. Remove the variable or give it a "
+            "path."
+        )
+        return
+    if not posixpath.isabs(root):
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} must be an absolute path, got {root!r}."
+        )
+        return
+    if root == DATA_DIR or root.startswith(DATA_DIR + "/"):
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} is {root!r}, inside {DATA_DIR}. The "
+            "provisioning tree is deployment-owned and the PVC is runtime "
+            "state; putting one inside the other gives the same file two "
+            "owners."
+        )
+        return
+
+    prune = env.get(PROVISIONING_PRUNE_ENV, {}).get("value")
+    if prune is not None and prune.strip() and prune.strip().lower() != "delete":
+        failures.fail(
+            f"{PROVISIONING_PRUNE_ENV} is {prune!r}, which the daemon reads as "
+            "`keep` — only the exact word `delete` prunes. Set it to `delete` "
+            "or remove it, rather than leaving a value that reads as intent it "
+            "does not carry."
+        )
+
+    agents_dir = posixpath.join(root, PROVISIONING_AGENTS_SUBDIR)
+    mount = next(
+        (
+            m
+            for m in container.get("volumeMounts", [])
+            if not m.get("subPath") and m.get("mountPath") == agents_dir
+        ),
+        None,
+    )
+    if mount is None:
+        failures.fail(
+            f"no volumeMount supplies {agents_dir!r}. A ConfigMap mounts its "
+            "keys flat in one directory, so the agent declarations have to be "
+            f"mounted at the `{PROVISIONING_AGENTS_SUBDIR}` subdirectory of the "
+            "provisioning root, not at the root."
+        )
+        return
+
+    failures.check(
+        mount.get("readOnly") is True,
+        f"the volumeMount supplying {agents_dir!r} must set readOnly: true. "
+        "The daemon never writes into the provisioning tree — a provisioned "
+        "agent's manifest is materialised into its own workspace instead — so "
+        "a writable mount states an intention the daemon does not have.",
+    )
+
+    volume = next(
+        (v for v in pod_spec.get("volumes", []) if v.get("name") == mount.get("name")),
+        None,
+    )
+    if volume is None or "configMap" not in volume:
+        failures.fail(
+            f"volume {mount.get('name')!r} must be a configMap volume — "
+            "provisioned resources come from the manifest, and this checker "
+            "verifies the checksum annotation against its rendered contents."
+        )
+        return
+
+    cm_name = volume["configMap"].get("name")
+    config_map = next(
+        (
+            d
+            for d in docs
+            if d.get("kind") == "ConfigMap" and d.get("metadata", {}).get("name") == cm_name
+        ),
+        None,
+    )
+    if config_map is None:
+        failures.fail(
+            f"ConfigMap {cm_name!r} is referenced but not rendered by this "
+            "kustomization. An out-of-band ConfigMap cannot be checked here, "
+            "and the checksum annotation could not be verified against it."
+        )
+        return
+
+    data = config_map.get("data", {})
+    if not data:
+        failures.fail(
+            f"ConfigMap {cm_name!r} renders no data, so the provisioning tree "
+            "is empty and the feature does nothing. Remove "
+            f"{PROVISIONING_PATH_ENV} or declare a resource."
+        )
+        return
+
+    for key in sorted(data):
+        check_provisioned_agent(cm_name, key, data[key], failures)
+        check_no_secret_values(cm_name, key, data[key], failures)
+
+    check_provisioning_checksum(template, data, failures)
+
+
+def check_provisioned_agent(
+    cm_name: str, key: str, contents: str, failures: Failures
+) -> None:
+    """One declaration the daemon has to be able to use.
+
+    The reconcile records a bad file as a failure and carries on rather than refusing to boot, which is the right behaviour at runtime and the wrong place to discover a typo — the agent is simply missing, and only `GET /api/provisioning/status` says why.
+    Catching it here means the manifest does not merge in the first place.
+    """
+    if not key.endswith(".toml"):
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} is not a `.toml` file. The "
+            "reconcile only reads `*.toml` from the agents directory, so this "
+            "key is mounted and ignored."
+        )
+        return
+
+    try:
+        parsed = tomllib.loads(contents)
+    except tomllib.TOMLDecodeError as exc:
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} is not valid TOML: {exc}. The "
+            "daemon would record this as a provisioning failure and start "
+            "without the agent."
+        )
+        return
+
+    name = parsed.get("name")
+    if not isinstance(name, str) or not name.strip():
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} declares no `name`. The "
+            "resource identifier is the manifest's `name`, not the file name, "
+            "and the reconcile refuses a manifest without one rather than "
+            "provisioning an agent called `unnamed`."
+        )
+
+
+def check_provisioning_checksum(
+    template: dict[str, Any], data: dict[str, str], failures: Failures
+) -> None:
+    """Editing a declaration has to roll the pod, exactly as editing the config does.
+
+    The reconcile runs at boot and nowhere else, so a ConfigMap edit that does not roll the StatefulSet changes nothing at all — and `GET /api/provisioning/status` would report the resource as `drifted` indefinitely with no indication that a rollout was ever expected.
+    """
+    annotations = template.get("metadata", {}).get("annotations", {})
+    actual = annotations.get(PROVISIONING_CHECKSUM_ANNOTATION)
+    manifest = "".join(
+        f"{hashlib.sha256(data[key].encode()).hexdigest()}  {key}\n"
+        for key in sorted(data)
+    )
+    expected = f"sha256:{hashlib.sha256(manifest.encode()).hexdigest()}"
+
+    if actual is None:
+        failures.fail(
+            f"the pod template has no {PROVISIONING_CHECKSUM_ANNOTATION!r} "
+            "annotation. The provisioning tree is reconciled at boot only, so "
+            "without it an edited declaration leaves the pod template "
+            "identical and never reaches a running daemon. Expected "
+            f"{expected!r}."
+        )
+        return
+
+    failures.check(
+        actual == expected,
+        f"{PROVISIONING_CHECKSUM_ANNOTATION} is {actual!r} but the rendered "
+        f"declarations hash to {expected!r}. A declaration changed and the "
+        "annotation did not, so applying this would not roll the StatefulSet "
+        "and the daemon would keep provisioning the old manifest.",
+    )
+
+
 def check_services(docs: list[dict[str, Any]], failures: Failures) -> None:
     services = [d for d in docs if d.get("kind") == "Service"]
     if not failures.check(
@@ -735,6 +945,7 @@ def main(argv: list[str]) -> int:
     else:
         check_statefulset(sts, failures)
         check_managed_config(docs, sts, failures)
+        check_provisioning(docs, sts, failures)
 
     check_services(docs, failures)
     check_no_inline_secrets(docs, failures)
