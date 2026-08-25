@@ -141,7 +141,7 @@ def check_repository_automation() -> None:
     desktop = yaml.safe_load(desktop_source)
     desktop_job = desktop.get("jobs", {}).get("desktop", {})
     cask_job = desktop.get("jobs", {}).get("sync_homebrew_cask", {})
-    if desktop_job.get("timeout-minutes") != 90:
+    if desktop_job.get("timeout-minutes") != 345:
         raise SystemExit("desktop release builds do not have the expected timeout")
     if desktop_job.get("strategy", {}).get("max-parallel") != 1:
         raise SystemExit("desktop updater manifest writes are not serialized")

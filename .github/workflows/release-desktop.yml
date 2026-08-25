@@ -46,7 +46,11 @@ jobs:
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
-    timeout-minutes: 90
+    # 345, not a tighter proportional value: this cap is per matrix leg, and a
+    # cold Tauri leg was measured at only a 1.45x margin under 300 (#7836).
+    # `max-parallel: 1` serialises the legs but does not extend the per-leg cap,
+    # so trimming this kills a release build rather than catching a hang.
+    timeout-minutes: 345
     environment: release-desktop
     strategy:
       fail-fast: false
