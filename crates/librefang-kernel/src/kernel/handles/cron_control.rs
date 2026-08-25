@@ -85,11 +85,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
             last_run: None,
         };
 
-        let id = self
-            .workflows
-            .cron_scheduler
-            .add_job(job, one_shot)
-            .map_err(|e| KernelOpError::Internal(e.to_string()))?;
+        let id = self.workflows.cron_scheduler.add_job(job, one_shot)?;
 
         // Persist after adding
         if let Err(e) = self.workflows.cron_scheduler.persist() {

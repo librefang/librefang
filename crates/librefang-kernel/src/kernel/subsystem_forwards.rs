@@ -209,6 +209,12 @@ impl MemorySubsystemApi for LibreFangKernel {
     fn proactive_store(&self) -> Option<&Arc<ProactiveMemoryStore>> {
         self.memory.proactive_store()
     }
+    #[inline]
+    fn extraction_resolution(
+        &self,
+    ) -> Option<&crate::kernel::subsystems::memory::MemoryExtractionResolution> {
+        self.memory.extraction_resolution()
+    }
 }
 
 impl MeshSubsystemApi for LibreFangKernel {

@@ -477,6 +477,27 @@ describe("MemoryPage (redesigned)", () => {
     });
   });
 
+  // `session_scoped_recall` decides whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn (#7605).
+  // The switch shipped with no operator surface at all, so this pins both halves of the one that now exists: the seeded default when the daemon does not report the field (an older daemon, or one that never wrote the key), and that toggling it reaches the PATCH payload rather than being dropped on save.
+  it("sends the session-scoped recall toggle through useUpdateMemoryConfig", async () => {
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Settings/i }));
+
+    const toggle = screen.getByRole("switch", { name: "Session-Scoped Recall" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(toggle);
+    expect(
+      screen.getByRole("switch", { name: "Session-Scoped Recall" }),
+    ).toHaveAttribute("aria-checked", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(configMutateAsync).toHaveBeenCalledTimes(1));
+    expect(configMutateAsync.mock.calls[0][0]).toMatchObject({
+      proactive_memory: { session_scoped_recall: false },
+    });
+  });
+
   it("shows the proactive-disabled notice on the Records tab when proactive memory is off", () => {
     useMemorySearchOrListMock.mockReturnValue({
       data: { memories: [], total: 0, proactive_enabled: false },

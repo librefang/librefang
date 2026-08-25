@@ -20,12 +20,19 @@
 
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Default TTL for a fresh claim. After this many seconds without a refresh,
 /// the next agent to dispatch can take ownership.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
+
+/// Reclaim expired entries after this many ownership decisions.
+///
+/// Decision-count scheduling avoids a background task while guaranteeing that
+/// a registry receiving continued traffic cannot retain dormant keys forever.
+const SWEEP_EVERY_DECISIONS: u64 = 256;
 
 /// Identity of one ownership slice. Built per-message from the canonical
 /// channel-type slug, the platform's thread identifier, and — when known —
@@ -163,6 +170,7 @@ pub enum DispatchDecision {
 pub struct ThreadOwnershipRegistry {
     claims: Arc<DashMap<ThreadKey, Claim>>,
     default_ttl: Duration,
+    decisions: AtomicU64,
 }
 
 impl ThreadOwnershipRegistry {
@@ -182,6 +190,7 @@ impl ThreadOwnershipRegistry {
         Self {
             claims: Arc::new(DashMap::new()),
             default_ttl: ttl,
+            decisions: AtomicU64::new(0),
         }
     }
 
@@ -242,6 +251,7 @@ impl ThreadOwnershipRegistry {
         } else {
             ttl
         };
+        self.maybe_sweep_expired_at(now);
         let mut entry = self.claims.entry(key).or_insert_with(|| Claim {
             agent_id: candidate,
             claimed_at: now,
@@ -270,7 +280,6 @@ impl ThreadOwnershipRegistry {
         }
 
         if was_mentioned {
-            let _previous = entry.agent_id;
             *entry = Claim {
                 agent_id: candidate,
                 claimed_at: now,
@@ -286,10 +295,20 @@ impl ThreadOwnershipRegistry {
         }
     }
 
-    /// Drop expired claims. Cheap O(n) sweep; intended to be called
-    /// occasionally (e.g. once a minute by the bridge). Not required for
-    /// correctness — `decide` handles expiry inline — but keeps memory bounded
-    /// in long-lived deployments with many ephemeral threads.
+    fn maybe_sweep_expired_at(&self, now: Instant) {
+        let decision = self
+            .decisions
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        if decision.is_multiple_of(SWEEP_EVERY_DECISIONS) {
+            self.sweep_expired_at(now);
+        }
+    }
+
+    /// Drop expired claims with a cheap O(n) sweep.
+    ///
+    /// The registry invokes this automatically every [`SWEEP_EVERY_DECISIONS`] decisions, while this public method also permits explicit maintenance.
+    /// Expiry remains correct between sweeps because `decide` checks the selected claim inline.
     pub fn sweep_expired(&self) -> usize {
         self.sweep_expired_at(Instant::now())
     }
@@ -422,6 +441,28 @@ mod tests {
         assert_eq!(dropped, 1);
         assert!(reg.current_holder(&key("T1")).is_none());
         assert_eq!(reg.current_holder(&key("T2")), Some(bob));
+    }
+
+    #[test]
+    fn continued_dispatch_periodically_reclaims_dormant_claims() {
+        let reg = ThreadOwnershipRegistry::with_ttl(Duration::from_secs(10));
+        let alice = fresh_id();
+        let t0 = Instant::now();
+
+        for index in 0..(SWEEP_EVERY_DECISIONS - 1) {
+            let thread = format!("dormant-{index}");
+            let _ = reg.decide_at(key(&thread), alice, false, t0);
+        }
+        assert_eq!(reg.claims.len(), (SWEEP_EVERY_DECISIONS - 1) as usize);
+
+        let after_ttl = t0 + Duration::from_secs(11);
+        let _ = reg.decide_at(key("active"), alice, false, after_ttl);
+        assert_eq!(
+            reg.claims.len(),
+            1,
+            "the scheduled sweep must remove expired one-shot thread claims"
+        );
+        assert_eq!(reg.current_holder(&key("active")), Some(alice));
     }
 
     #[test]

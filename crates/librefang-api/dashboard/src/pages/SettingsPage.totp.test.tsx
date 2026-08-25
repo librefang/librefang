@@ -2,13 +2,20 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { SettingsPage } from "./SettingsPage";
+import { SettingsPage, getTotpActionState } from "./SettingsPage";
 import { useTotpStatus } from "../lib/queries/approvals";
+import { usePasskeys } from "../lib/queries/passkeys";
 import {
   useTotpSetup,
   useTotpConfirm,
   useTotpRevoke,
 } from "../lib/mutations/approvals";
+import {
+  useRegisterPasskey,
+  useRevokePasskey,
+} from "../lib/mutations/passkeys";
+import { getRawConfigToml, isPasskeySupported } from "../api";
+import { ApiError } from "../lib/http/client";
 
 // Tests for #3853 — TOTP second-factor surface in SettingsPage. The
 // TotpSection lives inside SettingsPage and was completely uncovered.
@@ -24,6 +31,24 @@ vi.mock("../lib/mutations/approvals", () => ({
   useTotpConfirm: vi.fn(),
   useTotpRevoke: vi.fn(),
 }));
+
+vi.mock("../lib/queries/passkeys", () => ({
+  usePasskeys: vi.fn(),
+}));
+
+vi.mock("../lib/mutations/passkeys", () => ({
+  useRegisterPasskey: vi.fn(),
+  useRevokePasskey: vi.fn(),
+}));
+
+vi.mock("../api", async () => {
+  const actual = await vi.importActual<typeof import("../api")>("../api");
+  return {
+    ...actual,
+    getRawConfigToml: vi.fn(),
+    isPasskeySupported: vi.fn(),
+  };
+});
 
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>(
@@ -42,6 +67,11 @@ const useTotpStatusMock = useTotpStatus as unknown as ReturnType<typeof vi.fn>;
 const useTotpSetupMock = useTotpSetup as unknown as ReturnType<typeof vi.fn>;
 const useTotpConfirmMock = useTotpConfirm as unknown as ReturnType<typeof vi.fn>;
 const useTotpRevokeMock = useTotpRevoke as unknown as ReturnType<typeof vi.fn>;
+const usePasskeysMock = usePasskeys as unknown as ReturnType<typeof vi.fn>;
+const useRegisterPasskeyMock = useRegisterPasskey as unknown as ReturnType<typeof vi.fn>;
+const useRevokePasskeyMock = useRevokePasskey as unknown as ReturnType<typeof vi.fn>;
+const getRawConfigTomlMock = getRawConfigToml as unknown as ReturnType<typeof vi.fn>;
+const isPasskeySupportedMock = isPasskeySupported as unknown as ReturnType<typeof vi.fn>;
 
 interface MutationStub {
   mutateAsync: ReturnType<typeof vi.fn>;
@@ -66,13 +96,23 @@ function renderPage(): void {
   );
 }
 
-describe("SettingsPage TOTP section (#3853)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useTotpSetupMock.mockReturnValue(makeMutation());
-    useTotpConfirmMock.mockReturnValue(makeMutation());
-    useTotpRevokeMock.mockReturnValue(makeMutation());
+beforeEach(() => {
+  vi.clearAllMocks();
+  useTotpSetupMock.mockReturnValue(makeMutation());
+  useTotpConfirmMock.mockReturnValue(makeMutation());
+  useTotpRevokeMock.mockReturnValue(makeMutation());
+  usePasskeysMock.mockReturnValue({
+    data: [],
+    isError: false,
+    error: null,
   });
+  useRegisterPasskeyMock.mockReturnValue(makeMutation());
+  useRevokePasskeyMock.mockReturnValue(makeMutation());
+  isPasskeySupportedMock.mockReturnValue(false);
+  getRawConfigTomlMock.mockResolvedValue("[kernel]\nlog_level = \"info\"\n");
+});
+
+describe("SettingsPage TOTP section (#3853)", () => {
 
   it("shows the 'Not enrolled' badge and a Set up TOTP button when not enrolled", () => {
     useTotpStatusMock.mockReturnValue({
@@ -175,6 +215,13 @@ describe("SettingsPage TOTP section (#3853)", () => {
       expect(screen.getByAltText("TOTP QR Code")).toBeInTheDocument();
     });
     expect(screen.getByText("ABCDEFGHIJKLMNOP")).toBeInTheDocument();
+    const secret = screen.getByText("ABCDEFGHIJKLMNOP");
+    expect(secret).toHaveClass("blur-sm", "select-none");
+    expect(secret).toHaveAttribute("aria-hidden", "true");
+    await user.click(screen.getByRole("button", { name: "Reveal secret" }));
+    expect(secret).not.toHaveClass("blur-sm");
+    expect(secret).toHaveClass("select-all");
+    expect(secret).toHaveAttribute("aria-hidden", "false");
     expect(screen.getByText("aaaa-1111")).toBeInTheDocument();
     expect(screen.getByText("bbbb-2222")).toBeInTheDocument();
     expect(
@@ -222,6 +269,36 @@ describe("SettingsPage TOTP section (#3853)", () => {
     expect(
       await screen.findByText(/TOTP confirmed/i),
     ).toBeInTheDocument();
+  });
+
+  it("renders duplicate recovery-code values with distinct React keys", async () => {
+    const user = userEvent.setup();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    useTotpStatusMock.mockReturnValue({
+      data: {
+        enrolled: false,
+        confirmed: false,
+        enforced: false,
+        remaining_recovery_codes: 0,
+      },
+    });
+    useTotpSetupMock.mockReturnValue(
+      makeMutation(async () => ({
+        otpauth_uri: "otpauth://x",
+        secret: "SECRET",
+        qr_code: null,
+        recovery_codes: ["same-code", "same-code"],
+      })),
+    );
+
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Set up TOTP" }));
+
+    expect(await screen.findAllByText("same-code")).toHaveLength(2);
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "same key",
+    );
+    consoleError.mockRestore();
   });
 
   it("revoke flow requires a code before calling useTotpRevoke", async () => {
@@ -323,5 +400,55 @@ describe("SettingsPage TOTP section (#3853)", () => {
       screen.getByRole("button", { name: "Verify & Reset" }),
     );
     expect(setupMutation.mutateAsync).toHaveBeenCalledWith("654321");
+  });
+});
+
+describe("SettingsPage security helpers", () => {
+  it("selects each TOTP action branch without nested render conditions", () => {
+    expect(getTotpActionState(true, true, true)).toBe("setup");
+    expect(getTotpActionState(false, true, true)).toBe("reset");
+    expect(getTotpActionState(false, false, true)).toBe("revoke");
+    expect(getTotpActionState(false, false, false)).toBe("default");
+  });
+
+  it("uses the structured passkey-disabled error contract", () => {
+    isPasskeySupportedMock.mockReturnValue(true);
+    usePasskeysMock.mockReturnValue({
+      data: undefined,
+      isError: true,
+      error: new ApiError(503, "passkey_disabled", "localized message"),
+    });
+    useTotpStatusMock.mockReturnValue({ data: undefined });
+
+    renderPage();
+
+    expect(
+      screen.getByText(/Passkey login is not enabled on this server/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add passkey" })).not.toBeInTheDocument();
+  });
+
+  it("downloads config through the authenticated API client", async () => {
+    const user = userEvent.setup();
+    const createObjectUrl = vi.fn(() => "blob:config-export");
+    const revokeObjectUrl = vi.fn();
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: createObjectUrl,
+      revokeObjectURL: revokeObjectUrl,
+    });
+    useTotpStatusMock.mockReturnValue({ data: undefined });
+
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(getRawConfigTomlMock).toHaveBeenCalledTimes(1);
+    expect(createObjectUrl).toHaveBeenCalledWith(expect.any(Blob));
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(revokeObjectUrl).toHaveBeenCalledWith("blob:config-export");
+    vi.unstubAllGlobals();
   });
 });

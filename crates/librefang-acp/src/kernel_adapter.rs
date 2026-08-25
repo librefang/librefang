@@ -25,6 +25,28 @@ use crate::fs::FsClientHandle;
 use crate::terminal::TerminalClientHandle;
 use crate::{AcpError, AcpKernel, AcpResult};
 
+fn read_client_handle<T>(lock: &RwLock<Option<T>>, state: &'static str) -> Option<T>
+where
+    T: Clone,
+{
+    lock.read()
+        .unwrap_or_else(|poisoned| {
+            tracing::warn!(state, "ACP client handle read lock poisoned; recovering");
+            lock.clear_poison();
+            poisoned.into_inner()
+        })
+        .clone()
+}
+
+fn write_client_handle<T>(lock: &RwLock<Option<T>>, handle: T, state: &'static str) {
+    let mut guard = lock.write().unwrap_or_else(|poisoned| {
+        tracing::warn!(state, "ACP client handle write lock poisoned; recovering");
+        lock.clear_poison();
+        poisoned.into_inner()
+    });
+    *guard = Some(handle);
+}
+
 /// Wraps an `Arc<LibreFangKernel>` so it can serve ACP traffic.
 ///
 /// Construct via [`KernelAdapter::new`]; consume the `Arc<KernelAdapter>`
@@ -77,16 +99,13 @@ impl KernelAdapter {
     /// caller doesn't hold the lock across `await`. Returns `None`
     /// before `initialize` has handed us a connection.
     pub fn fs_client(&self) -> Option<FsClientHandle> {
-        self.fs_client.read().ok().and_then(|guard| guard.clone())
+        read_client_handle(&self.fs_client, "fs_client")
     }
 
     /// Snapshot of the `terminal/*` client handle, if any. Mirrors
     /// [`Self::fs_client`].
     pub fn terminal_client(&self) -> Option<TerminalClientHandle> {
-        self.terminal_client
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone())
+        read_client_handle(&self.terminal_client, "terminal_client")
     }
 }
 
@@ -189,11 +208,7 @@ impl AcpKernel for KernelAdapter {
         // and we only ever overwrite the slot. Recover the inner
         // value so a poisoned lock from a prior connection (defensive)
         // doesn't strand the new handshake.
-        let mut guard = self
-            .fs_client
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = Some(handle);
+        write_client_handle(&self.fs_client, handle, "fs_client");
     }
 
     fn register_session_fs(&self, lf_session_id: LfSessionId) {
@@ -214,11 +229,7 @@ impl AcpKernel for KernelAdapter {
     }
 
     fn set_terminal_client(&self, handle: TerminalClientHandle) {
-        let mut guard = self
-            .terminal_client
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard = Some(handle);
+        write_client_handle(&self.terminal_client, handle, "terminal_client");
     }
 
     fn register_session_terminal(&self, lf_session_id: LfSessionId) {
@@ -284,5 +295,49 @@ fn extract_text(content: &librefang_types::message::MessageContent) -> String {
             }
             s
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_client_handle, write_client_handle};
+    use std::sync::RwLock;
+
+    #[test]
+    fn poisoned_client_handle_locks_recover_and_remain_usable() {
+        let read_state = RwLock::new(Some("preserved"));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = read_state.write().unwrap();
+                    panic!("poison client handle before read recovery");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(read_state.is_poisoned());
+        assert_eq!(
+            read_client_handle(&read_state, "test_read"),
+            Some("preserved")
+        );
+        assert!(!read_state.is_poisoned());
+
+        let write_state = RwLock::new(Some("stale"));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = write_state.write().unwrap();
+                    panic!("poison client handle before write recovery");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(write_state.is_poisoned());
+        write_client_handle(&write_state, "replacement", "test_write");
+        assert!(!write_state.is_poisoned());
+        assert_eq!(
+            read_client_handle(&write_state, "test_write"),
+            Some("replacement")
+        );
     }
 }

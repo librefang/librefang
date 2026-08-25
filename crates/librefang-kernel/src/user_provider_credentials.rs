@@ -15,6 +15,7 @@ use librefang_types::agent::UserId;
 fn read_vault_state<'a, T>(lock: &'a std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
     lock.read().unwrap_or_else(|poisoned| {
         tracing::warn!("user provider credential vault read lock poisoned; recovering inner state");
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -24,6 +25,7 @@ fn write_vault_state<'a, T>(lock: &'a std::sync::RwLock<T>) -> std::sync::RwLock
         tracing::warn!(
             "user provider credential vault write lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -144,8 +146,23 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(state.is_poisoned());
         assert_eq!(&*read_vault_state(&state), &["openai", "anthropic"]);
+        assert!(!state.is_poisoned());
+
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _state = state.write().unwrap();
+                    panic!("poison user provider vault before write recovery");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(state.is_poisoned());
+
         write_vault_state(&state).push("gemini");
+        assert!(!state.is_poisoned());
         assert_eq!(read_vault_state(&state).len(), 3);
     }
 

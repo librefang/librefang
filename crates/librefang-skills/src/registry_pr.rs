@@ -79,6 +79,7 @@ pub async fn propose_skill_to_registry(
     req: ProposeRequest<'_>,
 ) -> Result<ProposedSkillPr, SkillError> {
     let name = req.skill.manifest.skill.name.clone();
+    validate_registry_skill_name(&name)?;
     validate_repo_slug(req.registry_repo)?;
     if req.token.trim().is_empty() {
         return Err(SkillError::InvalidManifest(
@@ -275,6 +276,23 @@ fn build_pr_body(skill: &InstalledSkill, evolution: &SkillEvolutionMeta) -> Stri
 }
 
 // ── Validation helpers ──────────────────────────────────────────────────
+
+/// Reject skill names that are not safe as one GitHub Contents API path
+/// component. Branch-name sanitization is not sufficient because the original
+/// name is also interpolated into `skills/<name>/<relative-path>`.
+fn validate_registry_skill_name(name: &str) -> Result<(), SkillError> {
+    let valid = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(SkillError::InvalidManifest(format!(
+            "Invalid registry skill name '{name}' (expected one [A-Za-z0-9_-] path component)"
+        )))
+    }
+}
 
 /// Reject a registry slug that is not a clean `owner/name`. Guards against
 /// path traversal and URL injection when the slug is interpolated into API
@@ -595,6 +613,28 @@ tags = ["test", "demo"]
         assert!(validate_repo_slug("owner/").is_err());
         assert!(validate_repo_slug("/name").is_err());
         assert!(validate_repo_slug("owner/na me").is_err());
+    }
+
+    #[test]
+    fn registry_skill_name_must_be_one_safe_path_component() {
+        for valid in ["web-summarizer", "skill_1", "Skill2"] {
+            assert!(validate_registry_skill_name(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "",
+            "../escape",
+            "nested/skill",
+            r"nested\skill",
+            "bad.name",
+            "bad name",
+            "nul\0name",
+            "ümlaut",
+        ] {
+            assert!(
+                validate_registry_skill_name(invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

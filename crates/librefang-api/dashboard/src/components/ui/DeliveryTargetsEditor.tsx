@@ -107,21 +107,100 @@ const SSRF_BLOCKED_HOSTS = new Set([
   "metadata",
   "metadata.google.internal",
   "metadata.aws.amazon.com",
+  "instance-data",
+  "instance-data.ec2.internal",
 ]);
 
+function parseIpv4(host: string): number[] | null {
+  const octets = host.split(".");
+  if (octets.length !== 4 || octets.some((part) => !/^\d+$/.test(part))) {
+    return null;
+  }
+  const parsed = octets.map(Number);
+  return parsed.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    ? parsed
+    : null;
+}
+
+function isBlockedIpv4(octets: number[]): boolean {
+  const [a, b] = octets;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function parseIpv6(host: string): number[] | null {
+  let normalized = host;
+  const dottedTail = normalized.match(/(?:^|:)(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (dottedTail) {
+    const ipv4 = parseIpv4(dottedTail);
+    if (!ipv4) return null;
+    const replacement = `${((ipv4[0] << 8) | ipv4[1]).toString(16)}:${((ipv4[2] << 8) | ipv4[3]).toString(16)}`;
+    normalized = `${normalized.slice(0, -dottedTail.length)}${replacement}`;
+  }
+
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const omitted = 8 - left.length - right.length;
+  if ((halves.length === 1 && omitted !== 0) || (halves.length === 2 && omitted < 1)) {
+    return null;
+  }
+
+  const rawSegments = [
+    ...left,
+    ...Array.from({ length: omitted }, () => "0"),
+    ...right,
+  ];
+  if (
+    rawSegments.length !== 8 ||
+    rawSegments.some((segment) => !/^[0-9a-f]{1,4}$/i.test(segment))
+  ) {
+    return null;
+  }
+  return rawSegments.map((segment) => Number.parseInt(segment, 16));
+}
+
+function isBlockedIpv6(segments: number[]): boolean {
+  const isUnspecified = segments.every((segment) => segment === 0);
+  const isLoopback = segments.slice(0, 7).every((segment) => segment === 0) && segments[7] === 1;
+  if (isUnspecified || isLoopback) return true;
+
+  const first = segments[0];
+  if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || (first & 0xff00) === 0xff00) {
+    return true;
+  }
+
+  const hasIpv4Prefix =
+    segments.slice(0, 5).every((segment) => segment === 0) &&
+    (segments[5] === 0 || segments[5] === 0xffff);
+  if (!hasIpv4Prefix) return false;
+  return isBlockedIpv4([
+    segments[6] >> 8,
+    segments[6] & 0xff,
+    segments[7] >> 8,
+    segments[7] & 0xff,
+  ]);
+}
+
 function isBlockedWebhookHost(host: string): boolean {
-  const lower = host.toLowerCase();
-  if (SSRF_BLOCKED_HOSTS.has(lower)) return true;
-  // Loopback IPv4 (127.0.0.0/8) and link-local (169.254.0.0/16, the
-  // cloud-metadata range). String-only check — full CIDR parsing isn't
-  // needed for an instant-feedback UX layer; the backend has the real
-  // enforcement.
-  if (/^127\./.test(host)) return true;
-  if (/^169\.254\./.test(host)) return true;
-  // IPv6 loopback / link-local.
-  if (lower === "::1" || lower.startsWith("[::1]")) return true;
-  if (lower.startsWith("fe80:") || lower.startsWith("[fe80:")) return true;
-  return false;
+  const lower = host.toLowerCase().replace(/^\[|\]$/g, "");
+  const ipv4 = parseIpv4(lower);
+  if (ipv4) return isBlockedIpv4(ipv4);
+  const ipv6 = parseIpv6(lower);
+  if (ipv6) return isBlockedIpv6(ipv6);
+  return (
+    SSRF_BLOCKED_HOSTS.has(lower) ||
+    lower.endsWith(".localhost") ||
+    lower.endsWith(".internal")
+  );
 }
 
 /** Exported so unit tests can drive the validator directly without
@@ -145,13 +224,13 @@ export function buildTarget(d: DraftState): [CronDeliveryTarget | null, string |
   if (d.type === "webhook") {
     const url = d.url.trim();
     if (!url) return [null, "scheduler.delivery.err_url_required"];
-    if (!url.startsWith("http://") && !url.startsWith("https://")) {
-      return [null, "scheduler.delivery.err_url_scheme"];
-    }
     // Mirror the backend SSRF rejection (cron_delivery::validate_webhook_url)
     // so users see the error in the form, not after a save round-trip.
     try {
       const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return [null, "scheduler.delivery.err_url_scheme"];
+      }
       if (isBlockedWebhookHost(parsed.hostname)) {
         return [null, "scheduler.delivery.err_url_blocked_host"];
       }
@@ -492,7 +571,7 @@ export function DeliveryTargetsEditor({ value, onChange, disabled }: DeliveryTar
                 <input
                   value={draft.path}
                   onChange={(e) => setDraft({ ...draft, path: e.target.value })}
-                  placeholder="/var/log/cron-output.log"
+                  placeholder="logs/cron-output.log"
                   className={`${INPUT_CLASS} font-mono text-xs`}
                 />
               </div>

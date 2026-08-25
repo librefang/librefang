@@ -14,10 +14,28 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, Once};
 
 /// Gate for [`load_dotenv`] so repeated calls are cheap no-ops.
 static DOTENV_LOADED: Once = Once::new();
+
+/// Serializes in-process `.env` read-modify-write operations.
+static ENV_FILE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Makes each staging path unique even when one process starts overlapping
+/// writes (including direct internal `write_env_file` calls).
+static ENV_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn lock_env_file_updates() -> MutexGuard<'static, ()> {
+    match ENV_FILE_WRITE_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            ENV_FILE_WRITE_LOCK.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
 
 /// Get the LibreFang home directory, respecting `LIBREFANG_HOME` env var.
 fn librefang_home() -> Option<PathBuf> {
@@ -236,9 +254,9 @@ pub fn save_env_key(key: &str, value: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
-    let mut entries = read_env_file(&path);
-    entries.insert(key.to_string(), value.to_string());
-    write_env_file(&path, &entries)?;
+    update_env_file(&path, |entries| {
+        entries.insert(key.to_string(), value.to_string());
+    })?;
 
     // Also set in current process.
     // SAFETY: callers must ensure no concurrent threads are reading the process
@@ -253,9 +271,9 @@ pub fn save_env_key(key: &str, value: &str) -> Result<(), String> {
 pub fn remove_env_key(key: &str) -> Result<(), String> {
     let path = env_file_path().ok_or("Could not determine LibreFang home directory")?;
 
-    let mut entries = read_env_file(&path);
-    entries.remove(key);
-    write_env_file(&path, &entries)?;
+    update_env_file(&path, |entries| {
+        entries.remove(key);
+    })?;
 
     std::env::remove_var(key);
 
@@ -300,6 +318,21 @@ fn read_env_file(path: &Path) -> BTreeMap<String, String> {
     map
 }
 
+fn update_env_file(
+    path: &Path,
+    update: impl FnOnce(&mut BTreeMap<String, String>),
+) -> Result<(), String> {
+    let _guard = lock_env_file_updates();
+    let mut entries = read_env_file(path);
+    update(&mut entries);
+    write_env_file(path, &entries)
+}
+
+fn env_tmp_path(path: &Path) -> PathBuf {
+    let sequence = ENV_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("env.tmp.{}.{}", std::process::id(), sequence))
+}
+
 fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(), String> {
     let mut content =
         String::from("# LibreFang environment — managed by `librefang config set-key`\n");
@@ -323,7 +356,7 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
         }
     }
 
-    // Atomic save: open <path>.tmp.<pid> with mode 0600 (Unix) at open
+    // Atomic save: open <path>.tmp.<pid>.<sequence> with mode 0600 (Unix) at open
     // time, write_all + flush + sync_all + rename(tmp, final).  Closes
     // three #3944 holes left by the bare std::fs::write:
     //   * Crash mid-write no longer leaves a truncated/empty .env
@@ -332,9 +365,9 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
     //   * Default-perms TOCTOU window is gone: the file is created
     //     0600 instead of 0644-then-tightened, so a parallel local
     //     reader can't grab the key during the open syscall.
-    //   * Two concurrent saves no longer share the same staging path
-    //     because the tmp filename is uniquified by PID.
-    let tmp_path = path.with_extension(format!("env.tmp.{}", std::process::id()));
+    //   * Concurrent calls never share the same staging path. The PID
+    //     separates processes and the sequence separates calls within one.
+    let tmp_path = env_tmp_path(path);
     let result = (|| -> std::io::Result<()> {
         use std::io::Write as _;
         let mut opts = std::fs::OpenOptions::new();
@@ -453,6 +486,45 @@ mod tests {
                 parsed.get(k)
             );
         }
+    }
+
+    #[test]
+    fn concurrent_env_updates_preserve_every_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join(".env"));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut threads = Vec::new();
+
+        for index in 0..8 {
+            let path = path.clone();
+            let start = start.clone();
+            threads.push(std::thread::spawn(move || {
+                start.wait();
+                update_env_file(&path, |entries| {
+                    entries.insert(format!("KEY_{index}"), format!("value-{index}"));
+                })
+                .unwrap();
+            }));
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let entries = read_env_file(&path);
+        assert_eq!(entries.len(), 8);
+        for index in 0..8 {
+            assert_eq!(
+                entries.get(&format!("KEY_{index}")),
+                Some(&format!("value-{index}"))
+            );
+        }
+    }
+
+    #[test]
+    fn staging_paths_are_unique_within_one_process() {
+        let path = Path::new("/tmp/.env");
+        assert_ne!(env_tmp_path(path), env_tmp_path(path));
     }
 
     /// Backslash MUST round-trip correctly — the escape ordering bug from
