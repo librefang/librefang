@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { Modal } from "./Modal";
 
@@ -108,5 +108,64 @@ describe("Modal autoFocus (#5666)", () => {
 
     const input = screen.getByTestId("first-input");
     await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+});
+
+describe("Modal stacking", () => {
+  it("keeps body scroll locked until the last blocking modal closes", () => {
+    document.body.style.overflow = "scroll";
+    const { rerender, unmount } = render(
+      <>
+        <Modal isOpen onClose={() => {}} title="Outer">outer</Modal>
+        <Modal isOpen onClose={() => {}} title="Inner">inner</Modal>
+      </>,
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+
+    rerender(
+      <>
+        <Modal isOpen={false} onClose={() => {}} title="Outer">outer</Modal>
+        <Modal isOpen onClose={() => {}} title="Inner">inner</Modal>
+      </>,
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+
+    unmount();
+    expect(document.body.style.overflow).toBe("scroll");
+    document.body.style.overflow = "";
+  });
+
+  it("closes only the highest stacked modal on Escape", () => {
+    const outerClose = vi.fn();
+    const innerClose = vi.fn();
+    const { rerender } = render(
+      <>
+        <Modal isOpen onClose={outerClose} title="Outer" zIndex={50}>outer</Modal>
+        <Modal isOpen onClose={innerClose} title="Inner" zIndex={70}>inner</Modal>
+      </>,
+    );
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(innerClose).toHaveBeenCalledTimes(1);
+    expect(outerClose).not.toHaveBeenCalled();
+
+    rerender(
+      <>
+        <Modal isOpen onClose={outerClose} title="Outer" zIndex={50}>outer</Modal>
+        <Modal isOpen={false} onClose={innerClose} title="Inner" zIndex={70}>inner</Modal>
+      </>,
+    );
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(outerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a titleless drawer landmark", () => {
+    render(
+      <Modal isOpen onClose={() => {}} variant="drawer-right">
+        drawer content
+      </Modal>,
+    );
+
+    expect(screen.getByRole("complementary", { name: "Details" })).toBeInTheDocument();
   });
 });

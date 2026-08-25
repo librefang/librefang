@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ApprovalsPage } from "./ApprovalsPage";
+import {
+  ApprovalsPage,
+  isValidTotpOrRecovery,
+  maxHistoryOffset,
+  sanitizeTotpOrRecovery,
+} from "./ApprovalsPage";
 import {
   useApprovals,
   useApprovalAudit,
@@ -140,6 +145,7 @@ function setFullConfig(
 function setTotpEnforced(enforced: boolean) {
   useTotpStatusMock.mockReturnValue({
     data: { enforced },
+    isSuccess: true,
     isLoading: false,
     isError: false,
   });
@@ -271,6 +277,79 @@ describe("ApprovalsPage", () => {
 
     expect(mutateAsync).toHaveBeenCalledTimes(1);
     expect(mutateAsync).toHaveBeenCalledWith({ id: "a1", totpCode: "123456" });
+  });
+
+  it("fails closed while the TOTP status is unavailable", async () => {
+    useTotpStatusMock.mockReturnValue({
+      data: undefined,
+      isSuccess: false,
+      isLoading: false,
+      isError: true,
+    });
+    const mutateAsync = vi.fn().mockResolvedValue(undefined);
+    useApproveApprovalMock.mockReturnValue({ mutateAsync, isPending: false });
+    setApprovalsList([makeApproval({ id: "a1" })]);
+
+    renderPage();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "approvals.approveWithTotp" }));
+
+    expect(screen.getByText("approvals.totp.modalTitle")).toBeInTheDocument();
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("normalizes TOTP and recovery-code input to accepted shapes", () => {
+    expect(sanitizeTotpOrRecovery("12a34--56-78")).toBe("1234-5678");
+    expect(sanitizeTotpOrRecovery("------")).toBe("");
+    expect(sanitizeTotpOrRecovery("123-456-")).toBe("123456");
+    expect(isValidTotpOrRecovery("123456")).toBe(true);
+    expect(isValidTotpOrRecovery("1234-5678")).toBe(true);
+  });
+
+  it("masks the complete recovery-code shape", async () => {
+    setTotpEnforced(true);
+    setApprovalsList([makeApproval({ id: "a1" })]);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(
+      screen.getByRole("button", { name: "approvals.approveWithTotp" }),
+    );
+    await user.type(screen.getByLabelText("approvals.totpLabel"), "1234-5678");
+
+    expect(screen.getByText("•••••••••")).toBeInTheDocument();
+    expect(screen.queryByText("••••-••••")).not.toBeInTheDocument();
+  });
+
+  it("locks every decision control while modify-and-retry is pending", async () => {
+    const mutateAsync = vi.fn(() => new Promise<void>(() => {}));
+    useModifyAndRetryApprovalMock.mockReturnValue({ mutateAsync, isPending: false });
+    setApprovalsList([makeApproval({ id: "a1" })]);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(screen.getByRole("button", { name: "approvals.editApprove" }));
+    await user.type(
+      screen.getByPlaceholderText("approvals.modifyPlaceholder"),
+      "Use a safer command",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "approvals.editApproveSubmit" }),
+    );
+
+    expect(screen.getByRole("button", { name: /approvals\.approve$/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "approvals.deny" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "approvals.editApproveSubmit" }),
+    ).toBeDisabled();
+  });
+
+  it("clamps history offsets to the last populated page", () => {
+    expect(maxHistoryOffset(0)).toBe(0);
+    expect(maxHistoryOffset(50)).toBe(0);
+    expect(maxHistoryOffset(51)).toBe(50);
+    expect(maxHistoryOffset(149)).toBe(100);
   });
 
   it("calls the reject mutation with the bare approval id (no TOTP gate)", async () => {

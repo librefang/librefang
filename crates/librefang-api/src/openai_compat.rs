@@ -13,6 +13,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
 use base64::Engine as _;
+use futures::StreamExt;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -604,6 +605,16 @@ fn finish_or_error_frame(ended_cleanly: bool, req_id: &str, created: u64, model:
     }
 }
 
+async fn observe_forwarder(handle: tokio::task::JoinHandle<bool>) -> bool {
+    match handle.await {
+        Ok(ended_cleanly) => ended_cleanly,
+        Err(error) => {
+            warn!("OpenAI compat: streaming forwarder failed to join: {error}");
+            false
+        }
+    }
+}
+
 /// Build an SSE stream response for streaming completions.
 async fn stream_response(
     state: Arc<AppState>,
@@ -654,7 +665,9 @@ async fn stream_response(
     // Spawn forwarder task — streams ALL agent-loop iterations, flattened into
     // one OpenAI completion, until the event channel closes.
     let req_id = request_id.clone();
-    tokio::spawn(async move {
+    let final_req_id = req_id.clone();
+    let final_agent_name = agent_name.clone();
+    let forwarder = tokio::spawn(async move {
         let mut fwd = ForwarderState {
             tool_index: 0,
             saw_terminal: false,
@@ -686,12 +699,23 @@ async fn stream_response(
                 }
             }
         }
-        let final_json = finish_or_error_frame(ended_cleanly, &req_id, created, &agent_name);
-        let _ = tx.send(Ok(SseEvent::default().data(final_json))).await;
-        let _ = tx.send(Ok(SseEvent::default().data("[DONE]"))).await;
+        ended_cleanly
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
+    // ReceiverStream ends when the forwarder drops its sender. Chain the
+    // terminal frames after that point while retaining and observing the
+    // forwarder's JoinHandle. A panic therefore becomes an in-band error
+    // instead of silently truncating an already-committed HTTP 200 stream.
+    let terminal_stream = futures::stream::once(async move {
+        let ended_cleanly = observe_forwarder(forwarder).await;
+        let final_json =
+            finish_or_error_frame(ended_cleanly, &final_req_id, created, &final_agent_name);
+        Ok::<SseEvent, Infallible>(SseEvent::default().data(final_json))
+    })
+    .chain(futures::stream::once(async {
+        Ok::<SseEvent, Infallible>(SseEvent::default().data("[DONE]"))
+    }));
+    let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx).chain(terminal_stream);
     Ok(Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
@@ -1083,6 +1107,13 @@ mod tests {
         assert_eq!(aj["error"]["type"], "server_error");
         assert!(aj.get("choices").is_none());
         assert!(!aborted.contains("\"finish_reason\":\"stop\""));
+    }
+
+    #[tokio::test]
+    async fn forwarder_panic_is_observed_as_failure() {
+        let handle: tokio::task::JoinHandle<bool> =
+            tokio::spawn(async { panic!("simulated forwarder panic") });
+        assert!(!observe_forwarder(handle).await);
     }
 
     // Regression (audit finding 13): an image-only user turn must be accepted

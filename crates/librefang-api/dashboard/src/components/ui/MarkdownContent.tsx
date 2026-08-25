@@ -7,7 +7,8 @@ import remarkGfm from "remark-gfm";
 // (http/https/mailto/tel/...) are stripped by `defaultUrlTransform`, which
 // would silently break `[note](obsidian://...)` links agents emit when
 // pointing at vault entries.
-const EXTRA_URL_SCHEMES = /^(obsidian|obsidian-advanced-uri):/i;
+const OBSIDIAN_URL =
+  /^obsidian(?:-advanced-uri)?:[A-Za-z0-9._~%!$&'()*+,;=:@/?#-]*$/i;
 
 // Exported so other markdown renderers (e.g. Typewriter_v2, which renders
 // the streaming view) share one URL policy — otherwise react-markdown's
@@ -15,7 +16,7 @@ const EXTRA_URL_SCHEMES = /^(obsidian|obsidian-advanced-uri):/i;
 // schemes this allows, so a link would render differently while streaming
 // than in the settled MarkdownContent view.
 export const urlTransform = (url: string): string => {
-  if (EXTRA_URL_SCHEMES.test(url)) {
+  if (OBSIDIAN_URL.test(url)) {
     return url;
   }
   return defaultUrlTransform(url);

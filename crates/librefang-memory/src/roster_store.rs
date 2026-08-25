@@ -1,8 +1,10 @@
 //! SQLite-backed group roster store.
 //!
-//! Tracks which users have been seen in each group chat, persisting across
-//! daemon restarts. Agents query this via the `group_members` tool instead
-//! of having the roster injected into the system prompt (saving tokens).
+//! Tracks which users have been seen in each group chat, persisting across daemon restarts.
+//! Agents query this on demand through the `channel_members` tool (#7865) rather than having the roster injected into every system prompt, which keeps the token cost proportional to the questions asked instead of to the number of turns.
+//!
+//! Membership here is observational: a row exists for someone because they spoke in that chat, not because a platform listed them.
+//! `channel_dm` (#7086) uses the same rows as its authorization set, so that narrower definition is deliberate.
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -62,7 +64,10 @@ impl RosterStore {
         Ok(())
     }
 
-    /// List all members of a group chat, ordered by display name.
+    /// List all members of a group chat, ordered by display name then user id.
+    ///
+    /// The tiebreak is load-bearing, not cosmetic: this list reaches an LLM prompt through the `channel_members` tool, and two members sharing a display name would otherwise come back in whatever order SQLite happened to produce, invalidating the provider prompt cache on unchanged content (#3298).
+    /// The in-memory `GroupRosterStore::members` in `librefang-channels` already breaks the same tie on the participant id.
     pub fn members(
         &self,
         channel: &str,
@@ -81,7 +86,7 @@ impl RosterStore {
             .prepare(
                 "SELECT user_id, display_name, username FROM group_roster
                  WHERE channel_type = ?1 AND chat_id = ?2
-                 ORDER BY display_name",
+                 ORDER BY display_name, user_id",
             )
             .map_err(LibreFangError::memory)?;
         let rows = stmt
@@ -187,6 +192,25 @@ mod tests {
         let members = store.members("telegram", "-100").unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].1, "Alice Updated");
+    }
+
+    // Two members with the same display name must come back in a fixed order regardless of insertion order: the list is rendered into an LLM prompt by the `channel_members` tool, so an unstable tail silently invalidates the provider prompt cache (#3298).
+    #[test]
+    fn same_display_name_is_ordered_by_user_id_across_insertion_orders() {
+        let forward = in_memory_store();
+        forward.upsert("slack", "C1", "U1", "Alex", None).unwrap();
+        forward.upsert("slack", "C1", "U2", "Alex", None).unwrap();
+
+        let reverse = in_memory_store();
+        reverse.upsert("slack", "C1", "U2", "Alex", None).unwrap();
+        reverse.upsert("slack", "C1", "U1", "Alex", None).unwrap();
+
+        let expected = vec![
+            ("U1".to_string(), "Alex".to_string(), None),
+            ("U2".to_string(), "Alex".to_string(), None),
+        ];
+        assert_eq!(forward.members("slack", "C1").unwrap(), expected);
+        assert_eq!(reverse.members("slack", "C1").unwrap(), expected);
     }
 
     #[test]

@@ -1,154 +1,192 @@
 #!/usr/bin/env python3
-"""Tests for scripts/check-changelog-attribution.py.
+"""Regressions for changelog attribution and fragment validation."""
 
-Two focuses:
+from __future__ import annotations
 
-* `(@user)` attribution must be recognized anywhere in a bullet's block, not
-  only on the `- ` marker line, so the check stays compatible with the
-  CHANGELOG's one-sentence-per-line prose wrapping (a long multi-sentence bullet
-  carries its trailing `(@houko)` on the final continuation line).
-* A `changelog.d/` fragment is held to the same standard as an `[Unreleased]`
-  bullet, and a fragment in an unrecognised section directory is rejected
-  outright — assembly has no heading to render it under and would drop it
-  silently.
-
-Run: python3 scripts/tests/test_check_changelog_attribution.py
-"""
+import argparse
+import contextlib
 import importlib.util
-import sys
+import io
+import os
+import unittest
 from pathlib import Path
+from unittest.mock import patch
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check-changelog-attribution.py"
-
-spec = importlib.util.spec_from_file_location("check_changelog_attribution", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-
-def check(cond, label):
-    if not cond:
-        print(f"FAIL [{label}]", file=sys.stderr)
-        sys.exit(1)
+SPEC = importlib.util.spec_from_file_location("check_changelog_attribution", SCRIPT)
+mod = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(mod)
 
 
-def main() -> None:
-    bba = mod.bullet_block_has_attribution
+class BulletBlockTests(unittest.TestCase):
+    def test_single_line_attribution(self):
+        self.assertTrue(mod.bullet_block_has_attribution(["- Entry. (@houko)"], 0))
 
-    # Single-line bullet with attribution on the marker line.
-    lines = ["- One-line bullet. (#1) (@houko)"]
-    check(bba(lines, 0), "single-line attributed")
+    def test_continuation_attribution(self):
+        lines = ["- First.", "  Second.", "  Third. (@houko)"]
+        self.assertFalse(mod.has_attribution(lines[0]))
+        self.assertTrue(mod.bullet_block_has_attribution(lines, 0))
 
-    # Multi-line bullet — attribution on the final continuation line (the
-    # shape the one-sentence-per-line reformat produces). This is the
-    # regression the fix targets: the marker line alone has no `(@user)`.
-    lines = [
-        "- First sentence.",
-        "  Second sentence.",
-        "  Third sentence. (#2) (@houko)",
-    ]
-    check(not mod.has_attribution(lines[0]), "marker line alone is unattributed")
-    check(bba(lines, 0), "multi-line attributed on continuation")
-
-    # Multi-line bullet with NO attribution anywhere must still be caught.
-    lines = ["- First sentence.", "  Second sentence with no attribution."]
-    check(not bba(lines, 0), "multi-line unattributed is flagged")
-
-    # A bullet's block ends at a blank line: attribution belonging to a LATER
-    # bullet must not leak backwards into an unattributed one.
-    lines = [
-        "- Unattributed bullet.",
-        "",
-        "- Later bullet. (@houko)",
-    ]
-    check(not bba(lines, 0), "attribution does not leak across a blank line")
-
-    # A bullet's block ends at the next bullet marker (no blank between).
-    lines = [
-        "- Unattributed bullet.",
-        "- Next bullet. (@houko)",
-    ]
-    check(not bba(lines, 0), "attribution does not leak across an adjacent bullet")
-
-    # `# pragma: no-attribution` on a continuation line exempts the bullet.
-    lines = [
-        "- Historical bullet.",
-        "  wrapped detail. # pragma: no-attribution",
-    ]
-    check(bba(lines, 0), "pragma exemption honored on continuation")
-
-    fragment_tests()
-
-    print("OK: check-changelog-attribution bullet + fragment tests passed.")
-
-
-def fragment_tests() -> None:
-    check_fragment = mod.check_fragment
-    classify = mod.classify_fragment_path
-
-    # A well-formed fragment in a recognised section passes.
-    ok = "changelog.d/fixed/6623-wire-max-content-chars.md"
-    check(classify(ok) == (True, None), "well-formed fragment path accepted")
-    check(
-        check_fragment(ok, "Fix the thing. (#6623) (@houko)\n") == [],
-        "attributed fragment passes",
-    )
-
-    # Multi-line body with the attribution on the final continuation line — the
-    # shape the one-sentence-per-line prose rule produces.
-    check(
-        check_fragment(
-            ok, "First sentence.\n  Second sentence.\n  Third. (#6623) (@houko)\n"
+    def test_missing_attribution(self):
+        self.assertFalse(
+            mod.bullet_block_has_attribution(["- First.", "  No attribution."], 0)
         )
-        == [],
-        "attribution on a fragment's continuation line counts",
-    )
 
-    # Missing attribution fails, and points at the first content line.
-    missing = check_fragment(ok, "Fix the thing. (#6623)\n")
-    check(len(missing) == 1, "unattributed fragment is flagged")
-    check(missing[0].lineno == 1, "unattributed fragment reports line 1")
-    check(
-        missing[0].reason == mod.MISSING_ATTRIBUTION,
-        "unattributed fragment reports the attribution reason",
-    )
+    def test_attribution_does_not_cross_blank_or_adjacent_bullet(self):
+        for lines in (
+            ["- Missing.", "", "- Later. (@houko)"],
+            ["- Missing.", "- Adjacent. (@houko)"],
+        ):
+            with self.subTest(lines=lines):
+                self.assertFalse(mod.bullet_block_has_attribution(lines, 0))
 
-    # A blank line ends the bullet block, so an attribution stranded after one
-    # does not count — assembly would have orphaned it into its own paragraph.
-    check(
-        len(check_fragment(ok, "Fix the thing.\n\n(@houko)\n")) == 1,
-        "attribution past a blank line does not count",
-    )
+    def test_pragma_on_continuation(self):
+        lines = ["- Historical.", "  Detail. # pragma: no-attribution"]
+        self.assertTrue(mod.bullet_block_has_attribution(lines, 0))
 
-    # An empty fragment fails rather than assembling into nothing.
-    empty = check_fragment(ok, "\n  \n")
-    check(len(empty) == 1 and empty[0].reason == "fragment is empty", "empty fragment flagged")
 
-    # An unrecognised section directory fails even when attribution is present:
-    # assembly has no heading for it and would drop the entry silently.
-    typo = "changelog.d/fix/6623-wire-max-content-chars.md"
-    is_fragment, problem = classify(typo)
-    check(is_fragment and problem is not None, "unrecognised section directory rejected")
-    bad_section = check_fragment(typo, "Fix the thing. (#6623) (@houko)\n")
-    check(len(bad_section) == 1, "unrecognised section is the only violation reported")
-    check("not a recognised" in bad_section[0].reason, "unrecognised section reason is explicit")
+class FragmentTests(unittest.TestCase):
+    path = "changelog.d/fixed/example.md"
 
-    # A fragment dropped straight into `changelog.d/` misses its section too.
-    check(
-        classify("changelog.d/6623-oops.md")[0] is True
-        and classify("changelog.d/6623-oops.md")[1] is not None,
-        "fragment outside any section directory rejected",
-    )
+    def test_attributed_fragment_and_continuation_pass(self):
+        self.assertEqual(mod.check_fragment(self.path, "Fix. (@houko)\n"), [])
+        self.assertEqual(
+            mod.check_fragment(self.path, "First.\n  Last. (@houko)\n"), []
+        )
 
-    # Infrastructure is not a fragment and is never scanned.
-    for infra in (
-        "changelog.d/README.md",
-        "changelog.d/fixed/.gitkeep",
-        "changelog.d/added/notes.txt",
-    ):
-        check(classify(infra) == (False, None), f"{infra} treated as infrastructure")
-        check(check_fragment(infra, "no attribution here\n") == [], f"{infra} not scanned")
+    def test_missing_attribution_has_exact_reason_and_line(self):
+        violations = mod.check_fragment(self.path, "Fix.\n")
+        self.assertEqual(
+            violations,
+            [mod.Violation(self.path, 1, "Fix.", mod.MISSING_ATTRIBUTION)],
+        )
+
+    def test_blank_line_ends_fragment_block(self):
+        self.assertEqual(len(mod.check_fragment(self.path, "Fix.\n\n(@houko)\n")), 1)
+
+    def test_empty_fragment_has_exact_reason(self):
+        self.assertEqual(
+            mod.check_fragment(self.path, "\n  \n"),
+            [mod.Violation(self.path, 1, "", "fragment is empty")],
+        )
+
+    def test_unknown_and_missing_sections_are_rejected(self):
+        for path in ("changelog.d/fix/example.md", "changelog.d/example.md"):
+            with self.subTest(path=path):
+                is_fragment, problem = mod.classify_fragment_path(path)
+                self.assertTrue(is_fragment)
+                self.assertIsNotNone(problem)
+                violations = mod.check_fragment(path, "Fix. (@houko)\n")
+                self.assertEqual(len(violations), 1)
+                self.assertEqual(violations[0].reason, problem)
+
+    def test_infrastructure_is_not_a_fragment(self):
+        for path in (
+            "changelog.d/README.md",
+            "changelog.d/fixed/.gitkeep",
+            "changelog.d/added/notes.txt",
+        ):
+            with self.subTest(path=path):
+                classification = mod.classify_fragment_path(path)
+                self.assertEqual(classification, (False, None))
+                self.assertEqual(mod.check_fragment(path, "unattributed\n"), [])
+
+
+class DiffParsingTests(unittest.TestCase):
+    def test_no_newline_marker_does_not_advance_post_image_line(self):
+        diff = "\n".join(
+            (
+                "diff --git a/CHANGELOG.md b/CHANGELOG.md",
+                "@@ -2 +2,2 @@",
+                "-- Replaced line without a newline.",
+                "\\ No newline at end of file",
+                "+- Attributed. (@houko)",
+                "+- Missing attribution.",
+            )
+        )
+        head = "\n".join(
+            (
+                "## [Unreleased]",
+                "- Attributed. (@houko)",
+                "- Missing attribution.",
+                "## [2026.1.1]",
+            )
+        )
+        with patch.object(mod, "run_git", side_effect=(diff, head)):
+            violations = mod.added_lines_in_unreleased("base", "head", ROOT)
+
+        self.assertEqual(
+            violations,
+            [mod.Violation("CHANGELOG.md", 3, "- Missing attribution.")],
+        )
+
+    def test_partial_diff_range_is_rejected(self):
+        cases = (
+            ("base", None, {}),
+            (None, "head", {}),
+            (None, None, {"BASE_SHA": "base"}),
+            (None, None, {"HEAD_SHA": "head"}),
+            ("cli-base", None, {"HEAD_SHA": "env-head"}),
+            (None, "cli-head", {"BASE_SHA": "env-base"}),
+            ("cli-base", None, {"BASE_SHA": "env-base", "HEAD_SHA": "env-head"}),
+        )
+        for base, head, environment in cases:
+            with (
+                self.subTest(base=base, head=head, environment=environment),
+                patch.dict(os.environ, environment, clear=True),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                args = argparse.Namespace(base=base, head=head)
+                with self.assertRaises(SystemExit) as caught:
+                    mod.resolve_diff_range(args)
+                self.assertEqual(caught.exception.code, 2)
+
+    def test_staged_no_newline_marker_does_not_advance_post_image_line(self):
+        diff = "\n".join(
+            (
+                "diff --git a/CHANGELOG.md b/CHANGELOG.md",
+                "@@ -2 +2,2 @@",
+                "-- Replaced line without a newline.",
+                "\\ No newline at end of file",
+                "+- Attributed. (@houko)",
+                "+- Missing attribution.",
+            )
+        )
+        staged = "\n".join(
+            (
+                "## [Unreleased]",
+                "- Attributed. (@houko)",
+                "- Missing attribution.",
+                "## [2026.1.1]",
+            )
+        )
+        with patch.object(mod, "run_git", side_effect=(diff, staged)):
+            violations = mod.scan_staged_added_lines(ROOT)
+
+        self.assertEqual(
+            violations,
+            [mod.Violation("CHANGELOG.md", 3, "- Missing attribution.")],
+        )
+
+    def test_complete_cli_range_overrides_environment(self):
+        args = argparse.Namespace(base="cli-base", head="cli-head")
+        with patch.dict(os.environ, {"BASE_SHA": "env-only"}, clear=True):
+            self.assertEqual(
+                mod.resolve_diff_range(args),
+                ("cli-base", "cli-head"),
+            )
+
+    def test_complete_environment_range_is_used(self):
+        args = argparse.Namespace(base=None, head=None)
+        environment = {"BASE_SHA": "env-base", "HEAD_SHA": "env-head"}
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(
+                mod.resolve_diff_range(args),
+                ("env-base", "env-head"),
+            )
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

@@ -196,7 +196,10 @@ def test_parse_notification_thread_id_carries_mention_status_id():
     # Reply target is the mention itself (`status_id` from the fixture),
     # NOT what the mention was responding to (`in_reply_to_id`).
     assert p["thread_id"] == "status-42"
-    assert p["librefang_user"] == "status-42"
+    assert json.loads(p["librefang_user"]) == {
+        "status_id": "status-42",
+        "visibility": "public",
+    }
     # The pre-fix `in_reply_to_id` is still in metadata for any
     # operator-side logging that needs it, but it must NOT govern the
     # reply target.
@@ -363,6 +366,39 @@ def test_post_status_chunks_chain_replies(monkeypatch):
     assert fake.calls[2]["params"]["in_reply_to_id"] == "id-2"
 
 
+def test_post_status_logs_partial_chunk_delivery(monkeypatch):
+    a = _adapter(MASTODON_MAX_MESSAGE_LEN="3")
+    calls = 0
+    warnings: list[tuple[str, dict]] = []
+
+    def urlopen(_req, timeout=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _FakeResp(200, b'{"id":"first"}')
+        raise ma.urllib.error.HTTPError(
+            "u", 500, "failure", {}, io.BytesIO(b"failed"),
+        )
+
+    monkeypatch.setattr(ma.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        ma.log, "warn", lambda message, **fields: warnings.append(
+            (message, fields),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="500"):
+        a._post_status("abcdef", in_reply_to_id=None)
+    assert warnings == [(
+        "mastodon reply partially delivered",
+        {
+            "posted_chunks": 1,
+            "total_chunks": 2,
+            "failed_chunk": 2,
+            "error": "mastodon post 500: failed",
+        },
+    )]
+
+
 def test_post_status_reply_to_inbound_thread(monkeypatch):
     a = _adapter()
     fake = _FakeUrlopen()
@@ -433,6 +469,47 @@ def test_post_status_custom_visibility(monkeypatch):
     monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
     a._post_status("private toot", in_reply_to_id=None)
     assert fake.calls[0]["params"]["visibility"] == "private"
+
+
+@pytest.mark.parametrize(
+    ("default", "parent", "expected"), [
+        ("public", "unlisted", "unlisted"),
+        ("unlisted", "private", "private"),
+        ("public", "direct", "direct"),
+        ("private", "public", "private"),
+    ],
+)
+def test_reply_visibility_never_exceeds_parent(
+    monkeypatch, default, parent, expected,
+):
+    a = _adapter(MASTODON_VISIBILITY=default)
+    fake = _FakeUrlopen()
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+    a._post_status(
+        "reply", in_reply_to_id="status-1", parent_visibility=parent,
+    )
+    assert fake.calls[0]["params"]["visibility"] == expected
+
+
+def test_on_send_recovers_visibility_from_reply_context(monkeypatch):
+    import asyncio
+    a = _adapter(MASTODON_VISIBILITY="public")
+    fake = _FakeUrlopen()
+    monkeypatch.setattr(ma.urllib.request, "urlopen", fake)
+
+    class _Cmd:
+        text = "private reply"
+        content = {"Text": "private reply"}
+        thread_id = None
+        user = {
+            "librefang_user": json.dumps({
+                "status_id": "mention-42", "visibility": "direct",
+            }, separators=(",", ":")),
+        }
+
+    asyncio.run(a.on_send(_Cmd()))
+    assert fake.calls[0]["params"]["in_reply_to_id"] == "mention-42"
+    assert fake.calls[0]["params"]["visibility"] == "direct"
 
 
 # ---- account_id surfaced via ready_event --------------------------
@@ -565,6 +642,73 @@ def test_poll_once_emits_in_chronological_order(monkeypatch):
     ]
     # High-water mark = newest id (notifs[0]), order-independent.
     assert newest == "n3"
+
+
+class _FakeSseResponse:
+    status = 200
+
+    def __init__(self, lines):
+        self.lines = lines
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def test_sse_flushes_notification_without_trailing_blank_line(monkeypatch):
+    a = _adapter()
+    a.own_account_id = "own-123"
+    notif = _mention("101", "streamed")
+    response = _FakeSseResponse([
+        b"event: notification\n",
+        f"data: {json.dumps(notif)}\n".encode("utf-8"),
+    ])
+    monkeypatch.setattr(
+        ma.urllib.request, "urlopen", lambda _req: response,
+    )
+    emitted: list[dict] = []
+    watermarks: list[str] = []
+    a._sse_loop(emitted.append, watermarks.append)
+    assert [e["params"]["message_id"] for e in emitted] == ["st-101"]
+    assert watermarks == ["101"]
+
+
+def test_producer_polls_from_sse_watermark_then_retries_sse(monkeypatch):
+    a = _adapter()
+    sse_calls = 0
+    poll_since_ids: list[str | None] = []
+    sleeps: list[float] = []
+
+    class _StopProducer(BaseException):
+        pass
+
+    def sse(_emit, advance):
+        nonlocal sse_calls
+        sse_calls += 1
+        if sse_calls == 1:
+            advance("101")
+            raise ma.urllib.error.URLError("stream dropped")
+        raise _StopProducer()
+
+    def poll(_emit, since_id):
+        poll_since_ids.append(since_id)
+        return since_id
+
+    monkeypatch.setattr(a, "_verify_credentials", lambda: "bot")
+    monkeypatch.setattr(a, "_sse_loop", sse)
+    monkeypatch.setattr(a, "_poll_once", poll)
+    monkeypatch.setattr(ma.time, "sleep", sleeps.append)
+
+    with pytest.raises(_StopProducer):
+        a._producer_blocking(lambda _event: None)
+    assert sse_calls == 2
+    assert poll_since_ids == ["101"]
+    assert sleeps == [1.0, ma.POLL_INTERVAL_SECS]
 
 
 # ---- 429 / Retry-After (Mastodon rate limiting) ----------------

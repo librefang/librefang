@@ -8,7 +8,9 @@ import re
 
 
 def run(input: dict) -> str:
-    text = input.get("text", "")
+    text = input.get("text")
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
 
     words = len(text.split())
     sentences = len([s for s in re.split(r"[.!?]+", text.strip()) if s.strip()]) if text.strip() else 0

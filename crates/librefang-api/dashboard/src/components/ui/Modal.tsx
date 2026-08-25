@@ -65,6 +65,64 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   "7xl": "sm:max-w-7xl",
 };
 
+let bodyScrollLockCount = 0;
+let bodyOverflowBeforeLock = "";
+
+function lockBodyScroll(): () => void {
+  if (bodyScrollLockCount === 0) {
+    bodyOverflowBeforeLock = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  bodyScrollLockCount += 1;
+
+  return () => {
+    bodyScrollLockCount = Math.max(0, bodyScrollLockCount - 1);
+    if (bodyScrollLockCount === 0) {
+      document.body.style.overflow = bodyOverflowBeforeLock;
+    }
+  };
+}
+
+interface OpenModal {
+  token: symbol;
+  zIndex: number;
+  sequence: number;
+  close: () => void;
+}
+
+const openModals: OpenModal[] = [];
+let nextModalSequence = 0;
+
+function handleModalEscape(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== "Escape") return;
+  const topModal = openModals.reduce<OpenModal | undefined>((top, modal) => {
+    if (!top || modal.zIndex > top.zIndex) return modal;
+    if (modal.zIndex === top.zIndex && modal.sequence > top.sequence) return modal;
+    return top;
+  }, undefined);
+  if (!topModal) return;
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  topModal.close();
+}
+
+function registerOpenModal(modal: Omit<OpenModal, "sequence">): () => void {
+  if (openModals.length === 0) {
+    window.addEventListener("keydown", handleModalEscape);
+  }
+  const entry = { ...modal, sequence: nextModalSequence++ };
+  openModals.push(entry);
+
+  return () => {
+    const index = openModals.findIndex((candidate) => candidate.token === entry.token);
+    if (index !== -1) openModals.splice(index, 1);
+    if (openModals.length === 0) {
+      window.removeEventListener("keydown", handleModalEscape);
+    }
+  };
+}
+
 /// Shared modal shell. Handles the cross-cutting concerns every page
 /// modal needs:
 ///
@@ -164,21 +222,18 @@ export const Modal = memo(function Modal({
 
   useEffect(() => {
     if (!isOpen || isDrawer) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
+    return lockBodyScroll();
   }, [isOpen, isDrawer]);
 
   useEffect(() => {
     if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCloseRef.current();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen]);
+    const token = Symbol("modal");
+    return registerOpenModal({
+      token,
+      zIndex,
+      close: () => onCloseRef.current(),
+    });
+  }, [isOpen, zIndex]);
 
   const handleBackdropClick = (e: React.MouseEvent) => {
     // Stop the click from bubbling to an ancestor backdrop.
@@ -190,7 +245,7 @@ export const Modal = memo(function Modal({
     // closing this one via backdrop would otherwise also
     // close its parent. See codex review on #2722.
     e.stopPropagation();
-    onClose();
+    onCloseRef.current();
   };
 
   // Three layout shapes:
@@ -232,6 +287,9 @@ export const Modal = memo(function Modal({
               ? { role: "complementary" as const }
               : { role: "dialog" as const, "aria-modal": true })}
             {...(title ? { "aria-labelledby": titleId } : {})}
+            {...(isDrawer && !title
+              ? { "aria-label": t("common.details", { defaultValue: "Details" }) }
+              : {})}
             className={dialogClass}
             onClick={(e) => e.stopPropagation()}
             variants={dialogVariants}
@@ -247,7 +305,7 @@ export const Modal = memo(function Modal({
                 {!hideCloseButton && (
                   <button
                     ref={closeButtonRef}
-                    onClick={onClose}
+                    onClick={() => onCloseRef.current()}
                     className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     aria-label={t("common.close", { defaultValue: "Close" })}
                   >

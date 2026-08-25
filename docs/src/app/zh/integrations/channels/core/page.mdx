@@ -130,10 +130,12 @@ Sidecar 自动处理 Gateway 重连、周期性心跳（首次心跳带 RFC 要�
 3. 前往 **OAuth & Permissions**，添加 Bot Token Scopes：
    - `chat:write`
    - `files:write`（Agent 发送 `File` / `FileData` 附件时必需）
+   - `files:read`（将用户上传的文件与图片转发给 Agent 时必需）
    - `app_mentions:read`
    - `im:history`
    - `im:read`
    - `im:write`
+   - `users:read`（仅当启用下文的显示名解析时需要）
 4. 将应用安装到你的工作区。
 5. 复制 Bot User OAuth Token（`xoxb-...`）。
 6. 设置环境变量：
@@ -162,6 +164,13 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FORCE_FLAT_REPLIES = "false"   # 设为 "true" 将回复以顶层消息发送
 # SLACK_REACTIONS = "true"             # 设为 "false" 关闭 👀 / ✅ 处理回执
 # SLACK_PROGRESS_CARD = "true"         # 设为 "false" 关闭多步任务进度卡片
+# SLACK_FILE_DOWNLOADS = "true"        # 设为 "false" 不再把用户上传转发给 Agent
+# SLACK_FILE_MAX_BYTES = "10485760"    # 入站附件大小上限
+# SLACK_FILE_ALLOWED_EXTENSIONS = ""   # 逗号分隔的扩展名白名单；留空表示接受所有扩展名
+# SLACK_FILE_DOWNLOAD_CHANNELS = ""    # 逗号分隔的频道 ID；留空表示所有频道
+# SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = ""   # 永不接受上传的频道 ID
+# SLACK_RESOLVE_DISPLAY_NAMES = "false"       # 设为 "true" 显示真实姓名而非原始 U… id
+# SLACK_DISPLAY_NAME_TTL = "21600"            # 已解析姓名的缓存时长(秒)
 ```
 
 8. 重启守护进程。
@@ -169,6 +178,31 @@ SLACK_BOT_TOKEN = "xoxb-..."
 ### 工作原理
 
 Slack 适配器使用 Socket Mode，通过 WebSocket 连接到 Slack 服务器。这避免了需要公网 Webhook URL 的问题。适配器接收事件（应用提及、私信）并路由到配置的 Agent。文本响应通过 `chat.postMessage` Web API 发送；`File` 与 `FileData` 响应使用 Slack external upload 流程，并保留同一 thread 上下文。URL 文件只会从公网 HTTP(S) 地址下载，URL 与内联文件均限制为 10 MiB。当 `threading = true` 时，回复通过 `thread_ts` 发送到消息所在的线程。
+
+### 用户上传的文件
+
+用户在频道或私信里发送的文件与图片会作为消息内容送达 Agent，Agent 可以直接看图、转写音频或阅读文档，而不是收到一个自己打不开的 URL。
+Slack 的私有文件 URL 必须携带 bot token 才能下载，因此适配器只为 Slack 自己的文件域名声明按主机生效的授权规则，由守护进程带着该 token 去下载；token 不会附加到任何其他主机上——这一点很重要，因为工作区成员可以注册指向任意地址的远程文件。
+每条消息只转发一个附件（协议中一条消息只承载一个内容值），并且附件优先于消息文本，文本作为附件的 caption 一同送出。
+链接预览里的图片不会被下载——那属于某人粘贴的 URL，而不是上传。
+
+四类开关全部可选：`SLACK_FILE_DOWNLOADS` 整体关闭该功能，`SLACK_FILE_MAX_BYTES` 限制大小（默认 10 MiB），`SLACK_FILE_ALLOWED_EXTENSIONS` 限定可接受的扩展名，`SLACK_FILE_DOWNLOAD_CHANNELS` / `SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS` 决定哪些频道参与——繁忙频道正是用后者单独退出，而不必在所有频道禁用上传。
+
+### 发送者显示名
+
+默认情况下,adapter 把发送者的原始 Slack id(`U09…`)当作显示名上报,agent 看到的、以及群名册里存下的都是它。
+设置 `SLACK_RESOLVE_DISPLAY_NAMES = "true"` 即可改为通过 Slack 的 `users.info` 解析真实姓名,同时顺带补上 `@handle`。
+这需要 `users:read` 这个 bot scope;没有它每次查询都会失败,adapter 会继续上报 id。
+
+查询结果按 user id 缓存 `SLACK_DISPLAY_NAME_TTL` 秒(默认六小时),所以繁忙频道一天只花掉少量 API 调用,而不是每条消息一次 —— `users.info` 有按方法计的速率限制,不缓存会很快耗尽。
+"查不到"同样会被缓存:一个已删除的用户,或一个缺少 scope 的机器人,只花一次请求,而不是每条消息一次。
+临时性失败(限流、连接中断)只抑制一分钟,工作区恢复后很快就会重新开始解析姓名。
+
+**默认关闭,是因为它改变的是 LibreFang 存下来的内容,而不只是展示的内容。**
+daemon 会为每个在群里发过言的人持久化一行名册记录(`channel`、`chat_id`、`user_id`、显示名、handle、首次与最近出现时间),这行记录里存的就是本 adapter 上报的值。
+开关关着时存的是一个不透明的平台 id;打开后,真实姓名会写入 `~/.librefang/memory.db`,直到该行被删除为止。
+目前这些行没有自动过期机制,所以请把启用它当作一个关于个人数据留存的决定,而不是一个展示偏好。
+只想给少数几个人配人类可读的名字、又不想引入任何查询与存储变化的运维者,可以继续使用 `[users]` 条目,它始终具有最高优先级。
 
 ### 处理状态反应（Reactions）
 

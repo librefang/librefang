@@ -9,8 +9,17 @@ ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
 warn()  { printf "\033[1;33m⚠\033[0m %s\n" "$1"; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$1" >&2; exit 1; }
 
+CURSOR_HIDDEN=0
+cleanup() {
+  if [ "$CURSOR_HIDDEN" -eq 1 ]; then
+    printf "\033[?25h" > /dev/tty 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 # --- 1. Check flyctl ---
-command -v flyctl &>/dev/null || err "flyctl not found. Install it first: curl -sL https://fly.io/install.sh | sh"
+command -v flyctl &>/dev/null || err "flyctl not found. Install it from https://fly.io/docs/flyctl/install/ first."
+command -v python3 &>/dev/null || err "python3 not found. Install Python 3 before running uninstall."
 
 # --- 2. Auth ---
 if ! flyctl auth whoami &>/dev/null; then
@@ -21,17 +30,23 @@ ok "Logged in as $(flyctl auth whoami)"
 
 # --- 3. Fetch LibreFang apps ---
 info "Fetching your LibreFang apps..."
-APPS=()
-while IFS= read -r line; do
-  [[ -n "$line" ]] && APPS+=("$line")
-done < <(flyctl apps list --json 2>/dev/null | python3 -c "
+if ! apps_json=$(flyctl apps list --json 2>&1); then
+  err "Could not list Fly apps: $apps_json"
+fi
+if ! parsed_apps=$(printf '%s' "$apps_json" | python3 -c "
 import sys, json
 apps = json.load(sys.stdin)
 for a in apps:
     name = a.get('Name', a.get('name', ''))
-    if name.startswith('librefang'):
+    if name == 'librefang' or name.startswith('librefang-'):
         print(name)
-" 2>/dev/null || true)
+" 2>&1); then
+  err "Could not parse Fly app list: $parsed_apps"
+fi
+APPS=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && APPS+=("$line")
+done <<< "$parsed_apps"
 
 if [ ${#APPS[@]} -eq 0 ]; then
   ok "No LibreFang apps found on your account."
@@ -51,7 +66,7 @@ tui_multiselect() {
   for ((i = 0; i < count; i++)); do selected+=(0); done
 
   printf "\033[?25l" > /dev/tty
-  trap 'printf "\033[?25h" > /dev/tty' RETURN
+  CURSOR_HIDDEN=1
 
   draw_menu() {
     for ((i = 0; i < count; i++)); do
@@ -115,6 +130,8 @@ tui_multiselect() {
     draw_menu
   done
   echo "" > /dev/tty
+  printf "\033[?25h" > /dev/tty
+  CURSOR_HIDDEN=0
 
   SELECTED_INDICES=()
   for ((i = 0; i < count; i++)); do
@@ -149,15 +166,20 @@ fi
 
 # --- 6. Destroy selected apps ---
 echo ""
+destroy_failures=0
 for idx in "${SELECTED_INDICES[@]}"; do
   app="${TUI_ITEMS[$idx]}"
   info "Destroying $app..."
-  if flyctl apps destroy "$app" --yes 2>/dev/null; then
+  if destroy_output=$(flyctl apps destroy "$app" --yes 2>&1); then
     ok "Destroyed $app"
   else
-    warn "Failed to destroy $app (may already be deleted)"
+    warn "Failed to destroy $app: $destroy_output"
+    destroy_failures=$((destroy_failures + 1))
   fi
 done
 
 echo ""
+if (( destroy_failures > 0 )); then
+  err "$destroy_failures selected app(s) could not be destroyed. Review the errors above."
+fi
 ok "Done! All selected apps have been destroyed."
