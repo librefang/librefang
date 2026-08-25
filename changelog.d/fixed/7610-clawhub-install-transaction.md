@@ -1,1 +1,0 @@
-Preserved existing ClawHub skill installs through staged promotion failures, cleaned failed staging trees, and stopped checksum discovery errors from downgrading installs to unverified downloads. (#7610) (@houko)

@@ -5,11 +5,18 @@ interface SelectOption {
   label: string;
 }
 
-interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
-  label?: string;
+type SelectAccessibleName =
+  | { label: string; "aria-label"?: string; "aria-labelledby"?: string }
+  | { label?: never; "aria-label": string; "aria-labelledby"?: string }
+  | { label?: never; "aria-label"?: never; "aria-labelledby": string };
+
+type SelectProps = Omit<
+  SelectHTMLAttributes<HTMLSelectElement>,
+  "aria-label" | "aria-labelledby"
+> & SelectAccessibleName & {
   options: SelectOption[];
   placeholder?: string;
-}
+};
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(
   ({ className = "", label, options, placeholder, ...props }, ref) => {

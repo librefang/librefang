@@ -1,33 +1,52 @@
 #!/usr/bin/env python3
-"""
-Streaming example — stream agent responses token by token.
-
-Usage:
-    python client_streaming.py
-"""
+"""Stream an agent response through the LibreFang REST API."""
 
 import sys
-import os
+from typing import Any, Optional
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from librefang_client import LibreFang
+from librefang import Client
+from librefang.librefang_client import LibreFangError
 
-client = LibreFang("http://localhost:4545")
 
-# Create an agent
-agent = client.agents.create(template="assistant")
-print(f"Agent: {agent['id']}")
+def main(client: Optional[Any] = None) -> int:
+    client = client or Client("http://localhost:4545")
+    agent_id = None
+    failed = False
 
-# Stream the response
-print("\n--- Streaming response ---")
-for event in client.agents.stream(agent["id"], "Tell me a short story about a robot."):
-    event_type = event.get("type", "")
-    if event_type == "text_delta" and event.get("delta"):
-        print(event["delta"], end="", flush=True)
-    elif event_type == "tool_call":
-        print(f"\n[Tool call: {event.get('tool')}]")
-    elif event_type == "done":
-        print("\n--- Done ---")
+    try:
+        agent = client.agents.spawn_agent(template="assistant")
+        agent_id = agent["agent_id"]
+        print(f"Agent: {agent_id}")
 
-# Clean up
-client.agents.delete(agent["id"])
+        print("\n--- Streaming response ---")
+        events = client.agents.send_message_stream(
+            agent_id,
+            message="Tell me a short story about a robot.",
+        )
+        for event in events:
+            if "error" in event or event.get("raw") == "error":
+                detail = event.get("error", event.get("raw"))
+                raise LibreFangError(f"Stream error: {detail}")
+            if event.get("content"):
+                print(event["content"], end="", flush=True)
+            elif event.get("tool"):
+                print(f"\n[Tool call: {event['tool']}]")
+            elif event.get("done"):
+                print("\n--- Done ---")
+    except LibreFangError as error:
+        print(f"LibreFang request failed: {error}", file=sys.stderr)
+        failed = True
+    finally:
+        if agent_id is not None:
+            try:
+                client.agents.kill_agent(agent_id, confirm=True)
+                print("Agent deleted.")
+            except LibreFangError as error:
+                print(f"Agent cleanup failed: {error}", file=sys.stderr)
+                failed = True
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

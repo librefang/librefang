@@ -41,7 +41,6 @@ const MINUTES = [0, 5, 10, 15, 20, 30, 45];
 
 const RE_DIGITS = /^\d+$/;
 const RE_SINGLE_DIGIT = /^\d$/;
-const RE_CRON_FIELD = /^(\*|(\*\/)?[0-9]+([-,/][0-9]+)*)$/;
 
 const CUSTOM_CRON_OPTS: string[][] = [
   ["*", "*/5", "*/10", "*/15", "*/30", ...Array.from({ length: 60 }, (_, i) => String(i))],
@@ -95,6 +94,49 @@ function buildCronFrom(
   }
 }
 
+function validateCronField(field: string, min: number, max: number): boolean {
+  if (field === "*") return true;
+
+  return field.split(",").every((part) => {
+    if (!part) return false;
+
+    const stepParts = part.split("/");
+    if (stepParts.length > 2) return false;
+    const [base, stepText] = stepParts;
+    if (stepText !== undefined) {
+      if (!RE_DIGITS.test(stepText) || Number(stepText) < 1) return false;
+    }
+
+    if (base === "*") return stepText !== undefined;
+
+    const rangeParts = base.split("-");
+    if (rangeParts.length > 2) return false;
+    if (rangeParts.length === 2) {
+      const [startText, endText] = rangeParts;
+      if (!RE_DIGITS.test(startText) || !RE_DIGITS.test(endText)) return false;
+      const start = Number(startText);
+      const end = Number(endText);
+      return start >= min && start <= max && end >= min && end <= max && start <= end;
+    }
+
+    if (!RE_DIGITS.test(base)) return false;
+    const value = Number(base);
+    return value >= min && value <= max;
+  });
+}
+
+export function validateCron(cron: string): boolean {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return false;
+  return (
+    validateCronField(parts[0], 0, 59) &&
+    validateCronField(parts[1], 0, 23) &&
+    validateCronField(parts[2], 1, 31) &&
+    validateCronField(parts[3], 1, 12) &&
+    validateCronField(parts[4], 0, 7)
+  );
+}
+
 export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz, onSave, onClose }: ScheduleModalProps) {
   const { t } = useTranslation();
 
@@ -135,12 +177,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
   useEffect(() => {
     setTimezone(initialTz || detectBrowserTimezone());
   }, [initialTz]);
-
-  const validateCron = (cron: string): boolean => {
-    const parts = cron.trim().split(/\s+/);
-    if (parts.length !== 5) return false;
-    return parts.every(p => RE_CRON_FIELD.test(p));
-  };
 
   const describeCron = (cron: string): string => {
     const parts = cron.trim().split(/\s+/);

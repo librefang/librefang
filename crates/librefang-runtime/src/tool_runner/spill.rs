@@ -2,6 +2,8 @@
 //! and `web_search` to overflow oversize tool results into the artifact
 //! store rather than burning context (#3347 5/N).
 
+const MAX_SPILL_FAILURE_PREVIEW_BYTES: usize = 4 * 1024;
+
 /// Resolve `[tool_results]` spill threshold + per-artifact cap from raw
 /// `ToolExecContext` fields, falling back to compiled defaults when the
 /// caller passed `0` (test call sites that don't populate the ctx).
@@ -27,9 +29,9 @@ pub(crate) fn resolve_spill_config(
 }
 
 /// Apply artifact spill to a tool-result string, returning a compact stub
-/// when the body exceeds `threshold` and the spill write succeeds.  Falls
-/// through to the original body when below the threshold or when the
-/// write fails (e.g. per-artifact cap exceeded, disk full).
+/// when the body exceeds `threshold` and the spill write succeeds. Bodies below
+/// the threshold pass through unchanged. A failed spill returns a bounded
+/// preview rather than re-injecting the complete oversized body.
 pub(super) fn spill_or_passthrough(
     tool_name: &str,
     body: String,
@@ -48,7 +50,15 @@ pub(super) fn spill_or_passthrough(
     ) {
         stub
     } else {
-        body
+        let threshold_limit = usize::try_from(threshold).unwrap_or(usize::MAX);
+        let preview_limit = threshold_limit.min(MAX_SPILL_FAILURE_PREVIEW_BYTES);
+        let preview = crate::str_utils::safe_truncate_str(&body, preview_limit);
+        format!(
+            "[artifact spill failed; showing {} of {} bytes]\n{}",
+            preview.len(),
+            body.len(),
+            preview
+        )
     }
 }
 
@@ -96,5 +106,21 @@ mod tests {
             wrote_artifact,
             "a recoverable artifact file must be written"
         );
+    }
+
+    #[test]
+    fn spill_failure_returns_bounded_utf8_preview() {
+        let body = "界".repeat(4096);
+        let out = spill_or_passthrough("shell_exec", body.clone(), 1024, 512);
+
+        assert!(out.contains("artifact spill failed"));
+        assert!(out.contains(&format!("of {} bytes", body.len())));
+        assert!(
+            out.len() < 1200,
+            "fallback was not bounded: {} bytes",
+            out.len()
+        );
+        assert!(!out.contains(&body));
+        assert!(out.ends_with('界'));
     }
 }

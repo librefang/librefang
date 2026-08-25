@@ -27,7 +27,8 @@ export const goalQueries = {
       queryKey: goalKeys.run(id),
       queryFn: () => getGoalRun(id),
       // Poll while a run is active so the dashboard reflects live progress.
-      refetchInterval: RUN_POLL_MS,
+      refetchInterval: (query) =>
+        query.state.data?.running ? RUN_POLL_MS : false,
       refetchIntervalInBackground: false,
     }),
 };
@@ -41,5 +42,8 @@ export function useGoalTemplates(options: QueryOverrides = {}) {
 }
 
 export function useGoalRun(id: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(goalQueries.run(id), options));
+  return useQuery(withOverrides(goalQueries.run(id), {
+    ...options,
+    enabled: Boolean(id) && options.enabled !== false,
+  }));
 }

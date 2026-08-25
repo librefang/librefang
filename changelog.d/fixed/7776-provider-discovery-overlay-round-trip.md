@@ -1,0 +1,4 @@
+Turning on live model discovery from the dashboard now survives a daemon restart.
+`PUT /api/providers/{name}/discovery` creates `~/.librefang/providers/{name}.toml` when the provider previously lived only in memory, and that file carried `id` and the flag alone — a shape `ProviderCatalogToml` rejected, because `display_name`, `api_key_env` and `base_url` were all required.
+The catalog loader therefore discarded the entire file with a `WARN` that did not even name it, and `discover_models` reverted to `false` on every boot while the provider's models stayed at zero.
+The writer now emits the identity fields from the live provider record (leaving any value already in the file untouched, so a hand-maintained catalog still survives the toggle byte-for-byte), the loader tolerates a partial overlay and merges same-id records without letting an absent value overwrite a present one, and the parse-failure warning names the offending path (#7776) (@DaBlitzStein)

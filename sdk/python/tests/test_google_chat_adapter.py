@@ -72,7 +72,8 @@ def _service_account_blob(*, with_jwt: bool = True, with_token: bool = False):
 
 
 def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
-             account_id: str = "", api_base: str = "", bind_host: str = ""):
+             account_id: str = "", api_base: str = "", bind_host: str = "",
+             verification_token: str | None = "test-verification-token"):
     os.environ["GOOGLE_CHAT_SERVICE_ACCOUNT_JSON"] = sa_blob
     os.environ["GOOGLE_CHAT_SPACE_IDS"] = spaces
     os.environ["GOOGLE_CHAT_WEBHOOK_PORT"] = port
@@ -85,6 +86,10 @@ def _set_env(*, sa_blob: str, spaces: str = "", port: str = "8090",
         os.environ["GOOGLE_CHAT_BIND_HOST"] = bind_host
     else:
         os.environ.pop("GOOGLE_CHAT_BIND_HOST", None)
+    if verification_token is not None:
+        os.environ["GOOGLE_CHAT_VERIFICATION_TOKEN"] = verification_token
+    else:
+        os.environ.pop("GOOGLE_CHAT_VERIFICATION_TOKEN", None)
 
 
 # Module import — must be after env preset for SCHEMA-only use, but
@@ -118,8 +123,16 @@ def test_missing_auth_paths_raises():
 def test_pre_supplied_token_path_constructs():
     _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
     a = gc.GoogleChatAdapter()
-    # Pre-supplied path seeds the cache so _get_access_token doesn't
-    # need to sign anything.
+    # Pre-supplied tokens bypass the expiring JWT cache.
+    assert a._get_access_token() == "pre-supplied-token"
+    assert a._token_cache.get() is None
+
+
+def test_pre_supplied_token_does_not_expire_with_jwt_lifetime(monkeypatch):
+    _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
+    a = gc.GoogleChatAdapter()
+    monkeypatch.setattr(gc.time, "time", lambda: 10**12)
+    a._token_cache.clear()
     assert a._get_access_token() == "pre-supplied-token"
 
 
@@ -377,12 +390,13 @@ def test_send_text_chunks_oversize_payload(monkeypatch):
     assert sum(len(p["text"]) for p in payloads) == len(text)
 
 
-def test_send_text_401_clears_token_cache(monkeypatch):
+def test_send_text_401_clears_jwt_cache_but_keeps_static_token(monkeypatch):
     _set_env(
         sa_blob=_service_account_blob(with_jwt=False, with_token=True),
     )
     a = gc.GoogleChatAdapter()
-    assert a._token_cache.get() == "pre-supplied-token"
+    a._token_cache.set("stale-jwt-token", 3600)
+    assert a._token_cache.get() == "stale-jwt-token"
 
     def fake_urlopen(req, timeout=None):
         import urllib.error
@@ -395,8 +409,9 @@ def test_send_text_401_clears_token_cache(monkeypatch):
     monkeypatch.setattr(gc.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError, match="Google Chat API error 401"):
         a._send_text("spaces/AAAA", "hi")
-    # 401 should have cleared the cache so the next send re-runs auth.
+    # Static tokens bypass the JWT cache and remain operator-managed.
     assert a._token_cache.get() is None
+    assert a._get_access_token() == "pre-supplied-token"
 
 
 # ---- JWT signing end-to-end against the test PEM ----------------------
@@ -561,10 +576,10 @@ async def test_on_send_empty_text_drops(monkeypatch):
 # ---- bind host knob ---------------------------------------------------
 
 
-def test_default_bind_host_is_0_0_0_0():
+def test_default_bind_host_is_loopback():
     _set_env(sa_blob=_service_account_blob(with_jwt=False, with_token=True))
     a = gc.GoogleChatAdapter()
-    assert a._bind_host == gc.DEFAULT_BIND_HOST == "0.0.0.0"
+    assert a._bind_host == gc.DEFAULT_BIND_HOST == "127.0.0.1"
 
 
 def test_bind_host_env_overrides_default():
@@ -593,6 +608,28 @@ def test_bind_host_empty_string_falls_back_to_default():
     assert a._bind_host == gc.DEFAULT_BIND_HOST
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "0.0.0.0", "::"])
+def test_every_listener_requires_verification_token(host):
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        bind_host=host,
+        verification_token=None,
+    )
+    with pytest.raises(RuntimeError, match="VERIFICATION_TOKEN.*required"):
+        gc.GoogleChatAdapter()
+
+
+def test_non_loopback_bind_accepts_verification_token():
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        bind_host="0.0.0.0",
+        verification_token="shared-secret",
+    )
+    a = gc.GoogleChatAdapter()
+    assert a._bind_host == "0.0.0.0"
+    assert a._verification_token == "shared-secret"
+
+
 def test_bind_host_field_in_schema_marked_advanced():
     schema = gc.GoogleChatAdapter.SCHEMA.to_dict()
     bh = next(
@@ -600,6 +637,17 @@ def test_bind_host_field_in_schema_marked_advanced():
     )
     assert bh["advanced"] is True
     assert bh["required"] is False
+
+
+def test_verification_token_field_is_secret_and_advanced():
+    schema = gc.GoogleChatAdapter.SCHEMA.to_dict()
+    field = next(
+        f for f in schema["fields"]
+        if f["key"] == "GOOGLE_CHAT_VERIFICATION_TOKEN"
+    )
+    assert field["type"] == "secret"
+    assert field["advanced"] is True
+    assert field["required"] is True
 
 
 # ---- shutdown lifecycle ------------------------------------------------
@@ -822,6 +870,7 @@ def test_webhook_handler_dedupes_redelivered_event():
     emitted: list[dict] = []
 
     payload = _msg_event(text="hi")
+    payload["token"] = a._verification_token
     # First delivery: emit fires + 200 OK returned to Google.
     status, _ = _post_to_webhook(a, payload, emit_target=emitted)
     assert status == 200
@@ -837,6 +886,7 @@ def test_webhook_handler_dedupes_redelivered_event():
 
     # A distinct message in the same space still emits.
     payload2 = _msg_event(text="round 2")
+    payload2["token"] = a._verification_token
     payload2["message"]["name"] = "spaces/AAAA/messages/M2"
     status, _ = _post_to_webhook(a, payload2, emit_target=emitted)
     assert status == 200
@@ -844,6 +894,39 @@ def test_webhook_handler_dedupes_redelivered_event():
         "spaces/AAAA/messages/M1",
         "spaces/AAAA/messages/M2",
     ]
+
+
+@pytest.mark.parametrize("supplied", [None, "", "wrong-secret"])
+def test_webhook_handler_rejects_invalid_verification_token(supplied):
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        verification_token="shared-secret",
+    )
+    a = gc.GoogleChatAdapter()
+    emitted: list[dict] = []
+    payload = _msg_event(text="forged")
+    if supplied is not None:
+        payload["token"] = supplied
+
+    status, _ = _post_to_webhook(a, payload, emit_target=emitted)
+    assert status == 401
+    assert emitted == []
+    assert len(a._seen.ids) == 0
+
+
+def test_webhook_handler_accepts_matching_verification_token():
+    _set_env(
+        sa_blob=_service_account_blob(with_jwt=False, with_token=True),
+        verification_token="shared-secret",
+    )
+    a = gc.GoogleChatAdapter()
+    emitted: list[dict] = []
+    payload = _msg_event(text="authentic")
+    payload["token"] = "shared-secret"
+
+    status, _ = _post_to_webhook(a, payload, emit_target=emitted)
+    assert status == 200
+    assert len(emitted) == 1
 
 
 def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
@@ -861,6 +944,7 @@ def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
 
     # Event for a disallowed space → filtered out by `_parse_webhook_event`.
     blocked = _msg_event(text="hi", space_name="spaces/BBBB")
+    blocked["token"] = a._verification_token
     status, _ = _post_to_webhook(a, blocked, emit_target=emitted)
     assert status == 200
     assert emitted == []
@@ -869,7 +953,8 @@ def test_webhook_handler_does_not_consume_dedupe_slot_for_filtered_events():
 
     # Non-MESSAGE event → also filtered, also no _seen consumption.
     non_msg = {"type": "ADDED_TO_SPACE",
-               "space": {"name": "spaces/AAAA", "type": "ROOM"}}
+               "space": {"name": "spaces/AAAA", "type": "ROOM"},
+               "token": a._verification_token}
     status, _ = _post_to_webhook(a, non_msg, emit_target=emitted)
     assert status == 200
     assert emitted == []

@@ -9,6 +9,9 @@ import type { Translation } from '../i18n'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
 
+const FEATURE_ACTIVE_IDS = ['hands', 'agents', 'skills', 'mcp', 'plugins', 'providers', 'workflows', 'channels']
+const LEARN_ACTIVE_IDS = ['architecture', 'hands', 'evolution', 'workflows', 'performance', 'downloads', 'install', 'faq', 'community']
+
 interface SiteHeaderProps {
   onOpenSearch?: () => void
   // True on non-homepage routes so we rewrite flat links to cross-page
@@ -71,9 +74,11 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
       if (e.key === 'Escape') { setOpen(false); setLangOpen(false); setFeaturesOpen(false); setLearnOpen(false) }
     }
     const handleClickOutside = (e: MouseEvent) => {
-      if (langOpen && !(e.target as HTMLElement).closest('[data-lang-menu]')) setLangOpen(false)
-      if (featuresOpen && !(e.target as HTMLElement).closest('[data-features-menu]')) setFeaturesOpen(false)
-      if (learnOpen && !(e.target as HTMLElement).closest('[data-learn-menu]')) setLearnOpen(false)
+      const target = e.target instanceof Element ? e.target : null
+      if (open && !target?.closest('[data-mobile-menu]')) setOpen(false)
+      if (langOpen && !target?.closest('[data-lang-menu], [data-lang-menu-mobile]')) setLangOpen(false)
+      if (featuresOpen && !target?.closest('[data-features-menu]')) setFeaturesOpen(false)
+      if (learnOpen && !target?.closest('[data-learn-menu]')) setLearnOpen(false)
     }
     document.addEventListener('keydown', handleEscape)
     document.addEventListener('click', handleClickOutside)
@@ -81,7 +86,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
       document.removeEventListener('keydown', handleEscape)
       document.removeEventListener('click', handleClickOutside)
     }
-  }, [langOpen, featuresOpen, learnOpen])
+  }, [open, langOpen, featuresOpen, learnOpen])
 
   const langPrefix = lang === 'en' ? '' : `/${lang}`
   const homeHref = lang === 'en' ? '/' : `/${lang}/`
@@ -122,10 +127,8 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
   const flatLinks: NavLink[] = [
     { label: t.nav.docs, href: 'https://docs.librefang.ai', external: true },
   ]
-  const featureActiveIds = ['hands', 'agents', 'skills', 'mcp', 'plugins', 'providers', 'workflows', 'channels']
-  const isFeatureActive = featureActiveIds.includes(activeSection)
-  const learnActiveIds = ['architecture', 'hands', 'evolution', 'workflows', 'performance', 'downloads', 'install', 'faq', 'community']
-  const isLearnActive = learnActiveIds.includes(activeSection)
+  const isFeatureActive = FEATURE_ACTIVE_IDS.includes(activeSection)
+  const isLearnActive = LEARN_ACTIVE_IDS.includes(activeSection)
 
   const headerClass = cn(
     'fixed top-0 left-0 right-0 z-50 transition-all duration-300',
@@ -316,7 +319,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
           <button onClick={toggleTheme} className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" aria-label={headerCopy.toggleTheme}>
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
-          <div className="relative" data-lang-menu>
+          <div className="relative" data-lang-menu-mobile>
             <button className="p-2 text-gray-600 dark:text-gray-400 hover:text-cyan-600 dark:hover:text-cyan-400 transition-colors" onClick={() => setLangOpen(!langOpen)} aria-label={headerCopy.switchLanguage}>
               <Globe className="w-4 h-4" />
             </button>
@@ -335,7 +338,7 @@ export default function SiteHeader({ onOpenSearch, isSubpage = false, sourceUrl,
       </div>
 
       {open && (
-        <div className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
+        <div data-mobile-menu className="md:hidden bg-surface-100 border-t border-black/10 dark:border-white/5 px-6 py-4 space-y-1">
           <div className="pb-1">
             <div className="text-[10px] font-mono text-gray-400 dark:text-gray-600 uppercase tracking-widest py-1.5">
               {t.nav.learnMore!}

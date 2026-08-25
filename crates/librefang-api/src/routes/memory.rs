@@ -112,6 +112,7 @@ use crate::types::ApiErrorResponse;
 #[derive(serde::Deserialize)]
 pub struct MemorySearchQuery {
     pub q: String,
+    pub level: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -120,9 +121,22 @@ fn default_limit() -> usize {
     10
 }
 
+fn parse_memory_level_filter(
+    level: Option<&str>,
+) -> Result<Option<librefang_types::memory::MemoryLevel>, String> {
+    match level {
+        None => Ok(None),
+        Some("user") => Ok(Some(librefang_types::memory::MemoryLevel::User)),
+        Some("session") => Ok(Some(librefang_types::memory::MemoryLevel::Session)),
+        Some("agent") => Ok(Some(librefang_types::memory::MemoryLevel::Agent)),
+        Some(_) => Err("Invalid memory level; expected user, session, or agent".to_string()),
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct MemoryListQuery {
     pub category: Option<String>,
+    pub level: Option<String>,
     #[serde(default)]
     pub offset: usize,
     #[serde(default = "default_limit")]
@@ -464,15 +478,24 @@ fn auth_denied_for(
     tag = "proactive-memory",
     params(
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -481,7 +504,10 @@ pub async fn memory_search(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     // Search across ALL agents so the dashboard shows all memories
-    match store.search_all_with_guard(&params.q, limit, &guard).await {
+    match store
+        .search_dashboard_with_guard(&params.q, None, level, limit, &guard)
+        .await
+    {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -508,16 +534,25 @@ pub async fn memory_search(
     tag = "proactive-memory",
     params(
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     // Graceful degradation: proactive memory disabled → empty list, not 500.
     let Some(store) = state.kernel.proactive_memory_store().cloned() else {
         return (
@@ -536,25 +571,30 @@ pub async fn memory_list(
     let limit = params.limit.min(100);
     let offset = params.offset;
 
-    // List across ALL agents so the dashboard shows all memories
+    // List across ALL agents so the dashboard shows all memories. Filtering,
+    // counting, and pagination happen in one SQL snapshot; do not route this
+    // through the recall API, whose candidate cap would hide older rows.
     match store
-        .list_all_with_guard(params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            None,
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                    "proactive_enabled": true,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "proactive_enabled": true,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
@@ -866,10 +906,15 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         Ok(stats) => {
             let mut value = serde_json::json!(stats);
             if let Some(obj) = value.as_object_mut() {
+                let counts = match store.count_by_agent() {
+                    Ok(counts) => counts,
+                    Err(error) => return internal_error(error),
+                };
                 obj.insert(
                     "proactive_enabled".to_string(),
                     serde_json::Value::Bool(true),
                 );
+                obj.insert("by_agent".to_string(), serde_json::json!(counts));
             }
             (StatusCode::OK, Json(value))
         }
@@ -979,10 +1024,14 @@ pub async fn memory_clear_level(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
@@ -990,6 +1039,11 @@ pub async fn memory_list_agent(
     Query(params): Query<MemoryListQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1000,22 +1054,25 @@ pub async fn memory_list_agent(
     let offset = params.offset;
 
     match store
-        .list_with_guard(&agent_id, params.category.as_deref(), &guard)
+        .list_page_with_guard(
+            Some(&agent_id),
+            params.category.as_deref(),
+            level,
+            offset,
+            limit,
+            &guard,
+        )
         .await
     {
-        Ok(items) => {
-            let total = items.len();
-            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "memories": page,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                })),
-            )
-        }
+        Ok((page, total)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memories": page,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            })),
+        ),
         Err(librefang_types::error::LibreFangError::AuthDenied(reason)) => {
             auth_denied(&state, request.extensions(), reason)
         }
@@ -1035,9 +1092,13 @@ pub async fn memory_list_agent(
     params(
         ("id" = String, Path, description = "Agent ID"),
         ("q" = String, Query, description = "Search query"),
+        ("level" = Option<String>, Query, description = "Optional memory level filter"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
+    responses(
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid memory level filter")
+    )
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
@@ -1045,6 +1106,11 @@ pub async fn memory_search_agent(
     Query(params): Query<MemorySearchQuery>,
     request: axum::extract::Request,
 ) -> impl IntoResponse {
+    let level = match parse_memory_level_filter(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
+    };
+
     let store = match get_pm_store(&state) {
         Ok(s) => s,
         Err(e) => return e,
@@ -1053,7 +1119,7 @@ pub async fn memory_search_agent(
     let guard = guard_for_request(&state, request.extensions());
     let limit = params.limit.min(100);
     match store
-        .search_with_guard(&params.q, &agent_id, limit, &guard)
+        .search_dashboard_with_guard(&params.q, Some(&agent_id), level, limit, &guard)
         .await
     {
         Ok(items) => (
@@ -1108,6 +1174,7 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1115,7 +1182,16 @@ pub async fn memory_duplicates(
         Err(e) => return e,
     };
 
-    match store.find_duplicates(&agent_id, None).await {
+    // Duplicate groups are memory contents, so this read needs the same
+    // namespace gate and PII redaction every other memory read gets — it was
+    // the one `/api/memory` read that had neither (#7808).
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store
+        .find_duplicates_with_guard(&agent_id, None, &guard)
+        .await
+    {
         Ok(groups) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1188,14 +1264,12 @@ pub async fn memory_consolidate(
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
     let guard = guard_for_user(&state, user_ref);
-    // Consolidate merges and soft-deletes duplicate memories → delete capability.
-    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
-        guard.check_delete("proactive")
-    {
-        return auth_denied_for(&state, user_ref, reason);
-    }
 
-    match store.consolidate(&agent_id).await {
+    // Consolidate merges and soft-deletes duplicate memories → delete
+    // capability. The gate lives in `consolidate_with_guard` so this route and
+    // the agent-callable `memory_semantic_consolidate` tool cannot drift apart
+    // on what consolidation costs (#7808).
+    match store.consolidate_with_guard(&agent_id, &guard).await {
         Ok(merged) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1595,6 +1669,25 @@ pub async fn memory_query_relations(
 #[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = crate::types::JsonObject)))]
 pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
+
+    // `extraction_model` unset means "inherit the kernel default", and that
+    // used to be all a caller could learn: an absent field, with no way to ask
+    // which model was actually doing the work. That gap cost a live deployment
+    // hours — an agent conversing on a fast model had its memory extraction
+    // silently inheriting a slow reasoning model, and no surface could show
+    // it.
+    //
+    // The answer is read from the resolution boot recorded, never re-derived
+    // from `config` here. Re-deriving reintroduces the same bug one level up:
+    // it hands back the configured (or inherited) spec unsplit, and it reports
+    // that model as effective even when no LLM extracts anything at all —
+    // extraction switched off, an `extractor_sidecar` taking over, or the
+    // driver failing to build so extraction silently fell back to substring
+    // matching. Two derivations of "which model extracts memories" can
+    // disagree, and the one an operator reads is then the one that is wrong.
+    let resolution = state.kernel.extraction_model_resolution();
+    let effective = resolution.and_then(|r| r.effective_target());
+
     Json(serde_json::json!({
         "embedding_provider": config.memory.embedding_provider,
         "embedding_model": &config.memory.embedding_model,
@@ -1604,7 +1697,52 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
             "enabled": config.proactive_memory.enabled,
             "auto_memorize": config.proactive_memory.auto_memorize,
             "auto_retrieve": config.proactive_memory.auto_retrieve,
+            // The raw setting, read live. It can legitimately differ from the
+            // resolved fields below: `POST /api/config/reload` swaps the
+            // `[proactive_memory]` table onto the running store but does not
+            // rebuild the extraction driver, so after such an edit this is what
+            // the file says and `effective_extraction_model` is what is running.
             "extraction_model": &config.proactive_memory.extraction_model,
+            // Provider and model as boot resolved them — already split, so a
+            // `provider/model` spec answers "which provider" and names the
+            // model in the form the upstream API receives.
+            //
+            // `null` whenever no model runs: extraction inactive, a sidecar
+            // doing the work, or the driver having failed to build so
+            // extraction fell back to substring matching. Naming a model as
+            // *effective* in that last case is the misreport this whole field
+            // exists to prevent — what was attempted is named in
+            // `extraction_degraded_reason`.
+            "effective_extraction_model": effective.map(|t| t.model.as_str()),
+            "effective_extraction_provider": effective.map(|t| t.provider.as_str()),
+            // "configured" when `extraction_model` was set at boot, otherwise
+            // "inherited_default" — the operator never picked this, it came
+            // from `[default_model]`. Still answerable after a failed driver
+            // build, so it reads the resolved target rather than the effective
+            // one.
+            "extraction_model_source": resolution
+                .and_then(|r| r.resolved_target())
+                .map(|t| t.source()),
+            // What actually extracts: "llm", "sidecar", "degraded_substring"
+            // (the driver failed to build — no model at all), "inactive"
+            // (nothing extracts), or "unknown" if boot never got that far.
+            "extraction_status": resolution.map_or("unknown", |r| r.status()),
+            // The single question a model name alone cannot answer. `null` only
+            // for "unknown", where claiming either answer would be a guess.
+            "extraction_llm_active": resolution.map(|r| r.llm_active()),
+            // Why extraction lost its LLM, when it did.
+            "extraction_degraded_reason": resolution.and_then(|r| r.degraded_reason()),
+            // The out-of-process extractor's command, when one is what runs.
+            // Naming it is the sidecar's equivalent of naming the model.
+            "extraction_sidecar_command": match resolution {
+                Some(librefang_kernel::MemoryExtractionResolution::Sidecar { command }) => {
+                    Some(command.as_str())
+                }
+                _ => None,
+            },
+            // Whether a memory is recallable only from the conversation that produced it (#7605).
+            // It governs whether one visitor's turn on a shared agent can be auto-retrieved into another visitor's turn, so an operator who cannot read it here cannot audit their own isolation posture without opening `config.toml` on the host.
+            "session_scoped_recall": config.proactive_memory.session_scoped_recall,
             "max_retrieve": config.proactive_memory.max_retrieve,
         },
     }))
@@ -1635,14 +1773,14 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
     // Keep the complete read-modify-write-reload transaction under the shared config lock.
     // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
     let _config_guard = state.config_write_lock.lock().await;
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,
@@ -1713,6 +1851,9 @@ pub async fn memory_config_patch(
                 "extraction_model".into(),
                 toml::Value::String(v.to_string()),
             );
+        }
+        if let Some(v) = pm.get("session_scoped_recall").and_then(|v| v.as_bool()) {
+            pm_tbl.insert("session_scoped_recall".into(), toml::Value::Boolean(v));
         }
         if let Some(v) = pm.get("max_retrieve").and_then(|v| v.as_u64()) {
             pm_tbl.insert("max_retrieve".into(), toml::Value::Integer(v as i64));
@@ -1841,6 +1982,8 @@ pub async fn memory_config_patch(
                 .unwrap_or(live.proactive_memory.auto_retrieve),
             "extraction_model": toml_str(proactive_section, "extraction_model")
                 .or_else(|| live.proactive_memory.extraction_model.clone()),
+            "session_scoped_recall": toml_bool(proactive_section, "session_scoped_recall")
+                .unwrap_or(live.proactive_memory.session_scoped_recall),
             "max_retrieve": toml_u64(proactive_section, "max_retrieve")
                 .unwrap_or(live.proactive_memory.max_retrieve as u64),
         },
