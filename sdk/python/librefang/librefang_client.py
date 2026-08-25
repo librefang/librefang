@@ -522,20 +522,23 @@ class _BudgetResource(_Resource):
     def delete_user_budget(self, user_id: str):
         return self._c._request("DELETE", f"/api/budget/users/{user_id}")
 
-    def usage_stats(self):
-        return self._c._request("GET", "/api/usage")
+    def usage_stats(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model(self):
-        return self._c._request("GET", "/api/usage/by-model")
+    def usage_by_model(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model_performance(self):
-        return self._c._request("GET", "/api/usage/by-model/performance")
+    def usage_by_model_performance(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model/performance", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_daily(self):
-        return self._c._request("GET", "/api/usage/daily")
+    def usage_daily(self, start_date: Any = None, end_date: Any = None, days: Any = None):
+        return self._c._request("GET", "/api/usage/daily", None, query={"start_date": start_date, "end_date": end_date, "days": days})
 
-    def usage_summary(self):
-        return self._c._request("GET", "/api/usage/summary")
+    def usage_export(self, start_date: Any = None, end_date: Any = None, format: Any = None):
+        return self._c._request("GET", "/api/usage/export", None, query={"start_date": start_date, "end_date": end_date, "format": format})
+
+    def usage_summary(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/summary", None, query={"start_date": start_date, "end_date": end_date})
 
 
 # ── Channels Resource ──────────────────────────────────────────
