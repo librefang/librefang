@@ -1,0 +1,1 @@
+- Prevent stale or duplicate dashboard speech requests from taking over playback, and preserve spoken currency ranges. (@xiaomo)

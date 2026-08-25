@@ -263,6 +263,7 @@ describe("PromptsPage", () => {
     expect(arg).toMatchObject({
       agentId: "11111111-1111-1111-1111-111111111111",
       version: { id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+      previousSystemPrompt: "You are a careful research assistant.",
     });
   });
 

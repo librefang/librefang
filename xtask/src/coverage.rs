@@ -38,7 +38,7 @@ pub fn run(args: CoverageArgs) -> Result<(), Box<dyn std::error::Error>> {
     if !has_cargo_llvm_cov() {
         println!("cargo-llvm-cov not found. Installing...");
         let status = Command::new("cargo")
-            .args(["install", "cargo-llvm-cov"])
+            .args(["install", "cargo-llvm-cov", "--locked"])
             .status()?;
         if !status.success() {
             return Err("failed to install cargo-llvm-cov".into());

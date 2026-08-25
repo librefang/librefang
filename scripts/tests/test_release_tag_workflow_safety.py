@@ -5,7 +5,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -180,6 +182,96 @@ def main() -> None:
     if "validate_release_tag" not in dashboard_needs:
         raise SystemExit("release-cli build_dashboard bypasses release tag validation")
 
+    release_tag_job = documents["release-tag.yml"].get("jobs", {}).get("tag", {})
+    if release_tag_job.get("if") != "github.ref == 'refs/heads/main'":
+        raise SystemExit("release-tag job can run from a non-main ref")
+    if release_tag_job.get("timeout-minutes") != 10:
+        raise SystemExit("release-tag job does not have the expected timeout")
+    release_tag_checkout = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("uses", "").startswith("actions/checkout@")
+        ),
+        {},
+    )
+    if release_tag_checkout.get("with", {}).get("ref") != "main":
+        raise SystemExit("release-tag checkout is not pinned to main")
+    workspace_step = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("name") == "Verify tag matches workspace version"
+        ),
+        None,
+    )
+    workspace_script = workspace_step.get("run") if isinstance(workspace_step, dict) else None
+    if not isinstance(workspace_script, str) or "tomllib.load" not in workspace_script:
+        raise SystemExit("release-tag workflow does not parse workspace version as TOML")
+    create_tag_step = next(
+        (
+            step
+            for step in release_tag_job.get("steps", [])
+            if step.get("name") == "Create + push tag"
+        ),
+        None,
+    )
+    create_tag_script = (
+        create_tag_step.get("run") if isinstance(create_tag_step, dict) else None
+    )
+    if not isinstance(create_tag_script, str) or not all(
+        fragment in create_tag_script
+        for fragment in (
+            "git fetch --no-tags origin refs/heads/main",
+            "CHECKED_OUT_SHA=$(git rev-parse HEAD)",
+            "CURRENT_MAIN_SHA=$(git rev-parse FETCH_HEAD)",
+            'if [ "$CHECKED_OUT_SHA" != "$CURRENT_MAIN_SHA" ]',
+            'git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$VERSION"',
+        )
+    ):
+        raise SystemExit("release-tag workflow can tag a stale main checkout")
+    manifest_text = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    manifest = tomllib.loads(manifest_text)
+    current_version = manifest["workspace"]["package"]["version"]
+    workspace_environment = os.environ.copy()
+    workspace_environment["PATH"] = (
+        f"{Path(sys.executable).parent}{os.pathsep}{workspace_environment['PATH']}"
+    )
+
+    def run_workspace_gate(candidate_manifest: str, version: str) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "Cargo.toml").write_text(
+                candidate_manifest,
+                encoding="utf-8",
+            )
+            return subprocess.run(
+                ["bash", "-eu", "-o", "pipefail", "-c", workspace_script],
+                cwd=temp_dir,
+                env={**workspace_environment, "VERSION": version},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    workspace_result = run_workspace_gate(manifest_text, f"v{current_version}")
+    if workspace_result.returncode != 0:
+        raise SystemExit(
+            "release-tag workspace-version gate rejected the current manifest: "
+            + workspace_result.stdout
+            + workspace_result.stderr
+        )
+    for candidate_manifest, version, expected_error in (
+        (manifest_text, "v0.0.0", "does not match"),
+        ("[workspace.package\n", "v1.0.0", "could not parse"),
+        ('[workspace.package]\nversion = ""\n', "v1.0.0", "is empty"),
+    ):
+        rejected = run_workspace_gate(candidate_manifest, version)
+        output = rejected.stdout + rejected.stderr
+        if rejected.returncode == 0 or expected_error not in output:
+            raise SystemExit(
+                f"release-tag workspace-version gate did not reject {expected_error!r} fixture"
+            )
+
     format_step = next(
         (
             step
@@ -230,6 +322,64 @@ def main() -> None:
         )
     ):
         raise SystemExit("release-cli workflow does not verify the exact release tag")
+
+    for workflow_name in ("mobile-smoke.yml", "release.yml"):
+        mobile_document = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+        )
+        if mobile_document.get("env", {}).get("TAURI_CLI_VERSION") != "2.11.4":
+            raise SystemExit(f"{workflow_name} does not pin Tauri CLI 2.11.4")
+        mobile_steps = [
+            step
+            for job in mobile_document.get("jobs", {}).values()
+            for step in job.get("steps", [])
+        ]
+        cache_keys = [
+            step.get("with", {}).get("key", "")
+            for step in mobile_steps
+            if step.get("name") == "Cache tauri-cli binary"
+        ]
+        if len(cache_keys) != 2 or any(
+            "env.TAURI_CLI_VERSION" not in key for key in cache_keys
+        ):
+            raise SystemExit(f"{workflow_name} Tauri CLI caches omit the pinned version")
+        install_scripts = [
+            step.get("run", "")
+            for step in mobile_steps
+            if step.get("name") == "Install Tauri CLI"
+        ]
+        if len(install_scripts) != 2 or any(
+            'cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked'
+            not in script
+            for script in install_scripts
+        ):
+            raise SystemExit(f"{workflow_name} does not install the pinned Tauri CLI")
+        if any(
+            'test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"'
+            not in script
+            for script in install_scripts
+        ):
+            raise SystemExit(f"{workflow_name} does not verify the installed Tauri CLI")
+        ios_init = next(
+            (
+                step.get("run", "")
+                for step in mobile_steps
+                if step.get("name") == "Initialise iOS project"
+            ),
+            "",
+        )
+        if "rm -rf gen/apple\ncargo tauri ios init" not in ios_init:
+            raise SystemExit(f"{workflow_name} does not remove iOS placeholders before init")
+        ndk_step = next(
+            (
+                step.get("run", "")
+                for step in mobile_steps
+                if step.get("name") == "Symlink legacy NDK binutils for openssl-src cross-compile"
+            ),
+            "",
+        )
+        if '[ -x "$NDK_BIN/llvm-$tool" ]' not in ndk_step:
+            raise SystemExit(f"{workflow_name} does not validate NDK tools before linking")
 
     print("release and repository automation safety checks passed")
 

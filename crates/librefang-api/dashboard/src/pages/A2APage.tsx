@@ -4,10 +4,10 @@ import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { fadeInScale } from "../lib/motion";
 import { StaggerList } from "../components/ui/StaggerList";
-import { sendA2ATask, getA2ATaskStatus } from "../lib/http/client";
+import { getA2ATaskStatus } from "../lib/http/client";
 import type { A2AAgentItem, A2ATaskStatus } from "../lib/http/client";
 import { useA2AAgents } from "../lib/queries/network";
-import { useDiscoverA2AAgent } from "../lib/mutations/network";
+import { useDiscoverA2AAgent, useSendA2ATask } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
@@ -33,12 +33,12 @@ export function A2APage() {
   // Send task state
   const [taskAgent, setTaskAgent] = useState<A2AAgentItem | null>(null);
   const [taskMessage, setTaskMessage] = useState("");
-  const [isSending, setIsSending] = useState(false);
   const [trackedTasks, setTrackedTasks] = useState<A2ATaskStatus[]>([]);
   const addToast = useUIStore((s) => s.addToast);
 
   const agentsQuery = useA2AAgents();
   const discoverMutation = useDiscoverA2AAgent();
+  const sendTaskMutation = useSendA2ATask();
 
   const agents = agentsQuery.data ?? [];
 
@@ -48,16 +48,15 @@ export function A2APage() {
       await discoverMutation.mutateAsync(discoverUrl.trim());
       setDiscoverUrl("");
       setShowDiscover(false);
-    } catch {
-      // error handled by UI
+    } catch (error) {
+      addToast(toastErr(error, t("common.error")), "error");
     }
   }
 
   async function handleSendTask() {
     if (!taskAgent?.url || !taskMessage.trim()) return;
-    setIsSending(true);
     try {
-      const result = await sendA2ATask({
+      const result = await sendTaskMutation.mutateAsync({
         agent_url: taskAgent.url,
         message: taskMessage.trim(),
       });
@@ -76,8 +75,6 @@ export function A2APage() {
       setTaskAgent(null);
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
-    } finally {
-      setIsSending(false);
     }
   }
 
@@ -259,10 +256,10 @@ export function A2APage() {
                   </button>
                   <button
                     onClick={handleSendTask}
-                    disabled={isSending || !taskMessage.trim()}
+                    disabled={sendTaskMutation.isPending || !taskMessage.trim()}
                     className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2 text-sm font-bold text-white hover:bg-brand/90 disabled:opacity-40 transition-colors"
                   >
-                    {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {sendTaskMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     {t("a2a.send")}
                   </button>
                 </div>

@@ -1,8 +1,8 @@
 import type { ModelItem } from "../api";
 
-/** Build the storage key for a model: "provider:id" */
+/** Build an unambiguous storage key for a model. */
 export function modelKey(m: Pick<ModelItem, "provider" | "id">): string {
-  return `${m.provider}:${m.id}`;
+  return `${m.provider}\u001f${m.id}`;
 }
 
 /** Filter to only visible (non-hidden) models */

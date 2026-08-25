@@ -21,6 +21,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 use tracing::warn;
 
 async fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
@@ -46,6 +47,36 @@ async fn atomic_write(target: &Path, content: &str) -> std::io::Result<()> {
         let _ = tokio::fs::remove_file(&tmp_path).await;
     }
     rename_result
+}
+
+async fn atomic_create(target: &Path, content: &str) -> std::io::Result<()> {
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    // Keep the staging name independent of the target name. A valid target can
+    // already be close to NAME_MAX, and prefixing that full name would make
+    // otherwise valid Add File operations fail.
+    let tmp_path = parent.join(format!(".librefang-new-{:016x}", rand::random::<u64>()));
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .await?;
+    let publish_result = async {
+        file.write_all(content.as_bytes()).await?;
+        file.sync_all().await?;
+        drop(file);
+
+        // Publishing with a hard link is atomic and fails if `target` already
+        // exists, unlike rename which replaces files on Unix.
+        tokio::fs::hard_link(&tmp_path, target).await
+    }
+    .await;
+
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+    publish_result
 }
 
 /// A single operation in a patch.
@@ -369,7 +400,7 @@ pub async fn apply_patch_ext(
                                 continue;
                             }
                         }
-                        match tokio::fs::write(&resolved, content).await {
+                        match atomic_create(&resolved, content).await {
                             Ok(()) => result.files_added += 1,
                             Err(e) => result.errors.push(format!("write {}: {}", path, e)),
                         }
@@ -475,9 +506,9 @@ pub async fn apply_patch_ext(
 
 /// Apply a sequence of hunks to file content.
 ///
-/// Each hunk's `context_before` + `old_lines` are searched for in the content.
-/// When found, `old_lines` are replaced with `new_lines`. Includes fuzzy
-/// whitespace fallback on mismatch.
+/// Each hunk's `context_before` + `old_lines` + `context_after` are searched for
+/// in the content. When found, `old_lines` are replaced with `new_lines`.
+/// Includes fuzzy whitespace fallback on mismatch.
 fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
@@ -489,6 +520,7 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String, String> {
             .context_before
             .iter()
             .chain(hunk.old_lines.iter())
+            .chain(hunk.context_after.iter())
             .map(|s| s.as_str())
             .collect();
 
@@ -747,6 +779,35 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_hunks_rejects_trailing_context_mismatch() {
+        let content = "before\nold\nunexpected\n";
+        let hunks = vec![Hunk {
+            context_before: vec!["before".to_string()],
+            old_lines: vec!["old".to_string()],
+            new_lines: vec!["new".to_string()],
+            context_after: vec!["expected".to_string()],
+        }];
+
+        assert!(apply_hunks(content, &hunks).is_err());
+    }
+
+    #[test]
+    fn test_apply_hunks_uses_trailing_context_to_disambiguate_anchor() {
+        let content = "before\nold\nwrong\nbefore\nold\nexpected\n";
+        let hunks = vec![Hunk {
+            context_before: vec!["before".to_string()],
+            old_lines: vec!["old".to_string()],
+            new_lines: vec!["new".to_string()],
+            context_after: vec!["expected".to_string()],
+        }];
+
+        assert_eq!(
+            apply_hunks(content, &hunks).unwrap(),
+            "before\nold\nwrong\nbefore\nnew\nexpected\n"
+        );
+    }
+
+    #[test]
     fn test_apply_hunks_fuzzy_whitespace() {
         let content = "line1  \nline2\t\nline3\n";
         let hunks = vec![Hunk {
@@ -848,6 +909,45 @@ mod tests {
         assert!(!updated.contains("line2"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn add_file_does_not_overwrite_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        tokio::fs::write(&target, "original").await.unwrap();
+        let ops = vec![PatchOp::AddFile {
+            path: "existing.txt".to_string(),
+            content: "replacement".to_string(),
+        }];
+
+        let result = apply_patch(&ops, dir.path(), &[]).await;
+
+        assert!(!result.is_ok());
+        assert_eq!(result.files_added, 0);
+        assert_eq!(tokio::fs::read_to_string(target).await.unwrap(), "original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_file_supports_long_valid_target_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = format!("{}.txt", "a".repeat(220));
+        let ops = vec![PatchOp::AddFile {
+            path: name.clone(),
+            content: "created".to_string(),
+        }];
+
+        let result = apply_patch(&ops, dir.path(), &[]).await;
+
+        assert!(result.is_ok(), "{:?}", result.errors);
+        assert_eq!(result.files_added, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join(name))
+                .await
+                .unwrap(),
+            "created"
+        );
     }
 
     #[tokio::test]

@@ -76,12 +76,19 @@ export function useCreateBackup(
 // AGENTS.md, not the narrow per-id default. Without this, every page
 // navigated after a restore shows pre-restore state until a manual
 // refresh (#5140).
+export type RestoreBackupVars = {
+  filename: string;
+  keepConfig?: boolean;
+  components?: string[];
+};
+
 export function useRestoreBackup(
-  options?: MutationOptions<Awaited<ReturnType<typeof restoreBackup>>, string>,
+  options?: MutationOptions<Awaited<ReturnType<typeof restoreBackup>>, RestoreBackupVars>,
 ) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: restoreBackup,
+    mutationFn: (vars: RestoreBackupVars) =>
+      restoreBackup(vars.filename, { keepConfig: vars.keepConfig, components: vars.components }),
     ...options,
     onSuccess: (...args) => {
       qc.invalidateQueries();

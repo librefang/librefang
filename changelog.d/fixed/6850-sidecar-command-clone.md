@@ -1,1 +1,0 @@
-- Avoided cloning the full JSON parameter tree while parsing known Rust sidecar commands. (@houko)

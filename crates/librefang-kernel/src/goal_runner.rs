@@ -42,6 +42,18 @@ use librefang_types::goal::{
 
 use crate::background::{classify_tick_error, TickOutcome};
 
+fn lock_goal_run_start_stop(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("goal runner start/stop lock poisoned; recovering serialization");
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        }
+    }
+}
+
 /// Pause between iterations. Short — the agent turn itself dominates wall-clock;
 /// this just yields and lets shutdown / stop signals be observed promptly.
 const TICK_INTERVAL: Duration = Duration::from_secs(2);
@@ -295,12 +307,8 @@ impl GoalRunner {
     pub fn stop(&self, goal_id: GoalId) -> bool {
         // Serialize against `start()` so the two never interleave on the same
         // goal id. The critical section is synchronous, so this std guard never
-        // spans an await point. Poison is irrelevant for a `Mutex<()>` used
-        // purely for mutual exclusion — recover the guard rather than panic.
-        let _guard = self
-            .start_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // spans an await point. Recover the exclusion guard rather than panic.
+        let _guard = lock_goal_run_start_stop(&self.start_lock);
         self.stop_locked(goal_id)
     }
 
@@ -335,7 +343,8 @@ impl GoalRunner {
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
-    ) where
+    ) -> bool
+    where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
     {
@@ -345,10 +354,15 @@ impl GoalRunner {
         // orphaned loop. The sequence is synchronous (no `.await`), so this std
         // guard is never held across an await point; `tokio::spawn` only
         // enqueues the task and does not block.
-        let _guard = self
-            .start_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = lock_goal_run_start_stop(&self.start_lock);
+
+        // Goal deletion commits before it calls `stop()`, which takes this same
+        // lock. Consequently either this read observes the deletion and no run
+        // is created, or deletion waits for the insertion and then removes it.
+        // There is no window where a deleted goal can leave an orphaned loop.
+        if load_goal(&substrate, goal_id).is_none() {
+            return false;
+        }
 
         // Replace any prior run for this goal. `stop_locked` (not `stop`)
         // because we already hold `start_lock`, which is non-reentrant.
@@ -413,6 +427,7 @@ impl GoalRunner {
             },
         );
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
+        true
     }
 
     /// Recover goal runs left in `Running` phase by a prior crash or restart.
@@ -703,6 +718,24 @@ async fn run_loop<F, Fut>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poisoned_goal_run_start_stop_lock_recovers_and_clears_poison() {
+        let lock = std::sync::Mutex::new(());
+        let poison = std::panic::catch_unwind(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("poison goal runner start/stop lock");
+        });
+
+        assert!(poison.is_err());
+        assert!(lock.is_poisoned());
+        let recovered = lock_goal_run_start_stop(&lock);
+        assert!(lock.try_lock().is_err());
+        drop(recovered);
+        assert!(!lock.is_poisoned());
+        let ordinary_guard = lock.lock().unwrap();
+        drop(ordinary_guard);
+    }
 
     #[test]
     fn parse_tick_extracts_progress_done_blocked() {
@@ -1131,8 +1164,10 @@ mod tests {
     async fn start_replaces_terminal_row_with_a_fresh_started_at() {
         let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
         let store = store_from(&substrate);
-        let goal_id = GoalId::new();
         let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
         let stale_started = Utc::now() - chrono::Duration::days(1);
         store
             .save_run(&GoalRunRow {
@@ -1171,6 +1206,31 @@ mod tests {
         );
 
         assert!(runner.stop(goal_id));
+    }
+
+    #[tokio::test]
+    async fn start_rejects_a_goal_missing_from_the_shared_store() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let goal_id = GoalId::new();
+        let agent_id = AgentId::new();
+        let (_tx, rx) = watch::channel(false);
+        let runner = GoalRunner::new_with_store(rx, store.clone());
+
+        let started =
+            runner.start(
+                goal_id,
+                agent_id,
+                25,
+                substrate,
+                |_agent_id, _message| async move {
+                    std::future::pending::<Result<String, String>>().await
+                },
+            );
+
+        assert!(!started);
+        assert!(runner.state(goal_id).is_none());
+        assert!(store.get_run(&goal_id.to_string()).unwrap().is_none());
     }
 
     #[test]

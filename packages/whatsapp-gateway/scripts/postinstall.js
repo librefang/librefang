@@ -19,7 +19,7 @@ const { execSync } = require('child_process');
 // ---------------------------------------------------------------------------
 // Baileys `fetchProps` non-blocking patch
 // ---------------------------------------------------------------------------
-// Baileys 6.7.21 (pinned exactly in package.json) issues
+// Baileys 6.7.22 (pinned exactly in package.json) issues
 // `Promise.all([fetchProps, fetchBlocklist, fetchPrivacySettings])` during
 // the initial post-auth handshake (`executeInitQueries` in
 // `node_modules/@whiskeysockets/baileys/lib/Socket/chats.js`, ~line 762 —
@@ -85,22 +85,44 @@ const BAILEYS_INIT_QUERIES_REPLACEMENT =
   "        fetchBlocklist().catch((err) => { try { logger && logger.warn ? logger.warn({ err }, '[librefang-baileys-patch] fetchBlocklist rejected') : console.warn('[librefang-baileys-patch] fetchBlocklist rejected:', err && err.message ? err.message : err); } catch (_) {} }),\n" +
   "        fetchPrivacySettings().catch((err) => { try { logger && logger.warn ? logger.warn({ err }, '[librefang-baileys-patch] fetchPrivacySettings rejected') : console.warn('[librefang-baileys-patch] fetchPrivacySettings rejected:', err && err.message ? err.message : err); } catch (_) {} }),\n" +
   "    ])";
+const BAILEYS_PATCH_MARKERS = [
+  'Promise.allSettled',
+  '[librefang-baileys-patch] fetchProps rejected',
+  '[librefang-baileys-patch] fetchBlocklist rejected',
+  '[librefang-baileys-patch] fetchPrivacySettings rejected',
+];
+
+function hasCompleteBaileysPatch(source) {
+  return BAILEYS_PATCH_MARKERS.every((marker) => source.includes(marker));
+}
 
 function patchBaileysInitQueries() {
-  const chatsJs = path.join(
+  const baileysDir = path.join(
     __dirname,
     '..',
     'node_modules',
     '@whiskeysockets',
     'baileys',
+  );
+  const chatsJs = path.join(
+    baileysDir,
     'lib',
     'Socket',
     'chats.js',
   );
-  if (!fs.existsSync(chatsJs)) {
-    // Baileys not installed (dev `--no-save` install) or 7.x path layout —
-    // nothing to patch.
+  const packageJson = path.join(baileysDir, 'package.json');
+  if (!fs.existsSync(packageJson)) {
+    // Dependency installation itself will report a missing required package.
     return;
+  }
+  const installedVersion = JSON.parse(fs.readFileSync(packageJson, 'utf8')).version;
+  const installedMajor = Number.parseInt(String(installedVersion).split('.')[0], 10);
+  if (!fs.existsSync(chatsJs)) {
+    if (installedMajor >= 7) return;
+    throw new Error(
+      `[librefang-baileys-patch] Baileys ${installedVersion} is missing ${chatsJs}; ` +
+        'refresh the postinstall patch for the installed source layout.',
+    );
   }
   const src = fs.readFileSync(chatsJs, 'utf8');
   // Already patched: the file contains an `allSettled` form referencing all
@@ -119,7 +141,11 @@ function patchBaileysInitQueries() {
   } else if (src.includes(BAILEYS_INIT_QUERIES_NEEDLE)) {
     patched = src.replace(BAILEYS_INIT_QUERIES_NEEDLE, BAILEYS_INIT_QUERIES_REPLACEMENT);
   } else {
-    return; // Baileys version doesn't expose this call shape (e.g. 7.x)
+    if (installedMajor >= 7) return;
+    throw new Error(
+      `[librefang-baileys-patch] unrecognized executeInitQueries shape in Baileys ${installedVersion}; ` +
+        'refresh BAILEYS_INIT_QUERIES_NEEDLE / BAILEYS_INIT_QUERIES_REPLACEMENT.',
+    );
   }
   fs.writeFileSync(chatsJs, patched, 'utf8');
 
@@ -127,10 +153,10 @@ function patchBaileysInitQueries() {
   // match no-op'd, fail loudly at install time so operators know to refresh
   // the patch rather than discovering a regressed gateway in production.
   const verify = fs.readFileSync(chatsJs, 'utf8');
-  if (!verify.includes('Promise.allSettled') || !verify.includes('[librefang-baileys-patch]')) {
+  if (!hasCompleteBaileysPatch(verify)) {
     throw new Error(
       '[librefang-baileys-patch] post-write verification failed: ' +
-        'expected `Promise.allSettled` and `[librefang-baileys-patch]` markers in ' +
+        'expected the allSettled call and all three per-query rejection markers in ' +
         chatsJs +
         '. The Baileys source likely changed shape; refresh the patch in ' +
         'scripts/postinstall.js (BAILEYS_INIT_QUERIES_NEEDLE / REPLACEMENT).',
@@ -150,6 +176,20 @@ function isTermux() {
   return false;
 }
 
+function patchAndroidNdkCflags(content) {
+  if (!content.includes('android_ndk_path')) return content;
+  const patched = content.replace(
+    /('cflags':\s*\[\s*'-fPIC'),\s*'-I<\(android_ndk_path\)[^']*'\s*(\])/,
+    '$1 $2',
+  );
+  if (patched === content) {
+    throw new Error(
+      '[postinstall] common.gypi contains android_ndk_path but its cflags shape is unrecognized',
+    );
+  }
+  return patched;
+}
+
 function rebuildBetterSqlite3OnTermux() {
   if (!isTermux()) {
     return;
@@ -163,7 +203,7 @@ function rebuildBetterSqlite3OnTermux() {
   }
 
   try {
-    require('better-sqlite3');
+    require(betterSqlite3Dir);
     // Native addon loads fine — no patching needed
     return;
   } catch (_) {
@@ -205,10 +245,7 @@ function rebuildBetterSqlite3OnTermux() {
     //   'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],
     // Replace with:
     //   'cflags': [ '-fPIC' ],
-    gypiContent = gypiContent.replace(
-      /('cflags':\s*\[\s*'-fPIC'\s*),\s*'-I<\(android_ndk_path\)[^']*'\s*(\])/,
-      '$1 $2'
-    );
+    gypiContent = patchAndroidNdkCflags(gypiContent);
     fs.writeFileSync(gypiPath, gypiContent, 'utf8');
     console.log('[postinstall] Patched common.gypi — removed android_ndk_path reference');
   } else {
@@ -240,10 +277,12 @@ module.exports = {
   patchBaileysInitQueries,
   isTermux,
   rebuildBetterSqlite3OnTermux,
+  patchAndroidNdkCflags,
   // Exposed for fixture-based tests: the literal needle/replacement strings
   // used by the patcher.
   BAILEYS_INIT_QUERIES_NEEDLE,
   BAILEYS_INIT_QUERIES_REPLACEMENT,
+  hasCompleteBaileysPatch,
 };
 
 if (require.main === module) {

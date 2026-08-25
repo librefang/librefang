@@ -155,7 +155,11 @@ pub async fn send_message(
     // attachment lands on the agent's most-recent registry session
     // (typically a warm group session for chat agents) and leaks across
     // chats — the 2026-05-20 incident this PR closes.
-    let sender_context = request_sender_context(&req);
+    let sender_context = request_sender_context(
+        &req,
+        api_user.as_ref().map(|u| &u.0),
+        state.kernel.auth_manager(),
+    );
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
@@ -543,8 +547,12 @@ pub async fn send_message_stream(
         },
     };
 
-    let (sender_context, incognito, session_override) =
-        build_streaming_kernel_args(&req, session_id_override);
+    let (sender_context, incognito, session_override) = build_streaming_kernel_args(
+        &req,
+        api_user.as_ref().map(|u| &u.0),
+        state.kernel.auth_manager(),
+        session_id_override,
+    );
 
     if !req.attachments.is_empty() {
         let image_blocks = match resolve_attachments(
@@ -831,15 +839,17 @@ pub async fn inject_message(
                 .with_code("backpressure")
                 .into_response()
         }
-        Err(e) => if e.to_string().contains("not found") {
-            ApiErrorResponse::not_found(e.to_string())
-        } else {
+        Err(crate::error::KernelError::LibreFang(
+            librefang_types::error::LibreFangError::AgentNotFound(_),
+        )) => ApiErrorResponse::not_found("agent not found")
+            .with_code("agent_not_found")
+            .into_response(),
+        Err(e) => {
             // Scrub the catch-all 500 (audit: rusqlite-errors-leak):
             // an inject failure rooted in the memory substrate would
             // otherwise leak SQL detail. Full error logged in scrub.
-            ApiErrorResponse::internal_scrub(&e)
+            ApiErrorResponse::internal_scrub(&e).into_response()
         }
-        .into_response(),
     }
 }
 
@@ -931,13 +941,21 @@ pub async fn push_message(
                 "agent_id": agent_id.to_string(),
             })),
         ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "success": false,
-                "detail": e,
-                "agent_id": agent_id.to_string(),
-            })),
-        ),
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                channel = %req.channel,
+                error = %e,
+                "Channel adapter rejected proactive message"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "detail": "Channel adapter rejected the message",
+                    "agent_id": agent_id.to_string(),
+                })),
+            )
+        }
     }
 }
