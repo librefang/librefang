@@ -3180,6 +3180,31 @@ export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
 }
 
+/**
+ * Provenance of the effective configuration — where it was loaded from, and
+ * whether this daemon will accept a write to it (#6695).
+ *
+ * `writable` is the field to branch on. It is equivalent to
+ * `mode === "mutable"`, exposed separately by the server so a client uses a
+ * boolean rather than string-matching a mode name.
+ */
+export interface ConfigStatus {
+  /** `"mutable"` or `"managed"`. Widened to `string` so an unknown future mode does not break parsing — branch on `writable`, not on this. */
+  mode: string;
+  /** Absolute path the effective configuration was loaded from. */
+  source: string;
+  /** Whether the API will accept a write. */
+  writable: boolean;
+  /** `sha256:<hex>` over the file's raw bytes, or `null` when the file does not exist. */
+  checksum?: string | null;
+  /** RFC 3339 timestamp of the file's last modification, or `null` when unavailable. */
+  modified_at?: string | null;
+}
+
+export async function getConfigStatus(): Promise<ConfigStatus> {
+  return get<ConfigStatus>("/api/config/status");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Config schema (draft-07)                                           */
 /* ------------------------------------------------------------------ */

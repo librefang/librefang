@@ -15637,3 +15637,676 @@ async fn step_agent_by_type_preview_reports_none_for_a_missing_template() {
         .is_none());
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Ephemeral worker spawn (refs #6699, #7723)
+// ---------------------------------------------------------------------------
+//
+// Four properties are pinned here, and each one is a thing that has already
+// gone wrong once in this feature's history:
+//
+//   * the worker advertises exactly the tools it can execute (#6930 handed the
+//     model definitions while the loop held `None` for every capability that
+//     would run them),
+//   * spend and quota land on the parent (#6930 checked the quota against the
+//     throwaway worker manifest, whose defaults are unlimited),
+//   * a worker that spawns a worker is bounded,
+//   * the mission workspace exists for the run and for nothing longer,
+//     including when the run fails.
+
+/// Boot a kernel that has no LLM driver, so an ephemeral spawn runs every step
+/// up to the LLM call and then stops.
+///
+/// That is exactly the seam these tests need: everything under test — the
+/// depth check, the quota check, the tool-set computation, the mission
+/// workspace lifecycle — happens before the driver is resolved, and declaring
+/// the absence of a driver keeps the test off any provider the host happens to
+/// have credentials for (#7743).
+fn boot_kernel_for_ephemeral_tests(label: &str) -> (tempfile::TempDir, Arc<LibreFangKernel>) {
+    boot_kernel_for_ephemeral_tests_with(label, KernelConfig::default())
+}
+
+/// As [`boot_kernel_for_ephemeral_tests`], with `base` supplying the fields the
+/// caller cares about (`max_agent_call_depth`, `agent_max_iterations`, …).
+///
+/// The kernel is `Arc`-wrapped and `set_self_handle`d because the ephemeral
+/// path hands the worker a real kernel handle — that is the whole point of it —
+/// and `kernel_handle()` panics on a bare kernel that never completed the
+/// bootstrap. A test kernel that skips this would exercise a spawn path that
+/// cannot exist in production.
+fn boot_kernel_for_ephemeral_tests_with(
+    label: &str,
+    base: KernelConfig,
+) -> (tempfile::TempDir, Arc<LibreFangKernel>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join(label);
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        // Every ephemeral test here stops at the LLM call: `provider = "none"`
+        // resolves to the stub driver, which refuses without touching the
+        // network, so the run reaches `run_agent_loop` and fails there rather
+        // than dialling whatever provider the host has credentials for.
+        default_model: DefaultModelConfig::driverless(),
+        ..base
+    };
+    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("boot"));
+    LibreFangKernel::set_self_handle(&kernel);
+    (tmp, kernel)
+}
+
+/// Register a parent agent carrying `resources`, so a test can exhaust its
+/// budget without touching any other agent's.
+fn register_parent_with_quota(
+    kernel: &LibreFangKernel,
+    name: &str,
+    resources: librefang_types::agent::ResourceQuota,
+) -> AgentId {
+    let id = AgentId::new();
+    let mut manifest = test_manifest(name, "ephemeral spawn parent", vec![]);
+    manifest.resources = resources;
+    kernel
+        .agents
+        .registry
+        .register(AgentEntry {
+            id,
+            name: name.to_string(),
+            manifest,
+            state: AgentState::Running,
+            session_id: SessionId::new(),
+            ..Default::default()
+        })
+        .unwrap();
+    id
+}
+
+/// Everything currently sitting in `<home>/transient`.
+///
+/// A mission workspace that outlives its run shows up here; so does one that
+/// was created by a spawn the guards should have refused before it got that
+/// far.
+fn transient_entries(kernel: &LibreFangKernel) -> Vec<std::path::PathBuf> {
+    let root = kernel
+        .home_dir()
+        .join(crate::kernel::mission_workspace::TRANSIENT_DIR_NAME);
+    match std::fs::read_dir(&root) {
+        Ok(entries) => entries.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn ephemeral_request(parent: AgentId) -> librefang_types::ephemeral::EphemeralSpawnRequest {
+    librefang_types::ephemeral::EphemeralSpawnRequest::new(parent, "mission", "do the thing")
+}
+
+fn advertised_names(tools: &[ToolDefinition]) -> Vec<String> {
+    tools.iter().map(|t| t.name.clone()).collect()
+}
+
+/// The advertised set and the executable set are the same set.
+///
+/// "Executable" is defined here as "the parent could execute it": the worker
+/// runs under the parent's identity, against the same capability handles the
+/// parent's own turns are given, so `available_tools(parent)` is precisely the
+/// set that will dispatch rather than answer `Unavailable`.
+///
+/// The three assertions cover the three ways the sets could diverge — the
+/// worker getting *more* than the parent, the worker getting something the
+/// parent's manifest never granted, and a requested name being silently
+/// dropped so a typo looks like success.
+#[tokio::test(flavor = "multi_thread")]
+async fn ephemeral_spawn_advertises_exactly_what_the_parent_can_execute() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-tools");
+    let parent = register_test_agent(&kernel, "unrestricted-parent");
+
+    // 1. No narrowing asked for: the worker gets the parent's set, exactly.
+    let advertised = kernel.ephemeral_tool_set(parent, None, None).unwrap();
+    let parent_set = kernel.available_tools(parent);
+    assert_eq!(
+        advertised_names(&advertised),
+        advertised_names(&parent_set),
+        "an unnarrowed worker must advertise exactly what its parent can execute — \
+         any name in one list and not the other is either a tool the worker \
+         cannot run or a privilege the parent does not hold"
+    );
+    assert!(
+        !advertised.is_empty(),
+        "the equality above is only meaningful over a non-empty set"
+    );
+
+    // 2. Narrowing to a requested subset yields that subset and nothing else.
+    let requested = vec!["file_read".to_string(), "agent_list".to_string()];
+    let narrowed = kernel
+        .ephemeral_tool_set(parent, None, Some(&requested))
+        .unwrap();
+    let mut got = advertised_names(&narrowed);
+    got.sort();
+    assert_eq!(got, vec!["agent_list".to_string(), "file_read".to_string()]);
+
+    // 3. A name the parent cannot call is an error naming the offender, not a
+    //    silent omission — otherwise a typo and a success are the same event.
+    let bogus = vec!["file_read".to_string(), "flie_raed".to_string()];
+    match kernel.ephemeral_tool_set(parent, None, Some(&bogus)) {
+        Err(KernelError::LibreFang(LibreFangError::InvalidInput(msg))) => assert!(
+            msg.contains("flie_raed"),
+            "the refusal must name the tool that could not be granted, got: {msg}"
+        ),
+        other => panic!("an unavailable tool name must be rejected, got: {other:?}"),
+    }
+
+    kernel.shutdown();
+}
+
+/// A restricted parent cannot launder an escalation through a worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ephemeral_worker_cannot_exceed_its_parents_tools() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-escalate");
+    let id = AgentId::new();
+    let mut manifest = test_manifest("restricted-parent", "narrow tool grant", vec![]);
+    manifest.capabilities.tools = vec!["file_read".to_string()];
+    kernel
+        .agents
+        .registry
+        .register(AgentEntry {
+            id,
+            name: "restricted-parent".to_string(),
+            manifest,
+            state: AgentState::Running,
+            session_id: SessionId::new(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let advertised = kernel.ephemeral_tool_set(id, None, None).unwrap();
+    assert!(
+        !advertised_names(&advertised).iter().any(|t| t == "shell_exec"),
+        "a parent that was never granted shell_exec must not be able to hand it to a worker, got: {:?}",
+        advertised_names(&advertised)
+    );
+
+    let escalation = vec!["shell_exec".to_string()];
+    assert!(
+        matches!(
+            kernel.ephemeral_tool_set(id, None, Some(&escalation)),
+            Err(KernelError::LibreFang(LibreFangError::InvalidInput(_)))
+        ),
+        "asking for a tool the parent may not call must be refused"
+    );
+
+    // The same ceiling applies to a tool an agent *type* declares: a template
+    // is operator-authored, but the agent running it still decides the
+    // ceiling.
+    let declared = vec!["shell_exec".to_string()];
+    assert!(
+        matches!(
+            kernel.ephemeral_tool_set(id, Some(&declared), None),
+            Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(_)))
+        ),
+        "an agent type cannot grant a worker more than the agent spawning it holds"
+    );
+
+    kernel.shutdown();
+}
+
+/// Pin the capability wiring at the `run_agent_loop` call site.
+///
+/// The equality test above is only true while the ephemeral path actually
+/// holds the handles a permanent agent's turn holds. #6930 advertised the same
+/// tool definitions while passing `None` for the kernel handle, skills, MCP,
+/// web, browser, workspace and process manager — nothing failed at spawn, and
+/// the model discovered the gap by spending a turn on a tool call that came
+/// back `Unavailable`.
+///
+/// Source inspection is the right shape for this because the defect *is* an
+/// argument at a call site: the tokens are read out of the permanent path
+/// (`agent_execution.rs`) rather than hardcoded here, so a rename that moves
+/// the permanent path forward fails this test instead of letting the two
+/// drift apart silently.
+#[test]
+fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
+    let permanent = include_str!("agent_execution.rs");
+    let ephemeral = include_str!("ephemeral_spawn.rs");
+
+    // Every handle whose absence turns an advertised tool into `Unavailable`.
+    const CAPABILITY_ARGS: &[&str] = &[
+        "Some(&skill_snapshot)",
+        "Some(effective_mcp)",
+        "Some(&self.media.web_ctx)",
+        "Some(&self.media.browser_ctx)",
+        "Some(&self.media.media_engine)",
+        "Some(&self.media.media_drivers)",
+        "Some(&self.governance.hooks)",
+        "Some(&self.processes.manager)",
+        "Some(&self.processes.registry)",
+        "manifest.workspace.as_deref()",
+    ];
+
+    for arg in CAPABILITY_ARGS {
+        assert!(
+            permanent.contains(arg),
+            "`{arg}` is no longer how the permanent agent path wires this capability — \
+             update CAPABILITY_ARGS in this test to the new spelling, and check that \
+             `ephemeral_spawn.rs` was updated with it"
+        );
+        assert!(
+            ephemeral.contains(arg),
+            "the ephemeral spawn path does not pass `{arg}` to `run_agent_loop`. \
+             A capability slot left empty while the matching tools are still advertised \
+             is the #6930 defect: the model spends a turn on a tool call and receives \
+             `Unavailable`. Either wire the handle or stop advertising its tools."
+        );
+    }
+
+    // The kernel handle is what `agent_spawn`, `agent_send`, the task, cron,
+    // workflow and channel tools all resolve through, and it is the one whose
+    // absence would quietly make the depth guard below unreachable.
+    assert!(
+        ephemeral.contains("Some(kernel_handle)"),
+        "the ephemeral worker must receive a kernel handle — without it every \
+         kernel-backed tool answers `Unavailable`, and a worker could never reach \
+         `agent_spawn`, which is what the depth guard exists to bound"
+    );
+}
+
+/// A worker that spawns a worker is bounded by the same counter `agent_send`
+/// and `run_workflow` use, and the refusal costs nothing — no mission
+/// directory is created for a spawn that is turned away.
+#[tokio::test(flavor = "multi_thread")]
+async fn ephemeral_spawn_past_max_agent_call_depth_is_refused() {
+    // Small enough to nest to literally rather than looping a recursive async
+    // helper. The production default is 5.
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests_with(
+        "eph-depth",
+        KernelConfig {
+            max_agent_call_depth: 2,
+            ..KernelConfig::default()
+        },
+    );
+    let parent = register_test_agent(&kernel, "depth-parent");
+
+    // Depth 0 — accepted. It still fails, at the LLM driver, but not with the
+    // depth refusal. This pairing is what proves the refusal below comes from
+    // the quota and not from the spawn being unrunnable in a test kernel.
+    let accepted = kernel
+        .spawn_ephemeral_worker(ephemeral_request(parent))
+        .await;
+    if let Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) = &accepted {
+        assert!(
+            !msg.contains("depth exceeded"),
+            "a top-level ephemeral spawn must not be refused by the depth quota, got: {msg}"
+        );
+    }
+
+    // Depth 2 == `max_agent_call_depth` — refused. Two nested frames stand in
+    // for two stacked agent turns, which is what a worker spawning a worker
+    // establishes in production.
+    let refused = librefang_runtime::tool_runner::with_agent_call_depth(
+        librefang_runtime::tool_runner::with_agent_call_depth(
+            kernel.spawn_ephemeral_worker(ephemeral_request(parent)),
+        ),
+    )
+    .await;
+    match refused {
+        Err(KernelError::LibreFang(LibreFangError::CapabilityDenied(msg))) => {
+            assert!(
+                msg.contains("depth exceeded"),
+                "the refusal must say what was exceeded, got: {msg}"
+            );
+            assert!(
+                msg.contains("max 2"),
+                "the refusal must report the configured cap rather than a hardcoded one, got: {msg}"
+            );
+        }
+        other => panic!("a spawn at max depth must be refused, got: {other:?}"),
+    }
+
+    assert!(
+        transient_entries(&kernel).is_empty(),
+        "a spawn refused by the depth quota must not have created a mission workspace, found: {:?}",
+        transient_entries(&kernel)
+    );
+
+    kernel.shutdown();
+}
+
+/// Spend is checked against the *parent's* quota, before the LLM call.
+///
+/// #6930 attributed the usage record to the parent but ran the quota check
+/// against the throwaway worker manifest, whose `ResourceQuota::default()` is
+/// unlimited — so attribution was correct for reporting and absent for
+/// enforcement. The second half of this test (a different agent with the same
+/// quota and no spend is *not* refused) is what makes it an attribution test
+/// rather than a "some quota somewhere tripped" test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exhausted_parent_budget_refuses_the_spawn_before_the_llm_call() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-budget");
+    let quota = librefang_types::agent::ResourceQuota {
+        max_cost_per_hour_usd: 0.50,
+        ..Default::default()
+    };
+    let broke = register_parent_with_quota(&kernel, "broke-parent", quota.clone());
+    let solvent = register_parent_with_quota(&kernel, "solvent-parent", quota);
+
+    kernel
+        .metering
+        .engine
+        .record(&librefang_memory::usage::UsageRecord {
+            agent_id: broke,
+            provider: "test".to_string(),
+            model: "test-model".to_string(),
+            cost_usd: 5.0,
+            latency_ms: 1,
+            ..Default::default()
+        })
+        .unwrap();
+
+    match kernel.spawn_ephemeral_worker(ephemeral_request(broke)).await {
+        Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(msg))) => assert!(
+            msg.contains(&broke.to_string()),
+            "the refusal must name the agent whose budget was exhausted, got: {msg}"
+        ),
+        other => panic!(
+            "a spawn on behalf of an over-quota parent must be refused before the LLM call, got: {other:?}"
+        ),
+    }
+
+    // Same quota, no spend: not refused. Whatever this fails on, it is not the
+    // budget — which is only true if the check reads the *parent's* ledger.
+    let solvent_result = kernel
+        .spawn_ephemeral_worker(ephemeral_request(solvent))
+        .await;
+    assert!(
+        !matches!(
+            solvent_result,
+            Err(KernelError::LibreFang(LibreFangError::QuotaExceeded(_)))
+        ),
+        "an agent with the same quota and no spend must not inherit another agent's exhaustion, got: {solvent_result:?}"
+    );
+
+    assert!(
+        transient_entries(&kernel).is_empty(),
+        "neither a refused spawn nor a failed run may leave a mission workspace behind, found: {:?}",
+        transient_entries(&kernel)
+    );
+
+    kernel.shutdown();
+}
+
+/// Observes the mission workspace from *inside* the run.
+///
+/// `BeforePromptBuild` fires after the mission directory is created and before
+/// the LLM driver is resolved, which is the only moment at which a test with
+/// no driver can see the run in flight.
+struct MissionObserver {
+    /// Path the spawn reported, and whether it existed when the hook fired.
+    observed: Arc<std::sync::Mutex<Option<(std::path::PathBuf, bool)>>>,
+}
+
+impl librefang_runtime::hooks::HookHandler for MissionObserver {
+    fn on_event(&self, _ctx: &librefang_runtime::hooks::HookContext) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn provide_prompt_section(
+        &self,
+        ctx: &librefang_runtime::hooks::HookContext,
+    ) -> Result<Option<librefang_runtime::hooks::DynamicSection>, String> {
+        if ctx.data["call_site"] == serde_json::json!("ephemeral_worker") {
+            let path = std::path::PathBuf::from(
+                ctx.data["mission_workspace"].as_str().unwrap_or_default(),
+            );
+            let exists = path.is_dir();
+            *self.observed.lock().unwrap() = Some((path, exists));
+        }
+        Ok(None)
+    }
+}
+
+/// The mission folder exists while the worker runs and is gone once it stops.
+///
+/// This is #7723's acceptance criterion — "folder exists during the run and is
+/// gone after; registry never registers the uid" — asserted from both sides:
+/// the observer sees the directory from *inside* the run, and the assertions
+/// after the call see it gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mission_workspace_exists_during_the_run_and_is_gone_after() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-mission");
+    let parent = register_test_agent(&kernel, "mission-parent");
+
+    let observer = Arc::new(MissionObserver {
+        observed: Arc::new(std::sync::Mutex::new(None)),
+    });
+    kernel.hook_registry().register(
+        librefang_types::agent::HookEvent::BeforePromptBuild,
+        observer.clone(),
+    );
+
+    // Deliberately no assertion on the outcome: the stub driver's refusal is
+    // recovered by the agent loop into an ordinary response, so this exercises
+    // the *completion* path. The failure path has its own test below, and the
+    // point of both is that the directory is gone either way.
+    let _ = kernel
+        .spawn_ephemeral_worker(ephemeral_request(parent))
+        .await;
+
+    let (path, existed_during_run) = observer.observed.lock().unwrap().clone().expect(
+        "the ephemeral spawn must build its prompt, which is where the mission path is reported",
+    );
+
+    assert!(
+        existed_during_run,
+        "the mission workspace {} did not exist while the run was in flight — \
+         a worker told to write scratch files there would fail on every write",
+        path.display()
+    );
+    // Both sides are canonicalized before the comparison. `MissionWorkspace`
+    // stores the resolved path — that resolution *is* the containment check
+    // that keeps a hostile label from escaping the transient root — while
+    // `home_dir()` returns the path as configured. On macOS the two differ by
+    // the `/var` → `/private/var` symlink, so comparing them raw fails here
+    // and passes on Linux, which would make this assertion a coin flip on the
+    // runner rather than a statement about the code.
+    let transient_root = std::fs::canonicalize(
+        kernel
+            .home_dir()
+            .join(crate::kernel::mission_workspace::TRANSIENT_DIR_NAME),
+    )
+    .expect("the transient root outlives the mission directories inside it");
+    assert!(
+        path.starts_with(&transient_root),
+        "the mission workspace must live under the transient root {}, got: {}",
+        transient_root.display(),
+        path.display()
+    );
+    assert!(
+        !path.exists(),
+        "the mission workspace {} outlived the run — a failed run must not leave an orphan",
+        path.display()
+    );
+    assert!(
+        transient_entries(&kernel).is_empty(),
+        "the transient root must be empty once the run is over, found: {:?}",
+        transient_entries(&kernel)
+    );
+
+    // Nothing was registered: an ephemeral worker has no agent record, so the
+    // uid name must not be findable and must not have taken the name-unique
+    // slot a permanent agent would need.
+    assert!(
+        kernel
+            .agents
+            .registry
+            .find_by_name(&path.file_name().unwrap().to_string_lossy())
+            .is_none(),
+        "an ephemeral worker must never appear in the agent registry"
+    );
+
+    kernel.shutdown();
+}
+
+/// A run that fails after the mission workspace exists still leaves nothing behind.
+///
+/// The refusal is injected through real configuration rather than a test hook:
+/// a non-empty `[providers] allowed` list makes driver resolution fail-closed
+/// (#6459), and driver resolution happens after the mission directory is
+/// created. That is the ordering that matters — a cleanup that only runs on
+/// the happy path is exactly the orphan-directory bug this guards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_leaves_no_mission_workspace_behind() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests_with(
+        "eph-mission-fail",
+        KernelConfig {
+            providers: librefang_types::config::ProvidersConfig {
+                allowed: vec!["some-other-provider".to_string()],
+            },
+            ..KernelConfig::default()
+        },
+    );
+
+    let id = AgentId::new();
+    let mut manifest = test_manifest("failing-parent", "pins a disallowed provider", vec![]);
+    manifest.model.provider = "openai".to_string();
+    kernel
+        .agents
+        .registry
+        .register(AgentEntry {
+            id,
+            name: "failing-parent".to_string(),
+            manifest,
+            state: AgentState::Running,
+            session_id: SessionId::new(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let observer = Arc::new(MissionObserver {
+        observed: Arc::new(std::sync::Mutex::new(None)),
+    });
+    kernel.hook_registry().register(
+        librefang_types::agent::HookEvent::BeforePromptBuild,
+        observer.clone(),
+    );
+
+    let result = kernel.spawn_ephemeral_worker(ephemeral_request(id)).await;
+    assert!(
+        result.is_err(),
+        "this test's premise is a run that fails; it succeeded, so the assertions \
+         below no longer exercise the failure path"
+    );
+
+    let (path, existed_during_run) = observer
+        .observed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the run must have got as far as building its prompt — otherwise it failed before the workspace existed and proves nothing");
+    assert!(
+        existed_during_run,
+        "premise: the mission workspace {} must have existed before the failure",
+        path.display()
+    );
+    assert!(
+        !path.exists(),
+        "the mission workspace {} survived a failed run",
+        path.display()
+    );
+    assert!(
+        transient_entries(&kernel).is_empty(),
+        "a failed run must leave the transient root empty, found: {:?}",
+        transient_entries(&kernel)
+    );
+
+    kernel.shutdown();
+}
+
+/// An agent type supplies the worker's prompt and tools, and names the mission.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ephemeral_worker_from_an_agent_type_uses_the_templates_tools() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-type");
+    let parent = register_test_agent(&kernel, "type-parent");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\ndescription = \"finds things out\"\n\
+         [capabilities]\ntools = [\"file_read\", \"web_search\"]\n",
+    );
+
+    let declared = vec!["file_read".to_string(), "web_search".to_string()];
+    let mut got = advertised_names(
+        &kernel
+            .ephemeral_tool_set(parent, Some(&declared), None)
+            .unwrap(),
+    );
+    got.sort();
+    assert_eq!(
+        got,
+        vec!["file_read".to_string(), "web_search".to_string()],
+        "an agent type that declares tools must narrow the worker to them"
+    );
+
+    // And the spawn resolves the type by name rather than requiring the caller
+    // to restate its manifest.
+    let mut request = ephemeral_request(parent);
+    request.agent_type = Some("researcher".to_string());
+    request.label = "researcher".to_string();
+    let result = kernel.spawn_ephemeral_worker(request).await;
+    assert!(
+        !matches!(
+            &result,
+            Err(KernelError::LibreFang(LibreFangError::InvalidInput(_)))
+        ),
+        "a seeded agent type must resolve, got: {result:?}"
+    );
+
+    // An unknown type is a caller-fixable input error naming the searched
+    // directories, not an internal fault.
+    let mut missing = ephemeral_request(parent);
+    missing.agent_type = Some("no-such-type".to_string());
+    match kernel.spawn_ephemeral_worker(missing).await {
+        Err(KernelError::LibreFang(LibreFangError::InvalidInput(msg))) => assert!(
+            msg.contains("no-such-type"),
+            "the refusal must name the type that was not found, got: {msg}"
+        ),
+        other => panic!("an unknown agent type must be an input error, got: {other:?}"),
+    }
+
+    assert!(transient_entries(&kernel).is_empty());
+    kernel.shutdown();
+}
+
+/// A worker cannot be handed an unbounded iteration budget by a tool call.
+///
+/// The request's `max_iterations` reaches the kernel from `agent_spawn` tool
+/// input, so it is model-controlled. It may only narrow the operator's ceiling.
+#[test]
+fn a_requested_iteration_cap_is_clamped_to_the_operator_ceiling() {
+    use crate::kernel::ephemeral_spawn::clamp_iterations;
+    let compiled = librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS;
+
+    assert_eq!(
+        clamp_iterations(Some(2), Some(10)),
+        2,
+        "a smaller request is honoured"
+    );
+    assert_eq!(
+        clamp_iterations(Some(1_000), Some(10)),
+        10,
+        "a request above the operator ceiling is clamped down to it, not used as-is"
+    );
+    assert_eq!(
+        clamp_iterations(None, Some(10)),
+        10,
+        "no request means the operator ceiling"
+    );
+    assert_eq!(
+        clamp_iterations(Some(u32::MAX), None),
+        compiled,
+        "an unset `agent_max_iterations` means the compiled limit applies, not that there is none"
+    );
+    assert_eq!(
+        clamp_iterations(Some(0), Some(10)),
+        10,
+        "zero is not a request for a worker that does nothing before answering"
+    );
+}

@@ -135,6 +135,7 @@ Sidecar 自动处理 Gateway 重连、周期性心跳（首次心跳带 RFC 要�
    - `im:history`
    - `im:read`
    - `im:write`
+   - `users:read`（仅当启用下文的显示名解析时需要）
 4. 将应用安装到你的工作区。
 5. 复制 Bot User OAuth Token（`xoxb-...`）。
 6. 设置环境变量：
@@ -168,6 +169,8 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FILE_ALLOWED_EXTENSIONS = ""   # 逗号分隔的扩展名白名单；留空表示接受所有扩展名
 # SLACK_FILE_DOWNLOAD_CHANNELS = ""    # 逗号分隔的频道 ID；留空表示所有频道
 # SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = ""   # 永不接受上传的频道 ID
+# SLACK_RESOLVE_DISPLAY_NAMES = "false"       # 设为 "true" 显示真实姓名而非原始 U… id
+# SLACK_DISPLAY_NAME_TTL = "21600"            # 已解析姓名的缓存时长(秒)
 ```
 
 8. 重启守护进程。
@@ -184,6 +187,22 @@ Slack 的私有文件 URL 必须携带 bot token 才能下载，因此适配器�
 链接预览里的图片不会被下载——那属于某人粘贴的 URL，而不是上传。
 
 四类开关全部可选：`SLACK_FILE_DOWNLOADS` 整体关闭该功能，`SLACK_FILE_MAX_BYTES` 限制大小（默认 10 MiB），`SLACK_FILE_ALLOWED_EXTENSIONS` 限定可接受的扩展名，`SLACK_FILE_DOWNLOAD_CHANNELS` / `SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS` 决定哪些频道参与——繁忙频道正是用后者单独退出，而不必在所有频道禁用上传。
+
+### 发送者显示名
+
+默认情况下,adapter 把发送者的原始 Slack id(`U09…`)当作显示名上报,agent 看到的、以及群名册里存下的都是它。
+设置 `SLACK_RESOLVE_DISPLAY_NAMES = "true"` 即可改为通过 Slack 的 `users.info` 解析真实姓名,同时顺带补上 `@handle`。
+这需要 `users:read` 这个 bot scope;没有它每次查询都会失败,adapter 会继续上报 id。
+
+查询结果按 user id 缓存 `SLACK_DISPLAY_NAME_TTL` 秒(默认六小时),所以繁忙频道一天只花掉少量 API 调用,而不是每条消息一次 —— `users.info` 有按方法计的速率限制,不缓存会很快耗尽。
+"查不到"同样会被缓存:一个已删除的用户,或一个缺少 scope 的机器人,只花一次请求,而不是每条消息一次。
+临时性失败(限流、连接中断)只抑制一分钟,工作区恢复后很快就会重新开始解析姓名。
+
+**默认关闭,是因为它改变的是 LibreFang 存下来的内容,而不只是展示的内容。**
+daemon 会为每个在群里发过言的人持久化一行名册记录(`channel`、`chat_id`、`user_id`、显示名、handle、首次与最近出现时间),这行记录里存的就是本 adapter 上报的值。
+开关关着时存的是一个不透明的平台 id;打开后,真实姓名会写入 `~/.librefang/memory.db`,直到该行被删除为止。
+目前这些行没有自动过期机制,所以请把启用它当作一个关于个人数据留存的决定,而不是一个展示偏好。
+只想给少数几个人配人类可读的名字、又不想引入任何查询与存储变化的运维者,可以继续使用 `[users]` 条目,它始终具有最高优先级。
 
 ### 处理状态反应（Reactions）
 

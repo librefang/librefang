@@ -353,6 +353,16 @@ pub enum StepAgent {
     /// agent-template directories and spawned top-level under the canonical
     /// name-derived UUID (#4614), so a workflow can express "use the
     /// researcher agent type" without the operator pre-registering one.
+    ///
+    /// **There is deliberately no `fresh` variant** that would spawn a
+    /// throwaway instance per run (#7714).
+    /// To isolate a step from the type's prior context, set
+    /// [`WorkflowStep::session_mode`] to `New` — that mints a fresh session
+    /// for the invocation without minting a second agent, workspace and
+    /// registry entry per run.
+    /// To keep two owners' spend apart on a shared type, that is what
+    /// `WorkflowRun::owner_agent_id` and `UsageRecord::billed_agent_id` are
+    /// for. See `docs/architecture/workflow-run-attribution.md`.
     ByType {
         #[serde(rename = "type")]
         template: String,
@@ -363,7 +373,7 @@ pub enum StepAgent {
 ///
 /// Ordered as they are reported in the "exactly one of" error so the
 /// message reads the same on every host.
-const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
+pub(crate) const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
 
 /// Select the [`StepAgent`] variant for one tagged-object payload.
 ///
@@ -1300,6 +1310,18 @@ pub struct WorkflowRun {
     /// same `{{input}}` it would have seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_current_input: Option<String>,
+    /// The agent that asked for this run (#7714).
+    ///
+    /// Set from the caller of the `workflow_run` / `workflow_start` tools, from the agent bound to the channel that issued a `/workflow` command, or from an API caller that named one.
+    /// `None` for an operator-initiated run with no calling agent.
+    ///
+    /// This is a property of the *run*, deliberately not of the agent that executes a step.
+    /// A `ByType` step resolves find-or-spawn to one shared canonical instance (`kernel::step_agent::find_or_spawn_agent_type`), so that agent is the same object for every owner that references the type; hanging ownership off it would make the second owner's runs report the first owner's.
+    /// Keeping the owner on the run is what lets two owners drive the same agent type and still keep their attribution apart.
+    ///
+    /// Set once at creation and never reassigned: resume and operator-action paths carry the original run's owner forward rather than re-deriving it from whoever resumed the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<AgentId>,
 }
 
 impl WorkflowRun {
@@ -2402,6 +2424,26 @@ impl WorkflowEngine {
         workflow_id: WorkflowId,
         input: String,
     ) -> Option<WorkflowRunId> {
+        self.create_run_owned(workflow_id, input, None).await
+    }
+
+    /// Start a workflow run owned by a specific agent (#7714).
+    ///
+    /// `owner` is the agent that asked for the run — the caller of the
+    /// `workflow_run` / `workflow_start` tools, the agent bound to the channel
+    /// that issued the command, or an agent an API caller named. It is
+    /// recorded on the run and never reassigned, so the resume and
+    /// operator-action paths carry it forward instead of re-deriving it from
+    /// whoever happened to resume.
+    ///
+    /// [`Self::create_run`] is the ownerless form and is what an
+    /// operator-initiated run uses.
+    pub async fn create_run_owned(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+    ) -> Option<WorkflowRunId> {
         let workflow = self.workflows.read().await.get(&workflow_id)?.clone();
         let run_id = WorkflowRunId::new();
 
@@ -2420,6 +2462,7 @@ impl WorkflowEngine {
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: owner,
         };
 
         // Persist the freshly-created Pending row before it goes into
@@ -7002,6 +7045,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         started_at: run.started_at.to_rfc3339(),
         completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
         created_at: run.started_at.to_rfc3339(),
+        owner_agent_id: run.owner_agent_id.map(|a| a.to_string()),
     }
 }
 
@@ -7122,6 +7166,24 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         paused_step_index: row.paused_step_index.map(|i| i as usize),
         paused_variables,
         paused_current_input: row.paused_current_input.clone(),
+        // #7714: a malformed owner is dropped rather than failing the whole
+        // reload. Recovering a run without its attribution is a strictly
+        // better outcome than refusing to recover it at all, and the run is
+        // then indistinguishable from a legitimately ownerless one.
+        owner_agent_id: row.owner_agent_id.as_deref().and_then(|raw| {
+            match raw.parse::<AgentId>() {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(
+                        run_id = %row.id,
+                        owner = %raw,
+                        error = %e,
+                        "row_to_workflow_run: owner_agent_id failed to parse; reloading run as ownerless"
+                    );
+                    None
+                }
+            }
+        }),
     })
 }
 
@@ -10382,6 +10444,7 @@ prompt_template = "do {{x}}"
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: None,
         }
     }
 
@@ -10448,6 +10511,7 @@ prompt_template = "do {{x}}"
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: None,
         };
         let running_id = running.id;
 
@@ -11020,6 +11084,181 @@ prompt_template = "do {{x}}"
             other => panic!("expected Paused after reload, got {:?}", other),
         }
         assert_eq!(run.paused_step_index, Some(0));
+    }
+
+    /// #7714: the mechanism the "no `fresh` variant" decision leans on.
+    ///
+    /// `fresh = true` was proposed to isolate a `ByType` step from the
+    /// canonical instance's cross-run history. Per-step `session_mode`
+    /// (#7862) already does that, so the flag was declined — see
+    /// `docs/architecture/workflow-run-attribution.md`. That makes the
+    /// forwarding of `session_mode` to the step executor load-bearing for a
+    /// decision, not merely a feature: if it silently stopped reaching the
+    /// executor, the declined alternative would become necessary again.
+    #[tokio::test]
+    async fn per_step_session_mode_reaches_the_executor_for_a_shared_type() {
+        use std::sync::Mutex;
+
+        let engine = WorkflowEngine::new();
+        let mut wf = test_workflow();
+        wf.steps.truncate(1);
+        wf.steps[0].agent = StepAgent::ByType {
+            template: "researcher".to_string(),
+        };
+        // Isolate this step from whatever the shared canonical instance has
+        // been doing for every other run.
+        wf.steps[0].session_mode = Some(SessionMode::New);
+        let wf_id = engine.register(wf).await;
+
+        let run_id = engine
+            .create_run(wf_id, "input".to_string())
+            .await
+            .expect("create_run must succeed");
+
+        let seen: Arc<Mutex<Vec<Option<SessionMode>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = seen.clone();
+        let sender = move |_id: AgentId, msg: String, sm: Option<SessionMode>| {
+            let seen = seen_for_closure.clone();
+            async move {
+                seen.lock().unwrap().push(sm);
+                Ok((format!("ok: {msg}"), 1u64, 1u64))
+            }
+        };
+
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("run must complete");
+
+        let observed = seen.lock().unwrap().clone();
+        assert_eq!(
+            observed.len(),
+            1,
+            "the single step must have dispatched once"
+        );
+        assert_eq!(
+            observed[0],
+            Some(SessionMode::New),
+            "the per-step session_mode must reach the executor; without it a \
+             `ByType` step cannot be isolated from the shared instance's history \
+             and the declined `fresh = true` flag would be needed after all"
+        );
+    }
+
+    /// #7714: an operator-initiated run has no calling agent, so `create_run`
+    /// must leave the run ownerless rather than inventing an owner.
+    #[tokio::test]
+    async fn create_run_leaves_the_run_ownerless() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine
+            .create_run(wf_id, "data".to_string())
+            .await
+            .expect("create_run must succeed");
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert_eq!(
+            run.owner_agent_id, None,
+            "the ownerless entry point must not synthesize an owner"
+        );
+    }
+
+    /// #7714: the owner recorded at creation must survive the round trip
+    /// through SQLite, because the paths that read it back (resume, re-run,
+    /// billing rollup) run against a reloaded run after a daemon restart.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_round_trips_through_the_store() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let owner = AgentId::new();
+        let run_id: WorkflowRunId;
+        {
+            let engine = WorkflowEngine::new_with_store(make_store(), tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            run_id = engine
+                .create_run_owned(wf_id, "data".to_string(), Some(owner))
+                .await
+                .expect("create_run_owned must succeed");
+            assert_eq!(
+                engine.get_run(run_id).await.unwrap().owner_agent_id,
+                Some(owner),
+                "the owner must be visible on the in-memory run immediately"
+            );
+        }
+
+        let engine = WorkflowEngine::new_with_store(make_store(), tmp.path());
+        tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        let reloaded = engine
+            .get_run(run_id)
+            .await
+            .expect("the run must be reloadable");
+        assert_eq!(
+            reloaded.owner_agent_id,
+            Some(owner),
+            "the owner must survive the SQLite round trip"
+        );
+    }
+
+    /// #7714: the core attribution guarantee.
+    ///
+    /// A `ByType` step resolves find-or-spawn to a single canonical instance
+    /// shared by every owner that references the type, so the executing agent
+    /// cannot carry ownership. Two owners running that same type must still
+    /// come back attributed to themselves — which is exactly what keeping the
+    /// owner on the *run* rather than on the agent buys.
+    #[tokio::test]
+    async fn two_owners_running_the_same_agent_type_keep_separate_attribution() {
+        let engine = WorkflowEngine::new();
+        let mut wf = test_workflow();
+        // A shared step-agent type, the case the guarantee is about.
+        wf.steps[0].agent = StepAgent::ByType {
+            template: "researcher".to_string(),
+        };
+        let wf_id = engine.register(wf).await;
+
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let alice_run = engine
+            .create_run_owned(wf_id, "alice input".to_string(), Some(alice))
+            .await
+            .expect("alice run must be created");
+        let bob_run = engine
+            .create_run_owned(wf_id, "bob input".to_string(), Some(bob))
+            .await
+            .expect("bob run must be created");
+
+        assert_ne!(alice_run, bob_run, "each owner gets a distinct run");
+        assert_eq!(
+            engine.get_run(alice_run).await.unwrap().owner_agent_id,
+            Some(alice)
+        );
+        assert_eq!(
+            engine.get_run(bob_run).await.unwrap().owner_agent_id,
+            Some(bob),
+            "the second owner's run must report the second owner, not the first"
+        );
+
+        // The step agent itself is deliberately shared: a canonical instance
+        // per type. If this ever stops holding, ownership-on-the-run is no
+        // longer load-bearing and this test should be revisited alongside it.
+        let step = &engine.get_workflow(wf_id).await.unwrap().steps[0];
+        assert!(
+            matches!(step.agent, StepAgent::ByType { ref template } if template == "researcher"),
+            "the shared-type premise of this test must hold"
+        );
     }
 
     /// A Pending run created on engine #1 must survive a crash that

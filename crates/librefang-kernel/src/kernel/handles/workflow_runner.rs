@@ -210,8 +210,21 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         workflow_id: &str,
         input: &str,
     ) -> Result<(String, String), kernel_handle::KernelOpError> {
+        // Fully qualified: `LibreFangKernel` also has an inherent
+        // `run_workflow_owned` taking a typed `WorkflowId`, which would
+        // otherwise win method resolution here.
+        kernel_handle::WorkflowRunner::run_workflow_owned(self, workflow_id, input, None).await
+    }
+
+    async fn run_workflow_owned(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<(String, String), kernel_handle::KernelOpError> {
         use crate::workflow::WorkflowId;
         use kernel_handle::KernelOpError;
+        use librefang_types::agent::AgentId;
 
         // Try parsing as UUID first, then fall back to name lookup.
         let wf_id = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
@@ -233,14 +246,19 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         // The nesting cap in `LibreFangKernel::run_workflow` raises `CapabilityDenied`, and folding it into `Internal` here would deliver it to `tool_workflow_run` as an opaque upstream failure — a 5xx-class shape that reads as a downstream crash and invites retry, which is exactly the confusion the comment in `tool_agent_send` argues against.
         // `KernelOpError` *is* `LibreFangError`, so the variant survives verbatim.
         // Everything else keeps the historical stringified `Internal` shape, including its prefix.
-        let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
-            .await
-            .map_err(|e| match e {
-                crate::error::KernelError::LibreFang(
-                    librefang_types::error::LibreFangError::CapabilityDenied(msg),
-                ) => KernelOpError::CapabilityDenied(msg),
-                other => KernelOpError::Internal(format!("Workflow execution failed: {other}")),
-            })?;
+        // #7714: an unparseable caller id degrades to an ownerless run rather
+        // than failing the call — the run is still worth executing, it just
+        // carries no attribution.
+        let owner = caller_agent_id.and_then(|raw| raw.parse::<AgentId>().ok());
+        let (run_id, output) =
+            LibreFangKernel::run_workflow_owned(self, wf_id, input.to_string(), owner)
+                .await
+                .map_err(|e| match e {
+                    crate::error::KernelError::LibreFang(
+                        librefang_types::error::LibreFangError::CapabilityDenied(msg),
+                    ) => KernelOpError::CapabilityDenied(msg),
+                    other => KernelOpError::Internal(format!("Workflow execution failed: {other}")),
+                })?;
 
         Ok((run_id.to_string(), output))
     }
@@ -431,10 +449,16 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 })?
         };
 
+        // #7714: the tracker already parses `caller_agent_id` below for its
+        // own registration, but it does so only when BOTH ids are present.
+        // Ownership must not inherit that condition: a `workflow_start` with a
+        // caller agent and no session is still owned by that agent, so parse it
+        // independently here.
+        let owner = caller_agent_id.and_then(|raw| raw.parse::<AgentId>().ok());
         let run_id = self
             .workflows
             .engine
-            .create_run(wf_id, input.to_string())
+            .create_run_owned(wf_id, input.to_string(), owner)
             .await
             .ok_or_else(|| KernelOpError::Internal("Workflow not found".to_string()))?;
 
@@ -876,6 +900,60 @@ mod tests {
             name_doc.contains(&format!("1-{MAX_CREATED_WORKFLOW_NAME_LEN}")),
             "the name length rule must be advertised as enforced, got: {name_doc}"
         );
+    }
+
+    /// Every step field `WorkflowCreateSpec` accepts and acts on must be advertised in the tool schema.
+    ///
+    /// `WorkflowCreateSpec` deserialises the canonical [`crate::workflow::WorkflowStep`], so the tool silently accepts every field that struct grows — agent-type routing, `required_skills`, `session_mode` — whether or not the published schema mentions them.
+    /// A field accepted but unadvertised is a field no model will ever send, and the `workflow-creator` skill would be documenting keys the tool's own schema denies.
+    /// This asserts the acceptance and the advertisement together, so the two cannot drift apart in either direction.
+    #[test]
+    fn the_tool_schema_advertises_the_step_routing_fields_the_spec_accepts() {
+        use crate::workflow::StepAgent;
+        use librefang_types::agent::SessionMode;
+
+        let wf = build_created_workflow(&spec(serde_json::json!([{
+            "name": "review",
+            "agent": {"type": "code-reviewer"},
+            "prompt_template": "Review {{input}}",
+            "required_skills": ["git-expert"],
+            "session_mode": "new",
+            "inherit_context": false,
+        }])))
+        .expect("agent-type routing, required_skills and session_mode are accepted");
+
+        let step = &wf.steps[0];
+        assert!(
+            matches!(&step.agent, StepAgent::ByType { template } if template == "code-reviewer"),
+            "`{{\"type\": …}}` must bind find-or-spawn, got {:?}",
+            step.agent
+        );
+        assert_eq!(step.required_skills, vec!["git-expert".to_string()]);
+        assert!(matches!(step.session_mode, Some(SessionMode::New)));
+        assert_eq!(step.inherit_context, Some(false));
+
+        let defs = librefang_runtime::tool_runner::builtin_tool_definitions();
+        let step_props = &defs
+            .iter()
+            .find(|d| d.name == "workflow_create")
+            .expect("workflow_create must be a builtin tool")
+            .input_schema["properties"]["steps"]["items"]["properties"];
+
+        for field in ["required_skills", "session_mode", "inherit_context"] {
+            assert!(
+                step_props[field].is_object(),
+                "step field `{field}` is accepted by workflow_create but absent from its schema"
+            );
+        }
+        let agent_doc = step_props["agent"]["description"]
+            .as_str()
+            .expect("the agent property must be documented");
+        for routing_key in crate::workflow::STEP_AGENT_ROUTING_KEYS {
+            assert!(
+                agent_doc.contains(&format!("\"{routing_key}\"")),
+                "the agent binding doc must name the `{routing_key}` routing key, got: {agent_doc}"
+            );
+        }
     }
 
     /// Pins the operator-facing timeout text format.

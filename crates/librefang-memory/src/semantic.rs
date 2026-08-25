@@ -629,17 +629,36 @@ impl SemanticStore {
         // pool connection + preparing a statement (audit:
         // memory-recall-n+1-update — second sub-finding). At K=50
         // that was 50 round-trips for what is a single SELECT
-        // WHERE id IN (?,?,...). Parse all ANN-returned ids first
-        // (so a single malformed UUID fails the whole hydrate
-        // rather than silently skipping), then issue one batched
-        // SELECT. The batch preserves the ANN ranking order by
-        // re-ordering against the input vec after fetch.
+        // WHERE id IN (?,?,...). Parse all ANN-returned ids first,
+        // then issue one batched SELECT. The batch preserves the ANN
+        // ranking order by re-ordering against the input vec after fetch.
+        //
+        // An id that is not a UUID is dropped, not propagated as an error.
+        // The id space belongs to an untrusted external backend, and a single
+        // unparseable row used to abort the whole recall — one malformed
+        // entry in a result set of fifty denied the agent every memory it
+        // would otherwise have recalled, which is a denial of service handed
+        // to whoever controls the backend's id column.
+        // Dropping it also makes this loop consistent with the hydrate loop
+        // below, where `by_id.remove` already skips an id SQLite does not
+        // know about: both are "the backend named something we cannot use",
+        // and they now degrade the same way.
         let mut ordered_ids: Vec<MemoryId> = Vec::with_capacity(results.len());
         for r in &results {
-            let mem_id = uuid::Uuid::parse_str(&r.id)
-                .map(MemoryId)
-                .map_err(LibreFangError::memory)?;
-            ordered_ids.push(mem_id);
+            match uuid::Uuid::parse_str(&r.id) {
+                Ok(uuid) => ordered_ids.push(MemoryId(uuid)),
+                Err(e) => {
+                    // The id is backend-controlled, so cap it before it
+                    // reaches the log line.
+                    let shown: String = r.id.chars().take(64).collect();
+                    warn!(
+                        backend = vs.backend_name(),
+                        vector_id = %shown,
+                        error = %e,
+                        "vector store returned a non-UUID id; dropping that result and continuing with the rest of the recall"
+                    );
+                }
+            }
         }
         let mut by_id = self.get_by_ids_batch(
             &ordered_ids,
@@ -1001,24 +1020,50 @@ impl SemanticStore {
         Ok(count as u64)
     }
 
-    /// Return the IDs of the lowest-confidence memories for a given agent,
-    /// ordered by confidence ASC then created_at ASC (oldest first as tiebreaker).
-    /// Used by the per-agent memory cap to evict the weakest memories.
-    pub fn lowest_confidence(
+    /// Return the IDs the per-agent memory cap should evict first, worst first.
+    ///
+    /// Ordering is **class before confidence** (#7756 §1.2). Raw dialogue is evicted
+    /// ahead of extracted facts even when the fact scores lower, and only within a
+    /// class does the old `confidence ASC, created_at ASC` ordering apply.
+    ///
+    /// The rationale is that the two classes have different exit paths. An extracted
+    /// fact is the distilled, categorised artefact of many turns and is produced at a
+    /// few rows a day; raw dialogue is written unconditionally, one row per turn, is
+    /// never distilled into anything, and has no TTL — so the cap is the only exit it
+    /// has. Ordering by confidence alone made the cap evict whichever class happened
+    /// to score lower, which is not a decision anybody made.
+    ///
+    /// The raw-dialogue predicate is the exact write signature of
+    /// `remember_interaction_best_effort` (`librefang-runtime`, `agent_loop::prompt`):
+    /// `MemorySource::Conversation`, scope `episodic`, empty metadata. Extracted facts
+    /// always carry a `category` (see `ProactiveMemoryStore::add_with_decision`) and
+    /// always land in a `*_memory` scope, so they can never match; imported and
+    /// system-sourced rows differ in `source`. A row that matches all three is one this
+    /// writer produced.
+    pub fn eviction_candidates(
         &self,
         agent_id: AgentId,
         limit: usize,
     ) -> LibreFangResult<Vec<MemoryId>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        // Derived rather than hard-coded so the predicate follows the enum's serde
+        // representation if it is ever renamed.
+        let conversation_source = serde_json::to_string(&MemorySource::Conversation)
+            .map_err(LibreFangError::serialization)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id FROM memories WHERE agent_id = ?1 AND deleted = 0 \
-                 ORDER BY confidence ASC, created_at ASC LIMIT ?2",
+                 ORDER BY \
+                   CASE WHEN scope = 'episodic' AND source = ?3 \
+                             AND COALESCE(json_extract(metadata, '$.category'), '') = '' \
+                        THEN 0 ELSE 1 END, \
+                   confidence ASC, created_at ASC \
+                 LIMIT ?2",
             )
             .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(
-                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                rusqlite::params![agent_id.0.to_string(), limit as i64, conversation_source],
                 |row| {
                     let id_str: String = row.get(0)?;
                     Ok(id_str)
@@ -1265,6 +1310,45 @@ fn fragment_matches_filter(frag: &MemoryFragment, f: &MemoryFilter) -> bool {
     if let Some(ref before) = f.before {
         if frag.created_at >= *before {
             return false;
+        }
+    }
+    // Metadata equality, mirroring the `json_extract(metadata, '$.key') = ?`
+    // predicates `recall_impl` pushes into SQLite. Without this the
+    // vector-store hydrate path re-checked every filter field except this
+    // one, so a caller that scoped a recall by metadata got that scope
+    // enforced on the SQLite path and silently dropped on the external-backend
+    // path — the divergence the defense-in-depth re-check exists to prevent.
+    for (key, want) in &f.metadata {
+        // Same key and value-kind admissibility as the SQL builder: a
+        // non-identifier key or a null/array/object value yields no predicate
+        // there, so it must yield no predicate here either, or the two paths
+        // would disagree in the opposite direction. `recall_impl` already
+        // warned about both; warning again would double-log the same filter.
+        if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        match want {
+            serde_json::Value::String(_) | serde_json::Value::Bool(_) => {
+                if frag.metadata.get(key) != Some(want) {
+                    return false;
+                }
+            }
+            serde_json::Value::Number(n) => {
+                // SQLite compares json_extract's numeric result under type
+                // affinity, where 1 and 1.0 are equal; serde_json's `Value`
+                // equality treats them as distinct. Compare as f64 so the two
+                // paths agree.
+                let matches = frag
+                    .metadata
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .zip(n.as_f64())
+                    .is_some_and(|(have, want)| have == want);
+                if !matches {
+                    return false;
+                }
+            }
+            _ => {}
         }
     }
     true
@@ -1624,6 +1708,143 @@ mod tests {
         SemanticStore::new(pool)
     }
 
+    /// Overwrite a row's confidence so eviction ordering can be exercised without
+    /// waiting on decay.
+    fn set_confidence(store: &SemanticStore, id: MemoryId, confidence: f32) {
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET confidence = ?1 WHERE id = ?2",
+                rusqlite::params![confidence, id.0.to_string()],
+            )
+            .unwrap();
+    }
+
+    /// The exact write signature of `remember_interaction_best_effort`.
+    fn remember_raw_dialogue(store: &SemanticStore, agent_id: AgentId, body: &str) -> MemoryId {
+        store
+            .remember(
+                agent_id,
+                &format!("[Past exchange]\nThem: {body}\nYou: sure"),
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap()
+    }
+
+    /// The write signature of `ProactiveMemoryStore::add_with_decision`.
+    fn remember_extracted_fact(store: &SemanticStore, agent_id: AgentId, body: &str) -> MemoryId {
+        let mut metadata = HashMap::new();
+        metadata.insert("category".to_string(), serde_json::json!("preference"));
+        store
+            .remember(
+                agent_id,
+                body,
+                MemorySource::Conversation,
+                "user_memory",
+                metadata,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn eviction_evicts_raw_dialogue_before_extracted_facts() {
+        // #7756 §1.2: the per-agent cap is the only exit raw dialogue has, so it must
+        // not spend that exit on a fact — not even a fact that scores far lower.
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let fact = remember_extracted_fact(&store, agent_id, "Prefers concise answers");
+        let raw = remember_raw_dialogue(&store, agent_id, "what is the weather");
+        set_confidence(&store, fact, 0.01);
+        set_confidence(&store, raw, 1.0);
+
+        assert_eq!(
+            store.eviction_candidates(agent_id, 1).unwrap(),
+            vec![raw],
+            "confidence outranked class"
+        );
+        // Once raw dialogue is exhausted the fact is next — the class rank changes the
+        // order, it does not make facts unevictable.
+        assert_eq!(
+            store.eviction_candidates(agent_id, 2).unwrap(),
+            vec![raw, fact]
+        );
+    }
+
+    #[test]
+    fn eviction_still_orders_by_confidence_within_the_raw_dialogue_class() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let strong = remember_raw_dialogue(&store, agent_id, "one");
+        let weak = remember_raw_dialogue(&store, agent_id, "two");
+        set_confidence(&store, strong, 0.9);
+        set_confidence(&store, weak, 0.1);
+
+        assert_eq!(
+            store.eviction_candidates(agent_id, 2).unwrap(),
+            vec![weak, strong]
+        );
+    }
+
+    #[test]
+    fn eviction_does_not_class_imported_episodic_rows_as_raw_dialogue() {
+        // Imported rows land in the default `episodic` scope with empty metadata but a
+        // different `source`, so only `source` keeps them out of the evict-first class.
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let imported = store
+            .remember(
+                agent_id,
+                "Chapter 1 of the handbook",
+                MemorySource::Document,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let raw = remember_raw_dialogue(&store, agent_id, "hello");
+        set_confidence(&store, imported, 0.01);
+        set_confidence(&store, raw, 1.0);
+
+        assert_eq!(store.eviction_candidates(agent_id, 1).unwrap(), vec![raw]);
+    }
+
+    #[test]
+    fn eviction_bound_holds_under_the_per_agent_cap() {
+        // The bound the cap promises: after eviction the agent is at the cap, and the
+        // rows spent on getting there are raw dialogue, not facts.
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let facts: Vec<MemoryId> = (0..3)
+            .map(|i| remember_extracted_fact(&store, agent_id, &format!("fact {i}")))
+            .collect();
+        for id in &facts {
+            // Facts deliberately score lowest, as they do today on any instance that
+            // ran under the pre-#7864 decay.
+            set_confidence(&store, *id, 0.001);
+        }
+        for i in 0..7 {
+            remember_raw_dialogue(&store, agent_id, &format!("turn {i}"));
+        }
+
+        // Cap of 4 over a corpus of 10 means six evictions.
+        let doomed = store.eviction_candidates(agent_id, 6).unwrap();
+        assert_eq!(doomed.len(), 6);
+        for id in &facts {
+            assert!(!doomed.contains(id), "an extracted fact was evicted");
+        }
+        for id in &doomed {
+            store.forget(*id).unwrap();
+        }
+        assert_eq!(store.count(agent_id, None).unwrap(), 4);
+    }
+
     #[test]
     fn test_remember_and_recall() {
         let store = setup();
@@ -1937,6 +2158,118 @@ mod tests {
         );
         assert_eq!(results[0].agent_id, agent_a);
         assert_eq!(results[0].content, "Alpha secret for agent A");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_via_vector_store_drops_non_uuid_ids_instead_of_failing_the_recall() {
+        // An external backend controls the id column, so one row whose id is
+        // not a UUID must cost the caller that one row — not the entire
+        // recall. Before this fix the parse error propagated out of
+        // `recall_via_vector_store` and every hydratable memory in the same
+        // result set was denied along with it.
+        let mut store = setup();
+        let agent = AgentId::new();
+
+        let good = store
+            .remember(
+                agent,
+                "A memory the backend indexed correctly",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let also_good = store
+            .remember(
+                agent,
+                "A second correctly indexed memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // The malformed id is first in ANN order, so a fix that only tolerates
+        // trailing garbage would not pass this.
+        store.set_vector_store(Arc::new(LeakyVectorStore {
+            ids: vec![
+                "not-a-uuid".to_string(),
+                good.0.to_string(),
+                String::new(),
+                also_good.0.to_string(),
+            ],
+        }));
+
+        let query = [0.1_f32, 0.2, 0.3];
+        let results = store
+            .recall_with_embedding("memory", 10, Some(MemoryFilter::agent(agent)), Some(&query))
+            .expect("a non-UUID id must not fail the whole recall");
+
+        let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "A memory the backend indexed correctly",
+                "A second correctly indexed memory"
+            ],
+            "both hydratable memories must survive, in ANN order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_via_vector_store_reapplies_metadata_filter_against_leaky_backend() {
+        // `MemoryFilter.metadata` is a tenancy dimension on the SQLite path
+        // (`json_extract(metadata, '$.key') = ?`). The hydrate path's
+        // defense-in-depth re-check must enforce it too, or a backend that
+        // ignores the filter widens the caller's scope on the external path
+        // only.
+        let mut store = setup();
+        let agent = AgentId::new();
+
+        let mut tenant_a = HashMap::new();
+        tenant_a.insert("tenant".to_string(), serde_json::json!("acme"));
+        let mut tenant_b = HashMap::new();
+        tenant_b.insert("tenant".to_string(), serde_json::json!("globex"));
+
+        let id_a = store
+            .remember(
+                agent,
+                "Acme quarterly numbers",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_a,
+            )
+            .unwrap();
+        let id_b = store
+            .remember(
+                agent,
+                "Globex quarterly numbers",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_b,
+            )
+            .unwrap();
+
+        store.set_vector_store(Arc::new(LeakyVectorStore {
+            ids: vec![id_a.0.to_string(), id_b.0.to_string()],
+        }));
+
+        let mut filter = MemoryFilter::agent(agent);
+        filter
+            .metadata
+            .insert("tenant".to_string(), serde_json::json!("acme"));
+        let query = [0.1_f32, 0.2, 0.3];
+        let results = store
+            .recall_with_embedding("quarterly", 10, Some(filter), Some(&query))
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "the metadata filter must survive the external-backend path, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].content, "Acme quarterly numbers");
     }
 
     /// A VectorStore backend that records every `insert` it receives and can

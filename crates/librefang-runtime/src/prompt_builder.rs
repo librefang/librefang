@@ -615,6 +615,91 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
     out
 }
 
+/// Maximum number of recalled memory bullets rendered into the personal-context block.
+///
+/// Substrate recall is already capped upstream at `MEMORY_RECALL_LIMIT`
+/// (`agent_loop::prompt`), but proactive-memory items are appended *after* that cap,
+/// so this formatter is the only place that sees the section's full contributor list.
+pub const MEMORY_BULLET_LIMIT: usize = 10;
+
+/// Per-bullet character budget, applied before the boundary-aware cut.
+pub const MEMORY_BULLET_MAX_CHARS: usize = 500;
+
+/// Character budget for the memory bullets as a whole, counted over bullet *content*
+/// (the `- [key] ` scaffolding is bounded and excluded).
+///
+/// Deliberately equal to `MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS`, so it is a
+/// true ceiling rather than a behaviour change: with today's constants it is saturated
+/// by ten full-length bullets and never binds. It exists because three producers feed
+/// this section — substrate recall, proactive memory, and the context engine — and
+/// until now nobody owned its total, so raising either constant would have silently
+/// multiplied the section's share of the context window (#7756 §1.3).
+pub const MEMORY_SECTION_MAX_CHARS: usize = MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS;
+
+/// Appended to a memory bullet that was cut short.
+///
+/// A severed sentence with no marker invites the model to confabulate the ending; an
+/// explicit marker tells it the text is incomplete.
+pub const MEMORY_TRUNCATION_MARKER: &str = " […truncated]";
+
+/// Smallest remaining section budget worth rendering another bullet into.
+///
+/// Below this, a bullet would be almost entirely marker, which is worse than omitting
+/// it and reporting the omission.
+const MEMORY_BULLET_MIN_CHARS: usize = 80;
+
+/// Minimum percentage of the per-bullet budget a boundary cut must retain.
+///
+/// Without a floor, a bullet whose first sentence ends after twelve characters would be
+/// cut down to those twelve characters — losing far more than the mid-word cut it is
+/// meant to replace.
+const MEMORY_BOUNDARY_MIN_PERCENT: usize = 60;
+
+/// Truncate a memory bullet at a sentence boundary, falling back to a word boundary.
+///
+/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there,
+/// this walks back to the last sentence terminator inside the budget, then to the last
+/// word boundary, and only performs a bare character cut when the text offers neither
+/// (scripts without spaces, or a single unbroken token). Every shortened result carries
+/// [`MEMORY_TRUNCATION_MARKER`].
+///
+/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget,
+/// so a boundary never costs more content than it saves.
+fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    // Byte index one past the last character the budget allows.
+    let end = content
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    let window = &content[..end];
+    let floor = max_chars * MEMORY_BOUNDARY_MIN_PERCENT / 100;
+
+    // Byte indices, exclusive. `sentence_cut` keeps the terminator; `word_cut` drops
+    // the whitespace it found (the trailing trim below removes any that survives).
+    let mut sentence_cut: Option<usize> = None;
+    let mut word_cut: Option<usize> = None;
+    for (nth, (byte_idx, ch)) in window.char_indices().enumerate() {
+        // Raw dialogue rows are multi-line (`[Past exchange]\nThem: …\nYou: …`), so a
+        // newline is as good a boundary as a full stop.
+        if matches!(
+            ch,
+            '.' | '!' | '?' | '…' | '。' | '！' | '？' | '\n' | ';' | '；'
+        ) && nth + 1 >= floor
+        {
+            sentence_cut = Some(byte_idx + ch.len_utf8());
+        }
+        if ch.is_whitespace() && nth >= floor {
+            word_cut = Some(byte_idx);
+        }
+    }
+    let cut = sentence_cut.or(word_cut).unwrap_or(end);
+    format!("{}{}", window[..cut].trim_end(), MEMORY_TRUNCATION_MARKER)
+}
+
 /// Format recalled memories as a natural personal-context block.
 ///
 /// Used by both the system prompt (appended to the Memory section) and
@@ -623,6 +708,24 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
 /// knowledge the way a person who actually knows you would — naturally,
 /// without announcing that it "remembers" things.
 pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) -> String {
+    format_memory_items_within_budget(
+        memories,
+        MEMORY_BULLET_LIMIT,
+        MEMORY_BULLET_MAX_CHARS,
+        MEMORY_SECTION_MAX_CHARS,
+    )
+}
+
+/// Budget-parameterised body of [`format_memory_items_as_personal_context`].
+///
+/// Separate so the budget arithmetic can be exercised at small values; production
+/// callers go through the wrapper and get the module constants.
+fn format_memory_items_within_budget(
+    memories: &[(String, String)],
+    bullet_limit: usize,
+    bullet_max_chars: usize,
+    section_max_chars: usize,
+) -> String {
     if memories.is_empty() {
         return String::new();
     }
@@ -647,13 +750,29 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
          - If a memory is clearly outdated or the user contradicts it, trust the current \
          conversation over stored context.\n\n",
     );
-    for (key, content) in memories.iter().take(10) {
-        let capped = cap_str(content, 500);
+    let mut spent = 0usize;
+    let mut rendered = 0usize;
+    for (key, content) in memories.iter().take(bullet_limit) {
+        let remaining = section_max_chars.saturating_sub(spent);
+        if remaining < MEMORY_BULLET_MIN_CHARS {
+            break;
+        }
+        let capped = truncate_memory_bullet(content, bullet_max_chars.min(remaining));
+        spent += capped.chars().count();
+        rendered += 1;
         if key.is_empty() {
             out.push_str(&format!("- {capped}\n"));
         } else {
             out.push_str(&format!("- [{key}] {capped}\n"));
         }
+    }
+    // Say so rather than dropping silently. The count is the only signal the model gets
+    // that its recalled context was clipped, whether by `bullet_limit` or by the budget.
+    let omitted = memories.len().saturating_sub(rendered);
+    if omitted > 0 {
+        out.push_str(&format!(
+            "\n({omitted} further remembered details are not shown here.)\n"
+        ));
     }
     out
 }
@@ -1106,7 +1225,7 @@ const SAFETY_SECTION: &str = "\
 const OUTPUT_CHANNELS_SECTION: &str = "\
 ## Output Channels
 - Public reply: the text you write in the current turn goes to the source chat (DM or group).
-- Private message to the owner: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat.
+- Private notice to the operator: call the `notify_owner(reason, summary)` tool. The content will NOT appear in the source chat. It reaches the operator out of band on their own surface rather than being delivered as a message on this channel, so it is not a way to answer one participant privately.
 - In a group, NEVER write narrative addressed directly to the owner (by honorific or name) as a public reply: use `notify_owner` instead.
 - When you have sent a `notify_owner`, do not repeat the `summary` in the public reply.";
 

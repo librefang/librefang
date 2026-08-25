@@ -811,6 +811,9 @@ impl LibreFangKernel {
             user_id: billed_user_id,
             channel: None,
             session_id: None,
+            // #7714: an ephemeral turn on a spawned worker still spends on
+            // its spawner's behalf, so it rolls up the same way as a full turn.
+            billed_agent_id: Some(crate::kernel::agent_execution::billed_agent_for(&entry)),
         };
         if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
@@ -2801,6 +2804,10 @@ impl LibreFangKernel {
         // Use `effective_owner` (already null for forks, computed above) NOT the raw owner, so a sub-agent's spend is not mis-attributed to the parent turn's user.
         // Snapshot into a Copy local before the spawn moves it into the task.
         let billed_user_id: Option<UserId> = effective_owner.or(attribution_user_id);
+        // #7714: resolved here, before the spawn, so the async block moves a
+        // plain `AgentId` instead of borrowing the registry entry across the
+        // task boundary. Mirrors how `billed_user_id` is captured above.
+        let billed_agent_id = crate::kernel::agent_execution::billed_agent_for(&entry);
 
         // `loop_opts` is already a local — the spawned async move will
         // capture it. Agent loop reads these at each turn-end / save /
@@ -3205,6 +3212,8 @@ impl LibreFangKernel {
                         user_id: billed_user_id,
                         channel: attribution_channel.clone(),
                         session_id: Some(effective_session_id),
+                        // #7714: same rollup as the non-streaming path.
+                        billed_agent_id: Some(billed_agent_id),
                     };
                     if let Err(e) = kernel_clone.metering.engine.check_all_and_record(
                         &usage_record,

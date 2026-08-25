@@ -3,7 +3,8 @@
 
 use super::error::{ToolError, ToolResult};
 use super::{
-    check_taint_outbound_text, current_agent_depth, require_kernel_typed, with_agent_call_depth,
+    caller_agent_id_missing, check_taint_outbound_text, current_agent_depth, require_kernel_typed,
+    with_agent_call_depth,
 };
 use crate::kernel_handle::prelude::*;
 use librefang_types::taint::TaintSink;
@@ -268,9 +269,7 @@ pub(super) async fn tool_agent_spawn(
     let name = input["name"]
         .as_str()
         .ok_or(ToolError::MissingParameter("name"))?;
-    let system_prompt = input["system_prompt"]
-        .as_str()
-        .ok_or(ToolError::MissingParameter("system_prompt"))?;
+    let system_prompt = input["system_prompt"].as_str();
 
     let spawn_sink = TaintSink::agent_message();
     if let Some(violation) = check_taint_outbound_text(name, &spawn_sink) {
@@ -278,11 +277,32 @@ pub(super) async fn tool_agent_spawn(
             "Taint violation (name): {violation}"
         )));
     }
-    if let Some(violation) = check_taint_outbound_text(system_prompt, &spawn_sink) {
-        return Err(ToolError::PermissionDenied(format!(
-            "Taint violation (system_prompt): {violation}"
-        )));
+    if let Some(prompt) = system_prompt {
+        if let Some(violation) = check_taint_outbound_text(prompt, &spawn_sink) {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (system_prompt): {violation}"
+            )));
+        }
     }
+
+    if input["ephemeral"].as_bool().unwrap_or(false) {
+        return tool_agent_spawn_ephemeral(
+            input,
+            kh,
+            name,
+            system_prompt,
+            parent_id,
+            parent_allowed_tools,
+        )
+        .await;
+    }
+
+    // Beyond this point the call builds a permanent agent, for which a system
+    // prompt is the manifest's only description of what the agent is. The
+    // schema no longer marks it required — an ephemeral worker spawned from an
+    // agent type gets its prompt from the template — so the permanent path
+    // reasserts it here, with the same error the schema used to produce.
+    let system_prompt = system_prompt.ok_or(ToolError::MissingParameter("system_prompt"))?;
 
     let tools: Vec<String> = input["tools"]
         .as_array()
@@ -343,6 +363,110 @@ pub(super) async fn tool_agent_spawn(
         .map_err(ToolError::upstream)?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
+    ))
+}
+
+/// The `ephemeral: true` branch of `agent_spawn` (refs #6699).
+///
+/// Runs the task inline and returns the worker's answer, rather than returning an agent id: an ephemeral worker has no id worth handing back, because by the time this returns it no longer exists.
+///
+/// The caller agent is not optional here. Every safety property of the ephemeral path — spend billed to a real ledger, the spawning agent's `[resources]` quota enforced, a tool set that cannot exceed the spawner's own — is expressed in terms of the parent, so a callerless surface (the MCP HTTP bridge, the REST tool endpoint) is refused rather than given an unattributed worker.
+///
+/// Depth is *not* re-checked here. The kernel checks it inside `spawn_ephemeral_worker` and surfaces `CapabilityDenied`, which `ToolError::upstream` preserves; adding a second check against the same counter is how one of two copies eventually stops matching the other.
+async fn tool_agent_spawn_ephemeral(
+    input: &serde_json::Value,
+    kh: &Arc<dyn KernelHandle>,
+    name: &str,
+    system_prompt: Option<&str>,
+    parent_id: Option<&str>,
+    parent_allowed_tools: Option<&[String]>,
+) -> ToolResult {
+    let message = input["message"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("message"))?;
+    if let Some(violation) = check_taint_outbound_text(message, &TaintSink::agent_message()) {
+        return Err(ToolError::PermissionDenied(format!(
+            "Taint violation (message): {violation}"
+        )));
+    }
+
+    let parent = parent_id.ok_or_else(|| caller_agent_id_missing("agent_spawn"))?;
+    let parent_id: librefang_types::agent::AgentId =
+        parent.parse().map_err(|_| ToolError::InvalidParameter {
+            name: "agent_spawn",
+            reason: format!("calling agent id '{parent}' is not a UUID"),
+        })?;
+
+    let mut request =
+        librefang_types::ephemeral::EphemeralSpawnRequest::new(parent_id, name, message);
+    request.system_prompt = system_prompt.map(str::to_string);
+    request.agent_type = input["agent_type"].as_str().map(str::to_string);
+    if let Some(agent_type) = request.agent_type.as_deref() {
+        if let Some(violation) = check_taint_outbound_text(agent_type, &TaintSink::agent_message())
+        {
+            return Err(ToolError::PermissionDenied(format!(
+                "Taint violation (agent_type): {violation}"
+            )));
+        }
+    }
+
+    // An explicit tool list is honoured as-is; the kernel rejects any name the
+    // parent cannot itself call. When the model asks for no particular tools,
+    // fall back to the parent's own allowlist rather than to "everything":
+    // a restricted parent that says nothing must not hand its worker a wider
+    // set than it holds. `None` (unrestricted parent) stays `None`, which the
+    // kernel reads as "whatever the parent's manifest grants".
+    let requested: Option<Vec<String>> = match input["tools"].as_array() {
+        Some(arr) => Some(
+            arr.iter()
+                .enumerate()
+                .filter_map(|(i, v)| match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        warn!(index = i, "tools[{}]: non-string value, skipping", i);
+                        None
+                    }
+                })
+                .collect(),
+        ),
+        None => parent_allowed_tools.map(<[String]>::to_vec),
+    };
+    request.tools = requested;
+
+    // Only `provider` and `model` are read out of the caller's `model` object.
+    // `EphemeralModelOverride` cannot carry `base_url` or `api_key_env` — see
+    // its doc comment for why widening it would be a credential-exfiltration
+    // primitive rather than a convenience.
+    if let Some(model) = input["model"].as_object() {
+        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+            provider: model
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            model: model
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        });
+    } else if let Some(model) = input["model"].as_str() {
+        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+            provider: None,
+            model: Some(model.to_string()),
+        });
+    }
+
+    request.max_iterations = input["max_iterations"]
+        .as_u64()
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+
+    let result = kh
+        .spawn_ephemeral(request)
+        .await
+        .map_err(ToolError::upstream)?;
+
+    Ok(format!(
+        "Ephemeral worker '{}' finished in {} iteration(s).\n\n{}",
+        result.name, result.iterations, result.response
     ))
 }
 

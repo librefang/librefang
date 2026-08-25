@@ -450,6 +450,25 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("{e}")))
     }
 
+    async fn spawn_ephemeral(
+        &self,
+        request: librefang_types::ephemeral::EphemeralSpawnRequest,
+    ) -> Result<librefang_types::ephemeral::EphemeralSpawnResult, kernel_handle::KernelOpError>
+    {
+        // Unwrap `KernelError` to the typed `LibreFangError` the trait speaks
+        // rather than stringifying it: the depth refusal must stay
+        // `CapabilityDenied` (→ 403) and an exhausted budget `QuotaExceeded`
+        // (→ 429) all the way out to the tool layer, where the model is told
+        // *why* it was refused. Flattening these to `Internal` would present a
+        // self-imposed quota as a downstream crash and invite a retry loop.
+        LibreFangKernel::spawn_ephemeral_worker(self, request)
+            .await
+            .map_err(|e| match e {
+                crate::error::KernelError::LibreFang(inner) => inner,
+                other => kernel_handle::KernelOpError::Internal(format!("{other}")),
+            })
+    }
+
     /// Write a new agent type to `$LIBREFANG_HOME/agent-types/{name}.toml` (#7722).
     ///
     /// Every rule here belongs to `librefang_types::agent_type_store`, which the HTTP `POST /api/templates` handler calls too.

@@ -2812,7 +2812,7 @@
           }
         ],
         "requestBody": {
-          "description": "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609).",
+          "description": "Tool configuration fields. `capabilities_tools` is the grant surface; `tool_allowlist` and `tool_blocklist` only ever narrow what it already admits, because the kernel applies them afterwards as a retain. An allowlist entry naming a builtin or skill tool that `capabilities_tools` excludes therefore grants nothing — add it to `capabilities_tools` instead. MCP tools are the exception: they are not filtered by `capabilities_tools`, so an `mcp_*` allowlist entry does select among them (#6609). `disabled` is the `tools_disabled` master switch, evaluated before all three filters. Every field is a tri-state: omit it to leave the stored value alone, send it to write exactly what it says (#7742).",
           "content": {
             "application/json": {
               "schema": {
@@ -2824,7 +2824,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist`.",
+            "description": "Updated tool configuration, echoing the stored `capabilities_tools`, `tool_allowlist`, `tool_blocklist` and `disabled` values. Carries an additional `warnings` array of strings naming each stored `tool_allowlist` entry that provably cannot admit any tool; the key is absent when there is nothing to report. The check runs whenever the request submits `tool_allowlist` or `capabilities_tools` — narrowing the grant surface is itself a way to render a stored entry inert — and is skipped for a request that submits only `tool_blocklist` or only `disabled`, and for an agent left with `tools_disabled = true`, where no allowlist entry can admit anything anyway.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3765,7 +3765,7 @@
           "auth"
         ],
         "summary": "Change the dashboard password and/or username.",
-        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.",
+        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.\n\nRefused with `423 Locked` in managed mode (#6695): the new username and password hash are persisted as top-level `dashboard_user` / `dashboard_pass_hash` keys in `config.toml`, so a deployment that owns the file owns the dashboard credential too.\nIn such a deployment the credential is rotated by changing the manifest and rolling, which is also the only way the change survives the next rollout.",
         "operationId": "change_password",
         "requestBody": {
           "content": {
@@ -3793,6 +3793,16 @@
           },
           "401": {
             "description": "Current password is incorrect"
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; rotate the credential in the manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5166,6 +5176,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the entry from the manifest instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -5231,6 +5251,16 @@
           },
           "409": {
             "description": "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the sidecar in the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6231,6 +6261,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/install — Install a catalog entry (alias for\nPOST /api/mcp/servers with template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), and refused **unconditionally** rather than per-store the way `persist_mcp_upsert` is.\nThe difference is not a policy choice: this handler calls `upsert_mcp_server_config` directly, with no `mcp_runtime_store` check, so it rewrites `config.toml` even when the store is `\"db\"`.\nWhile that remains true the guard has to be unconditional or it would miss the write it exists to stop.\nThe route it aliases (`POST /api/mcp/servers`) honours the store, so a managed deployment that wants an install surface sets `mcp_runtime_store = \"db\"` and uses that route.",
         "operationId": "install_extension",
         "requestBody": {
           "content": {
@@ -6252,6 +6283,16 @@
                 }
               }
             }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; declare the server in the manifest, or use POST /api/mcp/servers with `mcp_runtime_store = \"db\"`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
           }
         }
       }
@@ -6262,6 +6303,7 @@
           "extensions"
         ],
         "summary": "POST /api/extensions/uninstall — Uninstall by catalog id (template_id).",
+        "description": "Refused with `423 Locked` in managed mode (#6695), unconditionally, for the same reason as `install_extension`: it calls `remove_mcp_server_config` without consulting `mcp_runtime_store`.\nWithout the guard an uninstall would delete a `[[mcp_servers]]` entry the manifest declares and the next rollout would restore it, which is drift in both directions.",
         "operationId": "uninstall_extension",
         "requestBody": {
           "content": {
@@ -6276,6 +6318,16 @@
         "responses": {
           "200": {
             "description": "Uninstall a catalog-backed MCP server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Configuration is managed by the deployment; remove the server from the manifest instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14964,6 +15016,13 @@
               "type": "string"
             },
             "description": "Declared tools (capabilities.tools) — the grant surface.\nA builtin or skill tool has to be admitted here to reach the agent at all.\n`None` = no change, `Some([])` = unrestricted.\nGlob patterns allowed."
+          },
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`agent.toml: tools_disabled` — the master switch that removes every tool from the agent before any of the three filters above are consulted.\n`None` = no change, `Some(true)` = disable all tools, `Some(false)` = re-enable them.\n\nNamed `disabled` to match the key `GET /api/agents/{id}/tools` already returns.\nUntil #7742 the GET returned it and no request could write it, and every successful write forced it back to `false` — so an operator editing a blocklist re-enabled every tool without asking."
           },
           "tool_allowlist": {
             "type": [
