@@ -1048,12 +1048,8 @@ pub fn create_skill(
             name: name.to_string(),
             version: "0.1.0".to_string(),
             description: description.to_string(),
-            // The caller's `author` is the agent that produced the skill, and
-            // the skill-workshop approve path passes it (`storage.rs`, the
-            // `CandidateKind::Create` arm). Writing the literal here discarded
-            // it, so every approved skill's manifest claimed `agent-evolved`
-            // while the real provenance sat in `.evolution.json`, which is not
-            // what the marketplace or `librefang skill` surfaces read.
+            // The caller's `author` is the agent that produced the skill, and the skill-workshop approve path passes it (`storage.rs`, the `CandidateKind::Create` arm).
+            // Writing the literal here discarded it, so every approved skill's manifest claimed `agent-evolved` while the real provenance sat in `.evolution.json`, which is not what the marketplace or `librefang skill` surfaces read.
             author: author.unwrap_or("agent-evolved").to_string(),
             license: String::new(),
             tags,
@@ -2198,11 +2194,8 @@ mod tests {
         assert_eq!(result.strategy, MatchStrategy::Exact);
     }
 
-    /// The skill-workshop approve path hands `create_skill` the agent that
-    /// produced the candidate (`skill_workshop/storage.rs`, `CandidateKind::Create`).
-    /// That agent has to reach `skill.toml`, because the manifest is what the
-    /// marketplace and the `librefang skill` surfaces read; `.evolution.json`
-    /// records it too, but nothing user-facing looks there.
+    /// The skill-workshop approve path hands `create_skill` the agent that produced the candidate (`skill_workshop/storage.rs`, `CandidateKind::Create`).
+    /// That agent has to reach `skill.toml`, because the manifest is what the marketplace and the `librefang skill` surfaces read; `.evolution.json` records it too, but nothing user-facing looks there.
     #[test]
     fn create_skill_records_the_caller_as_the_manifest_author() {
         let dir = TempDir::new().unwrap();
