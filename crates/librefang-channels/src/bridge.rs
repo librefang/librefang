@@ -350,8 +350,26 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
-    /// Persist a group roster member to the kernel's persistent storage.
+    /// Persist a group roster member the daemon has **observed speaking** to the kernel's persistent storage.
+    ///
+    /// This is the set `channel_dm` authorizes a private message against, so a caller reaching for it is asserting the person actually addressed the agent.
+    /// For a platform's bulk member list use [`ChannelBridgeHandle::roster_upsert_enumerated`] instead (#7086).
     async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Persist a group roster member a platform's member list named, whom the daemon has never heard from.
+    ///
+    /// Recorded as `source = 'enumerated'`: reportable by `channel_members`, never addressable by `channel_dm`.
+    /// The store refuses to demote an already-observed row, so a channel-wide enumeration sweep cannot revoke anyone's private-message reachability (#7086).
+    async fn roster_upsert_enumerated(
         &self,
         _channel: &str,
         _chat_id: &str,
@@ -2802,11 +2820,12 @@ fn should_process_group_message(
 
 /// Extract structured `GroupMember` entries from the inbound message metadata.
 ///
-/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`) populate `SenderContext.group_members` through this, and that is where it stops: nothing outside this crate reads that field, and no channel adapter on `main` emits the key.
+/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`) populate `SenderContext.group_members` through this, and, since #7086, the enumerated half of the persistent roster through [`upsert_enumerated_members_into_roster`].
+/// The Slack sidecar emits the key when `SLACK_ENUMERATE_MEMBERS` is on; the WhatsApp gateway's bulk list arrives under the separate `group_participants` key and feeds the addressee guard instead.
 ///
-/// This is NOT the roster write path, despite what this comment claimed until #7086 was audited.
-/// The persistent `group_roster` table is written from exactly one place, `upsert_sender_into_roster`, one row per person actually observed speaking — bulk membership metadata is parsed here and dropped.
-/// The distinction is load-bearing rather than pedantic: `channel_dm` authorizes a private message against the roster, so widening it from "people this daemon has heard from" to "everyone a platform reports as a member" would let an agent DM someone who has never interacted with it.
+/// The two roster writes stay apart on purpose, and the distinction is load-bearing rather than pedantic.
+/// `upsert_sender_into_roster` records one row per person actually observed speaking, as `source = 'observed'`, and that is the set `channel_dm` authorizes a private message against.
+/// What this function feeds is `source = 'enumerated'` — reportable by `channel_members`, never addressable — because widening the authorization set from "people this daemon has heard from" to "everyone a platform reports as a member" would let an agent DM someone who has never interacted with it.
 fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
     message
         .metadata
@@ -3023,6 +3042,73 @@ async fn upsert_sender_into_roster(
             error = %e,
             "roster_upsert failed; group member will not be remembered for this turn"
         );
+    }
+}
+
+/// The most members a single inbound message may enumerate into the roster.
+///
+/// A Slack workspace channel can list tens of thousands of people, and every one of them would become a stored identity row.
+/// The adapter caps its own page count, but the bridge trusts nothing it is handed over the sidecar wire: a metadata array is attacker-adjacent input, and an unbounded loop here is a write amplification of one message into an arbitrary number of SQLite transactions.
+/// Overflow is truncated and logged rather than rejected, because a partial roster is still a useful answer to "who is in this channel?" and a rejected one is not.
+const MAX_ENUMERATED_MEMBERS_PER_MESSAGE: usize = 1_000;
+
+/// Persist the platform-supplied member list riding on an inbound group message (#7086).
+///
+/// This is the bulk half of the roster, and it is deliberately a different write from [`upsert_sender_into_roster`].
+/// Those rows land as `source = 'observed'` and authorize `channel_dm`; these land as `source = 'enumerated'` and do not.
+/// Merging the two — which is what "just fill the roster from `conversations.members`" would have meant — would let an agent privately message any member of a channel it sits in, including people who have never addressed it.
+///
+/// Skips DMs (a one-to-one chat has no membership to enumerate) and messages carrying no `group_members` metadata, which is every message from every adapter that has not opted in.
+/// A failed row is logged and the sweep continues: one unwritable member should not cost the rest of the list.
+async fn upsert_enumerated_members_into_roster(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    message: &ChannelMessage,
+) {
+    if !message.is_group || message.sender.platform_id.is_empty() {
+        return;
+    }
+    let members = extract_group_members(message);
+    if members.is_empty() {
+        return;
+    }
+    let channel_str = channel_type_str(&message.channel);
+    if members.len() > MAX_ENUMERATED_MEMBERS_PER_MESSAGE {
+        warn!(
+            channel = channel_str,
+            chat_id = %message.sender.platform_id,
+            supplied = members.len(),
+            cap = MAX_ENUMERATED_MEMBERS_PER_MESSAGE,
+            "group_members metadata exceeds the per-message enumeration cap; truncating"
+        );
+    }
+    for member in members.iter().take(MAX_ENUMERATED_MEMBERS_PER_MESSAGE) {
+        if member.user_id.is_empty() {
+            continue;
+        }
+        // An adapter that cannot resolve a name sends the raw platform id, and so do we — an empty `display_name` would render as a blank line in `channel_members`.
+        let display_name = if member.display_name.is_empty() {
+            member.user_id.as_str()
+        } else {
+            member.display_name.as_str()
+        };
+        if let Err(e) = handle
+            .roster_upsert_enumerated(
+                channel_str,
+                &message.sender.platform_id,
+                &member.user_id,
+                display_name,
+                member.username.as_deref(),
+            )
+            .await
+        {
+            warn!(
+                channel = channel_str,
+                chat_id = %message.sender.platform_id,
+                user_id = %member.user_id,
+                error = %e,
+                "roster_upsert_enumerated failed; this member will not appear in channel_members"
+            );
+        }
     }
 }
 
@@ -4887,6 +4973,7 @@ async fn dispatch_message(
     .await;
 
     upsert_sender_into_roster(handle, message).await;
+    upsert_enumerated_members_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
@@ -6788,6 +6875,7 @@ async fn dispatch_with_blocks(
     .await;
 
     upsert_sender_into_roster(handle, message).await;
+    upsert_enumerated_members_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);

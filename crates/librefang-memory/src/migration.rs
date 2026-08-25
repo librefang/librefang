@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 50;
+const SCHEMA_VERSION: u32 = 52;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -242,6 +242,19 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // provider gets real full-text search instead of a `content LIKE` scan —
     // and so `memory.fts_only` finally has a memories index to fall back to.
     run_step!(50, migrate_v50);
+
+    // v52 (#7086): add `group_roster.source` so the observational roster and a
+    // platform's bulk member list can share one table without sharing one
+    // meaning. `channel_dm` authorizes against `source = 'observed'` only.
+    //
+    // v51 is deliberately skipped: it is claimed by an in-flight PR (#7916).
+    // The `run_step!` guard is `current_version < N`, so a gap costs nothing on
+    // the way up — but the audit backfill below inserts a row for every version
+    // in `1..=user_version`, which means a database that reaches 52 has already
+    // claimed 51 and would never run a `migrate_v51` added afterwards. Whichever
+    // of the two lands second must therefore take the next free number rather
+    // than the gap.
+    run_step!(52, migrate_v52);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1035,7 +1048,33 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v52 (#7086): `group_roster.source` — where a roster row came from.
+///
+/// The roster had exactly one meaning until now: a row existed because that person was observed speaking in that chat.
+/// `channel_dm` (#7874) leans on precisely that meaning — it authorizes a private message against the roster, so the set doubles as "people this agent has actually interacted with here".
+///
+/// The bulk enumeration this issue asked for (Slack's `conversations.members`) reports everyone the platform lists, most of whom have never addressed the agent.
+/// Writing those into the same undifferentiated rows would silently promote the whole channel into `channel_dm`'s authorization set — an agent could then DM a member who has never spoken to it, which is a privilege escalation dressed as a feature.
+///
+/// So the two sets share the table and the primary key but not the predicate.
+/// `source` is `'observed'` (someone spoke) or `'enumerated'` (a platform listed them), every pre-migration row is `'observed'` because the sender upsert was the only writer, and the authorization query filters on the column explicitly.
+/// A single column beats a second table here because the natural key is identical in both sets: a member who is enumerated and later speaks is one row that changes classification, not two rows needing a UNION with a priority rule at every read site.
+fn migrate_v52(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "group_roster", "source")? {
+        conn.execute(
+            "ALTER TABLE group_roster ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (52, datetime('now'), 'Add group_roster.source so bulk-enumerated members stay out of the channel_dm authorization set (#7086)')",
         [],
     )?;
     Ok(())
