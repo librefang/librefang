@@ -1196,6 +1196,221 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // Agent lineage persistence (#7930)
+    // ---------------------------------------------------------------------
+
+    /// Build a minimal saveable entry with a given id and parent.
+    fn lineage_entry(id: AgentId, name: &str, parent: Option<AgentId>) -> AgentEntry {
+        AgentEntry {
+            id,
+            name: name.to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Running,
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            parent,
+            session_id: librefang_types::agent::SessionId::new(),
+            ..Default::default()
+        }
+    }
+
+    /// The exact regression from #7930: before schema v54 there was no column
+    /// for `parent`, so this round-trip returned `None` for a child agent and
+    /// the API reported `parent_agent_id: null` for it after every restart.
+    #[test]
+    fn agent_parent_survives_a_store_round_trip() {
+        let store = setup();
+        let parent_id = AgentId::new();
+        let child_id = AgentId::new();
+
+        store
+            .save_agent(&lineage_entry(parent_id, "parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(parent_id)))
+            .unwrap();
+
+        let loaded = store.load_agent(child_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.parent,
+            Some(parent_id),
+            "the child's parent link must survive reload — this is #7930"
+        );
+        assert!(
+            !loaded.parent_unknown,
+            "a row written after v54 has authoritative lineage"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let child = all.iter().find(|a| a.id == child_id).unwrap();
+        assert_eq!(
+            child.parent,
+            Some(parent_id),
+            "load_all_agents is the boot path — it must agree with load_agent"
+        );
+    }
+
+    /// A root agent saved after v54 reports `None` *authoritatively*: the API
+    /// may render it as a top-level agent, which it may not do for a pre-v54
+    /// row (see `pre_v54_agent_row_reports_unknown_lineage_not_root`).
+    #[test]
+    fn root_agent_saved_after_v54_is_a_known_root() {
+        let store = setup();
+        let id = AgentId::new();
+        store.save_agent(&lineage_entry(id, "solo", None)).unwrap();
+
+        let loaded = store.load_agent(id).unwrap().unwrap();
+        assert_eq!(loaded.parent, None);
+        assert!(
+            !loaded.parent_unknown,
+            "a genuine root agent must be distinguishable from an unrecorded one"
+        );
+    }
+
+    /// `children` has no column — it is recomputed from the `parent_id` edges.
+    #[test]
+    fn children_are_derived_from_parent_edges_and_sorted() {
+        let store = setup();
+        let parent_id = AgentId::new();
+        let mut child_ids = vec![AgentId::new(), AgentId::new(), AgentId::new()];
+
+        store
+            .save_agent(&lineage_entry(parent_id, "parent", None))
+            .unwrap();
+        for (i, cid) in child_ids.iter().enumerate() {
+            store
+                .save_agent(&lineage_entry(*cid, &format!("child-{i}"), Some(parent_id)))
+                .unwrap();
+        }
+        // An unrelated root agent must not be swept into the child list.
+        store
+            .save_agent(&lineage_entry(AgentId::new(), "unrelated", None))
+            .unwrap();
+
+        child_ids.sort_by_key(|id| id.0);
+
+        let loaded = store.load_agent(parent_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.children, child_ids,
+            "load_agent must derive children from parent_id, sorted by id"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let parent = all.iter().find(|a| a.id == parent_id).unwrap();
+        assert_eq!(
+            parent.children, child_ids,
+            "load_all_agents must derive the same list as load_agent"
+        );
+        let unrelated = all.iter().find(|a| a.name == "unrelated").unwrap();
+        assert!(unrelated.children.is_empty());
+    }
+
+    /// Re-pointing a child at a new parent must move it, not duplicate it.
+    /// This is what a stored `children` column could not have guaranteed:
+    /// `spawn_agent_inner` appends to the parent's in-memory list and persists
+    /// only the child row, so the old parent's stored list would have kept the
+    /// child forever.
+    #[test]
+    fn reparenting_moves_the_child_rather_than_duplicating_it() {
+        let store = setup();
+        let old_parent = AgentId::new();
+        let new_parent = AgentId::new();
+        let child_id = AgentId::new();
+
+        store
+            .save_agent(&lineage_entry(old_parent, "old-parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(new_parent, "new-parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(old_parent)))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(new_parent)))
+            .unwrap();
+
+        assert_eq!(
+            store.load_agent(old_parent).unwrap().unwrap().children,
+            Vec::<AgentId>::new(),
+            "the old parent must lose the child — two stored copies could not have agreed"
+        );
+        assert_eq!(
+            store.load_agent(new_parent).unwrap().unwrap().children,
+            vec![child_id]
+        );
+        assert_eq!(
+            store.load_agent(child_id).unwrap().unwrap().parent,
+            Some(new_parent)
+        );
+    }
+
+    /// A row written before schema v54 must report lineage as *unknown*.
+    /// Reading it as a root agent would replace #7930's wrong `null` with a
+    /// confidently wrong "this agent has no parent".
+    #[test]
+    fn pre_v54_agent_row_reports_unknown_lineage_not_root() {
+        let store = setup();
+        let id = AgentId::new();
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+
+        // Reproduce exactly what `ALTER TABLE agents ADD COLUMN parent_recorded
+        // INTEGER NOT NULL DEFAULT 0` leaves behind for a row that already existed.
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE agents SET parent_id = NULL, parent_recorded = 0 WHERE id = ?1",
+                rusqlite::params![id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let loaded = store.load_agent(id).unwrap().unwrap();
+        assert_eq!(loaded.parent, None);
+        assert!(
+            loaded.parent_unknown,
+            "a pre-v54 row must NOT start claiming to be a root agent"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let legacy = all.iter().find(|a| a.id == id).unwrap();
+        assert!(
+            legacy.parent_unknown,
+            "load_all_agents (the boot path) must agree that the lineage is unknown"
+        );
+    }
+
+    /// Saving a pre-v54 row again promotes it out of "unknown": the caller
+    /// just stated its lineage, so `parent_recorded` flips to 1.
+    #[test]
+    fn re_saving_a_pre_v54_row_records_its_lineage() {
+        let store = setup();
+        let id = AgentId::new();
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE agents SET parent_recorded = 0 WHERE id = ?1",
+                rusqlite::params![id.0.to_string()],
+            )
+            .unwrap();
+        }
+        assert!(store.load_agent(id).unwrap().unwrap().parent_unknown);
+
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+        assert!(
+            !store.load_agent(id).unwrap().unwrap().parent_unknown,
+            "an explicit save states the lineage, so the row is no longer unknown"
+        );
+    }
+
     /// Regression guard for the audit item
     /// `agent-cascade-delete-missing-tables`: every table with an
     /// `agent_id` column MUST be purged when an agent is deleted.
