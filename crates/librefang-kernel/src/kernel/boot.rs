@@ -1115,9 +1115,7 @@ impl LibreFangKernel {
                  LibreFang role and grant nothing — see WARN lines above"
             );
         }
-        // And for `[external_auth.group_map]` (#7746): a target that names no
-        // `[[groups]]` entry — a rename that missed the map, or a typo — confers
-        // no membership, with the same silent symptom.
+        // And for `[external_auth.group_map]` (#7746): a target that names no `[[groups]]` entry — a rename that missed the map, or a typo — confers no membership, with the same silent symptom.
         let oidc_group_dangling =
             crate::auth::validate_oidc_group_map(&config.external_auth.group_map, &config.groups);
         if oidc_group_dangling > 0 {

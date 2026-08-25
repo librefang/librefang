@@ -138,10 +138,7 @@ impl LibreFangKernel {
                     );
                 }
             }
-            // Same for `[external_auth.group_map]` (#7746), and additionally when
-            // `[[groups]]` itself moved: deleting or renaming a group is the most
-            // likely way a previously valid map target becomes dangling, and that
-            // edit does not touch `group_map` at all.
+            // Same for `[external_auth.group_map]` (#7746), and additionally when `[[groups]]` itself moved: deleting or renaming a group is the most likely way a previously valid map target becomes dangling, and that edit does not touch `group_map` at all.
             if old_cfg.external_auth.group_map != new_config.external_auth.group_map
                 || old_cfg.groups != new_config.groups
             {

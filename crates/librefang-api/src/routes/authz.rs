@@ -300,40 +300,28 @@ pub async fn check(
 
 /// Response of `GET /api/authz/whoami`.
 ///
-/// The four fields answer the four questions an operator debugging an SSO
-/// denial actually has, in the order they ask them: who does the daemon think
-/// I am, what privilege did that resolve to, which teams am I on, and what did
-/// those teams confer.
+/// The four fields answer the four questions an operator debugging an SSO denial actually has, in the order they ask them: who does the daemon think I am, what privilege did that resolve to, which teams am I on, and what did those teams confer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct WhoamiView {
-    /// Display name the credential resolved to. `root` for the master api key,
-    /// a trusted loopback caller, or an `allow_no_auth` deployment.
+    /// Display name the credential resolved to.
+    /// `root` for the master api key, a trusted loopback caller, or an `allow_no_auth` deployment.
     pub name: String,
-    /// Canonical `UserId` — the value that reaches `authorize()` and every
-    /// audit entry.
+    /// Canonical `UserId` — the value that reaches `authorize()` and every audit entry.
     pub user_id: String,
     /// RBAC privilege level, `viewer` / `user` / `admin` / `owner`.
     pub role: String,
-    /// The caller's [`librefang_types::principal::Principal`] in canonical
-    /// `kind:uuid` form, or `null` for the synthetic root credential — which
-    /// names no `[[users]]` entry and is therefore not a principal that can own
-    /// anything. Mirrors `AuthenticatedApiUser::owner_principal`.
+    /// The caller's [`librefang_types::principal::Principal`] in canonical `kind:uuid` form, or `null` for the synthetic root credential — which names no `[[users]]` entry and is therefore not a principal that can own anything.
+    /// Mirrors `AuthenticatedApiUser::owner_principal`.
     pub principal: Option<String>,
-    /// Every `[[groups]]` entry the caller effectively belongs to: declared
-    /// members unioned with the identity provider's mapped claims.
+    /// Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims.
     pub groups: Vec<String>,
-    /// The subset of `groups` that came from this request's token rather than
-    /// from `[[groups]] members`. Empty for every non-OIDC credential.
+    /// The subset of `groups` that came from this request's token rather than from `[[groups]] members`.
+    /// Empty for every non-OIDC credential.
     ///
-    /// Present as its own field because the difference is the thing an operator
-    /// is trying to see: a name in `groups` but not here is something they have
-    /// to remove from `config.toml` by hand, and a name in both is a grant that
-    /// the identity provider can no longer retract.
+    /// Present as its own field because the difference is the thing an operator is trying to see: a name in `groups` but not here is something they have to remove from `config.toml` by hand, and a name in both is a grant that the identity provider can no longer retract.
     pub idp_groups: Vec<String>,
-    /// Group-conferred role strings — each effective group's own name plus its
-    /// declared `roles`. The channel-binding vocabulary, deliberately **not**
-    /// the RBAC ladder: `role` above is a separate answer and no entry here
-    /// contributes to it.
+    /// Group-conferred role strings — each effective group's own name plus its declared `roles`.
+    /// The channel-binding vocabulary, deliberately **not** the RBAC ladder: `role` above is a separate answer and no entry here contributes to it.
     pub roles: Vec<String>,
 }
 
@@ -341,22 +329,15 @@ pub struct WhoamiView {
 ///
 /// # Why it is not `require_admin`
 ///
-/// The two sibling endpoints in this module report on *another* user and are
-/// gated at `Admin`. This one reports on the caller and nothing else, so it
-/// discloses to a `Viewer` only what that `Viewer` already presented, and
-/// gating it at `Admin` would withhold it from exactly the person most likely
-/// to need it — the SSO user whose claims mapped to less than they expected.
-/// An unauthenticated caller never reaches the handler at all: `/api/authz/*`
-/// is on no public allowlist, so `middleware::auth` has already answered 401.
+/// The two sibling endpoints in this module report on *another* user and are gated at `Admin`.
+/// This one reports on the caller and nothing else, so it discloses to a `Viewer` only what that `Viewer` already presented, and gating it at `Admin` would withhold it from exactly the person most likely to need it — the SSO user whose claims mapped to less than they expected.
+/// An unauthenticated caller never reaches the handler at all: `/api/authz/*` is on no public allowlist, so `middleware::auth` has already answered 401.
 ///
 /// # Why the IdP-derived membership is recomputed here
 ///
-/// It is not stored anywhere to read. `IdpGroupMembership` is put into request
-/// extensions by the OIDC middleware from the token this request carried, and
-/// dies with the request; `KernelConfig::effective_groups_for` unions it with
-/// the declared `[[groups]]` at the moment of the call. That is what makes a
-/// revocation in the identity provider visible here as soon as the caller's
-/// token stops carrying the claim, with no local cleanup step.
+/// It is not stored anywhere to read.
+/// `IdpGroupMembership` is put into request extensions by the OIDC middleware from the token this request carried, and dies with the request; `KernelConfig::effective_groups_for` unions it with the declared `[[groups]]` at the moment of the call.
+/// That is what makes a revocation in the identity provider visible here as soon as the caller's token stops carrying the claim, with no local cleanup step.
 #[utoipa::path(
     get,
     path = "/api/authz/whoami",
