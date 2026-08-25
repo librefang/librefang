@@ -319,8 +319,13 @@ mod tests {
         assert!(err.is_missing(), "{err}");
         assert_eq!(err.kind(), "missing");
         let rendered = err.to_string();
-        assert!(rendered.contains("workspaces/agents"), "{rendered}");
-        assert!(rendered.contains("registry/agents"), "{rendered}");
+        // The message interpolates real paths, so the separator is the platform's: `workspaces/agents` on Unix and `workspaces\agents` on Windows.
+        // Build the expected fragment the same way rather than hard-coding a forward slash, which passed everywhere except the Windows shard (#7889).
+        let workspaces_agents: String =
+            ["workspaces", "agents"].join(std::path::MAIN_SEPARATOR_STR);
+        let registry_agents: String = ["registry", "agents"].join(std::path::MAIN_SEPARATOR_STR);
+        assert!(rendered.contains(&workspaces_agents), "{rendered}");
+        assert!(rendered.contains(&registry_agents), "{rendered}");
     }
 
     /// The review finding this module exists for: a corrupt manifest used to

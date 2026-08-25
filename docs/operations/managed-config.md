@@ -12,7 +12,7 @@ Managed mode makes that ownership explicit and enforces it server-side.
 
 | Variable | Effect | Default |
 |---|---|---|
-| `LIBREFANG_CONFIG_PATH` | Loads `config.toml` from this exact path instead of `$LIBREFANG_HOME/config.toml`. | unset — `$LIBREFANG_HOME/config.toml` |
+| `LIBREFANG_CONFIG_PATH` | Resolves `config.toml` to this exact path instead of `$LIBREFANG_HOME/config.toml`, for reads **and** writes. | unset — `$LIBREFANG_HOME/config.toml` |
 | `LIBREFANG_CONFIG_MODE` | `managed` locks the file. Any other value, including unset, empty, and a typo, means mutable. | unset — mutable |
 
 **They are independent on purpose.**
@@ -24,6 +24,23 @@ Defaulting a typo to the locked mode would take the dashboard away from a deploy
 
 **The mode is read from the process environment and never from the config file.**
 A `config_mode` key inside `config.toml` would let an API write unlock the very file it is being refused access to.
+
+## One resolution, recorded at boot
+
+The path is resolved exactly once, in `LibreFangKernel::boot`, and stored on the kernel as `config_path_boot`.
+Everything downstream reads it back through `KernelApi::config_path()`: the hot-reload path, the 30-second change watcher, the `source` field of `GET /api/config/status`, the `source` in every `423` body, and every route that persists into the file.
+The CLI resolves through the same helper (`librefang_kernel::config::default_config_path`), so `librefang config set` inside the pod writes the file the daemon will reload.
+
+This is worth stating because it was not true before #6695.
+The loader honoured `LIBREFANG_CONFIG_PATH` while the writers re-derived `<home_dir>/config.toml`, so relocating the file produced a daemon that read the mount and wrote a second copy into `LIBREFANG_HOME` — one the next reload never looked at.
+Managed mode's refusal named the mounted file; a *mutable* deployment with the same mount silently drifted instead.
+
+Two consequences follow from the resolution order (`LIBREFANG_CONFIG_PATH` > `$LIBREFANG_HOME/config.toml` > `~/.librefang/config.toml`):
+
+- **The filename does not have to be `config.toml`.**
+  Three write paths used to reject anything else as an "invalid config file path" — a check that was meaningful when the path came from a request body and was pure obstruction once it came from the operator's own environment.
+- **A `home_dir` key inside the config file does not move the config file.**
+  It still relocates the data directory and everything else under the home, but the file cannot live at a path determined by its own contents; that is what used to send writes to a location the loader never read.
 
 ## What managed mode does
 
@@ -198,5 +215,5 @@ Stated plainly rather than left to be discovered:
   The existing `WRITABLE_EXACT_PATHS` / `WRITABLE_SECTION_PREFIXES` allowlist is already a field-level model and is already load-bearing for security; layering a second, orthogonal ownership axis over it would produce a matrix where the interesting cases are the corners.
   Revisit when a deployment actually needs it.
 - **CLI writes are not gated.**
-  `librefang config set` and friends still write the file.
+  `librefang config set` and friends still write the file — the file the daemon loaded, since #6695, but they write it.
   An operator running the CLI inside the pod is doing so deliberately; managed mode is about the API and dashboard surface that a user reaches without shell access.

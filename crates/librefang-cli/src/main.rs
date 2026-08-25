@@ -293,7 +293,7 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
 }
 
 fn load_language_from_config() -> Option<String> {
-    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let config_path = librefang_kernel::config::default_config_path();
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("language")?.as_str().map(|s| s.to_string())
@@ -303,7 +303,7 @@ fn load_language_from_config() -> Option<String> {
 /// Returns the configured level (e.g. "debug", "warn") or falls back to "info".
 fn load_log_level_from_config() -> String {
     let level = (|| -> Option<String> {
-        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let config_path = librefang_kernel::config::default_config_path();
         let content = std::fs::read_to_string(&config_path).ok()?;
         let config: toml::Value = toml::from_str(&content).ok()?;
         config.get("log_level")?.as_str().map(|s| s.to_string())
@@ -314,7 +314,7 @@ fn load_log_level_from_config() -> String {
 /// Load just the `log_dir` field from config.toml without fully deserializing.
 /// Returns the configured custom log directory, or `None` to use the default.
 fn load_log_dir_from_config() -> Option<PathBuf> {
-    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let config_path = librefang_kernel::config::default_config_path();
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("log_dir")?.as_str().map(PathBuf::from)

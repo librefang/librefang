@@ -38,6 +38,8 @@ pub(crate) mod tool_name {
     pub const MEMORY_SEMANTIC_ADD: &str = "memory_semantic_add";
     pub const MEMORY_SEMANTIC_FORGET: &str = "memory_semantic_forget";
     pub const MEMORY_SEMANTIC_STATS: &str = "memory_semantic_stats";
+    pub const MEMORY_SEMANTIC_DUPLICATES: &str = "memory_semantic_duplicates";
+    pub const MEMORY_SEMANTIC_CONSOLIDATE: &str = "memory_semantic_consolidate";
     pub const WIKI_GET: &str = "wiki_get";
     pub const WIKI_SEARCH: &str = "wiki_search";
     pub const WIKI_WRITE: &str = "wiki_write";
@@ -103,6 +105,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
     pub const WORKFLOW_CREATE: &str = "workflow_create";
+    pub const AGENT_TYPE_CREATE: &str = "agent_type_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -470,7 +473,8 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                     "properties": {
                         "query": { "type": "string", "description": "What to look for, in natural language" },
                         "limit": { "type": "integer", "description": "Max fragments to return (default 5, max 50)" },
-                        "min_confidence": { "type": "number", "description": "Drop fragments whose confidence has decayed below this floor, 0.0-1.0. Use it to ask for nothing rather than stale noise." }
+                        "min_confidence": { "type": "number", "description": "Drop fragments whose confidence has decayed below this floor, 0.0-1.0. Use it to ask for nothing rather than stale noise." },
+                        "min_similarity": { "type": "number", "description": "Drop fragments whose similarity to the query falls below this floor, -1.0-1.0. Different from min_confidence: confidence is how much the memory is still trusted, similarity is how well it answers THIS query. Set it when an empty answer is better than an unrelated one; around 0.3 is a reasonable starting point. Ignored when no embedding provider is configured, because then nothing is scored." }
                     },
                     "required": ["query"]
                 }),
@@ -500,6 +504,22 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             ToolDefinition {
                 name: tool_name::MEMORY_SEMANTIC_STATS.to_string(),
                 description: "Report how much this agent remembers semantically: total fragments, counts per level, counts per category, and whether automatic memorize/recall and LLM extraction are switched on. Use it to check whether semantic memory is actually enabled before concluding that a search found nothing because nothing was stored.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_DUPLICATES.to_string(),
+                description: "Group this agent's near-duplicate semantic memories and report the groups, changing nothing. Use it when the same claim keeps resurfacing in recall and you suspect several copies are reinforcing each other — the groups tell you which ids say the same thing. Each group lists two or more memories the store considers the same fact; you can retract the ones you disagree with individually via memory_semantic_forget, or merge a whole group with memory_semantic_consolidate where that tool is available.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::MEMORY_SEMANTIC_CONSOLIDATE.to_string(),
+                description: "Merge every near-duplicate group in this agent's semantic memory, keeping the newest memory of each group and permanently retracting the rest. This deletes memories you did not name, across the whole store, in one call, and cannot be undone from here — run memory_semantic_duplicates first and read what it reports. Returns how many memories were retracted. Only available when this agent's manifest sets `[proactive_memory] allow_self_consolidation = true`; if it is not, use memory_semantic_duplicates and report what you found instead.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},
@@ -1359,6 +1379,25 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "total_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 86400, "description": "Wall-clock limit for the whole run (ceiling 86400 = 24h). Omit to use the daemon default." }
                     },
                     "required": ["name", "steps"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::AGENT_TYPE_CREATE.to_string(),
+                description: "Author a new agent type — a reusable agent manifest stored on the daemon that agent_spawn, the dashboard and the TUI can all spawn agents from afterwards. Use this when a role is worth repeating (\"release-notes writer\", \"triage bot\"); for a one-off helper, spawn from an existing type instead. The type outlives the conversation. Names are unique across the agent-type catalog and across live agent names: a name already in use is rejected rather than overwritten, so pick another name and call again. Only the seven fields below are settable here — everything else in a manifest (triggers, MCP servers, schedules, exec policy) starts at its default and is edited afterwards through the dashboard. Returns {name, description, provider, model, tools, skills} as stored.".to_string(),
+                // The property keys are written in alphabetical order so this schema serializes identically whether serde_json's map is insertion-ordered or sorted (#3298).
+                // A tool definition reaches the LLM prompt on every request that ships it, and a key order that varies between processes invalidates the provider's prompt cache while the content is unchanged.
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string", "description": "One line on what this agent type is for, shown in the catalog an operator picks from" },
+                        "model": { "type": "string", "description": "Model id to run this type on, e.g. 'claude-sonnet-4-5'. Omit to inherit the daemon's configured default model." },
+                        "name": { "type": "string", "description": "Unique agent type name, 1-64 characters of letters, digits, '_' and '-' (e.g. 'release-notes-writer'). This is how the type is addressed afterwards, and it is also the file name on disk." },
+                        "provider": { "type": "string", "description": "LLM provider for this type, e.g. 'anthropic' or 'openai'. Omit to inherit the daemon's configured default provider." },
+                        "skills": { "type": "array", "items": { "type": "string" }, "description": "Skills installed on agents spawned from this type" },
+                        "system_prompt": { "type": "string", "description": "The system prompt agents of this type run with. An empty string is stored as an empty prompt, not replaced with canned text." },
+                        "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names granted to agents spawned from this type (agent_list shows what an existing agent has). Omit for the manifest default." }
+                    },
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {

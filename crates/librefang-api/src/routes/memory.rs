@@ -1174,6 +1174,7 @@ pub async fn memory_stats_agent(
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(agent_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1181,7 +1182,16 @@ pub async fn memory_duplicates(
         Err(e) => return e,
     };
 
-    match store.find_duplicates(&agent_id, None).await {
+    // Duplicate groups are memory contents, so this read needs the same
+    // namespace gate and PII redaction every other memory read gets — it was
+    // the one `/api/memory` read that had neither (#7808).
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+
+    match store
+        .find_duplicates_with_guard(&agent_id, None, &guard)
+        .await
+    {
         Ok(groups) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1254,14 +1264,12 @@ pub async fn memory_consolidate(
 
     let user_ref = api_user.as_ref().map(|e| &e.0);
     let guard = guard_for_user(&state, user_ref);
-    // Consolidate merges and soft-deletes duplicate memories → delete capability.
-    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
-        guard.check_delete("proactive")
-    {
-        return auth_denied_for(&state, user_ref, reason);
-    }
 
-    match store.consolidate(&agent_id).await {
+    // Consolidate merges and soft-deletes duplicate memories → delete
+    // capability. The gate lives in `consolidate_with_guard` so this route and
+    // the agent-callable `memory_semantic_consolidate` tool cannot drift apart
+    // on what consolidation costs (#7808).
+    match store.consolidate_with_guard(&agent_id, &guard).await {
         Ok(merged) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1765,14 +1773,14 @@ pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
     // Keep the complete read-modify-write-reload transaction under the shared config lock.
     // Otherwise two unrelated dashboard saves can read the same snapshot and the later write silently reverts the earlier one.
     let _config_guard = state.config_write_lock.lock().await;
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let content = match tokio::fs::read_to_string(&config_path).await {
         Ok(c) => c,

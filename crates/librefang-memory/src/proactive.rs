@@ -1865,16 +1865,105 @@ impl ProactiveMemoryStore {
         query: &str,
         user_id: &str,
         limit: usize,
+        min_similarity: Option<f32>,
         guard: &crate::namespace_acl::MemoryNamespaceGuard,
     ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
         if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
             return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
         }
-        let mut items =
-            <Self as librefang_types::memory::ProactiveMemory>::search(self, query, user_id, limit)
-                .await?;
+        let mut items = match min_similarity {
+            // No per-call floor: take the trait path, which already applies the
+            // configured default.
+            None => {
+                <Self as librefang_types::memory::ProactiveMemory>::search(
+                    self, query, user_id, limit,
+                )
+                .await?
+            }
+            Some(floor) => self.search_with_floor(query, user_id, limit, floor).await?,
+        };
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Per-agent semantic search with an explicit cosine floor, overriding
+    /// [`ProactiveMemoryConfig::min_similarity`](librefang_types::memory::ProactiveMemoryConfig::min_similarity) for this one call (#7808).
+    ///
+    /// Deliberately *not* graph-enriched, unlike the trait `search`.
+    /// The synthetic knowledge-graph item that path appends carries no embedding and therefore no
+    /// similarity, so a caller who asked for "only fragments scoring at least `floor`" would get
+    /// back an item that was never measured against the floor at all — the one result guaranteed
+    /// to violate the guarantee they asked for.
+    async fn search_with_floor(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+        floor: f32,
+    ) -> librefang_types::error::LibreFangResult<Vec<MemoryItem>> {
+        self.maybe_run_maintenance();
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let filter = Some(MemoryFilter {
+            min_similarity: Some(floor),
+            ..MemoryFilter::agent(agent_id)
+        });
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&qe))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
+        Ok(results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .take(limit)
+            .collect())
+    }
+
+    /// Read-only duplicate inspection, gated on read access to the `proactive`
+    /// namespace (#7808).
+    ///
+    /// The counterpart to [`Self::consolidate_with_guard`] that changes nothing: it reports the
+    /// groups consolidation *would* merge, so an operator — or an agent that has not been granted
+    /// the destructive half — can see the pile of near-duplicates reinforcing a stale belief
+    /// without being able to act on it unattended.
+    /// PII redaction applies to every group, matching every other read wrapper.
+    pub async fn find_duplicates_with_guard(
+        &self,
+        user_id: &str,
+        level: Option<MemoryLevel>,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<Vec<MemoryItem>>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut groups = self.find_duplicates(user_id, level).await?;
+        for group in &mut groups {
+            guard.redact_all(group);
+        }
+        Ok(groups)
+    }
+
+    /// Consolidation wrapper. Requires the `delete` capability on the
+    /// `proactive` namespace, not merely `write` (#7808).
+    ///
+    /// Consolidation merges each near-duplicate group into its newest member and soft-deletes the
+    /// rest, so its effect on the store is deletion regardless of how the operation is named — and
+    /// the gate has to match the effect, not the name.
+    /// This is the same capability [`Self::reset_with_guard`] demands for the same reason.
+    pub async fn consolidate_with_guard(
+        &self,
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<u64> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.consolidate(user_id).await
     }
 
     /// Delete wrapper that gates access to the `proactive` namespace and
@@ -2109,8 +2198,13 @@ impl ProactiveMemory for ProactiveMemoryStore {
         self.maybe_run_maintenance();
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Filter by agent to avoid cross-agent leakage
-        let filter = Some(MemoryFilter::agent(agent_id));
+        // Filter by agent to avoid cross-agent leakage, and carry the
+        // deployment-wide similarity floor so automatic recall gets the same
+        // "nothing rather than noise" guarantee the search tool offers (#7808).
+        let filter = Some(MemoryFilter {
+            min_similarity: self.read_config().min_similarity,
+            ..MemoryFilter::agent(agent_id)
+        });
 
         // Use vector search if embedding driver available
         let results = if let Some(ref emb) = self.embedding {
@@ -4113,6 +4207,7 @@ mod tests {
             image_url: None,
             image_embedding: None,
             modality: Default::default(),
+            similarity: None,
         };
 
         // A new memory with similar content + same category. With the
@@ -5351,6 +5446,58 @@ mod tests {
         assert!(
             matches!(decay_err, Err(LibreFangError::AuthDenied(_))),
             "decay_confidence_with_guard must deny Viewer; got {decay_err:?}"
+        );
+
+        // #7808: consolidation reads like maintenance and behaves like a bulk
+        // delete — it merges near-duplicate groups and soft-deletes every
+        // member but the newest. The gate has to match the effect.
+        let consolidate_err = store.consolidate_with_guard(&agent, &viewer).await;
+        assert!(
+            matches!(consolidate_err, Err(LibreFangError::AuthDenied(_))),
+            "consolidate_with_guard must deny Viewer; got {consolidate_err:?}"
+        );
+
+        // Its read-only counterpart must NOT be denied to a Viewer: reporting
+        // which memories duplicate each other changes nothing, and withholding
+        // it would leave a read-only operator unable to see why recall is
+        // repeating itself.
+        let duplicates = store
+            .find_duplicates_with_guard(&agent, None, &viewer)
+            .await;
+        assert!(
+            duplicates.is_ok(),
+            "find_duplicates_with_guard is a read and must be allowed to Viewer; got {duplicates:?}"
+        );
+    }
+
+    /// #7808: the read half of the duplicate surface is still a memory read, so
+    /// an ACL that denies `proactive` reads must deny it — the failing-open
+    /// alternative would hand a caller barred from `list_with_guard` the same
+    /// contents grouped differently.
+    #[tokio::test]
+    async fn find_duplicates_with_guard_denies_unauthorised_read() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::error::LibreFangError;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let denied = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["kv:self".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        });
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new().to_string();
+
+        let err = store
+            .find_duplicates_with_guard(&agent, None, &denied)
+            .await;
+        assert!(
+            matches!(err, Err(LibreFangError::AuthDenied(_))),
+            "find_duplicates_with_guard must deny a caller with no proactive read; got {err:?}"
         );
     }
 }

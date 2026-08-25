@@ -34,6 +34,23 @@ use tracing::{debug, error, warn};
 /// should attach an external `VectorStore` backend.
 const MAX_BRUTEFORCE_CANDIDATES: usize = 5000;
 
+/// Upper bound on how many bm25-ranked ids the `memories_fts` lookup hands to
+/// the hydrating SELECT (#7808).
+///
+/// Deliberately far below [`MAX_BRUTEFORCE_CANDIDATES`]: these ids become bound
+/// parameters in an `id IN (?,?,…)` clause, and a 5000-parameter statement is
+/// both close to SQLite's variable ceiling and slower to prepare than the
+/// relevance it buys — bm25 has already ordered the matches, so a caller asking
+/// for at most 50 fragments gains nothing from a 5000th-ranked candidate.
+/// The remaining SQL predicates (scope, confidence, peer_id, …) run after this
+/// cut, which is why it over-fetches at all rather than stopping at `limit`.
+const MAX_FTS_CANDIDATES: usize = 500;
+
+/// Upper bound on how many terms a natural-language query contributes to the
+/// FTS5 `MATCH` expression, so a pathological paste cannot build a query string
+/// SQLite has to parse into thousands of OR-ed phrases.
+const MAX_FTS_TERMS: usize = 32;
+
 /// Semantic store backed by SQLite with optional vector search.
 ///
 /// When a [`VectorStore`] backend is provided, vector similarity search in
@@ -274,7 +291,35 @@ impl SemanticStore {
         // before that borrow occurs.
         let mut conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Build SQL: fetch candidates (broader than limit for vector re-ranking)
+        // ── Full-text pre-selection when there is no query embedding ──
+        //
+        // Without this the no-embedding path was `content LIKE '%{query}%'`
+        // (#7808): a substring scan that only matches when the caller's entire
+        // phrasing appears verbatim inside a memory, which a natural-language
+        // question essentially never does. `memories_fts` (v49) turns the same
+        // path into a real inverted-index lookup ranked by bm25.
+        //
+        // Strictly additive: a query that yields no FTS hits falls through to
+        // the LIKE predicate below, so substring matches that FTS's word
+        // boundaries would miss ("fang" inside "librefang") still work, and a
+        // deployment whose index has not been built yet degrades to exactly
+        // the old behaviour instead of going silent.
+        let fts_ranked: Option<Vec<String>> = if query_embedding.is_none() && !query.is_empty() {
+            fts_candidate_ids(
+                &conn,
+                query,
+                filter.as_ref().and_then(|f| f.agent_id),
+                MAX_FTS_CANDIDATES,
+            )
+        } else {
+            None
+        };
+
+        // Build SQL: fetch candidates (broader than limit for re-ranking).
+        // Both re-ranked paths — cosine and bm25 — order in Rust after the
+        // rows are materialized, so both must over-fetch for the same reason:
+        // a `LIMIT limit` here would let the SQL ordering, not relevance,
+        // decide which rows the ranker ever sees.
         let fetch_limit = if query_embedding.is_some() {
             // Cosine re-ranking (below) decides final relevance, so the
             // candidate set must NOT be pre-filtered by recency — an old,
@@ -283,6 +328,10 @@ impl SemanticStore {
             // MAX_BRUTEFORCE_CANDIDATES rather than the 100 most-recently
             // accessed rows, which silently dropped relevant older memories.
             (limit * 10).max(MAX_BRUTEFORCE_CANDIDATES)
+        } else if fts_ranked.is_some() {
+            // The `id IN (…)` list already caps this path at
+            // MAX_FTS_CANDIDATES rows; the LIMIT is belt-and-braces.
+            MAX_FTS_CANDIDATES
         } else {
             limit
         };
@@ -294,8 +343,22 @@ impl SemanticStore {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut param_idx = 1;
 
-        // Text search filter (only when no embeddings — vector search handles relevance)
-        if query_embedding.is_none() && !query.is_empty() {
+        // Text search filter (only when no embeddings — vector search handles
+        // relevance). The FTS index answers first when it matched anything;
+        // LIKE remains the fallback for the queries it cannot serve.
+        if let Some(ref ids) = fts_ranked {
+            let placeholders = ids
+                .iter()
+                .enumerate()
+                .map(|(offset, _)| format!("?{}", param_idx + offset))
+                .collect::<Vec<_>>()
+                .join(",");
+            sql.push_str(&format!(" AND id IN ({placeholders})"));
+            for id in ids {
+                params.push(Box::new(id.clone()));
+                param_idx += 1;
+            }
+        } else if query_embedding.is_none() && !query.is_empty() {
             sql.push_str(&format!(" AND content LIKE ?{param_idx} ESCAPE '\\'"));
             params.push(Box::new(format!("%{}%", escape_like(query))));
             param_idx += 1;
@@ -406,9 +469,9 @@ impl SemanticStore {
             let _ = param_idx;
         }
 
-        if query_embedding.is_some() {
-            // Similarity-neutral candidate ordering: recency (accessed_at) must
-            // not decide which rows reach cosine re-ranking, or an
+        if query_embedding.is_some() || fts_ranked.is_some() {
+            // Relevance-neutral candidate ordering: recency (accessed_at) must
+            // not decide which rows reach cosine or bm25 re-ranking, or an
             // old-but-relevant memory outside the recency window is silently
             // dropped. `created_at DESC` only breaks ties when the store is
             // larger than the cap.
@@ -534,32 +597,83 @@ impl SemanticStore {
                 image_url,
                 image_embedding,
                 modality,
+                // Filled in by the cosine pass below when there is a query
+                // embedding; stays `None` on the text-match path, where no
+                // similarity was measured (#7808).
+                similarity: None,
             });
         }
 
+        // Restore the bm25 ordering the FTS lookup produced. The SELECT above
+        // reads `id IN (...)`, which SQLite is free to return in any order, so
+        // relevance has to be re-imposed here — otherwise the index would only
+        // decide *which* rows match and `created_at DESC` would decide which
+        // of them survive the truncation, which is the recency bias the
+        // over-fetch exists to avoid. Rows the FTS lookup did not rank cannot
+        // occur (they came from that id list) but sort last if they ever do.
+        if let Some(ref ids) = fts_ranked {
+            let rank: HashMap<&str, usize> = ids
+                .iter()
+                .enumerate()
+                .map(|(position, id)| (id.as_str(), position))
+                .collect();
+            fragments.sort_by_key(|frag| {
+                rank.get(frag.id.0.to_string().as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+            fragments.truncate(limit);
+            debug!(
+                "FTS recall: {} results from {candidate_count} candidates",
+                fragments.len(),
+            );
+        }
+
         // If we have a query embedding, re-rank by cosine similarity.
-        // Non-comparable vectors (dim mismatch, zero magnitude) sort to
-        // the bottom (NEG_INFINITY sentinel) instead of being treated as
-        // 0.0, which would have ranked them above genuinely orthogonal
-        // hits. We deliberately do NOT use -1.0: that is a valid cosine
-        // result for anti-similar vectors and would tie with the
+        // Non-comparable vectors (dim mismatch, zero magnitude) score `None`
+        // and sort to the bottom on a NEG_INFINITY sentinel instead of being
+        // treated as 0.0, which would have ranked them above genuinely
+        // orthogonal hits. We deliberately do NOT use -1.0: that is a valid
+        // cosine result for anti-similar vectors and would tie with the
         // "non-comparable" bucket.
+        //
+        // The score is now stamped onto the fragment before the sort rather
+        // than computed inside the comparator and discarded (#7808). Two
+        // reasons: callers need the number (a similarity floor is impossible
+        // without it, and the search tool reports it so a model can judge how
+        // much a fragment is worth trusting), and the comparator was
+        // recomputing cosine O(n log n) times over vectors of ~1500 floats
+        // where O(n) suffices.
         if let Some(qe) = query_embedding {
+            for frag in &mut fragments {
+                frag.similarity = frag
+                    .embedding
+                    .as_deref()
+                    .and_then(|e| cosine_similarity(qe, e));
+            }
             fragments.sort_by(|a, b| {
-                let sim_a = a
-                    .embedding
-                    .as_deref()
-                    .and_then(|e| cosine_similarity(qe, e))
-                    .unwrap_or(f32::NEG_INFINITY);
-                let sim_b = b
-                    .embedding
-                    .as_deref()
-                    .and_then(|e| cosine_similarity(qe, e))
-                    .unwrap_or(f32::NEG_INFINITY);
+                let sim_a = a.similarity.unwrap_or(f32::NEG_INFINITY);
+                let sim_b = b.similarity.unwrap_or(f32::NEG_INFINITY);
                 sim_b
                     .partial_cmp(&sim_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+            // Similarity floor (#7808): "nothing rather than noise".
+            // Applied after ranking and before truncation, so the floor
+            // decides membership rather than merely reordering the same top-k.
+            // A fragment with no measurable similarity is dropped too — the
+            // caller asked for a measured minimum, and an unmeasured row
+            // cannot clear it.
+            if let Some(floor) = filter.as_ref().and_then(|f| f.min_similarity) {
+                let before = fragments.len();
+                fragments.retain(|frag| frag.similarity.is_some_and(|s| s >= floor));
+                if fragments.len() < before {
+                    debug!(
+                        "Vector recall: similarity floor {floor} dropped {} of {before} ranked candidates",
+                        before - fragments.len(),
+                    );
+                }
+            }
             fragments.truncate(limit);
             debug!(
                 "Vector recall: {} results from {candidate_count} candidates",
@@ -683,6 +797,20 @@ impl SemanticStore {
         // pushes into SQLite for the fields carried by MemoryFragment.
         if let Some(ref f) = filter {
             fragments.retain(|frag| fragment_matches_filter(frag, f));
+        }
+
+        // Carry the backend's own similarity onto the fragments, then apply the
+        // caller's floor (#7808). The external path never reaches the cosine
+        // block in `recall_impl`, so without this a `min_similarity` request
+        // would be silently ignored the moment a VectorStore is attached — the
+        // floor would hold on the SQLite path and evaporate on the one built
+        // for large stores.
+        let scores: HashMap<&str, f32> = results.iter().map(|r| (r.id.as_str(), r.score)).collect();
+        for frag in &mut fragments {
+            frag.similarity = scores.get(frag.id.0.to_string().as_str()).copied();
+        }
+        if let Some(floor) = filter.as_ref().and_then(|f| f.min_similarity) {
+            fragments.retain(|frag| frag.similarity.is_some_and(|s| s >= floor));
         }
 
         // Update access counts — see note on the SQLite-path
@@ -1354,6 +1482,100 @@ fn fragment_matches_filter(frag: &MemoryFragment, f: &MemoryFilter) -> bool {
     true
 }
 
+/// Build an FTS5 `MATCH` expression from a natural-language query (#7808).
+///
+/// The query is split on every non-alphanumeric character and each surviving
+/// token is emitted as a quoted phrase, OR-ed together.
+/// Splitting that way is also what makes the result injection-proof: a token
+/// can only contain alphanumerics, so no token can carry a quote, a `*`, a
+/// `NEAR`, or any other character FTS5's query grammar treats as syntax.
+/// Passing a raw user question straight to `MATCH` would instead be a parse
+/// error on the first apostrophe or question mark, and would surface as a
+/// failed recall rather than a bad one.
+///
+/// `OR` rather than `AND` because bm25 already rewards documents matching more
+/// of the terms: `AND` would return nothing for a question whose every word
+/// must appear in one memory, which is the LIKE failure mode in a new costume.
+///
+/// Returns `None` when the query contributes no usable term (punctuation only),
+/// which the caller reads as "no FTS pre-selection" rather than "no results".
+fn fts_match_expression(query: &str) -> Option<String> {
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .take(MAX_FTS_TERMS)
+        .map(|token| format!("\"{token}\""))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+/// Look up bm25-ranked memory ids for `query` in the `memories_fts` index.
+///
+/// `None` means "no usable FTS pre-selection" — no parseable term, no matching
+/// row, or an index that could not be queried — and the caller must fall back
+/// to the `content LIKE` predicate rather than treating it as an empty result
+/// set. That distinction is the whole safety property of this function: FTS can
+/// only ever add matches to the no-embedding path, never remove them.
+///
+/// Index errors are logged and swallowed for the same reason. The index is a
+/// derivative of `memories` maintained by triggers, so a missing or corrupt one
+/// is an operational fault to repair (`rebuild_memories_fts`), not a reason to
+/// fail a recall that the base table can still answer.
+fn fts_candidate_ids(
+    conn: &rusqlite::Connection,
+    query: &str,
+    agent_id: Option<AgentId>,
+    limit: usize,
+) -> Option<Vec<String>> {
+    let expression = fts_match_expression(query)?;
+
+    // `agent_id` is UNINDEXED in the FTS table, so this is a filter over the
+    // matched rows rather than an index probe — still far cheaper than
+    // hydrating another agent's matches only to discard them in SQL.
+    let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_id {
+        Some(agent) => (
+            "SELECT memory_id FROM memories_fts \
+             WHERE memories_fts MATCH ?1 AND agent_id = ?2 \
+             ORDER BY rank LIMIT ?3",
+            vec![
+                Box::new(expression),
+                Box::new(agent.0.to_string()),
+                Box::new(limit as i64),
+            ],
+        ),
+        None => (
+            "SELECT memory_id FROM memories_fts \
+             WHERE memories_fts MATCH ?1 \
+             ORDER BY rank LIMIT ?2",
+            vec![Box::new(expression), Box::new(limit as i64)],
+        ),
+    };
+
+    let read = || -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = conn.prepare(sql)?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?;
+        rows.collect()
+    };
+
+    match read() {
+        Ok(ids) if ids.is_empty() => None,
+        Ok(ids) => Some(ids),
+        Err(e) => {
+            debug!(
+                error = %e,
+                "memories_fts lookup failed; falling back to LIKE matching"
+            );
+            None
+        }
+    }
+}
+
 /// Deserialize embedding from bytes.
 fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
     bytes
@@ -1452,6 +1674,8 @@ fn decode_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryFragment
         image_url,
         image_embedding,
         modality,
+        // Row decoding carries no query, so no similarity was measured (#7808).
+        similarity: None,
     })
 }
 
@@ -1843,6 +2067,405 @@ mod tests {
             store.forget(*id).unwrap();
         }
         assert_eq!(store.count(agent_id, None).unwrap(), 4);
+    }
+
+    /// Store one memory carrying `embedding`, returning its id.
+    fn remember_vec(store: &SemanticStore, agent: AgentId, content: &str, embedding: &[f32]) {
+        store
+            .remember_with_embedding(
+                agent,
+                content,
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(embedding),
+                None,
+                None,
+                MemoryModality::Text,
+            )
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // #7808 — the similarity floor.
+    // -----------------------------------------------------------------
+
+    /// The score the ranker computes must survive onto the fragment.
+    ///
+    /// Before #7808 `cosine_similarity` was called inside the `sort_by`
+    /// closure and its result dropped on the floor, so rank order was the only
+    /// thing a caller ever learned. Everything below depends on the number
+    /// being carried out, so pin that first.
+    #[test]
+    fn recall_carries_the_cosine_score_onto_each_fragment() {
+        let store = setup();
+        let agent = AgentId::new();
+        remember_vec(&store, agent, "exactly on axis", &[1.0, 0.0]);
+        remember_vec(&store, agent, "orthogonal", &[0.0, 1.0]);
+
+        let results = store
+            .recall_with_embedding("anything", 10, None, Some(&[1.0, 0.0]))
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content, "exactly on axis");
+        let top = results[0]
+            .similarity
+            .expect("ranked fragment must carry a score");
+        let bottom = results[1]
+            .similarity
+            .expect("ranked fragment must carry a score");
+        assert!(
+            (top - 1.0).abs() < 1e-5,
+            "identical vectors score 1.0, got {top}"
+        );
+        assert!(
+            bottom.abs() < 1e-5,
+            "orthogonal vectors score 0.0, got {bottom}"
+        );
+    }
+
+    /// A text-match recall measures nothing, so it must report nothing rather
+    /// than a plausible-looking zero.
+    #[test]
+    fn recall_without_an_embedding_reports_no_similarity() {
+        let store = setup();
+        let agent = AgentId::new();
+        remember_vec(
+            &store,
+            agent,
+            "the deploy pipeline runs on Fridays",
+            &[1.0, 0.0],
+        );
+
+        let results = store.recall("deploy", 10, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].similarity, None,
+            "an unranked fragment must carry None, never 0.0 — 0.0 is a measured miss"
+        );
+    }
+
+    /// The floor decides membership, not merely order: a query whose only
+    /// candidates are irrelevant must come back empty.
+    ///
+    /// This is the failure the floor exists for. With none, recall over-fetches,
+    /// ranks, and truncates to top-k, so a sparse store hands the prompt its
+    /// least-bad rows and the model reads them as answers.
+    #[test]
+    fn recall_similarity_floor_excludes_low_scoring_rows() {
+        let store = setup();
+        let agent = AgentId::new();
+        remember_vec(&store, agent, "near match", &[1.0, 0.1]);
+        remember_vec(&store, agent, "orthogonal noise", &[0.0, 1.0]);
+        remember_vec(&store, agent, "opposite", &[-1.0, 0.0]);
+
+        let query = [1.0_f32, 0.0];
+
+        // No floor: every candidate survives, including the two that answer
+        // nothing — the pre-#7808 behaviour, pinned so a regression is visible.
+        let unfiltered = store
+            .recall_with_embedding("q", 10, None, Some(&query))
+            .unwrap();
+        assert_eq!(
+            unfiltered.len(),
+            3,
+            "without a floor every candidate is returned"
+        );
+
+        let filter = MemoryFilter {
+            min_similarity: Some(0.5),
+            ..Default::default()
+        };
+        let filtered = store
+            .recall_with_embedding("q", 10, Some(filter), Some(&query))
+            .unwrap();
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only the near match clears a 0.5 floor; got {:?}",
+            filtered
+                .iter()
+                .map(|f| (&f.content, f.similarity))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(filtered[0].content, "near match");
+
+        // A floor nothing reaches yields nothing, which is the whole point:
+        // "ask for nothing rather than noise" has to be able to return nothing.
+        let filter = MemoryFilter {
+            min_similarity: Some(0.999),
+            ..Default::default()
+        };
+        let none = store
+            .recall_with_embedding("q", 10, Some(filter), Some(&query))
+            .unwrap();
+        assert!(
+            none.is_empty(),
+            "an unreachable floor must return an empty set"
+        );
+    }
+
+    /// A fragment with no stored embedding cannot be measured, so it cannot
+    /// clear a floor — promoting it would hand back the one row guaranteed to
+    /// violate the guarantee the caller asked for.
+    #[test]
+    fn recall_similarity_floor_drops_unmeasurable_fragments() {
+        let store = setup();
+        let agent = AgentId::new();
+        remember_vec(&store, agent, "measurable", &[1.0, 0.0]);
+        store
+            .remember(
+                agent,
+                "no embedding at all",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let filter = MemoryFilter {
+            min_similarity: Some(0.5),
+            ..Default::default()
+        };
+        let results = store
+            .recall_with_embedding("q", 10, Some(filter), Some(&[1.0, 0.0]))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "measurable");
+    }
+
+    /// The floor is a post-ranking cut, and there is no ranking to cut on the
+    /// text-match path. Applying it there would silently empty the fallback the
+    /// no-embedding deployments live on.
+    #[test]
+    fn recall_similarity_floor_is_inert_without_a_query_embedding() {
+        let store = setup();
+        let agent = AgentId::new();
+        remember_vec(
+            &store,
+            agent,
+            "the deploy pipeline runs on Fridays",
+            &[1.0, 0.0],
+        );
+
+        let filter = MemoryFilter {
+            min_similarity: Some(0.99),
+            ..Default::default()
+        };
+        let results = store.recall("deploy", 10, Some(filter)).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "a floor must not empty a recall that measured no similarity"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // #7808 — memories_fts.
+    // -----------------------------------------------------------------
+
+    /// Search with no embedding provider must go through the FTS index, and
+    /// that has to be observable rather than inferred: a query whose words
+    /// appear in the memory but whose phrasing does not is exactly the query
+    /// `content LIKE '%…%'` cannot answer and an inverted index can.
+    #[test]
+    fn recall_without_embeddings_matches_via_fts_not_substring() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "The staging deploy pipeline runs every Friday afternoon",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // The old LIKE path looked for this whole string inside the content and
+        // found nothing. FTS matches on the terms.
+        let results = store
+            .recall("when does the deploy pipeline run?", 10, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "a natural-language question must reach the memory whose words it shares"
+        );
+        assert!(results[0].content.contains("deploy pipeline"));
+    }
+
+    /// FTS ranking must survive the hydrating SELECT. `id IN (...)` returns
+    /// rows in whatever order SQLite likes, so bm25 order has to be re-imposed
+    /// in Rust — otherwise the index picks the candidates and `created_at`
+    /// picks the winners, which is the recency bias the over-fetch exists to
+    /// avoid.
+    #[test]
+    fn fts_recall_orders_by_relevance_not_recency() {
+        let store = setup();
+        let agent = AgentId::new();
+        // Written first, so `created_at DESC` would rank it LAST.
+        store
+            .remember(
+                agent,
+                "kubernetes ingress certificate rotation runbook",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent,
+                "lunch preferences: no coriander",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent,
+                "the office kubernetes cluster is in Frankfurt",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let results = store
+            .recall("kubernetes ingress certificate rotation", 10, None)
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0].content.contains("runbook"),
+            "the memory sharing four query terms must outrank the one sharing one, \
+             regardless of write order; got {:?}",
+            results.iter().map(|f| &f.content).collect::<Vec<_>>()
+        );
+        assert!(
+            !results.iter().any(|f| f.content.contains("coriander")),
+            "a memory sharing no term with the query must not be returned at all"
+        );
+    }
+
+    /// FTS may only ever add matches. A substring hit that lands inside a word
+    /// has no FTS term to match, so the LIKE path must still answer it.
+    #[test]
+    fn fts_miss_falls_back_to_substring_matching() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "we deployed librefang to the edge nodes",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // "fang" is not a token in "librefang", so FTS returns nothing and the
+        // LIKE fallback has to carry the query.
+        let results = store.recall("fang", 10, None).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "an FTS miss must fall through to substring matching, not report an empty store"
+        );
+    }
+
+    /// A query made entirely of punctuation contributes no FTS term. That must
+    /// read as "no pre-selection" and fall through, not as "no results".
+    #[test]
+    fn fts_ignores_a_query_with_no_usable_terms() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "??? mystery memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(fts_match_expression("???"), None);
+        let results = store.recall("???", 10, None).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "the LIKE path still answers a term-free query"
+        );
+    }
+
+    /// The MATCH expression is built from alphanumeric runs only, so nothing a
+    /// caller types can reach FTS5's query grammar as syntax.
+    #[test]
+    fn fts_match_expression_neutralises_query_syntax() {
+        let expression = fts_match_expression("what's \"broken\" NEAR* deploy?").unwrap();
+        assert_eq!(
+            expression,
+            "\"what\" OR \"s\" OR \"broken\" OR \"NEAR\" OR \"deploy\""
+        );
+        assert!(
+            !expression.contains('*') && !expression.contains('\''),
+            "no query character may survive as FTS5 syntax: {expression}"
+        );
+        assert_eq!(
+            fts_match_expression("   ").as_deref(),
+            None,
+            "whitespace contributes no term"
+        );
+        // The term cap holds, so a pasted document cannot build an unbounded
+        // OR-chain for SQLite to parse.
+        let long: String = (0..MAX_FTS_TERMS * 3)
+            .map(|i| format!("term{i} "))
+            .collect();
+        let capped = fts_match_expression(&long).unwrap();
+        assert_eq!(capped.matches(" OR ").count(), MAX_FTS_TERMS - 1);
+    }
+
+    /// The triggers, not the write paths, keep the index in step — so an
+    /// edit or a hard delete made anywhere in the crate stays indexed.
+    #[test]
+    fn memories_fts_tracks_updates_and_deletes() {
+        let store = setup();
+        let agent = AgentId::new();
+        store
+            .remember(
+                agent,
+                "the incident postmortem is scheduled",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(store.recall("postmortem", 10, None).unwrap().len(), 1);
+
+        // The pool is single-connection in these tests, so every direct SQL
+        // step has to release its handle before the store needs one back.
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE memories SET content = 'the incident retrospective is scheduled'",
+                [],
+            )
+            .unwrap();
+        }
+        assert!(
+            store.recall("postmortem", 10, None).unwrap().is_empty(),
+            "the old term must leave the index when the row is edited"
+        );
+        assert_eq!(store.recall("retrospective", 10, None).unwrap().len(), 1);
+
+        let conn = store.pool.get().unwrap();
+        conn.execute("DELETE FROM memories", []).unwrap();
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "a hard delete must take its FTS row with it");
     }
 
     #[test]

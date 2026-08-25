@@ -1608,7 +1608,7 @@ pub async fn set_provider_key(
     // This handler writes `secrets.env` at the top and only *conditionally* reaches `persist_default_model` further down — the auto-switch branches depend on whether the current default already has a working key, which the caller cannot predict.
     // A guard at the config write would therefore refuse a request that had already rewritten `secrets.env` and mutated the process environment, and would return 200 or 423 for the identical request depending on daemon state.
     // Refusing first keeps the request atomic and the contract documentable: in a managed deployment provider credentials come from the environment or secret manifest, not from this route.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
@@ -1764,7 +1764,7 @@ pub async fn set_provider_key(
         };
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
-            let config_path = state.kernel.home_dir().join("config.toml");
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
                 tracing::warn!("Failed to persist default_model to config.toml: {e}");
             }
@@ -1803,7 +1803,7 @@ pub async fn set_provider_key(
         };
         if let Some(model_id) = replacement {
             let old_model = current_model.clone();
-            let config_path = state.kernel.home_dir().join("config.toml");
+            let config_path = state.kernel.config_path().to_path_buf();
             if let Err(e) = persist_default_model(&config_path, &name, &model_id, &env_var) {
                 tracing::warn!("Failed to persist default_model to config.toml: {e}");
             }
@@ -2574,7 +2574,7 @@ pub async fn set_provider_url(
 ) -> impl IntoResponse {
     // Managed mode (#6695): `[provider_urls]` and `[provider_proxy_urls]` are deployment configuration, persisted below at `upsert_provider_url` / `upsert_provider_proxy_url`.
     // Refuse before the in-memory catalog is mutated, so a refused request leaves neither the file nor the live catalog moved — otherwise the running daemon would drift from the manifest with nothing on disk to show for it.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
@@ -2635,7 +2635,7 @@ pub async fn set_provider_url(
     // lock prevents another config endpoint from committing a stale snapshot,
     // while spawn_blocking keeps config parsing and the fsync-backed atomic
     // replacement off the Tokio worker.
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     let _config_guard = state.config_write_lock.lock().await;
     let persist_name = name.clone();
     let persist_base_url = base_url.clone();
@@ -2774,7 +2774,7 @@ pub async fn set_default_provider(
     // Managed mode (#6695): the whole point of this route is to persist `[default_model]` into config.toml (`persist_default_model` below), which a managed deployment owns.
     // The guard runs before the catalog refreshes because those issue outbound HTTP to OpenRouter / EveryAPI — a refused request should cost nothing, and refreshing a catalog we are about to refuse to act on is pure waste.
     // Refusing here also keeps the in-memory `default_model_override` aligned with the file: the persist failure below is only a `warn!`, so without the guard a managed deployment would answer 200 and hot-switch the live default while the manifest kept saying otherwise — the exact silent drift managed mode exists to prevent.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
@@ -2841,7 +2841,7 @@ pub async fn set_default_provider(
     };
 
     // Update config.toml to persist the switch
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     let persisted = match persist_default_model(&config_path, &name, &model_id, &env_var) {
         Ok(()) => true,
         Err(e) => {

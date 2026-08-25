@@ -72,9 +72,14 @@ impl LibreFangKernel {
     /// #6651; the call is idempotent, so make it unconditionally right after
     /// the `Arc` wrap.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
-        let config = load_config(config_path)
+        // Resolve the path *before* loading, and hand the same value to the kernel.
+        // `load_config(None)` would resolve it internally and throw it away, leaving every later reader to guess at it from `home_dir` — which is wrong under `LIBREFANG_CONFIG_PATH`, wrong under `--config`, and wrong for a file whose own `home_dir` key points elsewhere (#6695).
+        let config_path = config_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(crate::config::default_config_path);
+        let config = load_config(Some(&config_path))
             .map_err(|e| crate::error::KernelError::LibreFang(LibreFangError::Config(e)))?;
-        Self::boot_with_config(config)
+        Self::boot_with_config_at(Some(config_path), config)
     }
 
     /// Boot the kernel with an explicit configuration.
@@ -89,8 +94,25 @@ impl LibreFangKernel {
     /// Carries the same post-boot obligation as [`Self::boot`]: wrap the
     /// returned kernel in an `Arc` and call [`Self::set_self_handle`] on it
     /// before anything can dispatch an agent turn.
-    pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
+    pub fn boot_with_config(config: KernelConfig) -> KernelResult<Self> {
+        Self::boot_with_config_at(None, config)
+    }
+
+    /// Boot the kernel with an explicit configuration *and* the file it came from.
+    ///
+    /// `config_path` is the path the kernel will re-read on hot-reload, watch for changes, and persist API config writes into.
+    /// `None` means "the caller built this config in memory": the path is then derived with [`crate::config::config_path_for`], which honours `LIBREFANG_CONFIG_PATH` and otherwise falls back to the config's own `home_dir`.
+    ///
+    /// Same post-boot obligation as [`Self::boot`].
+    pub fn boot_with_config_at(
+        config_path: Option<PathBuf>,
+        mut config: KernelConfig,
+    ) -> KernelResult<Self> {
         use librefang_types::config::KernelMode;
+
+        // One resolution, recorded on the kernel, used by every later reader and writer.
+        let config_path_boot =
+            config_path.unwrap_or_else(|| crate::config::config_path_for(&config));
 
         // Env var overrides — useful for Docker where config.toml is baked in.
         if let Ok(listen) = std::env::var("LIBREFANG_LISTEN") {
@@ -1302,7 +1324,10 @@ impl LibreFangKernel {
         // silently replace the caller's in-memory config with whatever is on
         // disk, which is wrong when the caller started the kernel with a
         // non-default config path or a programmatically-built config.
-        let migrated = match librefang_runtime::mcp_migrate::migrate_if_needed(&config.home_dir) {
+        let migrated = match librefang_runtime::mcp_migrate::migrate_if_needed(
+            &config.home_dir,
+            &config_path_boot,
+        ) {
             Ok(Some(summary)) => {
                 info!("MCP migration: {summary}");
                 true
@@ -1320,7 +1345,7 @@ impl LibreFangKernel {
         info!("MCP catalog: {catalog_count} template(s) available");
 
         let config = if migrated {
-            let cfg_path = config.home_dir.join("config.toml");
+            let cfg_path = config_path_boot.clone();
             if cfg_path.is_file() {
                 match load_config(Some(&cfg_path)) {
                     Ok(reloaded) => {
@@ -1785,7 +1810,7 @@ impl LibreFangKernel {
         // skill config injection layer treats a missing/invalid file as an
         // empty table, which is the same semantics as the previous on-miss
         // path.
-        let initial_raw_config_toml = load_raw_config_toml(&config.home_dir.join("config.toml"));
+        let initial_raw_config_toml = load_raw_config_toml(&config_path_boot);
 
         // Canonical agent UUID registry (refs #4614). Loaded from
         // `<home_dir>/agent_identities.toml`; missing or malformed files
@@ -1875,6 +1900,7 @@ impl LibreFangKernel {
 
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
+            config_path_boot,
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),

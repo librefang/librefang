@@ -787,6 +787,11 @@ pub(crate) struct RunningTask {
 pub struct LibreFangKernel {
     /// Boot-time home directory (immutable — cannot hot-reload).
     home_dir_boot: PathBuf,
+    /// Absolute path of the `config.toml` this kernel was booted from (immutable — cannot hot-reload).
+    ///
+    /// Resolved exactly once, in `boot` / `boot_with_config`, and read by every surface that re-reads or persists the configuration — hot-reload, the mtime watcher, and every API route that writes into the file (#6695).
+    /// Deriving it a second time from `home_dir_boot` is what let the daemon load `LIBREFANG_CONFIG_PATH` and then write somewhere else.
+    config_path_boot: PathBuf,
     /// Boot-time data directory (immutable — cannot hot-reload).
     data_dir_boot: PathBuf,
     /// Kernel configuration (atomically swappable for hot-reload).

@@ -106,6 +106,15 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Path of the `config.toml` this daemon loaded (boot-time immutable).
+    ///
+    /// The one answer to "which file is the configuration", for hot-reload, the change watcher, the managed-mode `423` body, and every route that persists into it.
+    /// Do not reconstruct it as `home_dir().join("config.toml")`: that expression disagrees with the loader whenever `LIBREFANG_CONFIG_PATH` is set, whenever the daemon was started with `--config`, and whenever the loaded file sets its own `home_dir` (#6695).
+    #[inline]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path_boot
+    }
+
     /// Snapshot the inbox subsystem's status (config + on-disk file counts).
     ///
     /// Provided as a kernel-surface method so API callers do not need to reach

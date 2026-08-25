@@ -174,6 +174,70 @@ librefang memory list --prefix "project:"
 
 ---
 
+## Agent-callable semantic memory
+
+Semantic memory is not only something an agent is *given* — it is something an agent can *ask*.
+The `memory_semantic_*` tools reach the embedding-backed `memories` table, which is the store the agent loop already recalls from automatically before each turn.
+
+<Note>
+The three `memory_store` / `memory_recall` / `memory_list` tools are a **separate**, exact-key key/value store.
+`memory_recall` matches a key character for character; it does no fuzzy, semantic, or substring matching.
+Reaching for it to "search memory" returns a key miss, not an empty result.
+</Note>
+
+| Tool | Effect |
+| --- | --- |
+| `memory_semantic_search(query, limit?, min_confidence?, min_similarity?)` | Search remembered facts by meaning. Each result carries an `id`, and a `similarity` when embeddings ranked it. |
+| `memory_semantic_add(content)` | Record a durable fact. The extractor may distil, merge, or decline it; the result says which. |
+| `memory_semantic_forget(memory_id)` | Retract one memory so it stops being recalled. |
+| `memory_semantic_stats()` | Counts per level and category, plus whether the subsystem is switched on. |
+| `memory_semantic_duplicates()` | Report near-duplicate groups. Changes nothing. |
+| `memory_semantic_consolidate()` | Merge every near-duplicate group, keeping the newest of each and retracting the rest. **Opt-in, see below.** |
+
+Only `memory_semantic_search` ships in every request; the rest are reachable through `tool_search` / `tool_load`.
+All six are withheld when `[proactive_memory] enabled = false`, and gated a second time on the agent's declared `memory_read` / `memory_write` capability scopes.
+
+### Consolidation is opt-in, per agent
+
+`memory_semantic_consolidate` is the only tool here whose reach is the agent's whole store rather than a row it named: it soft-deletes every member but the newest of each near-duplicate group, in one unattended call, with no undo the agent can reach.
+It is therefore withheld unless the agent's own manifest asks for it.
+
+```toml
+# {workspace}/agent.toml — NOT config.toml (#5476)
+[proactive_memory]
+allow_self_consolidation = true
+```
+
+An explicit `capabilities.tools` entry does not stand in for this, and neither does `tools = ["*"]`: naming a tool grants reach, and this switch grants permission to delete rows the caller never named.
+There is deliberately no kernel-global counterpart — a deployment-wide switch would arm destructive maintenance on agents nobody re-examined.
+
+Leaving it off costs nothing an operator cannot recover.
+`memory_semantic_duplicates` still reports every group the merge would have touched, and `POST /api/memory/agents/{id}/consolidate` still performs it with a human deciding when.
+
+### Asking for nothing rather than noise
+
+Recall over-fetches candidates, ranks them by cosine similarity, and truncates to the top few.
+With no floor, a sparse store fills that top-k with whatever exists — irrelevant memories are promoted on merit and land in the prompt as if they were answers.
+
+`min_similarity` sets the floor below which a memory is not recalled at all, which makes an empty recall possible:
+
+```toml
+# ~/.librefang/config.toml — deployment default, applies to automatic recall too
+[proactive_memory]
+min_similarity = 0.3
+```
+
+```toml
+# {workspace}/agent.toml — per-agent override
+[proactive_memory]
+min_similarity = 0.45
+```
+
+Resolution is per-call argument → agent override → deployment default → no floor.
+It is inert when no embedding provider is configured, because then nothing has been scored: distinct from `min_confidence`, which is decay-derived trust in a memory's content and says nothing about whether that memory answers *this* query.
+
+---
+
 ## Vector Search
 
 ### Semantic Search
@@ -191,6 +255,12 @@ librefang memory search --vector "machine learning techniques for text classific
 [memory]
 similarity_threshold = 0.75
 ```
+
+### Full-text fallback
+
+When no embedding provider is reachable — including the deliberate `[memory] fts_only = true` mode — search falls back to the `memories_fts` FTS5 index over memory content, ranked by bm25.
+The index is maintained by triggers on the `memories` table, so nothing has to remember to keep it current, and it is rebuilt from `memories` when the schema migration runs.
+Queries that the index cannot serve (a substring landing inside a word, a query made only of punctuation) still fall through to substring matching, so the index only ever adds matches.
 
 ### API Endpoint
 
@@ -274,7 +344,7 @@ librefang session compaction-status
 
 ## Background Consolidation (Auto-Dream)
 
-Session compaction keeps a **single session** from overflowing. Auto-dream is a complementary mechanism that works at a longer time horizon: once in a while it wakes an opted-in agent up, hands it a four-phase prompt (Orient / Gather / Consolidate / Prune), and lets the agent curate its own long-term memory across recent sessions — upserting durable insights via `memory_store` and trimming stale entries.
+Session compaction keeps a **single session** from overflowing. Auto-dream is a complementary mechanism that works at a longer time horizon: once in a while it wakes an opted-in agent up, hands it a four-phase prompt (Orient / Gather / Consolidate / Prune), and lets the agent curate its own long-term memory across recent sessions — upserting durable insights via `memory_semantic_add` and retracting stale ones via `memory_semantic_forget`.
 
 <Note>
 **Disabled by default.** Auto-dream spends real tokens on a recurring schedule, so both the global switch and every agent's opt-in flag are `false` unless you turn them on. See [`[auto_dream]`](/configuration/core#auto_dream) for the full reference.
@@ -304,7 +374,7 @@ auto_dream_min_sessions = 1     # after every session, for a chatty one
 ### How a dream runs
 
 1. The primary trigger is the `AgentLoopEnd` hook — the moment an agent finishes a turn, the kernel evaluates its four gates in order: global enabled → time since last dream → session activity count → per-agent file lock. Any miss and the dream is skipped. A sparse backstop scheduler (default `check_interval_secs = 86400` / 1 day) covers opted-in agents that never turn (e.g. channel bots waiting on inbound traffic).
-2. On a pass, the agent is invoked as a **forked turn** off the canonical session via `kernel.run_forked_agent_streaming` — same system prompt, tools, and message prefix as the parent turn so Anthropic's prompt cache hits. Fork turns don't persist their messages back to canonical session, so the user's conversation history isn't polluted by consolidation chatter. A runtime tool allowlist (`memory_store` / `memory_recall` / `memory_list`) is enforced at execute time, not request-build time, so the schema stays byte-identical to the parent and cache alignment holds. Prompt-injected dreams that try a non-memory tool get a synthetic error back and can't actually invoke anything outside the allowlist.
+2. On a pass, the agent is invoked as a **forked turn** off the canonical session via `kernel.run_forked_agent_streaming` — same system prompt, tools, and message prefix as the parent turn so Anthropic's prompt cache hits. Fork turns don't persist their messages back to canonical session, so the user's conversation history isn't polluted by consolidation chatter. A runtime tool allowlist covering the key/value and `memory_semantic_*` tools is enforced at execute time, not request-build time, so the schema stays byte-identical to the parent and cache alignment holds. Prompt-injected dreams that try a non-memory tool get a synthetic error back and can't actually invoke anything outside the allowlist. `memory_semantic_consolidate` is in that allowlist but reaches a dream only for an agent whose manifest also sets `allow_self_consolidation` — so three switches, all defaulting to off, stand between a fresh install and an unattended whole-store merge.
 3. Streamed progress (phase, tool calls, memories touched, last turn preview, token/cost) is kept in a per-agent registry and surfaced via the status endpoint.
 4. On success the lock's mtime advances to "now" (driving the time gate); on failure or abort the mtime is rolled back so the next tick will retry.
 

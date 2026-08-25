@@ -656,24 +656,51 @@ pub async fn get_agent_channels(
     )
 }
 
+/// Body of `PUT /api/agents/{id}/channels`.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetAgentChannelsRequest {
+    /// `channel_type` strings the agent may receive messages from.
+    /// An empty list clears the allowlist, which means "all channels" (`mode = "all"`).
+    pub channels: Vec<String>,
+}
+
 /// PUT /api/agents/{id}/channels — Update an agent's channel allowlist.
+///
+/// Body shape mirrors the sibling `mcp_servers` route rather than the bare array the OpenAPI
+/// annotation used to advertise (#7742).
+/// The old handler read `body["channels"]` out of an untyped `Value` and fell back to `Vec::new()`
+/// for anything it did not recognise, so the documented bare-array body — and any typo in the key —
+/// silently cleared the allowlist and reopened the agent to every channel.
+/// Widening an allowlist is not a defensible interpretation of a malformed request, so a body that
+/// does not deserialize is now a 400.
 #[utoipa::path(
     put,
     path = "/api/agents/{id}/channels",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = crate::types::JsonArray, description = "Array of channel_type strings"),
+    request_body(content = SetAgentChannelsRequest, description = "Object containing the channel allowlist"),
     responses(
-        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject)
+        (status = 200, description = "Update an agent's channel allowlist", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed request body", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_channels(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<SetAgentChannelsRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.body_text()})),
+            )
+        }
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -683,14 +710,7 @@ pub async fn set_agent_channels(
             )
         }
     };
-    let channels: Vec<String> = body["channels"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let channels = body.channels;
     match state.kernel.set_agent_channels(agent_id, channels.clone()) {
         Ok(()) => (
             StatusCode::OK,

@@ -1099,7 +1099,7 @@ async fn dashboard_snapshot_compute(state: &Arc<AppState>) -> serde_json::Value 
         "memory_used_mb": memory_used_mb,
         "default_provider": cfg.default_model.provider,
         "default_model": cfg.default_model.model,
-        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "config_exists": state.kernel.config_path().exists(),
         "api_listen": cfg.api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": cfg.log_level,

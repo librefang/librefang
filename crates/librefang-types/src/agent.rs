@@ -1034,6 +1034,17 @@ pub struct ManifestTrigger {
     /// [`librefang_kernel::triggers::TriggerPattern`] for the variant set.
     /// Carried as a `serde_json::Value` so the manifest crate does not
     /// have to depend on the kernel.
+    ///
+    /// A `[[triggers]]` block that omits `pattern` deserializes to
+    /// `Value::Null` because of the struct-level `#[serde(default)]`, and
+    /// TOML has no representation for null — serializing such a manifest
+    /// fails with `unsupported unit type`, which took the *entire*
+    /// `agent.toml` write down with it.
+    /// The kernel already treats a null pattern as inert (`reconcile_manifest_triggers`
+    /// skips it with a `warn!` and moves on), so the honest round trip is to
+    /// emit nothing and read it back as null again — the alternative was an
+    /// agent whose every manifest field silently stopped being persistable.
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     pub pattern: serde_json::Value,
     /// Prompt template sent to the LLM when the trigger fires.
     /// `{{event}}` is replaced with the rendered event description.

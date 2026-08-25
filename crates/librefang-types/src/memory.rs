@@ -84,6 +84,16 @@ pub struct MemoryItem {
     /// Which agent owns this memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Cosine similarity between this memory's embedding and the query that
+    /// retrieved it, in `[-1.0, 1.0]` (#7808).
+    ///
+    /// `None` whenever the number would be a fiction rather than a measurement: a listing read, a
+    /// `content LIKE` / FTS fallback with no embeddings in play, or a row that carries no stored
+    /// embedding to compare against.
+    /// Callers must not substitute `0.0` for `None` — 0.0 is a real cosine result (orthogonal) and
+    /// conflating the two makes an unranked result look like a measured miss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
 }
 
 impl MemoryItem {
@@ -101,6 +111,7 @@ impl MemoryItem {
             accessed_at: None,
             access_count: None,
             agent_id: None,
+            similarity: None,
         }
     }
 
@@ -152,6 +163,7 @@ impl MemoryItem {
             access_count: Some(frag.access_count),
             agent_id: Some(frag.agent_id.to_string()),
             created_at: frag.created_at,
+            similarity: frag.similarity,
             metadata: frag.metadata,
         }
     }
@@ -271,6 +283,27 @@ pub struct ProactiveMemoryConfig {
     /// Memories written before this shipped carry no session tag and stay recallable from every session, so turning it on does not hide an existing store.
     #[serde(default = "default_true")]
     pub session_scoped_recall: bool,
+    /// Minimum cosine similarity a memory must reach against the query before
+    /// it is recalled at all — the "nothing rather than noise" floor (#7808).
+    ///
+    /// Recall over-fetches candidates, re-ranks them by cosine, and truncates to top-k.
+    /// With no floor, a sparse store fills that top-k with whatever exists: vectors that fail to
+    /// compare sink to the bottom, but merely-irrelevant ones are promoted on merit and then
+    /// injected into the prompt as if they were answers.
+    /// A floor makes an empty recall possible, which is the honest outcome when nothing stored is
+    /// actually about the query.
+    ///
+    /// `None` (the default) preserves the historical behaviour: every re-ranked candidate is
+    /// eligible.
+    /// Useful values sit around 0.2–0.4 for `text-embedding-3-small`; too high a floor empties
+    /// recall entirely, so raise it while watching what recall returns rather than setting it
+    /// blind.
+    /// Ignored when no query embedding exists (the `content LIKE` / FTS fallback measures no
+    /// similarity), and overridable per agent via
+    /// [`ProactiveMemoryOverrides::min_similarity`] or per call by the
+    /// `memory_semantic_search` tool's `min_similarity` argument.
+    #[serde(default)]
+    pub min_similarity: Option<f32>,
     /// Out-of-process memory extractor. When set, extraction is delegated to
     /// the configured subprocess (which may use its own LLM, a local model,
     /// embeddings, etc.) instead of the built-in LLM/rule-based extractor; the
@@ -373,6 +406,7 @@ impl Default for ProactiveMemoryConfig {
             update_threshold_same_category: default_update_threshold_same_category(),
             update_threshold_cross_category: default_update_threshold_cross_category(),
             session_scoped_recall: true,
+            min_similarity: None,
             extractor_sidecar: None,
         }
     }
@@ -490,6 +524,48 @@ pub struct ProactiveMemoryOverrides {
     /// `None` (the default) inherits the kernel-global value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_scoped_recall: Option<bool>,
+    /// Per-agent override for [`ProactiveMemoryConfig::min_similarity`] — the
+    /// cosine floor below which a memory is not recalled at all (#7808).
+    ///
+    /// `None` (the default) inherits the kernel-global value.
+    /// Set it per agent when one agent's store is dense enough to support a strict floor while
+    /// another's is sparse and would go silent under the same number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_similarity: Option<f32>,
+    /// Whether this agent may consolidate its **own** semantic memory
+    /// unattended, via the `memory_semantic_consolidate` tool (#7808).
+    ///
+    /// Defaults to `false`, and that default is the whole point.
+    /// Consolidation is not a read with a side effect: it groups near-duplicates across the
+    /// agent's entire store and soft-deletes every member of each group but one, in a single
+    /// unattended call with no per-row confirmation and no undo the agent can reach.
+    /// The number of rows it removes is bounded only by how many near-duplicates the configured
+    /// `duplicate_threshold` finds, so a threshold tuned loosely enough turns one tool call into a
+    /// broad deletion.
+    /// A capability that destructive should exist because an agent poisoned by a pile of
+    /// reinforcing near-duplicates has no remedy short of a full reset — but it should not arrive
+    /// switched on with the rest of the memory surface.
+    ///
+    /// Leaving it off costs nothing an operator cannot recover: `memory_semantic_duplicates` is
+    /// always available, so the agent can still see and report every group it would have merged,
+    /// and `POST /api/memory/agents/{id}/consolidate` still performs the merge with a human
+    /// deciding when.
+    /// What the flag buys is the unattended case — chiefly the auto-dream loop, whose Consolidate
+    /// phase exists for exactly this and which is itself already per-agent opt-in.
+    ///
+    /// ```toml
+    /// # {workspace}/agent.toml — NOT config.toml (#5476)
+    /// [proactive_memory]
+    /// allow_self_consolidation = true
+    /// ```
+    ///
+    /// There is deliberately no kernel-global counterpart.
+    /// A deployment-wide "every agent may prune its own store" switch is a single edit that
+    /// silently arms destructive maintenance on agents nobody re-examined, and `KernelConfig` has
+    /// no `agents` table to scope it back down with (#5476) — so the decision stays where the
+    /// blast radius is, in the manifest of the one agent it applies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_self_consolidation: Option<bool>,
 }
 
 impl ProactiveMemoryOverrides {
@@ -547,6 +623,24 @@ impl ProactiveMemoryOverrides {
             .unwrap_or(global.session_scoped_recall)
     }
 
+    /// Resolve the effective `min_similarity` floor for this agent given the kernel-global `[proactive_memory]` defaults (#7808).
+    ///
+    /// Agent override → kernel-global → `None` (no floor, the historical behaviour).
+    /// Like [`Self::resolve_session_scoped_recall`] this ignores the master `enabled` switch: an
+    /// agent with proactive memory off performs no recall for a floor to apply to.
+    pub fn resolve_min_similarity(&self, global: &ProactiveMemoryConfig) -> Option<f32> {
+        self.min_similarity.or(global.min_similarity)
+    }
+
+    /// Whether this agent may consolidate its own semantic memory unattended (#7808).
+    ///
+    /// There is no global fallback by design (see [`Self::allow_self_consolidation`]): an
+    /// unset override is `false`, so the capability is reachable only from the manifest of the
+    /// agent that will do the deleting.
+    pub fn resolve_allow_self_consolidation(&self) -> bool {
+        self.allow_self_consolidation.unwrap_or(false)
+    }
+
     /// True when *no* field is set — equivalent to `Default::default()`.
     /// Used by call sites that want to skip the resolve dance entirely
     /// for the common "no override" case.
@@ -556,6 +650,8 @@ impl ProactiveMemoryOverrides {
             && self.auto_retrieve.is_none()
             && self.extraction_model.is_none()
             && self.session_scoped_recall.is_none()
+            && self.min_similarity.is_none()
+            && self.allow_self_consolidation.is_none()
     }
 }
 
@@ -918,6 +1014,7 @@ fn push_memory(
         accessed_at: None,
         access_count: None,
         agent_id: None,
+        similarity: None,
     });
 }
 
@@ -1282,6 +1379,17 @@ pub struct MemoryFragment {
     /// Modality of this memory (text, image, or multimodal).
     #[serde(default)]
     pub modality: MemoryModality,
+    /// Cosine similarity against the query embedding that retrieved this
+    /// fragment, carried out of the ranker instead of being discarded (#7808).
+    ///
+    /// The re-ranking comparator has always computed this number and thrown it away inside the
+    /// `sort_by` closure, which is why no caller could ask for "nothing rather than noise" — the
+    /// only signal that survived was rank order, and rank order on a sparse store still fills the
+    /// top-k with whatever exists.
+    /// `None` means no similarity was measured for this fragment: no query embedding, no stored
+    /// embedding, or a non-comparable pair (dimension mismatch, zero magnitude).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f32>,
 }
 
 /// Filter criteria for memory recall.
@@ -1303,6 +1411,19 @@ pub struct MemoryFilter {
     pub metadata: HashMap<String, serde_json::Value>,
     /// Filter by peer ID (for per-user memory isolation in multi-user channels).
     pub peer_id: Option<String>,
+    /// Minimum cosine similarity a fragment must reach against the query
+    /// embedding to be returned at all (#7808).
+    ///
+    /// Unlike every other field on this struct this is **not** a SQL predicate: similarity is only
+    /// known after the candidate rows have been re-ranked, so it is applied by `recall_impl` after
+    /// the cosine pass and before the top-k truncation.
+    /// It therefore has no effect on a recall with no query embedding — there is no score to
+    /// compare against, and inventing one would silently empty the fallback path.
+    ///
+    /// Distinct from `min_confidence`, which is decay-derived trust in a memory's content and says
+    /// nothing about whether the memory answers *this* query.
+    #[serde(default)]
+    pub min_similarity: Option<f32>,
 }
 
 impl MemoryFilter {
@@ -1858,6 +1979,7 @@ mod tests {
             image_url: None,
             image_embedding: None,
             modality: Default::default(),
+            similarity: None,
         };
         let json = serde_json::to_string(&fragment).unwrap();
         let deserialized: MemoryFragment = serde_json::from_str(&json).unwrap();
@@ -1926,6 +2048,8 @@ mod tests {
             auto_retrieve: Some(true),
             extraction_model: None,
             session_scoped_recall: None,
+            min_similarity: None,
+            allow_self_consolidation: None,
         };
         assert!(
             !overrides.resolve_auto_memorize(&global),
@@ -1994,6 +2118,86 @@ mod tests {
         assert!(!overrides.resolve_auto_retrieve(&global));
     }
 
+    /// #7808: the similarity floor resolves agent override → kernel-global →
+    /// none, and — unlike `resolve_auto_retrieve` — deliberately ignores the
+    /// master switch, because an agent with recall off has no recall for a
+    /// floor to apply to.
+    #[test]
+    fn resolve_min_similarity_prefers_the_agent_over_the_deployment() {
+        let mut global = ProactiveMemoryConfig::default();
+        assert_eq!(
+            ProactiveMemoryOverrides::default().resolve_min_similarity(&global),
+            None,
+            "no floor anywhere means the historical behaviour: every candidate is eligible"
+        );
+
+        global.min_similarity = Some(0.3);
+        assert_eq!(
+            ProactiveMemoryOverrides::default().resolve_min_similarity(&global),
+            Some(0.3)
+        );
+
+        let overrides = ProactiveMemoryOverrides {
+            min_similarity: Some(0.45),
+            ..Default::default()
+        };
+        assert_eq!(overrides.resolve_min_similarity(&global), Some(0.45));
+
+        let disabled = ProactiveMemoryOverrides {
+            enabled: Some(false),
+            min_similarity: Some(0.45),
+            ..Default::default()
+        };
+        assert_eq!(
+            disabled.resolve_min_similarity(&global),
+            Some(0.45),
+            "the master switch decides whether recall happens, not how it ranks"
+        );
+    }
+
+    /// #7808: the self-consolidation opt-in has no global fallback by design —
+    /// an unset override is `false`, so the capability is reachable only from
+    /// the manifest of the agent that will do the deleting.
+    #[test]
+    fn allow_self_consolidation_defaults_to_off_with_no_global_escape_hatch() {
+        assert!(
+            !ProactiveMemoryOverrides::default().resolve_allow_self_consolidation(),
+            "destructive consolidation must not be on by default"
+        );
+        assert!(!ProactiveMemoryOverrides {
+            allow_self_consolidation: Some(false),
+            ..Default::default()
+        }
+        .resolve_allow_self_consolidation());
+        assert!(ProactiveMemoryOverrides {
+            allow_self_consolidation: Some(true),
+            ..Default::default()
+        }
+        .resolve_allow_self_consolidation());
+    }
+
+    /// `is_empty` short-circuits the resolve dance for the common "no override"
+    /// case, so a field it forgets is a field that stops being honoured.
+    #[test]
+    fn is_empty_accounts_for_every_override_field() {
+        assert!(ProactiveMemoryOverrides::default().is_empty());
+        for populated in [
+            ProactiveMemoryOverrides {
+                min_similarity: Some(0.3),
+                ..Default::default()
+            },
+            ProactiveMemoryOverrides {
+                allow_self_consolidation: Some(true),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !populated.is_empty(),
+                "a set field must make the overrides non-empty: {populated:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_proactive_memory_overrides_serde_roundtrip() {
         let overrides = ProactiveMemoryOverrides {
@@ -2002,6 +2206,8 @@ mod tests {
             auto_retrieve: None,
             extraction_model: Some("openai/gpt-4o-mini".to_string()),
             session_scoped_recall: None,
+            min_similarity: None,
+            allow_self_consolidation: None,
         };
         let toml = toml::to_string(&overrides).expect("serialize");
         // Only the set fields are emitted (skip_serializing_if on None).

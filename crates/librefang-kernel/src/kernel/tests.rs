@@ -15163,9 +15163,16 @@ mod provider_budget_gate_5980 {
 
 /// All four semantic tool names, so a rename cannot silently drop one from the
 /// gate's coverage.
+/// The semantic tools gated by memory scopes alone.
+///
+/// `memory_semantic_consolidate` is deliberately absent: it carries a second,
+/// independent gate (`[proactive_memory] allow_self_consolidation` in
+/// `agent.toml`) that defaults to off, so it is withheld even from the manifests
+/// every tool below is granted to. Its own tests are further down.
 const SEMANTIC_MEMORY_TOOLS: &[&str] = &[
     "memory_semantic_search",
     "memory_semantic_stats",
+    "memory_semantic_duplicates",
     "memory_semantic_add",
     "memory_semantic_forget",
 ];
@@ -15302,7 +15309,11 @@ fn semantic_memory_read_and_write_halves_are_gated_independently() {
             },
         ),
     );
-    for tool in ["memory_semantic_search", "memory_semantic_stats"] {
+    for tool in [
+        "memory_semantic_search",
+        "memory_semantic_stats",
+        "memory_semantic_duplicates",
+    ] {
         assert!(
             names.contains(&tool.to_string()),
             "{tool} is a read and must be granted by memory_read; got {names:?}"
@@ -15380,6 +15391,15 @@ fn semantic_memory_tool_access_classifies_every_semantic_tool() {
         LibreFangKernel::semantic_memory_tool_access("memory_semantic_forget"),
         Some(SemanticMemoryAccess::Write)
     );
+    // #7808: reporting duplicate groups changes nothing; merging them deletes.
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_duplicates"),
+        Some(SemanticMemoryAccess::Read)
+    );
+    assert_eq!(
+        LibreFangKernel::semantic_memory_tool_access("memory_semantic_consolidate"),
+        Some(SemanticMemoryAccess::Write)
+    );
     // The KV tools are NOT semantic and must never be caught by the gate.
     for kv in ["memory_store", "memory_recall", "memory_list"] {
         assert_eq!(
@@ -15436,6 +15456,239 @@ fn semantic_memory_tools_are_stripped_when_the_subsystem_is_disabled() {
         "memory_store is key/value and must be unaffected; got {names:?}"
     );
     kernel.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// #7808 — the self-consolidation opt-in.
+//
+// `memory_semantic_consolidate` merges near-duplicate groups across an agent's
+// entire store and soft-deletes every member but the newest, unattended and in
+// one call. It exists because an agent buried under near-duplicates
+// reinforcing a stale belief has no remedy short of a full reset — but it
+// arrives switched off, and only `agent.toml` can switch it on (#5476).
+//
+// Two gates, tested separately because they fail differently: `available_tools`
+// decides what the model is told about, and the kernel handle decides what
+// actually runs. A name can reach dispatch without passing through the first —
+// a replayed transcript, a cached `tool_load`, a manifest edited mid-session —
+// so the second is the one that has to hold.
+// ---------------------------------------------------------------------------
+
+/// A manifest with the memory scopes the semantic write tools need, so the
+/// only thing separating these cases is the opt-in itself.
+fn consolidation_manifest(name: &str, allow: Option<bool>) -> AgentManifest {
+    let mut manifest = gate_manifest(
+        name,
+        ManifestCapabilities {
+            tools: vec!["memory_*".to_string()],
+            memory_read: Some(vec!["*".to_string()]),
+            memory_write: Some(vec!["*".to_string()]),
+            ..Default::default()
+        },
+    );
+    manifest.proactive_memory = librefang_types::memory::ProactiveMemoryOverrides {
+        allow_self_consolidation: allow,
+        ..Default::default()
+    };
+    manifest
+}
+
+#[test]
+fn consolidate_is_withheld_from_an_agent_that_did_not_opt_in() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-default");
+    let names = tool_names(
+        &kernel,
+        consolidation_manifest("gate-consolidate-default-agent", None),
+    );
+    assert!(
+        !names.contains(&"memory_semantic_consolidate".to_string()),
+        "consolidation must not be advertised without an explicit opt-in; got {names:?}"
+    );
+    // Everything else on the semantic surface is still granted — the opt-in
+    // withholds one destructive tool, not the feature.
+    for tool in SEMANTIC_MEMORY_TOOLS {
+        assert!(
+            names.contains(&tool.to_string()),
+            "{tool} must remain available; got {names:?}"
+        );
+    }
+    // Specifically: the read-only way to see the same duplicate groups stays
+    // reachable, so an agent that cannot merge can still report the problem.
+    assert!(names.contains(&"memory_semantic_duplicates".to_string()));
+    kernel.shutdown();
+}
+
+#[test]
+fn consolidate_appears_once_the_manifest_opts_in() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-optin");
+    let names = tool_names(
+        &kernel,
+        consolidation_manifest("gate-consolidate-optin-agent", Some(true)),
+    );
+    assert!(
+        names.contains(&"memory_semantic_consolidate".to_string()),
+        "an agent whose manifest sets allow_self_consolidation must get the tool; got {names:?}"
+    );
+    kernel.shutdown();
+}
+
+/// Naming the tool outright in `capabilities.tools` overrides the *scope* gate
+/// but must NOT override this one.
+///
+/// Naming a tool grants reach; this switch grants permission to delete rows the
+/// caller never named. If an explicit name were enough, the ordinary way to
+/// grant memory access — `tools = ["memory_semantic_consolidate"]` in a
+/// hand-written manifest, or a template copied from one — would arm destructive
+/// maintenance as a side effect of asking for the tool.
+#[test]
+fn naming_consolidate_in_capabilities_does_not_bypass_the_opt_in() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-named");
+    let mut manifest = gate_manifest(
+        "gate-consolidate-named-agent",
+        ManifestCapabilities {
+            tools: vec!["memory_semantic_consolidate".to_string()],
+            memory_read: Some(vec!["*".to_string()]),
+            memory_write: Some(vec!["*".to_string()]),
+            ..Default::default()
+        },
+    );
+    manifest.proactive_memory = librefang_types::memory::ProactiveMemoryOverrides::default();
+    let names = tool_names(&kernel, manifest);
+    assert!(
+        !names.contains(&"memory_semantic_consolidate".to_string()),
+        "an explicit tools entry must not stand in for the opt-in; got {names:?}"
+    );
+    kernel.shutdown();
+}
+
+/// A wildcard `tools = ["*"]` grant is the widest declaration a manifest can
+/// make, and it still must not reach consolidation.
+#[test]
+fn wildcard_tools_do_not_bypass_the_opt_in() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-wildcard");
+    let names = tool_names(
+        &kernel,
+        gate_manifest(
+            "gate-consolidate-wildcard-agent",
+            ManifestCapabilities {
+                tools: vec!["*".to_string()],
+                memory_read: Some(vec!["*".to_string()]),
+                memory_write: Some(vec!["*".to_string()]),
+                ..Default::default()
+            },
+        ),
+    );
+    assert!(
+        !names.contains(&"memory_semantic_consolidate".to_string()),
+        "`tools = [\"*\"]` must not arm destructive consolidation; got {names:?}"
+    );
+    kernel.shutdown();
+}
+
+/// The enforcement gate, reached directly rather than through
+/// `available_tools` — because that is how a replayed or cached tool name
+/// reaches it.
+// Multi-threaded flavour: kernel boot uses `block_in_place`, which the
+// current-thread runtime rejects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consolidate_call_is_refused_without_the_opt_in() {
+    use librefang_kernel_handle::MemoryAccess;
+
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-enforced");
+    let opted_out = kernel
+        .spawn_agent(consolidation_manifest("consolidate-opted-out", None))
+        .expect("spawn");
+
+    let err = kernel
+        .memory_semantic_consolidate(&opted_out.to_string(), None, None)
+        .await
+        .expect_err("consolidation must be refused without the opt-in");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("allow_self_consolidation"),
+        "the refusal must name the setting that would allow it: {message}"
+    );
+    assert!(
+        message.contains("memory_semantic_duplicates"),
+        "the refusal must point at the read-only alternative: {message}"
+    );
+
+    // And the gate is checked before the store is consulted, so an agent that
+    // DID opt in gets past it — here that surfaces as the proactive store being
+    // unavailable in this test kernel, which is a different error entirely.
+    let opted_in = kernel
+        .spawn_agent(consolidation_manifest("consolidate-opted-in", Some(true)))
+        .expect("spawn");
+    let past_the_gate = kernel
+        .memory_semantic_consolidate(&opted_in.to_string(), None, None)
+        .await;
+    let past_message = format!("{past_the_gate:?}");
+    assert!(
+        !past_message.contains("allow_self_consolidation"),
+        "an opted-in agent must not be stopped by the opt-in gate: {past_message}"
+    );
+
+    kernel.shutdown();
+}
+
+/// An agent the kernel cannot resolve to a manifest is exactly the caller whose
+/// opt-in cannot be confirmed, so the gate must fail closed rather than treat
+/// "no manifest" as "no restriction".
+#[test]
+fn unknown_agent_is_not_treated_as_opted_in() {
+    let (kernel, _tmp) = boot_gate_kernel("gate-consolidate-unknown");
+    assert!(
+        !kernel.allows_self_consolidation(librefang_types::agent::AgentId::new()),
+        "an unregistered agent must never be treated as having opted in"
+    );
+    kernel.shutdown();
+}
+
+/// The dream loop runs unattended by definition, so what it may call is a
+/// separate decision from what an interactive agent may call. Pin the list
+/// itself: widening it is the thing that decides what a background loop with no
+/// human in it may delete.
+#[test]
+fn dream_allowed_tools_covers_the_semantic_surface_and_nothing_else() {
+    use crate::auto_dream::DREAM_ALLOWED_TOOLS;
+
+    for expected in [
+        "memory_store",
+        "memory_recall",
+        "memory_list",
+        "memory_semantic_search",
+        "memory_semantic_stats",
+        "memory_semantic_duplicates",
+        "memory_semantic_add",
+        "memory_semantic_forget",
+        "memory_semantic_consolidate",
+    ] {
+        assert!(
+            DREAM_ALLOWED_TOOLS.contains(&expected),
+            "{expected} must be reachable from the dream loop that exists to use it"
+        );
+    }
+    // The dream prompt is built from memories, which are derived from
+    // conversation content — so this list is the blast radius of a prompt
+    // injection carried in a memory. Nothing outside memory belongs in it.
+    for name in DREAM_ALLOWED_TOOLS {
+        assert!(
+            name.starts_with("memory_"),
+            "{name} is not a memory tool and must not be reachable from an unattended loop"
+        );
+    }
+    // Every name must be a real, dispatchable tool: a ghost entry grants
+    // nothing and hides the fact that the loop cannot do what the list claims.
+    let builtins: Vec<String> = librefang_runtime::tool_runner::builtin_tool_definitions()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    for name in DREAM_ALLOWED_TOOLS {
+        assert!(
+            builtins.contains(&name.to_string()),
+            "{name} is allow-listed for dreams but is not a builtin tool"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

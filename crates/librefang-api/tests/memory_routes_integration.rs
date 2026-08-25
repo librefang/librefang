@@ -1191,3 +1191,129 @@ async fn patch_memory_config_with_non_table_proactive_memory_entry_is_graceful()
     let body = read_json(resp).await;
     assert!(body.get("error").is_some(), "missing error field: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// #7808 — the duplicate/consolidate pair.
+//
+// `GET .../duplicates` was the one `/api/memory` read with no namespace gate
+// and no PII redaction: it went straight to the unguarded inherent method while
+// every sibling read went through a `*_with_guard` wrapper. Duplicate groups
+// are memory *contents*, so that was a way to read what `list_with_guard`
+// would have redacted, grouped differently.
+//
+// `POST .../consolidate` kept its gate but expressed it inline in the handler,
+// so the route and the agent-callable `memory_semantic_consolidate` tool would
+// have carried two independent opinions about what consolidation costs. Both
+// now resolve through the same wrappers in `librefang-memory`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicates_route_returns_documented_shape_through_the_guarded_read() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get(&format!(
+            "/api/memory/agents/{agent_id}/duplicates"
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an authenticated read must survive the newly-added guard"
+    );
+    let body = read_json(resp).await;
+    assert!(
+        body.get("duplicate_groups").is_some() && body.get("groups").is_some(),
+        "the response shape must be unchanged by the guard: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn consolidate_route_reports_its_merge_count() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let agent_id = uuid::Uuid::new_v4().to_string();
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::POST,
+            &format!("/api/memory/agents/{agent_id}/consolidate"),
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "moving the delete gate into consolidate_with_guard must not refuse an admin caller"
+    );
+    let body = read_json(resp).await;
+    assert_eq!(
+        body["consolidated"],
+        serde_json::json!(true),
+        "body: {body}"
+    );
+    assert_eq!(
+        body["merged_count"],
+        serde_json::json!(0),
+        "an empty store merges nothing: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn consolidate_route_requires_auth() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/memory/agents/some-agent/consolidate")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "a destructive maintenance route must never be anonymous"
+    );
+}
+
+/// The similarity floor has to reach an operator without a recompile, so it
+/// must round-trip through the config surface like every other
+/// `[proactive_memory]` key — and appear in the redacted view the dashboard
+/// reads (#7808).
+#[tokio::test(flavor = "multi_thread")]
+async fn min_similarity_is_visible_in_the_memory_config_surface() {
+    let harness = boot_router_with_config(TEST_KEY, |config| {
+        config.proactive_memory.min_similarity = Some(0.3);
+    })
+    .await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/config"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = read_json(resp).await;
+    let reported = body["proactive_memory"]["min_similarity"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("min_similarity missing from the redacted config: {body}"));
+    assert!(
+        (reported - 0.3).abs() < 1e-6,
+        "the configured floor must be reported verbatim, got {reported}"
+    );
+}

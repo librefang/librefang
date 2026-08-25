@@ -37,7 +37,7 @@ impl LibreFangKernel {
         // without touching the live config. (Phase 3e/3 of #4713 originally
         // re-introduced the pre-#4664 tolerant path during the mod.rs split;
         // this restores the strict loader.)
-        let config_path = self.home_dir_boot.join("config.toml");
+        let config_path = self.config_path_boot.clone();
         let mut new_config = crate::config::try_load_config(&config_path)
             .map_err(|e| format!("Config reload failed; live config unchanged: {e}"))?;
 

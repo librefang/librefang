@@ -595,3 +595,288 @@ async fn update_pins_identity_to_the_url_rather_than_the_body() {
     cleanup(name);
     cleanup("somewhere-else");
 }
+
+// ---------------------------------------------------------------------------
+// The agent-facing `agent_type_create` tool (#7722)
+// ---------------------------------------------------------------------------
+//
+// These run the real runtime dispatcher against the real kernel this harness booted, then read the
+// result back through the production router. That pairing is the point: the tool and `POST
+// /api/templates` write the same directory through the same `agent_type_store`, and the only way to
+// prove they have not drifted is to have one of them write and the other read.
+
+use librefang_kernel_handle::KernelHandle;
+use librefang_runtime::tool_runner::{execute_tool_raw, ToolExecContext};
+
+/// A tool context with nothing wired but the kernel — `agent_type_create` needs no workspace, no
+/// skills and no MCP connections, so anything else here would be noise that hides which dependency
+/// the tool actually has.
+fn tool_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
+    ToolExecContext {
+        kernel: Some(kernel),
+        allowed_tools: None,
+        available_tools: None,
+        caller_agent_id: Some("test-agent"),
+        skill_registry: None,
+        allowed_skills: None,
+        mcp_connections: None,
+        web_ctx: None,
+        browser_ctx: None,
+        allowed_env_vars: None,
+        workspace_root: None,
+        media_engine: None,
+        media_drivers: None,
+        exec_policy: None,
+        tts_engine: None,
+        docker_config: None,
+        process_manager: None,
+        process_registry: None,
+        sender_id: None,
+        channel: None,
+        chat_id: None,
+        sender_account_id: None,
+        session_id: None,
+        spill_threshold_bytes: 0,
+        max_artifact_bytes: 0,
+        checkpoint_manager: None,
+        interrupt: None,
+        dangerous_command_checker: None,
+    }
+}
+
+async fn call_agent_type_create(h: &Harness, payload: Json) -> librefang_types::tool::ToolResult {
+    let kernel: Arc<dyn KernelHandle> = h.state.kernel.clone();
+    let ctx = tool_ctx(&kernel);
+    execute_tool_raw("t1", "agent_type_create", &payload, &ctx).await
+}
+
+/// The headline acceptance item: a type an agent authors mid-conversation is a type the HTTP
+/// catalog serves, byte for byte the same document.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_type_the_tool_creates_is_the_type_the_api_serves() {
+    let _g = lock().lock().await;
+    let name = "at_tool_created";
+    cleanup(name);
+
+    let h = boot().await;
+
+    let result = call_agent_type_create(
+        &h,
+        json!({
+            "name": name,
+            "description": "authored from a conversation",
+            "system_prompt": "Be terse.",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4",
+            "tools": ["web_search"],
+            "skills": ["research"],
+        }),
+    )
+    .await;
+    assert!(
+        !result.is_error,
+        "agent_type_create failed: {}",
+        result.content
+    );
+
+    let tool_view: Json = serde_json::from_str(&result.content).expect("tool result is JSON");
+    assert_eq!(tool_view["name"], name);
+    assert_eq!(tool_view["provider"], "anthropic");
+    assert_eq!(tool_view["model"], "claude-sonnet-4");
+
+    // The detail route serves the same seven-field projection a dashboard editor would open.
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["source"], "agent-type");
+    assert_eq!(
+        detail["editable"], true,
+        "a tool-authored type must be editable by an operator afterwards: {detail}"
+    );
+    assert_eq!(
+        detail["spec"]["description"],
+        "authored from a conversation"
+    );
+    assert_eq!(detail["spec"]["system_prompt"], "Be terse.");
+    assert_eq!(detail["spec"]["provider"], "anthropic");
+    assert_eq!(detail["spec"]["model"], "claude-sonnet-4");
+    assert_eq!(detail["spec"]["tools"], json!(["web_search"]));
+    assert_eq!(detail["spec"]["skills"], json!(["research"]));
+
+    // And it is spawnable-from: the catalog lists it exactly as it lists an operator-authored one.
+    let (status, list) = get(&h, "/api/templates").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let row = list["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == name)
+        .unwrap_or_else(|| panic!("tool-created type missing from the catalog: {list}"));
+    assert_eq!(row["source"], "agent-type");
+    assert_eq!(row["editable"], true);
+
+    cleanup(name);
+}
+
+/// An operator's document is not something an agent may overwrite by guessing its name.
+/// The refusal comes from the shared `File::create_new` claim, so it holds for the tool for the same
+/// reason it holds for `POST` — which is exactly what routing both through one store buys.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_refuses_a_name_already_taken_without_clobbering_it() {
+    let _g = lock().lock().await;
+    let name = "at_tool_dupe";
+    cleanup(name);
+    write_agent_type(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+
+    let result = call_agent_type_create(
+        &h,
+        json!({ "name": name, "system_prompt": "I am the replacement." }),
+    )
+    .await;
+    assert!(
+        result.is_error,
+        "a duplicate name must be refused: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("already exists"),
+        "the reason must tell the model to pick another name: {}",
+        result.content
+    );
+
+    // Nothing was written: the operator's manifest still has its prompt and every field the flat
+    // shape cannot express.
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["spec"]["system_prompt"], "Seeded prompt.");
+    let raw = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(raw.contains("max_history_messages = 42"), "{raw}");
+    assert!(raw.contains("[[triggers]]"), "{raw}");
+
+    cleanup(name);
+}
+
+/// A name that would escape the store directory has to be refused before it is ever joined onto a
+/// path, and the refusal has to say what a legal name looks like — the model is the one that has to
+/// fix it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_rejects_a_name_that_would_escape_the_store_directory() {
+    let _g = lock().lock().await;
+    let h = boot().await;
+
+    for bad in ["../escape", "has space", "", &"a".repeat(65)] {
+        let result = call_agent_type_create(&h, json!({ "name": bad })).await;
+        assert!(
+            result.is_error,
+            "name {bad:?} must be refused: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("letters, digits"),
+            "the refusal must describe a legal name for {bad:?}: {}",
+            result.content
+        );
+    }
+
+    assert!(
+        !home().join("escape.toml").exists(),
+        "a traversal attempt wrote a file outside the agent-types directory"
+    );
+}
+
+/// A key the model invented is refused by name rather than dropped, and nothing reaches disk.
+/// `AgentTypeSpec` is `deny_unknown_fields` precisely so a typo cannot be read as "keep the old
+/// value" — the tool inherits that rather than re-deriving its own idea of the shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_rejects_a_spec_carrying_a_field_that_does_not_exist() {
+    let _g = lock().lock().await;
+    let name = "at_tool_typo";
+    cleanup(name);
+
+    let h = boot().await;
+
+    let result = call_agent_type_create(
+        &h,
+        json!({ "name": name, "sytsem_prompt": "note the typo" }),
+    )
+    .await;
+    assert!(
+        result.is_error,
+        "an unknown key must be refused: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("sytsem_prompt"),
+        "the offending key must be named: {}",
+        result.content
+    );
+
+    let (status, body) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a rejected spec must not have created anything: {body}"
+    );
+
+    cleanup(name);
+}
+
+/// A name that belongs to a live agent is refused for the tool the same way it is for `POST`:
+/// an agent type shadowing it would win every later catalog read and make the agent unreachable.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_refuses_a_name_that_belongs_to_a_live_agent() {
+    let _g = lock().lock().await;
+    let name = "at_tool_shadow";
+    cleanup(name);
+    write_workspace_agent(name, &manifest_with_non_form_fields(name));
+
+    let h = boot().await;
+
+    let result = call_agent_type_create(&h, json!({ "name": name })).await;
+    assert!(
+        result.is_error,
+        "a shadowing name must be refused: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("live agent"),
+        "the reason must say why the name is unavailable: {}",
+        result.content
+    );
+    assert!(
+        !agent_type_file(name).exists(),
+        "a refused create left a file behind"
+    );
+
+    cleanup(name);
+}
+
+/// Omitting provider and model is legal and resolves to the `"default"` sentinel the kernel later
+/// maps onto `[default_model]`. The tool reports what was stored rather than echoing what was sent,
+/// so a model that omitted them can see what it actually got.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was_given() {
+    let _g = lock().lock().await;
+    let name = "at_tool_defaults";
+    cleanup(name);
+
+    let h = boot().await;
+
+    let result = call_agent_type_create(&h, json!({ "name": name })).await;
+    assert!(!result.is_error, "{}", result.content);
+
+    let tool_view: Json = serde_json::from_str(&result.content).expect("tool result is JSON");
+    assert_eq!(tool_view["provider"], "default");
+    assert_eq!(tool_view["model"], "default");
+
+    let (status, detail) = get(&h, &format!("/api/templates/{name}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["spec"]["provider"], tool_view["provider"],
+        "the tool must report the provider the catalog will serve: {detail}"
+    );
+    assert_eq!(detail["spec"]["model"], tool_view["model"], "{detail}");
+
+    cleanup(name);
+}

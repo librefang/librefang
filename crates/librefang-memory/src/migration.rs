@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 49;
+const SCHEMA_VERSION: u32 = 50;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -230,13 +230,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // elapsed idle span on every hourly tick. NULL on pre-migration rows, which
     // the read path treats as "clock starts at accessed_at".
     run_step!(48, migrate_v48);
-
     // v49 (#7714): add `workflow_runs.owner_agent_id` so a run records which
     // agent asked for it, and `usage_events.billed_agent_id` so a spawned
     // worker's spend rolls up to the agent that spawned it. Both are NULL on
     // every pre-migration row: an ownerless run stays ownerless, and a usage
     // row with no `billed_agent_id` bills to `agent_id` exactly as before.
     run_step!(49, migrate_v49);
+
+    // v50 (#7808): add the `memories_fts` FTS5 index plus the triggers that
+    // keep it in step with `memories`, so a deployment with no embedding
+    // provider gets real full-text search instead of a `content LIKE` scan —
+    // and so `memory.fts_only` finally has a memories index to fall back to.
+    run_step!(50, migrate_v50);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -957,6 +962,97 @@ fn migrate_v49(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (49, datetime('now'), 'Add workflow_runs.owner_agent_id and usage_events.billed_agent_id for run ownership and spend rollup (#7714)')",
+        [],
+    )?;
+    Ok(())
+}
+/// v50 (#7808): Full-text index over `memories.content`.
+///
+/// The schema had exactly one FTS5 table, `sessions_fts`, and nothing over
+/// `memories`.
+/// Recall with no query embedding therefore fell back to
+/// `content LIKE '%{query}%'` — a substring scan that matches nothing unless
+/// the caller's entire phrasing appears verbatim inside a memory, which for a
+/// natural-language question it essentially never does.
+/// The same gap made `memory.fts_only = true` a misnomer for memories: it
+/// switches vector search off deliberately, and there was no memories index on
+/// the other side of that switch.
+///
+/// # Shape
+///
+/// A standalone (non-external-content) FTS5 table mirroring `memories.id` and
+/// `content`, matching `sessions_fts`, which the codebase already maintains
+/// this way.
+/// External-content tables are leaner, but they resolve every hit by rowid
+/// against the base table and go silently wrong if the two ever drift; a
+/// standalone mirror can be rebuilt from `memories` at any time, and
+/// [`rebuild_memories_fts`] does exactly that.
+///
+/// `agent_id` is carried UNINDEXED so a per-agent search can narrow inside the
+/// FTS query rather than filtering after the fact.
+/// The tokenizer is declared explicitly for the reason #3548 established on
+/// `sessions_fts`: the default is version-dependent, and an index built under
+/// one tokenizer answers differently from one built under another.
+/// `remove_diacritics 2` folds accents, so `cafe` finds `café`.
+///
+/// # Sync
+///
+/// Three triggers mirror INSERT / UPDATE / DELETE on `memories`.
+/// Soft deletes (`deleted = 1`) deliberately stay *in* the index: the query
+/// path joins back to `memories` and filters `deleted = 0` anyway, and keeping
+/// the row means an undelete needs no re-index.
+/// The backfill runs unconditionally through [`rebuild_memories_fts`], so
+/// re-running this migration on a partially-populated index converges instead
+/// of double-inserting.
+fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            memory_id UNINDEXED,
+            agent_id UNINDEXED,
+            content,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE ON memories BEGIN
+            DELETE FROM memories_fts WHERE memory_id = old.id;
+            INSERT INTO memories_fts (memory_id, agent_id, content)
+            VALUES (new.id, new.agent_id, new.content);
+        END;
+        ",
+    )?;
+
+    rebuild_memories_fts(conn)?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Rebuild `memories_fts` from `memories`, dropping whatever was there.
+///
+/// Idempotent and safe to call at any time: the index is a pure derivative of
+/// `memories`, so a full rebuild is always the correct repair for drift and is
+/// what makes [`migrate_v50`] re-runnable.
+/// Kept separate from the migration so a future integrity check can reach it
+/// without replaying DDL.
+fn rebuild_memories_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM memories_fts", [])?;
+    conn.execute(
+        "INSERT INTO memories_fts (memory_id, agent_id, content) \
+         SELECT id, agent_id, content FROM memories",
         [],
     )?;
     Ok(())
@@ -2659,6 +2755,102 @@ mod tests {
             "re-running migrate_v49 must not touch data"
         );
         assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
+    }
+
+    #[test]
+    fn test_migrate_v50_creates_memories_fts_and_keeps_it_in_step() {
+        // #7808: the schema had exactly one FTS5 table (`sessions_fts`) and
+        // nothing over `memories`, so recall with no embedding provider was a
+        // `content LIKE '%…%'` scan and `memory.fts_only` had no memories index
+        // to fall back to.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memories_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("memories_fts must exist after the ladder runs");
+        assert!(
+            sql.contains("unicode61"),
+            "the tokenizer must be declared explicitly, per the #3548 lesson on sessions_fts; got: {sql}"
+        );
+
+        // Writes reach the index through triggers, so no write path in the
+        // crate has to remember to maintain it.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('m1', 'agent-1', 'the release train leaves on Thursday', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"release\" OR \"train\""],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "an inserted memory must be searchable immediately");
+
+        // Soft deletes stay indexed on purpose: the query path filters
+        // `deleted = 0` against `memories` anyway, and an undelete then needs
+        // no re-index.
+        conn.execute("UPDATE memories SET deleted = 1 WHERE id = 'm1'", [])
+            .unwrap();
+        let after_soft_delete: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after_soft_delete, 1);
+
+        // Re-running the migration converges rather than double-inserting —
+        // the backfill is a rebuild, not an append.
+        migrate_v50(&conn).unwrap();
+        let after_rerun: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            after_rerun, 1,
+            "re-running migrate_v50 must not duplicate index rows"
+        );
+    }
+
+    #[test]
+    fn test_migrate_v50_backfills_memories_written_before_the_index_existed() {
+        // The realistic upgrade: rows already sitting in `memories` when the
+        // index is created. Without the backfill an existing store would look
+        // empty to every FTS-backed search until each row happened to be
+        // rewritten.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Reproduce the pre-v49 state: rows present, index absent.
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted) \
+             VALUES ('old', 'agent-1', 'the postgres primary lives in Frankfurt', 'conversation', 'agent_memory', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER memories_fts_ai;
+             DROP TRIGGER memories_fts_au;
+             DROP TRIGGER memories_fts_ad;
+             DROP TABLE memories_fts;",
+        )
+        .unwrap();
+
+        migrate_v50(&conn).unwrap();
+
+        let (id, _): (String, String) = conn
+            .query_row(
+                "SELECT memory_id, content FROM memories_fts WHERE memories_fts MATCH ?1",
+                ["\"postgres\""],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("a row written before the index existed must be backfilled");
+        assert_eq!(id, "old");
     }
 
     #[test]

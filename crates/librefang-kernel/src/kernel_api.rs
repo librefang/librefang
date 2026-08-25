@@ -96,6 +96,8 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn event_bus_ref(&self) -> &EventBus;
     fn hands(&self) -> &librefang_hands::registry::HandRegistry;
     fn home_dir(&self) -> &Path;
+    /// Path of the `config.toml` this daemon loaded — see [`LibreFangKernel::config_path`].
+    fn config_path(&self) -> &Path;
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine;
     fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache;
     fn memory_substrate(&self) -> &Arc<MemorySubstrate>;
@@ -879,6 +881,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn home_dir(&self) -> &Path {
         Self::home_dir(self)
+    }
+    fn config_path(&self) -> &Path {
+        Self::config_path(self)
     }
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
         <Self as crate::MediaSubsystemApi>::media_engine(self)

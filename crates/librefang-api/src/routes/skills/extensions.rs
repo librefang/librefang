@@ -134,7 +134,7 @@ pub async fn install_extension(
 ) -> impl IntoResponse {
     // Ahead of `install_integration`, which reloads the on-disk catalog and resolves credentials out of the vault.
     // Neither is durable, but both are work done on behalf of a request that cannot succeed.
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
@@ -180,7 +180,7 @@ pub async fn install_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
         // Scrub the config-write io error (audit:
         // rusqlite-errors-leak) — path / permission detail stays in
@@ -232,7 +232,7 @@ pub async fn uninstall_extension(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionUninstallRequest>,
 ) -> impl IntoResponse {
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
 
@@ -258,7 +258,7 @@ pub async fn uninstall_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }

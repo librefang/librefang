@@ -289,6 +289,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 image_url: None,
                                 image_embedding: None,
                                 modality: Default::default(),
+                                similarity: None,
                             });
                         }
                     }
@@ -343,6 +344,7 @@ impl ContextEngine for ScriptableContextEngine {
                                     image_url: None,
                                     image_embedding: None,
                                     modality: Default::default(),
+                                    similarity: None,
                                 });
                             }
                         }
@@ -393,6 +395,7 @@ impl ContextEngine for ScriptableContextEngine {
                                 image_url: None,
                                 image_embedding: None,
                                 modality: Default::default(),
+                                similarity: None,
                             });
                         }
                     }
