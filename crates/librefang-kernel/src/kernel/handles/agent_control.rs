@@ -469,6 +469,50 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             })
     }
 
+    /// Write a new agent type to `$LIBREFANG_HOME/agent-types/{name}.toml` (#7722).
+    ///
+    /// Every rule here belongs to `librefang_types::agent_type_store`, which the HTTP `POST /api/templates` handler calls too.
+    /// Nothing kernel-specific is layered on top, and that is the point: an agent authoring a type through the tool gets the same name rule, the same refusal to shadow a live agent, the same `File::create_new` claim against a concurrent create, and the same exhaustive `into_new_manifest` constructor an operator gets through the dashboard.
+    ///
+    /// The write is a single small file and runs inline rather than on a blocking pool, matching the HTTP handler, which does the same on the axum worker.
+    async fn create_agent_type(
+        &self,
+        name: &str,
+        spec: librefang_types::agent_type::AgentTypeSpec,
+    ) -> Result<kernel_handle::AgentTypeSummary, kernel_handle::KernelOpError> {
+        use librefang_types::agent_type_store::{create_agent_type, CreateAgentTypeError};
+
+        let created = create_agent_type(name, spec).map_err(|e| match e {
+            // A name the store refuses is something the caller can fix by sending another one, so the reason travels rather than being flattened into an opaque internal failure.
+            CreateAgentTypeError::InvalidName => {
+                kernel_handle::KernelOpError::InvalidInput(e.to_string())
+            }
+            CreateAgentTypeError::NameTaken | CreateAgentTypeError::ShadowsLiveAgent => {
+                kernel_handle::KernelOpError::Conflict(e.to_string())
+            }
+            // The io payload names a path on the daemon host, so it is logged rather than returned.
+            CreateAgentTypeError::Io(detail) => {
+                tracing::error!("agent type create failed: {detail}");
+                kernel_handle::KernelOpError::Internal(
+                    "could not write the agent type to disk".to_string(),
+                )
+            }
+        })?;
+
+        tracing::info!(
+            agent_type = %created.name,
+            "Agent type created through the agent-facing tool"
+        );
+        Ok(kernel_handle::AgentTypeSummary {
+            name: created.name,
+            description: created.manifest.description,
+            provider: created.manifest.model.provider,
+            model: created.manifest.model.model,
+            tools: created.manifest.capabilities.tools,
+            skills: created.manifest.skills,
+        })
+    }
+
     fn max_agent_call_depth(&self) -> u32 {
         let cfg = self.config.load();
         cfg.max_agent_call_depth

@@ -844,10 +844,8 @@ def parse_slack_event(
         # G… for private groups). The kernel uses this as the reply
         # target — matching Rust's `sender.platform_id = channel`.
         user_id=channel,
-        # Display name is the Slack user id verbatim — the Rust
-        # adapter doesn't try to resolve display names (it would
-        # need an extra `users.info` call per message). Operators
-        # who want human-readable names set them in `[users]`.
+        # Placeholder only. This is a pure function with no workspace access, so it stamps the raw Slack user id and `SlackAdapter._apply_identity` overwrites it with a resolved display name when `SLACK_RESOLVE_DISPLAY_NAMES` is on (#7086).
+        # With resolution off — the default — the raw id is what the agent sees, and operators who want names without the `users:read` scope set them in `[users]`.
         user_name=user_id,
         content=content,
         message_id=ts,
@@ -984,8 +982,7 @@ class SlackAdapter(SidecarAdapter):
             Field("SLACK_ALLOWED_CHANNELS",
                   "Allowed Channel IDs (comma-separated, empty = allow all)",
                   "text",
-                  placeholder="C0123, C0456",
-                  advanced=True),
+                  placeholder="C0123, C0456"),
             Field("SLACK_UNFURL_LINKS",
                   "Expand link previews in sent messages",
                   "bool",
@@ -994,14 +991,12 @@ class SlackAdapter(SidecarAdapter):
             Field("SLACK_FORCE_FLAT_REPLIES",
                   "Post replies as top-level messages instead of threads",
                   "bool",
-                  placeholder="false",
-                  advanced=True),
+                  placeholder="false"),
             Field("SLACK_REACTIONS",
                   "Add an eyes reaction while a turn runs and flip it to "
                   "a check / cross when it finishes",
                   "bool",
-                  placeholder="true",
-                  advanced=True),
+                  placeholder="true"),
             Field("SLACK_PROGRESS_CARD",
                   "Show the multi-step task-progress card (defaults to "
                   "following SLACK_REACTIONS)",
@@ -1011,8 +1006,7 @@ class SlackAdapter(SidecarAdapter):
             Field("SLACK_FILE_DOWNLOADS",
                   "Forward user-uploaded files and images to the agent",
                   "bool",
-                  placeholder="true",
-                  advanced=True),
+                  placeholder="true"),
             Field("SLACK_FILE_MAX_BYTES",
                   "Maximum inbound attachment size in bytes",
                   "number",

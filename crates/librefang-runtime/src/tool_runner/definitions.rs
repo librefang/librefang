@@ -105,6 +105,7 @@ pub(crate) mod tool_name {
     pub const WORKFLOW_START: &str = "workflow_start";
     pub const WORKFLOW_CANCEL: &str = "workflow_cancel";
     pub const WORKFLOW_CREATE: &str = "workflow_create";
+    pub const AGENT_TYPE_CREATE: &str = "agent_type_create";
     pub const SYSTEM_TIME: &str = "system_time";
     pub const CANVAS_PRESENT: &str = "canvas_present";
     pub const READ_ARTIFACT: &str = "read_artifact";
@@ -1378,6 +1379,25 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                         "total_timeout_secs": { "type": "integer", "minimum": 1, "maximum": 86400, "description": "Wall-clock limit for the whole run (ceiling 86400 = 24h). Omit to use the daemon default." }
                     },
                     "required": ["name", "steps"]
+                }),
+            },
+            ToolDefinition {
+                name: tool_name::AGENT_TYPE_CREATE.to_string(),
+                description: "Author a new agent type — a reusable agent manifest stored on the daemon that agent_spawn, the dashboard and the TUI can all spawn agents from afterwards. Use this when a role is worth repeating (\"release-notes writer\", \"triage bot\"); for a one-off helper, spawn from an existing type instead. The type outlives the conversation. Names are unique across the agent-type catalog and across live agent names: a name already in use is rejected rather than overwritten, so pick another name and call again. Only the seven fields below are settable here — everything else in a manifest (triggers, MCP servers, schedules, exec policy) starts at its default and is edited afterwards through the dashboard. Returns {name, description, provider, model, tools, skills} as stored.".to_string(),
+                // The property keys are written in alphabetical order so this schema serializes identically whether serde_json's map is insertion-ordered or sorted (#3298).
+                // A tool definition reaches the LLM prompt on every request that ships it, and a key order that varies between processes invalidates the provider's prompt cache while the content is unchanged.
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "description": { "type": "string", "description": "One line on what this agent type is for, shown in the catalog an operator picks from" },
+                        "model": { "type": "string", "description": "Model id to run this type on, e.g. 'claude-sonnet-4-5'. Omit to inherit the daemon's configured default model." },
+                        "name": { "type": "string", "description": "Unique agent type name, 1-64 characters of letters, digits, '_' and '-' (e.g. 'release-notes-writer'). This is how the type is addressed afterwards, and it is also the file name on disk." },
+                        "provider": { "type": "string", "description": "LLM provider for this type, e.g. 'anthropic' or 'openai'. Omit to inherit the daemon's configured default provider." },
+                        "skills": { "type": "array", "items": { "type": "string" }, "description": "Skills installed on agents spawned from this type" },
+                        "system_prompt": { "type": "string", "description": "The system prompt agents of this type run with. An empty string is stored as an empty prompt, not replaced with canned text." },
+                        "tools": { "type": "array", "items": { "type": "string" }, "description": "Tool names granted to agents spawned from this type (agent_list shows what an existing agent has). Omit for the manifest default." }
+                    },
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {

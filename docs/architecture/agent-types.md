@@ -3,6 +3,15 @@
 An *agent type* is a reusable agent manifest an operator authors once and spawns from.
 It is a plain `AgentManifest` document — the same shape as an agent's own `agent.toml` — and it is served, created, edited and deleted through `/api/templates`.
 
+## One API path, one human word
+
+"Agent type" is the term every human- and agent-facing surface uses: the dashboard page at `/agent-types`, the TUI screen, the store directory, the `agent_type_create` tool, and this document.
+The **API path stays `/api/templates`**, and there is deliberately no `/api/agent-types` alias (#7722).
+
+An alias would be permanent — route tables, the OpenAPI document, the generated dashboard client and every operator script would carry two names for one resource forever, and every reader of the route table would have to work out whether the two paths differ in any way.
+They would not, which makes the second name pure cost.
+The word an operator reads and the path a client posts to are allowed to differ; what is not allowed is two paths that mean the same thing.
+
 ## Where they live
 
 | Source | Path | Written by this API |
@@ -40,7 +49,14 @@ Three consequences worth stating explicitly:
 
 ## Creating one
 
-`POST /api/templates` is the only path that constructs a manifest, because there is nothing on disk to preserve.
+Creating is the only path that constructs a manifest, because there is nothing on disk to preserve.
+There are two callers — `POST /api/templates` and the `agent_type_create` tool — and they share one implementation, `librefang_types::agent_type_store::create_agent_type`.
+It validates the name, refuses one that belongs to a live agent, builds the manifest through `AgentTypeSpec::into_new_manifest`, claims the path with `File::create_new`, and fills the claim with an atomic rename.
+Each surface keeps only its own vocabulary for the refusals: HTTP status codes and translated operator strings on one side, `ToolError` variants and model-readable prose on the other.
+
+Sharing the write rather than the validation alone is the point.
+A rule that lives on one of two writing paths is a rule the other silently does not have, and the name-shadowing check, the `deny_unknown_fields` refusal and the race-free claim are each worth exactly as much as the weaker of the two paths.
+
 `AgentTypeSpec::into_new_manifest` writes an **exhaustive** struct literal — no `..Default::default()` rest pattern.
 
 That is deliberate and load-bearing.
@@ -50,7 +66,7 @@ If you are here because the compiler just told you a field is missing, add it to
 
 ## Writes are atomic
 
-`persist_agent_type` renders the manifest, then lands it through `crate::atomic_write` — a sibling temp file, `sync_all`, `rename`.
+`librefang_types::agent_type_store` renders the manifest, then lands it through a sibling temp file, `sync_all`, `rename`, and a parent-directory sync on Unix.
 `std::fs::write` truncates in place, so a failure partway through would leave a truncated `agent.toml` where a valid one used to be, which is the worst possible failure mode for a file the daemon parses at spawn.
 
 A manifest that cannot be re-rendered as TOML is refused with a `500` and nothing is written, rather than partially serialized.
@@ -61,8 +77,10 @@ A manifest that cannot be re-rendered as TOML is refused with a `500` and nothin
 | --- | --- | --- |
 | HTTP | `GET /api/templates`, `/api/templates/{name}`, `/api/templates/{name}/toml` | `POST /api/templates`, `PUT`/`DELETE /api/templates/{name}` |
 | Dashboard | `src/lib/queries/agentTypes.ts` | `src/lib/mutations/agentTypes.ts`, `src/pages/AgentTypesPage.tsx` |
-| TUI | templates screen (`crates/librefang-cli/src/tui/event.rs`) — daemon backend via HTTP, in-process backend reads the same two directories | — |
+| TUI | agent types screen (`crates/librefang-cli/src/tui/event.rs`) — daemon backend via HTTP, in-process backend reads the same two directories | — |
+| Agent | — | `agent_type_create` tool (`crates/librefang-runtime/src/tool_runner/agent.rs`) via `AgentControl::create_agent_type` |
 
 The TUI spawns from the manifest `GET /api/templates/{name}/toml` serves verbatim; it does not reconstruct one.
 
-All three go through `AgentTypeSpec`, so a future agent-facing authoring tool (#7722) inherits the same merge rules by using the same type rather than re-deriving them.
+All four go through `AgentTypeSpec`, so the agent-facing tool (#7722) inherits the same merge rules by using the same type rather than re-deriving them.
+The tool's own schema is the seven flat keys and nothing else, written in sorted key order because a tool definition is stringified into the LLM prompt on every turn that ships it (#3298).

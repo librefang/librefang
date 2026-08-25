@@ -42,6 +42,10 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 | `agent_find` | `query` | 按名字、ID 或 tag 搜 agent。 |
 | `agent_kill` | `agent_id` | 终止运行中的 agent。子 agent 上下文里默认禁。 |
 | `goal_update` | `goal` | 中途更新**当前** agent 的目标。新目标写进 agent 的 manifest,后续 prompt 看得到。 |
+| `agent_type_create` | `name`,可选 `description`、`system_prompt`、`provider`、`model`、`tools`、`skills` | 创建一个新的**智能体类型**(agent type)—— 一份存在 daemon 上的可复用 manifest,之后 `agent_spawn`、仪表盘和 TUI 都能从它生成 agent。这里只能设置这七个字段,manifest 的其余部分先取默认值,之后再改。名字若已被某个智能体类型或某个运行中的 agent 占用,会被拒绝而不是覆盖。 |
+
+`agent_type_create` 走的是和 `POST /api/templates` 完全相同的 `AgentTypeSpec` 校验与同一个存储实现,所以 agent 自己写出来的类型和运维在仪表盘里写出来的没有任何区别。
+工具、仪表盘和 TUI 统一用"智能体类型"这个说法;HTTP 路径仍旧只有 `/api/templates` 一个,不再为同一个资源加第二个别名。
 
 `[kernel]` 里的 `max_agent_call_depth`(默认 `5`)封顶 `agent_send` 链能递归多深 —— 让 A→B→A 循环根本到不了生产。
 下面的 `workflow_run` 若发生嵌套(某一步的目标 agent 又跑了一次 workflow)也计入同一份预算,因为每一步都会嵌套一整个 agent turn,效果跟 `agent_send` 跳一层一样。
@@ -325,10 +329,10 @@ media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meet
 
 ## 在源码里去哪看
 
-- **Tool registry** — `crates/librefang-runtime/src/tools/` —— 所有 `register_tool!` 调用。
-- **Schema 序列化** — `librefang-runtime::tools::schema` —— LLM 看到的 JSON schema。
-- **Capability 把关** — `librefang-runtime::capability` —— 哪些 agent 能调哪些工具。
-- **浏览器池** — `crates/librefang-runtime/src/tools/browser/`。
-- **Schedule / cron 运行时工具** — `crates/librefang-runtime/src/tools/scheduler/`。
+- **工具注册与 schema** — `crates/librefang-runtime/src/tool_runner/definitions.rs` —— `builtin_tool_definitions()` 给出每个内置工具的名字、描述和 LLM 看到的 JSON schema。
+- **分发** — `crates/librefang-runtime/src/tool_runner/dispatch.rs` —— 把工具名路由到处理函数的那个 match;处理函数本身按域拆在同目录的 `agent.rs`、`workflow.rs`、`memory.rs` 等文件里。
+- **Capability 把关** — `crates/librefang-types/src/capability.rs`,加上 `execute_tool` 里的 `allowed_tools` 检查 —— 哪些 agent 能调哪些工具。
+- **浏览器池** — `crates/librefang-runtime/src/browser.rs` 和 `browser_tools.rs`。
+- **Schedule / cron 运行时工具** — `crates/librefang-runtime/src/tool_runner/schedule.rs` 和 `cron.rs`。
 
 不确定的时候,工具结构体上的 rustdoc 是权威规约。Dashboard 的 "Tools" inspector 也会按当前 capability 授权渲染实际可用的工具集。

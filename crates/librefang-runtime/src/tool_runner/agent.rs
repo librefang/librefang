@@ -500,3 +500,57 @@ pub(super) fn tool_agent_kill(
     kh.kill_agent(agent_id).map_err(ToolError::upstream)?;
     Ok(format!("Agent {agent_id} killed successfully."))
 }
+
+// ---------------------------------------------------------------------------
+// agent_type_create — author a reusable agent type from a conversation (#7722)
+// ---------------------------------------------------------------------------
+
+/// Create an operator-authored agent type from an agent-authored spec.
+///
+/// This handler is deliberately thin, for the same reason `tool_workflow_create` is: everything that decides whether the write is legal — the name rule, the refusal to shadow a live agent, the atomic claim against a concurrent create — is enforced kernel-side by the shared `agent_type_store`, which the HTTP `POST /api/templates` handler calls too.
+/// Re-checking any of it here would be a second copy of a rule that has to stay identical across the two surfaces, and the second copy is the one that goes stale.
+///
+/// What it does own is the deserialization boundary.
+/// `AgentTypeSpec` is `deny_unknown_fields`, so a key the model invented — `temperature`, `max_tokens`, `memory` — is refused by name instead of being dropped on the floor and answered with a cheerful success the model then builds on.
+/// The rejection is reported as an invalid `spec` parameter, carrying serde's own message, because the offending key is exactly what the model needs to see to fix the call on its next turn.
+pub(super) async fn tool_agent_type_create(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> ToolResult {
+    let name = input["name"]
+        .as_str()
+        .ok_or(ToolError::MissingParameter("name"))?
+        .to_string();
+
+    let spec: librefang_types::agent_type::AgentTypeSpec = serde_json::from_value(input.clone())
+        .map_err(|e| ToolError::InvalidParameter {
+            name: "spec",
+            reason: e.to_string(),
+        })?;
+
+    let kh = require_kernel_typed(kernel)?;
+    // `InvalidInput` (a name the store will not accept) and `Conflict` (the name is taken, by an agent type or by a live agent) both describe something the model can fix by calling again with a different name, so the kernel's reason is relayed against `name` rather than flattened into an opaque upstream failure.
+    let summary = kh
+        .create_agent_type(&name, spec)
+        .await
+        .map_err(|e| match e {
+            librefang_types::error::LibreFangError::InvalidInput(reason)
+            | librefang_types::error::LibreFangError::Conflict(reason) => {
+                ToolError::InvalidParameter {
+                    name: "name",
+                    reason,
+                }
+            }
+            other => ToolError::upstream(other),
+        })?;
+
+    Ok(serde_json::json!({
+        "name": summary.name,
+        "description": summary.description,
+        "provider": summary.provider,
+        "model": summary.model,
+        "tools": summary.tools,
+        "skills": summary.skills,
+    })
+    .to_string())
+}

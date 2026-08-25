@@ -30,6 +30,7 @@ A `config_mode` key inside `config.toml` would let an API write unlock the very 
 The path is resolved exactly once, in `LibreFangKernel::boot`, and stored on the kernel as `config_path_boot`.
 Everything downstream reads it back through `KernelApi::config_path()`: the hot-reload path, the 30-second change watcher, the `source` field of `GET /api/config/status`, the `source` in every `423` body, and every route that persists into the file.
 The CLI resolves through the same helper (`librefang_kernel::config::default_config_path`), so `librefang config set` inside the pod writes the file the daemon will reload.
+`deploy/docker-entrypoint.sh` honours `LIBREFANG_CONFIG_PATH` too, which it did not until the Kubernetes overlay landed: it derived `$LIBREFANG_HOME/config.toml`, found that absent on a fresh PVC, and ran `librefang init` — which resolved the *mounted* file, took its upgrade branch because that file exists, and exited non-zero trying to merge new default sections into a read-only mount, on every boot.
 
 This is worth stating because it was not true before #6695.
 The loader honoured `LIBREFANG_CONFIG_PATH` while the writers re-derived `<home_dir>/config.toml`, so relocating the file produced a daemon that read the mount and wrote a second copy into `LIBREFANG_HOME` — one the next reload never looked at.
@@ -170,6 +171,13 @@ A pessimistic one would grey out every control on a daemon that is perfectly wri
 **Rollout, not in-place reload.**
 Change the ConfigMap, roll the StatefulSet — a checksum annotation on the pod template is the usual way to make the change trigger the rollout.
 
+`deploy/kubernetes/overlays/managed-config/` is that shape as a working kustomize overlay: `config.toml` rendered into a ConfigMap, mounted read-only at `/etc/librefang/` outside the PVC, both environment variables set, and a `checksum/config` annotation carrying the same `sha256:` string this endpoint reports.
+Pinning the annotation to the file's own digest rather than to kustomize's name-suffix hash makes the value that causes the rollout and the value that confirms it landed the same value, so `GET /api/config/status` answers "did my change reach the daemon?" with one string comparison.
+`scripts/check-k8s-manifests.py` recomputes the digest from the rendered ConfigMap and fails when the annotation is stale, because a stale annotation applies cleanly and rolls nothing.
+It also rejects `include = [...]` inside a managed ConfigMap: the checksum covers the primary file's bytes only, so an included file could change with the checksum unmoved, and the annotation this overlay is built around would stop meaning what it says.
+That settles the `include` question for the overlay's own scope without changing what the daemon computes — `include` is unaffected in a mutable deployment.
+The deployment procedure, the update procedure and the rollback procedure are in [`deploy/kubernetes/README.md`](../../deploy/kubernetes/README.md#managed-configuration).
+
 This is the only supported update path today, and it is chosen deliberately.
 In-place reload of a ConfigMap has to handle Kubernetes' atomic symlink swap without ever reading a half-written file, and then guarantee that an invalid new file never partially replaces the last valid effective configuration.
 A rollout works for restart-required fields too, which is the superset, so it is the contract worth supporting first.
@@ -196,10 +204,6 @@ Stated plainly rather than left to be discovered:
   `POST /api/auth/change-password` is refused, so in a managed deployment `dashboard_user` / `dashboard_pass_hash` change in the manifest and nowhere else.
   This is the intended consequence of the lock rather than a limitation to work around — a password changed through the API would be reverted by the next rollout, which is a worse outcome than being told no.
   The guard runs *before* the current-password check, so the endpoint also stops being a password oracle in this mode.
-
-- **Kubernetes deployment tooling is not in the tree.**
-  There is no shipped ConfigMap / Secret manifest, and no checksum-annotation rollout example, even though the rollout described above is the supported update path.
-  The `checksum` on `GET /api/config/status` is the piece that makes such an annotation verifiable, and it exists; the manifests that would use it do not.
 
 - **Most of the guarded writers do not take `config_write_lock`**, so they can already race a `POST /api/config/set` in mutable mode — a pre-existing bug that predates managed mode and is orthogonal to it.
   The sidecar-channel routes are the exception: both acquire it around the rewrite (`routes/channels.rs`).

@@ -658,11 +658,14 @@ impl LibreFangKernel {
         // override > catalog (#6568, #7774).
         // The ephemeral `/btw` session is created empty below, so it carries no
         // persisted hint to fall back to.
+        // Only the size reaches the agent loop; the layer that produced it is
+        // reported by the context report, not consumed here (#7774).
         let ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &manifest.model,
             None,
-        );
+        )
+        .map(|resolved| resolved.tokens);
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user-configured per-model capability overrides
@@ -2462,7 +2465,8 @@ impl LibreFangKernel {
             &self.llm.model_catalog.load(),
             &manifest.model,
             Some(session.context_window_tokens),
-        );
+        )
+        .map(|resolved| resolved.tokens);
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.

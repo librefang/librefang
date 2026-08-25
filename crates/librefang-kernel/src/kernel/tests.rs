@@ -3343,7 +3343,19 @@ fn sanitize_reviewer_line_strips_newlines_and_brackets() {
 /// registry's `load_skill` accepts it. Also drops a prompt_context.md
 /// to exercise the progressive-loading branch.
 fn install_test_skill(skills_parent: &std::path::Path, name: &str, tags: &[&str]) {
-    let dir = skills_parent.join(name);
+    install_test_skill_named(skills_parent, name, name, tags);
+}
+
+/// Install a skill whose directory name and `[skill].name` are given independently.
+///
+/// [`install_test_skill`] derives both from one argument, which makes it structurally unable to catch a caller that validates an allowlist against directory names instead of manifest names — the two values are always equal (#7772).
+fn install_test_skill_named(
+    skills_parent: &std::path::Path,
+    dir_name: &str,
+    manifest_name: &str,
+    tags: &[&str],
+) {
+    let dir = skills_parent.join(dir_name);
     std::fs::create_dir_all(&dir).unwrap();
     let tag_toml = tags
         .iter()
@@ -3352,7 +3364,7 @@ fn install_test_skill(skills_parent: &std::path::Path, name: &str, tags: &[&str]
         .join(", ");
     let toml = format!(
         "[skill]\n\
-         name = \"{name}\"\n\
+         name = \"{manifest_name}\"\n\
          version = \"0.1.0\"\n\
          description = \"test skill\"\n\
          author = \"test\"\n\
@@ -3564,6 +3576,348 @@ fn test_set_agent_mcp_servers_persists_allowlist_to_agent_toml() {
         written.contains("test-mcp-server"),
         "agent.toml must contain the assigned MCP server so it survives a restart, got:\n{written}"
     );
+
+    kernel.shutdown();
+}
+
+/// Boot a kernel over `home_dir` with a `data/` subdir, the shape every allowlist test below needs.
+fn boot_kernel_at(home_dir: &std::path::Path) -> LibreFangKernel {
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.to_path_buf(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    LibreFangKernel::boot_with_config(config).expect("boot")
+}
+
+/// Spawn a minimal agent for an allowlist test.
+fn spawn_allowlist_test_agent(kernel: &LibreFangKernel, name: &str) -> AgentId {
+    kernel
+        .spawn_agent_inner(
+            AgentManifest {
+                name: name.to_string(),
+                description: "allowlist validation regression".to_string(),
+                author: "test".to_string(),
+                module: "builtin:chat".to_string(),
+                ..Default::default()
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("spawn")
+}
+
+/// Write a minimal MCP catalog entry at `<home_dir>/mcp/catalog/<id>.toml`, the layout `McpCatalog::load` reads at boot.
+fn write_test_mcp_catalog_entry(home_dir: &std::path::Path, id: &str) {
+    let dir = home_dir.join("mcp").join("catalog");
+    std::fs::create_dir_all(&dir).unwrap();
+    let toml = format!(
+        "id = \"{id}\"\n\
+         name = \"{id}\"\n\
+         description = \"test catalog entry\"\n\
+         category = \"devtools\"\n\
+         \n\
+         [transport]\n\
+         type = \"stdio\"\n\
+         command = \"true\"\n"
+    );
+    std::fs::write(dir.join(format!("{id}.toml")), toml).unwrap();
+}
+
+#[test]
+fn test_set_agent_skills_validates_against_manifest_name_not_directory_name() {
+    // #7772 review item: the pending-skill check must compare against `[skill].name`, which is what the loaded registry is keyed by, not against the directory name.
+    // The two identifiers are equal in every other skill test in this file, so only a deliberately mismatched fixture can tell the accessors apart.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    let kernel = boot_kernel_at(&home_dir);
+
+    // Installed after boot, so it is on disk but absent from the loaded registry.
+    install_test_skill_named(&home_dir.join("skills"), "package-dir", "actual-skill", &[]);
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "manifest-name-skill-agent");
+
+    kernel
+        .set_agent_skills(agent_id, vec!["actual-skill".to_string()])
+        .expect(
+            "the manifest name is the identifier the skill will load under, so it must be accepted",
+        );
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .skills,
+        vec!["actual-skill".to_string()]
+    );
+
+    // The directory name must not be silently accepted in its place: once the skill loads it lands in the registry under `actual-skill`, so a stored `package-dir` would match nothing and quietly strip the agent's skill at the next restart.
+    let err = kernel
+        .set_agent_skills(agent_id, vec!["package-dir".to_string()])
+        .expect_err("the directory name can never match after load and must be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("package-dir"),
+                "the error must name the rejected value, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .skills,
+        vec!["actual-skill".to_string()],
+        "a rejected save must leave the previously stored allowlist untouched"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_skills_accepts_on_disk_unloaded_pending_name() {
+    // A skill directory that exists on disk but is not in the running registry is a legitimate pending declaration — the same state `pending_skill_and_mcp_declarations` reports on the read side — and accepting it must not load or activate anything.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    let kernel = boot_kernel_at(&home_dir);
+
+    install_test_skill(&home_dir.join("skills"), "unloaded-pending-skill", &[]);
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "unloaded-skill-agent");
+
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            !registry
+                .skill_names()
+                .iter()
+                .any(|n| n == "unloaded-pending-skill"),
+            "precondition: the skill must not be loaded yet"
+        );
+    }
+
+    kernel
+        .set_agent_skills(agent_id, vec!["unloaded-pending-skill".to_string()])
+        .expect("an on-disk-but-unloaded skill name must be accepted as a pending declaration");
+
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .skills,
+        vec!["unloaded-pending-skill".to_string()]
+    );
+    {
+        let registry = kernel.skills.skill_registry.read().unwrap();
+        assert!(
+            !registry
+                .skill_names()
+                .iter()
+                .any(|n| n == "unloaded-pending-skill"),
+            "accepting a pending declaration must not load the skill as a side effect"
+        );
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_skills_rejects_name_unknown_everywhere_as_invalid_input() {
+    // A name that is neither loaded nor on disk is a typo, and must be rejected as `InvalidInput` — the old `Internal` variant is what rendered as "Internal error" at the API boundary for a user-input problem.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+    let kernel = boot_kernel_at(&home_dir);
+    let agent_id = spawn_allowlist_test_agent(&kernel, "unknown-skill-agent");
+
+    let err = kernel
+        .set_agent_skills(agent_id, vec!["totally-made-up-skill".to_string()])
+        .expect_err("a name absent from both the registry and disk must be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("totally-made-up-skill"),
+                "the error must name the rejected skill, got: {msg}"
+            );
+            assert!(
+                !msg.contains("Internal"),
+                "a validation failure must not read as an internal fault, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
+    // The reported bug: `fetch` is in the local MCP catalog but was never configured, so it never connected, so the old accept-set (built from connected tools) rejected it.
+    // Accepting it must persist the name and nothing else — no install, no connect, no `effective_mcp_servers` mutation.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    write_test_mcp_catalog_entry(&home_dir, "fetch");
+    let kernel = boot_kernel_at(&home_dir);
+
+    let before = kernel.mcp.effective_mcp_servers.read().unwrap().len();
+    let agent_id = spawn_allowlist_test_agent(&kernel, "catalog-only-agent");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["fetch".to_string()])
+        .expect("a catalog-only server name is a legitimate pending declaration");
+
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        vec!["fetch".to_string()]
+    );
+    let after = kernel.mcp.effective_mcp_servers.read().unwrap();
+    assert_eq!(
+        before,
+        after.len(),
+        "accepting a pending declaration must not configure a server as a side effect"
+    );
+    assert!(
+        !after.iter().any(|s| s.name == "fetch"),
+        "fetch must not have been added to the effective server list"
+    );
+    drop(after);
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_accepts_configured_but_unconnected_name() {
+    // The old check resolved connected *tools* back to servers, so a server configured in `config.toml` that had not dialed yet — or failed to dial — was rejected even though it is exactly what the operator wrote down.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+    register_mcp_server(&kernel, "configured-not-connected");
+    // Deliberately no tools pushed into `tools_ref` — nothing has connected.
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "unconnected-mcp-agent");
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["configured-not-connected".to_string()])
+        .expect("a configured server must be accepted whether or not it has connected");
+
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        vec!["configured-not-connected".to_string()]
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_keeps_pending_name_when_adding_configured_ones() {
+    // The reported failure in full: the dashboard PUTs the whole array, so one inherited pending name (`fetch`) took down a save whose actual purpose was adding two configured servers.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    write_test_mcp_catalog_entry(&home_dir, "fetch");
+    let kernel = boot_kernel_at(&home_dir);
+    register_mcp_server(&kernel, "memory");
+    register_mcp_server(&kernel, "camoufox");
+    register_mcp_server(&kernel, "sequential-thinking");
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "inherited-fetch-agent");
+    let saved = vec![
+        "memory".to_string(),
+        "fetch".to_string(),
+        "camoufox".to_string(),
+        "sequential-thinking".to_string(),
+    ];
+    kernel
+        .set_agent_mcp_servers(agent_id, saved.clone())
+        .expect("adding configured servers alongside an inherited pending one must succeed");
+
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        saved
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_accepts_wildcard_allowlist() {
+    // `["*"]` is a documented value meaning "all connected servers", but it is not the name of anything, so the connected-tool accept-set never contained it and saving it failed with `Unknown MCP server: *`.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+    let agent_id = spawn_allowlist_test_agent(&kernel, "wildcard-mcp-agent");
+
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["*".to_string()])
+        .expect("the documented wildcard must be storable");
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        vec!["*".to_string()]
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_set_agent_mcp_servers_rejects_name_unknown_everywhere_as_invalid_input() {
+    // A name absent from both `config.toml` and the catalog is genuinely unknown, and must still be rejected — as `InvalidInput`, not `Internal`.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+    let agent_id = spawn_allowlist_test_agent(&kernel, "unknown-mcp-agent");
+
+    let err = kernel
+        .set_agent_mcp_servers(agent_id, vec!["totally-made-up-server".to_string()])
+        .expect_err("a name absent from config and catalog must be rejected");
+    match err {
+        KernelError::LibreFang(LibreFangError::InvalidInput(ref msg)) => {
+            assert!(
+                msg.contains("totally-made-up-server"),
+                "the error must name the rejected server, got: {msg}"
+            );
+            assert!(
+                !msg.contains("Internal"),
+                "a validation failure must not read as an internal fault, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
 
     kernel.shutdown();
 }

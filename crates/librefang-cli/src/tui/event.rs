@@ -1,5 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use crate::commands::automation::WorkflowRunOutcome;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::McpSubsystemApi;
@@ -19,6 +20,7 @@ use super::screens::{
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
+    models::ModelRow,
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
@@ -183,6 +185,13 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
+    /// Model catalogue loaded for the Models screen (refs #7774).
+    ModelCatalogLoaded(Vec<ModelRow>),
+    /// One model's operator capacity limits were persisted; carries the
+    /// `provider:model_id` override key.
+    ModelLimitsSaved(String),
+    /// One model's operator capacity limits were dropped back to the catalog.
+    ModelLimitsReset(String),
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
     /// Log entries loaded.
@@ -911,6 +920,35 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// How long the daemon may hold the run request open before handing the run back as a background task.
+///
+/// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
+/// 45 s leaves 15 s of that budget for the response itself.
+const WORKFLOW_RUN_WAIT_MS: u64 = 45_000;
+
+/// The wait has to expire before this thread's own client does, or a slow run comes back as a disconnect instead of the 202 the screen knows how to render.
+const _: () = assert!(
+    WORKFLOW_RUN_WAIT_MS < 60_000,
+    "spawn_run_workflow builds a 60 s client; a longer wait can never return 202"
+);
+
+/// Render one workflow-run response for the Workflows screen.
+///
+/// Reading `output` and nothing else meant a 202 (still running) and a 422 (the run failed) both rendered the generic "completed" line, so the screen announced success on every failure.
+/// The classification is shared with `librefang workflow run` so the two surfaces cannot drift apart again.
+fn workflow_run_result_message(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    match crate::commands::automation::classify_workflow_run(status, body) {
+        WorkflowRunOutcome::Completed { output, .. } => output.to_string(),
+        WorkflowRunOutcome::Accepted { run_id } => {
+            crate::i18n::t_args("tui-event-workflow-still-running", &[("id", run_id)])
+        }
+        WorkflowRunOutcome::Failed { error } => crate::i18n::t_args(
+            "tui-event-workflow-run-failed",
+            &[("status", &status.to_string()), ("detail", error)],
+        ),
+    }
+}
+
 /// Run a workflow in background.
 pub fn spawn_run_workflow(
     backend: BackendRef,
@@ -924,17 +962,18 @@ pub fn spawn_run_workflow(
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
-                .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
+                .post(format!(
+                    "{base_url}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
+                ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
             {
                 Ok(resp) => {
+                    let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let result = body["output"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-workflow-completed"));
-                    let _ = tx.send(AppEvent::WorkflowRunResult(result));
+                    let _ = tx.send(AppEvent::WorkflowRunResult(
+                        workflow_run_result_message(status, &body),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::WorkflowRunResult(format!("Error: {e}")));
@@ -2452,13 +2491,22 @@ pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 }
 
 /// Fetch settings models.
+///
+/// `GET /api/models` answers with `{ "models": [...], "total": n, "available": n }`.
+/// Reading the body as a bare array — which this did — yields `None` on every
+/// call, so the Settings > Models list rendered empty against a healthy daemon.
+/// The chat model picker below already reads `body["models"]`; this is the same
+/// shape.
+/// The cost keys are the API's own (`input_cost_per_m` / `output_cost_per_m`);
+/// the `cost_input` / `cost_output` names read here appear nowhere in the
+/// response, so the prices column was pinned to `$0.00/$0.00`.
 pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let models: Vec<ModelInfo> = body
+                    let models: Vec<ModelInfo> = body["models"]
                         .as_array()
                         .map(|arr| {
                             arr.iter()
@@ -2467,8 +2515,8 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     provider: m["provider"].as_str().unwrap_or("").to_string(),
                                     tier: m["tier"].as_str().unwrap_or("").to_string(),
                                     context_window: m["context_window"].as_u64().unwrap_or(0),
-                                    cost_input: m["cost_input"].as_f64().unwrap_or(0.0),
-                                    cost_output: m["cost_output"].as_f64().unwrap_or(0.0),
+                                    cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
+                                    cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
                                 })
                                 .collect()
                         })
@@ -2481,6 +2529,198 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::SettingsModelsLoaded(Vec::new()));
         }
     });
+}
+
+/// Fetch the model catalogue for the Models screen, with each entry's effective
+/// and catalog-declared capacity limits side by side (refs #7774).
+///
+/// `context_window` / `max_output_tokens` on the row are the values in force
+/// after the operator override; `limits_catalog` carries what the registry or a
+/// discovery probe declared. The screen needs both — the difference is what
+/// tells an operator a model has been corrected, and what a reset restores.
+pub fn spawn_fetch_model_catalog(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/models")).send() {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>() {
+                        let mut models: Vec<ModelRow> = body["models"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .map(|m| ModelRow {
+                                        id: m["id"].as_str().unwrap_or("").to_string(),
+                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                        tier: m["tier"].as_str().unwrap_or("").to_string(),
+                                        context_window_effective: m["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        context_window_catalog: m["limits_catalog"]
+                                            ["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_effective: m["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_catalog: m["limits_catalog"]
+                                            ["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // The catalogue arrives in whatever order the providers
+                        // were merged in; a stable sort keeps the cursor from
+                        // landing on a different model after a refresh.
+                        models.sort_by(|a, b| {
+                            (a.provider.as_str(), a.id.as_str())
+                                .cmp(&(b.provider.as_str(), b.id.as_str()))
+                        });
+                        let _ = tx.send(AppEvent::ModelCatalogLoaded(models));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-models-load-failed",
+                    )));
+                    let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+            let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Read the stored override document for one model, so a write can merge into
+/// it instead of replacing it.
+///
+/// `PUT /api/models/overrides/{id}` takes a whole `ModelOverrides` document and
+/// clears every field the body omits, so submitting only the two capacity
+/// limits would silently drop the temperature, top-p and reasoning-effort
+/// settings stored under the same key.
+fn read_model_overrides(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    key: &str,
+) -> serde_json::Value {
+    client
+        .get(format!("{base_url}/api/models/overrides/{key}"))
+        .send()
+        .ok()
+        .and_then(|resp| resp.json::<serde_json::Value>().ok())
+        .filter(|doc| doc.is_object())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Persist one model's operator capacity limits (refs #7774).
+///
+/// `None` for a limit removes that field, which lets the catalog answer again.
+/// Everything else already stored under the key is carried across untouched.
+pub fn spawn_save_model_limits(
+    backend: BackendRef,
+    key: String,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", context_window);
+            set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
+            match client
+                .put(format!("{base_url}/api/models/overrides/{key}"))
+                .json(&doc)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsSaved(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-save-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Drop one model's capacity-limit overrides so the catalog answers again.
+///
+/// Only the two limit fields are removed: the inference parameters under the
+/// same key are a different concern and this screen does not own them. When
+/// nothing is left, the whole entry is deleted so the file does not accumulate
+/// empty documents.
+pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", None);
+            set_or_clear(&mut doc, "max_output_tokens", None);
+            let empty = doc.as_object().map(|o| o.is_empty()).unwrap_or(true);
+            let outcome = if empty {
+                client
+                    .delete(format!("{base_url}/api/models/overrides/{key}"))
+                    .send()
+            } else {
+                client
+                    .put(format!("{base_url}/api/models/overrides/{key}"))
+                    .json(&doc)
+                    .send()
+            };
+            match outcome {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsReset(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-reset-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Write `value` into `doc`, or remove the key entirely when it is `None`.
+///
+/// Removing rather than writing `null` matters: the field is
+/// `skip_serializing_if = "Option::is_none"` on the way out, and leaving a
+/// `null` behind would round-trip as a set-but-empty override.
+fn set_or_clear(doc: &mut serde_json::Value, field: &str, value: Option<u64>) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            obj.insert(field.to_string(), serde_json::json!(v));
+        }
+        None => {
+            obj.remove(field);
+        }
+    }
 }
 
 /// Fetch settings tools.
@@ -3537,6 +3777,54 @@ mod tests {
             array[0]["session_mode"], "new",
             "the per-step session override must survive the parse untouched"
         );
+    }
+
+    /// The Workflows screen used to read `output` and nothing else, so the generic "completed" line was printed for a 202 that had not finished and for a 422 that had failed.
+    /// A failure must never render as a completion.
+    #[test]
+    fn a_failed_run_is_not_rendered_as_completed() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            &serde_json::json!({"error": "workflow_failed", "detail": "step 'draft' timed out"}),
+        );
+
+        assert!(
+            message.contains("step 'draft' timed out"),
+            "the run's reason must reach the screen: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a failed run must not render as a completed one"
+        );
+    }
+
+    #[test]
+    fn an_accepted_run_names_the_run_id_to_poll() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::ACCEPTED,
+            &serde_json::json!({"run_id": "3f1c-run", "status": "running"}),
+        );
+
+        assert!(
+            message.contains("3f1c-run"),
+            "a still-running launch must name the run so it stays traceable: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a run that has not finished must not claim to have completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_shows_its_output_verbatim() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({"run_id": "3f1c-run", "output": "the summary"}),
+        );
+
+        assert_eq!(message, "the summary");
     }
 
     #[test]

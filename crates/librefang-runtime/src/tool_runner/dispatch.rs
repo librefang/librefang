@@ -1012,6 +1012,8 @@ pub async fn execute_tool_raw(
         "agent_spawn" => tool_agent_spawn(input, *kernel, *caller_agent_id, *allowed_tools).await,
         "agent_list" => tool_agent_list(*kernel),
         "agent_kill" => tool_agent_kill(input, *kernel),
+        // Authoring an agent type is an agent-lifecycle operation — it writes the manifest a later `agent_spawn` consumes — so it sits with the inter-agent tools rather than with the workflow tools it was modelled on (#7722).
+        "agent_type_create" => tool_agent_type_create(input, *kernel).await,
 
         // Shared memory (`memory_*`) and wiki (`wiki_*`) tools are dispatched
         // before this match, through the typed `ToolError` boundary, so their

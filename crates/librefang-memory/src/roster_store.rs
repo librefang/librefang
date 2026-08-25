@@ -1,8 +1,10 @@
 //! SQLite-backed group roster store.
 //!
-//! Tracks which users have been seen in each group chat, persisting across
-//! daemon restarts. Agents query this via the `group_members` tool instead
-//! of having the roster injected into the system prompt (saving tokens).
+//! Tracks which users have been seen in each group chat, persisting across daemon restarts.
+//! Agents query this on demand through the `channel_members` tool (#7865) rather than having the roster injected into every system prompt, which keeps the token cost proportional to the questions asked instead of to the number of turns.
+//!
+//! Membership here is observational: a row exists for someone because they spoke in that chat, not because a platform listed them.
+//! `channel_dm` (#7086) uses the same rows as its authorization set, so that narrower definition is deliberate.
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

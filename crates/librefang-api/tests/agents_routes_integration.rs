@@ -20,6 +20,13 @@
 //!                                   the fields it omits, empty string clears,
 //!                                   and the result matches PATCH /config for
 //!                                   the same body — refs #6608)
+//!   PUT   /api/agents/{id}/mcp_servers (an inherited declaration this instance
+//!                                   has not installed saves rather than 400s,
+//!                                   a genuinely unknown name is still rejected
+//!                                   without "Internal error" wording — #7772)
+//!   PUT   /api/agents/{id}/skills  (an on-disk-but-unloaded skill saves under
+//!                                   its `[skill].name`, not its directory name
+//!                                   — #7772)
 //!
 //! Run: cargo test -p librefang-api --test agents_routes_integration
 
@@ -1976,6 +1983,166 @@ async fn context_endpoint_rejects_cross_agent_session() {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session/context — where the reported window came from.
+//
+// Refs #7774 item 5. `max_context_tokens` used to be a bare integer, so an
+// operator could not tell a window they had configured from one the registry
+// declared from one the runtime had invented because nothing knew.
+// The reported incident is the last case: a gateway-served model reports no
+// limits, the runtime assumes 8192, and a conversation well inside the model's
+// real window is refused for an overflow that exists only in that assumption.
+// ---------------------------------------------------------------------------
+
+/// Spawn an agent pinned to one `(provider, model)`, optionally with an
+/// `agent.toml`-style per-agent window.
+fn spawn_on_model(
+    state: &Arc<AppState>,
+    name: &str,
+    provider: &str,
+    model: &str,
+    context_window: Option<u64>,
+) -> AgentId {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        model: librefang_types::agent::ModelConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            context_window,
+            ..Default::default()
+        },
+        ..AgentManifest::default()
+    };
+    state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent")
+}
+
+async fn context_source(app: axum::Router, id: AgentId) -> (u64, String, bool) {
+    let (status, body) = send(app, get(&format!("/api/agents/{}/session/context", id))).await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+    (
+        body["max_context_tokens"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("max_context_tokens: {body:?}")),
+        body["max_context_tokens_source"]
+            .as_str()
+            .unwrap_or_else(|| panic!("max_context_tokens_source: {body:?}"))
+            .to_string(),
+        body["max_context_tokens_assumed"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("max_context_tokens_assumed: {body:?}")),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_endpoint_names_the_layer_that_produced_the_window() {
+    let h = boot(TEST_TOKEN).await;
+
+    // Layer 3 — the catalog. A custom entry is the only catalog value a
+    // hermetic test can state, and it reaches `resolve_context_window` through
+    // exactly the path a registry-declared or probe-discovered entry does.
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            "/api/models/custom",
+            serde_json::json!({
+                "id": "sensor-model-generic-high",
+                "provider": "ollama",
+                "context_window": 32_768,
+                "max_output_tokens": 4_096,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {body:?}");
+
+    let catalog_agent = spawn_on_model(
+        &h.state,
+        "ctx-src-catalog",
+        "ollama",
+        "sensor-model-generic-high",
+        None,
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!((max, source.as_str(), assumed), (32_768, "catalog", false));
+
+    // Layer 1 — `agent.toml [model] context_window`, the most specific layer.
+    // Same model, so this also proves the per-agent value outranks the catalog
+    // in what the report says as well as in what it computes.
+    let agent_override = spawn_on_model(
+        &h.state,
+        "ctx-src-agent",
+        "ollama",
+        "sensor-model-generic-high",
+        Some(96_000),
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), agent_override).await;
+    assert_eq!(
+        (max, source.as_str(), assumed),
+        (96_000, "agent_override", false)
+    );
+
+    // Layer 4 — nothing knows this model, so the number is the runtime's own
+    // guess and has to say so. This is the case the issue was filed over.
+    let unknown_agent = spawn_on_model(
+        &h.state,
+        "ctx-src-fallback",
+        "litellm",
+        "not-in-any-catalog",
+        None,
+    );
+    let (max, source, assumed) = context_source(h.app.clone(), unknown_agent).await;
+    assert_eq!(max, 8_192, "the conservative unknown-model fallback");
+    assert_eq!(source, "fallback");
+    assert!(
+        assumed,
+        "an assumed window must be flagged as assumed, or the operator reads a guess as a fact"
+    );
+
+    // Layer 2 — the per-model operator override, set through the route the
+    // dashboard and the TUI both use. It must displace the catalog value AND
+    // the label, for the agent that was already reporting `catalog`.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            "/api/models/overrides/ollama:sensor-model-generic-high",
+            serde_json::json!({ "context_window": 16_384 }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body:?}");
+
+    let (max, source, assumed) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!(
+        (max, source.as_str(), assumed),
+        (16_384, "model_override", false),
+        "the operator correction exists to beat the catalog, and the report must say it did"
+    );
+
+    // The per-agent value is still the most specific layer after the per-model
+    // override lands — a model-level correction is inherited by every agent, so
+    // an agent that states its own window keeps it.
+    let (max, source, _) = context_source(h.app.clone(), agent_override).await;
+    assert_eq!((max, source.as_str()), (96_000, "agent_override"));
+
+    // Deleting the override returns the catalog value and the catalog label.
+    let (status, _) = send(
+        h.app.clone(),
+        delete(
+            "/api/models/overrides/ollama:sensor-model-generic-high",
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (max, source, _) = context_source(h.app.clone(), catalog_agent).await;
+    assert_eq!((max, source.as_str()), (32_768, "catalog"));
+}
+
+// ---------------------------------------------------------------------------
 // PATCH /api/agents/{id}/config — api_key_env / base_url are applied, not
 // silently dropped (the OpenAPI schema advertises both fields).
 // ---------------------------------------------------------------------------
@@ -2544,5 +2711,217 @@ model = "test-model"
         body["available"],
         serde_json::json!(["ghost-mcp"]),
         "the connected server must now be in the available pool"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/agents/{id}/mcp_servers and PUT /api/agents/{id}/skills — an
+// inherited declaration this instance has not installed must not take the
+// whole save down with it (#7772).
+//
+// The dashboard PUTs the entire array, so an agent that inherited `fetch`
+// from a registry agent type could not be edited at all: the request failed
+// with `[400] Internal error: Unknown MCP server: fetch`, naming a server the
+// operator never asked for, and the servers they were actually adding were
+// never stored.
+// ---------------------------------------------------------------------------
+
+/// A helper to build a configured-but-transportless MCP server entry, the
+/// shape `config.toml`'s `[[mcp_servers]]` produces before anything dials.
+fn configured_mcp_entry(name: &str) -> librefang_types::config::McpServerConfigEntry {
+    librefang_types::config::McpServerConfigEntry {
+        name: name.to_string(),
+        template_id: None,
+        transport: None,
+        timeout_secs: 30,
+        env: Vec::new(),
+        headers: Vec::new(),
+        oauth: None,
+        taint_scanning: true,
+        taint_policy: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_mcp_servers_keeps_inherited_declaration_while_adding_configured_ones() {
+    // The reported failure, end to end. `fetch` ships in the pinned registry
+    // fixture's MCP catalog and is never configured here, so it is installed
+    // but not configured — exactly the state that used to 400.
+    let h = boot_with_mcp_servers(
+        TEST_TOKEN,
+        vec![
+            configured_mcp_entry("memory"),
+            configured_mcp_entry("camoufox"),
+            configured_mcp_entry("sequential-thinking"),
+        ],
+    )
+    .await;
+    let id = spawn_named(&h.state, "inherited-fetch-agent");
+
+    let saved = serde_json::json!(["memory", "fetch", "camoufox", "sequential-thinking"]);
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": saved }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an inherited catalog-only declaration must not block a save that adds configured servers; body={body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/mcp_servers"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["assigned"], saved,
+        "every name in the PUT must be persisted, the pending one included"
+    );
+    // `pending` here is a liveness answer (`unconnected_mcp_declarations`), and
+    // nothing dials in this harness, so every declared name is listed. What
+    // matters is that the un-installed one is reported rather than dropped.
+    let pending = body["pending"].as_array().expect("pending array");
+    assert!(
+        pending.iter().any(|v| v == "fetch"),
+        "the un-installed declaration stays visible as pending rather than being silently dropped, got: {pending:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_mcp_servers_rejects_unknown_name_without_internal_error_wording() {
+    // A name in neither config.toml nor the catalog is still rejected, but as
+    // a user-input problem: the old `Internal` variant is what made the
+    // dashboard say "Internal error" for a typo.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "unknown-mcp-put-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/mcp_servers"),
+            serde_json::json!({ "mcp_servers": ["totally-made-up-server"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        msg.contains("totally-made-up-server"),
+        "the message must name the rejected server, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_skills_accepts_pending_manifest_name_not_directory_name() {
+    // The skills half, with the directory name and `[skill].name` deliberately
+    // different. The running registry is keyed by the manifest name, so
+    // `actual-skill` is the only value that can ever match and `package-dir`
+    // is the value that never will — validating against directory names got
+    // this exactly backwards.
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "pending-skill-put-agent");
+
+    // Written after boot, so the directory is on disk but not in the loaded registry.
+    let skill_dir = h.state.kernel.home_dir().join("skills").join("package-dir");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("skill.toml"),
+        r#"
+[skill]
+name = "actual-skill"
+version = "0.1.0"
+description = "directory name and manifest name deliberately differ"
+author = "test"
+
+[runtime]
+type = "promptonly"
+
+[source]
+type = "local"
+"#,
+    )
+    .expect("write skill.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["actual-skill"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the manifest name of an on-disk-but-unloaded skill must be accepted; body={body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["assigned"], serde_json::json!(["actual-skill"]));
+
+    // The directory name must not be accepted in its place — a stored
+    // `package-dir` would match nothing once the skill loads.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["package-dir"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the directory name can never match after load and must be rejected; body={body:?}"
+    );
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/skills"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["assigned"],
+        serde_json::json!(["actual-skill"]),
+        "a rejected save must leave the stored allowlist untouched"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_put_skills_rejects_unknown_name_without_internal_error_wording() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "unknown-skill-put-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/skills"),
+            serde_json::json!({ "skills": ["totally-made-up-skill"] }),
+            Some(TEST_TOKEN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let msg = body["error"].as_str().expect("error message present");
+    assert!(
+        msg.contains("totally-made-up-skill"),
+        "the message must name the rejected skill, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Internal error"),
+        "a validation failure must not read as a server fault, got: {msg}"
     );
 }

@@ -326,6 +326,7 @@ automation-workflow-created-id =   ID: { $id }
 automation-workflow-create-failed = Не вдалося створити воркфлоу: { $error }
 automation-workflow-completed = Воркфлоу завершено!
 automation-workflow-run-id =   ID запуску: { $id }
+automation-workflow-still-running = Воркфлоу запущено; він ще виконується.
 automation-workflow-failed = Помилка воркфлоу: { $error }
 automation-trigger-none = Немає зареєстрованих тригерів.
 automation-trigger-invalid-pattern = Некоректний JSON шаблону: { $error }
@@ -1410,6 +1411,8 @@ chat-runner-press-esc-to-exit =   Натисніть Esc для виходу.
 
 # tui/event.rs
 tui-event-workflow-completed = Воркфлоу завершено
+tui-event-workflow-still-running = Воркфлоу запущено; ще виконується (запуск { $id })
+tui-event-workflow-run-failed = Запуск воркфлоу не вдався ({ $status }): { $detail }
 tui-event-workflow-exec-not-available-in-process = Виконання воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-create-not-available-in-process = Створення воркфлоу недоступне в інпроцес-режимі
 tui-event-workflow-steps-empty = Потрібні кроки: введіть JSON-масив об'єктів кроків
@@ -1447,6 +1450,10 @@ tui-event-provider-delete-key-failed = Не вдалося видалити кл
 tui-event-provider-connection-ok = З'єднання встановлено
 tui-event-provider-test-failed = Тест не пройшов
 tui-event-provider-test-not-available-in-process = Тестування провайдерів недоступне в інпроцес-режимі
+tui-event-models-load-failed = Не вдалося завантажити каталог моделей
+tui-event-models-not-available-in-process = Налаштування моделей потребує запущеного демона й недоступне в режимі in-process
+tui-event-model-limits-save-failed = Не вдалося зберегти ліміти для { $model }
+tui-event-model-limits-reset-failed = Не вдалося повернути ліміти для { $model }
 tui-event-hand-activation-failed = Не вдалося активувати
 tui-event-hand-activate-failed-error = Не вдалося активувати: { $error }
 tui-event-hand-activation-failed-error = Помилка активації: { $error }
@@ -1534,6 +1541,7 @@ tui-tab-sessions = Сесії
 tui-tab-workflows = Потоки
 tui-tab-triggers = Тригери
 tui-tab-memory = Пам'ять
+tui-tab-models = Моделі
 tui-tab-skills = Скіли
 tui-tab-hands = Hands
 tui-tab-extensions = Ext
@@ -1589,6 +1597,34 @@ tui-sessions-loading = Завантаження сесій…
 tui-sessions-empty = Сесій ще немає. Почніть чат, щоб створити її.
 tui-sessions-delete-confirm = Видалити цю сесію? [y] Так  [будь-яка клавіша] Скасувати
 tui-sessions-hints = ↑↓ Навігація  Enter Відкрити  d Видалити  / Пошук  r Оновити
+
+# models.rs
+tui-models-title = Моделі
+tui-models-count =
+    { $count ->
+        [one] 1 модель
+        [few] { $count } моделі
+       *[other] { $count } моделей
+    }
+tui-models-header-model = Модель
+tui-models-header-provider = Провайдер
+tui-models-header-window = Вікно
+tui-models-header-catalog = Каталог
+tui-models-header-max-output = Макс. вивід
+tui-models-loading = Завантаження каталогу моделей…
+tui-models-empty = Немає моделей. Налаштуйте провайдера в Налаштуваннях або додайте модель через `librefang model add`.
+tui-models-window-unknown = невідоме
+tui-models-hints = ↑↓ Навігація  / Фільтр  e Редагувати ліміти  d Повернути до каталогу  r Оновити
+tui-models-status-no-override = Для цієї моделі немає перевизначення — нічого повертати.
+tui-models-status-saved = Ліміти для { $model } збережено
+tui-models-status-reset = { $model } повернуто до значень каталогу
+tui-models-field-context-window = Контекстне вікно
+tui-models-field-max-output = Макс. токенів виводу
+tui-models-field-cleared = (очищено — використовується каталог)
+tui-models-field-catalog-hint = каталог: { $value }
+tui-models-edit-explainer = Діє для кожного агента на цій моделі та зберігається після синхронізації реєстру.
+tui-models-edit-not-max-tokens = Контекстне вікно — це загальний бюджет моделі, а не ліміт виводу на одну відповідь.
+tui-models-edit-hints = Tab Змінити поле  0-9 Ввід  Enter Зберегти  Esc Скасувати
 
 # peers.rs
 tui-peers-title = Піри
@@ -1732,7 +1768,7 @@ tui-security-feat-prompt-name = Сканер ін'єкцій у промптах
 tui-security-feat-prompt-desc = Виявляє спроби обходу інструкцій та витоку даних
 
 # templates.rs
-tui-templates-title = Темплейти
+tui-templates-title = Типи Агентів
 tui-templates-cat-all = Всі
 tui-templates-cat-general = Загальні
 tui-templates-cat-development = Розробка
@@ -1740,12 +1776,12 @@ tui-templates-cat-research = Дослідження
 tui-templates-cat-writing = Письмо
 tui-templates-cat-business = Бізнес
 tui-templates-cat-custom = Власні
-tui-templates-header-template = Темплейт
+tui-templates-header-template = Тип агента
 tui-templates-header-category = Категорія
 tui-templates-header-provider-model = Провайдер/Модель
 tui-templates-header-description = Опис
-tui-templates-loading = Завантаження темплейтів…
-tui-templates-empty = Немає доступних темплейтів.
+tui-templates-loading = Завантаження типів агентів…
+tui-templates-empty = Немає доступних типів агентів.
 tui-templates-detail-provider =   Провайдер: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] Навігація  [Enter] Запустити Агента  [f] Фільтр категорій  [r] Оновити
 tui-templates-provider-not-configured = Провайдер '{ $provider }' не налаштований. Спочатку встановіть API-ключ у Налаштуваннях.

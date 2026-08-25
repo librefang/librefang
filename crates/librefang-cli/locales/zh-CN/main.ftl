@@ -474,6 +474,8 @@ chat-runner-press-esc-to-exit =   按 Esc 键退出。
 
 # tui/event.rs
 tui-event-workflow-completed = 工作流已完成
+tui-event-workflow-still-running = 工作流已启动，仍在运行中（运行 { $id }）
+tui-event-workflow-run-failed = 工作流运行失败（{ $status }）：{ $detail }
 tui-event-workflow-exec-not-available-in-process = 进程内模式下工作流执行不可用
 tui-event-workflow-create-not-available-in-process = 进程内模式下工作流创建不可用
 tui-event-workflow-steps-empty = 需要填写步骤：请输入步骤对象的 JSON 数组
@@ -511,6 +513,10 @@ tui-event-provider-delete-key-failed = 删除 { $name } 的密钥失败
 tui-event-provider-connection-ok = 连接成功
 tui-event-provider-test-failed = 测试失败
 tui-event-provider-test-not-available-in-process = 进程内模式下提供商测试不可用
+tui-event-models-load-failed = 加载模型目录失败
+tui-event-models-not-available-in-process = 模型配置需要运行中的守护进程，在进程内模式下不可用
+tui-event-model-limits-save-failed = 保存 { $model } 的上限失败
+tui-event-model-limits-reset-failed = 重置 { $model } 的上限失败
 tui-event-hand-activation-failed = 激活失败
 tui-event-hand-activate-failed-error = 激活失败: { $error }
 tui-event-hand-activation-failed-error = 激活失败: { $error }
@@ -598,6 +604,7 @@ tui-tab-sessions = 会话
 tui-tab-workflows = 工作流
 tui-tab-triggers = 触发器
 tui-tab-memory = 记忆
+tui-tab-models = 模型
 tui-tab-skills = 技能
 tui-tab-hands = Hands
 tui-tab-extensions = 扩展
@@ -642,6 +649,32 @@ tui-sessions-loading = 正在加载会话…
 tui-sessions-empty = 暂无会话。开启聊天以创建。
 tui-sessions-delete-confirm = 删除此会话？[y] 是  [任意键] 取消
 tui-sessions-hints = ↑↓ 导航  Enter 打开  d 删除  / 搜索  r 刷新
+
+# models.rs
+tui-models-title = 模型
+tui-models-count =
+    { $count ->
+       *[other] { $count } 个模型
+    }
+tui-models-header-model = 模型
+tui-models-header-provider = 提供方
+tui-models-header-window = 窗口
+tui-models-header-catalog = 目录值
+tui-models-header-max-output = 最大输出
+tui-models-loading = 正在加载模型目录…
+tui-models-empty = 暂无模型。请在设置中配置提供方，或使用 `librefang model add` 添加。
+tui-models-window-unknown = 未知
+tui-models-hints = ↑↓ 导航  / 过滤  e 编辑上限  d 恢复目录值  r 刷新
+tui-models-status-no-override = 该模型没有覆盖值，无需恢复。
+tui-models-status-saved = 已保存 { $model } 的上限
+tui-models-status-reset = { $model } 已恢复为目录值
+tui-models-field-context-window = 上下文窗口
+tui-models-field-max-output = 最大输出 token
+tui-models-field-cleared = （已清除 — 使用目录值）
+tui-models-field-catalog-hint = 目录值：{ $value }
+tui-models-edit-explainer = 对使用该模型的每个智能体生效，并在注册表同步后保留。
+tui-models-edit-not-max-tokens = 上下文窗口是模型的总预算，不是单次回复的输出上限。
+tui-models-edit-hints = Tab 切换字段  0-9 输入  Enter 保存  Esc 取消
 
 # peers.rs
 tui-peers-title = 对等节点
@@ -779,7 +812,7 @@ tui-security-feat-prompt-name = 提示词注入扫描器
 tui-security-feat-prompt-desc = 检测覆盖尝试和数据外泄
 
 # templates.rs
-tui-templates-title = 模板
+tui-templates-title = 智能体类型
 tui-templates-cat-all = 全部
 tui-templates-cat-general = 通用
 tui-templates-cat-development = 开发
@@ -787,12 +820,12 @@ tui-templates-cat-research = 研究
 tui-templates-cat-writing = 写作
 tui-templates-cat-business = 商务
 tui-templates-cat-custom = 自定义
-tui-templates-header-template = 模板
+tui-templates-header-template = 智能体类型
 tui-templates-header-category = 分类
 tui-templates-header-provider-model = 提供商/模型
 tui-templates-header-description = 描述
-tui-templates-loading = 正在加载模板…
-tui-templates-empty = 无可用模板。
+tui-templates-loading = 正在加载智能体类型…
+tui-templates-empty = 无可用智能体类型。
 tui-templates-detail-provider =   提供商: { $provider }/{ $model }  
 tui-templates-hints =   [↑↓] 导航  [Enter] 生成智能体  [f] 过滤分类  [r] 刷新
 tui-templates-provider-not-configured = 提供商 '{ $provider }' 未配置。请先在“设置”中设置 API 密钥。
@@ -1411,6 +1444,7 @@ automation-workflow-created-id =   ID：{ $id }
 automation-workflow-create-failed = 创建工作流失败：{ $error }
 automation-workflow-completed = 工作流已完成！
 automation-workflow-run-id =   运行 ID：{ $id }
+automation-workflow-still-running = 工作流已启动，仍在运行中。
 automation-workflow-failed = 工作流失败：{ $error }
 automation-trigger-none = 未注册触发器。
 automation-trigger-invalid-pattern = 无效模式 JSON：{ $error }

@@ -486,21 +486,122 @@ pub struct EffectiveCapabilities {
     pub supports_thinking: bool,
 }
 
+/// Which layer supplied one of the values in [`EffectiveLimits`] (refs #7774).
+///
+/// A limit and its provenance are computed together, in one pass over the same
+/// override map and catalog entry, so a caller can never read a value from one
+/// layer and attribute it to another.
+/// The operator-facing consequence is the whole point of #7774's item 5: an
+/// 8192 that came from a registry-declared catalog entry and an 8192 nobody
+/// ever measured are the same number and a completely different fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitSource {
+    /// Neither the operator override nor the catalog entry carried a usable
+    /// value, so the paired `Option` is `None` and the caller's own fallback
+    /// decides the number.
+    #[default]
+    Unknown,
+    /// The catalog entry's registry-declared or probe-discovered value.
+    Catalog,
+    /// The operator's `model_overrides.json` correction, which outranks the
+    /// catalog because it exists to correct it.
+    Override,
+}
+
 /// Effective capacity limits for a model after applying operator overrides on
 /// top of the catalog entry's declared values (refs #7774). Returned by
 /// `ModelCatalog::effective_limits` / `effective_limits_for_manifest`.
 ///
-/// Both fields are `Option` because "unknown" is a real answer here and must
+/// Both value fields are `Option` because "unknown" is a real answer here and must
 /// not be flattened to `0`: a `0` propagated into compaction thresholds or
 /// budget math is the bug `ModelCatalogEntry::context_window` documents.
 /// `None` means neither the operator nor the catalog knows, and the caller
 /// applies its own fallback (and, for the context window, logs that it did).
+///
+/// Each value is paired with the [`LimitSource`] that produced it, so a caller
+/// reporting the number to an operator can also say where it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct EffectiveLimits {
     /// Context window in tokens, or `None` when unknown.
     pub context_window: Option<u64>,
+    /// Which layer supplied [`Self::context_window`].
+    /// [`LimitSource::Unknown`] exactly when the value is `None`.
+    #[serde(default)]
+    pub context_window_source: LimitSource,
     /// Maximum output tokens, or `None` when unknown.
     pub max_output_tokens: Option<u64>,
+    /// Which layer supplied [`Self::max_output_tokens`].
+    /// [`LimitSource::Unknown`] exactly when the value is `None`.
+    #[serde(default)]
+    pub max_output_tokens_source: LimitSource,
+}
+
+/// Which layer of the context-window precedence chain answered (refs #7774).
+///
+/// The chain itself lives in the kernel's `resolve_context_window`; this enum
+/// is the name it hands back so every surface can report the *provenance* of a
+/// window rather than only its size.
+/// [`Self::Fallback`] is the one an operator most needs to see: it means no
+/// layer knew the model's window and the number on screen is a guess the
+/// runtime made, which is exactly the condition that turns a real 16K
+/// conversation into an imaginary overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextWindowSource {
+    /// `agent.toml: [model] context_window` — an explicit per-agent override.
+    AgentOverride,
+    /// `model_overrides.json: context_window` — the per-model operator override.
+    ModelOverride,
+    /// The model catalog entry, registry-declared or probe-discovered.
+    Catalog,
+    /// The window persisted on the session by an earlier turn, used only when
+    /// nothing above resolves.
+    SessionHint,
+    /// Nothing resolved and the caller applied its own conservative default.
+    /// The value on screen is assumed, not known.
+    Fallback,
+}
+
+impl ContextWindowSource {
+    /// Whether the window this source produced is a guess rather than a fact
+    /// about the model.
+    ///
+    /// Only [`Self::Fallback`] qualifies. A session hint is a value some
+    /// earlier turn resolved and persisted, so it is second-hand rather than
+    /// invented — and when that earlier turn had nothing either, the hint it
+    /// wrote is filtered out as a zero rather than promoted to a fact.
+    pub fn is_assumed(self) -> bool {
+        matches!(self, ContextWindowSource::Fallback)
+    }
+
+    /// The stable wire name, matching the `serde` representation.
+    ///
+    /// Used where the value has to reach a JSON body or a log field without
+    /// routing through `serde_json` for one enum.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContextWindowSource::AgentOverride => "agent_override",
+            ContextWindowSource::ModelOverride => "model_override",
+            ContextWindowSource::Catalog => "catalog",
+            ContextWindowSource::SessionHint => "session_hint",
+            ContextWindowSource::Fallback => "fallback",
+        }
+    }
+}
+
+/// A resolved context window and the layer that produced it (refs #7774).
+///
+/// Returned by the kernel's `resolve_context_window` so the value and its
+/// provenance travel together; splitting them into two calls is how a report
+/// ends up labelling a catalog value as a fallback, or the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedContextWindow {
+    /// The window, in tokens. Always greater than zero — every layer filters
+    /// its own zeros before answering.
+    pub tokens: usize,
+    /// Which layer answered.
+    pub source: ContextWindowSource,
 }
 
 /// Per-region endpoint configuration.

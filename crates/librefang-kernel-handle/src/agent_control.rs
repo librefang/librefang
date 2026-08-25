@@ -16,6 +16,20 @@ pub struct AgentInfo {
     pub tools: Vec<String>,
 }
 
+/// A newly created agent type, as the runtime hands it back to the model (#7722).
+///
+/// Deliberately a struct rather than the raw `AgentManifest`: the tool's caller is an LLM that just authored seven fields and needs to see those seven fields resolved, not fifty-eight defaults it never asked about and cannot act on.
+/// `provider` and `model` are the two that most often come back different from what was sent — an omitted one resolves to the `"default"` sentinel the kernel later maps onto `[default_model]` — so they are reported rather than assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTypeSummary {
+    pub name: String,
+    pub description: String,
+    pub provider: String,
+    pub model: String,
+    pub tools: Vec<String>,
+    pub skills: Vec<String>,
+}
+
 /// What [`AgentControl::send_to_agent_async_tracked`] actually did (#6650).
 ///
 /// The method has two legitimate outcomes and they mean opposite things to the caller, so they must not share one `String` slot.
@@ -261,6 +275,25 @@ pub trait AgentControl: Send + Sync {
     ) -> Result<EphemeralSpawnResult, KernelOpError> {
         let _ = request;
         Err(KernelOpError::unavailable("spawn_ephemeral"))
+    }
+
+    /// Create an operator-authored agent type — a reusable manifest under `$LIBREFANG_HOME/agent-types/` that `agent_spawn` and the dashboard can later spawn from (#7722).
+    ///
+    /// This sits on `AgentControl` rather than on a role trait of its own because an agent type is the thing `spawn_agent` consumes, and because a new supertrait on `KernelHandle` would break every stub implementor in the workspace at once for one method.
+    ///
+    /// `name` is the identity, validated kernel-side against the same rule `/api/templates/{name}` applies; `spec.name` is ignored.
+    /// The kernel writes through `AgentTypeSpec::into_new_manifest` and the shared `agent_type_store`, so this path and the HTTP path cannot disagree about what a new agent type contains, what names are legal, or what happens when two creates race for one name.
+    ///
+    /// Errors are typed because the tool relays them to a model that can act on them next turn: `InvalidInput` for a name the store refuses, `Conflict` for a name already taken by an agent type or a live agent.
+    ///
+    /// Default: unavailable, so stubs and mocks that never author agent types need no impl.
+    async fn create_agent_type(
+        &self,
+        name: &str,
+        spec: librefang_types::agent_type::AgentTypeSpec,
+    ) -> Result<AgentTypeSummary, KernelOpError> {
+        let _ = (name, spec);
+        Err(KernelOpError::unavailable("create_agent_type"))
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.
