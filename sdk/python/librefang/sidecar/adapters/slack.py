@@ -844,10 +844,8 @@ def parse_slack_event(
         # G… for private groups). The kernel uses this as the reply
         # target — matching Rust's `sender.platform_id = channel`.
         user_id=channel,
-        # Display name is the Slack user id verbatim — the Rust
-        # adapter doesn't try to resolve display names (it would
-        # need an extra `users.info` call per message). Operators
-        # who want human-readable names set them in `[users]`.
+        # Placeholder only. This is a pure function with no workspace access, so it stamps the raw Slack user id and `SlackAdapter._apply_identity` overwrites it with a resolved display name when `SLACK_RESOLVE_DISPLAY_NAMES` is on (#7086).
+        # With resolution off — the default — the raw id is what the agent sees, and operators who want names without the `users:read` scope set them in `[users]`.
         user_name=user_id,
         content=content,
         message_id=ts,
