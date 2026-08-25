@@ -1035,7 +1035,7 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
         [],
     )?;
     Ok(())
@@ -2179,6 +2179,75 @@ mod tests {
                 "migration v{v} is applied (user_version={user_version}) but has no audit row"
             );
         }
+    }
+
+    /// Companion to `test_every_migration_records_audit_row`, and the guard that test could not be (#7924).
+    ///
+    /// That test asserts every applied version *has* an audit row, but the #3538 backfill at the end of
+    /// `run_migrations` creates any missing row before the assertion runs — so a migration that stamps the
+    /// wrong version number passes it, rescued by the repair path.
+    /// `migrate_v50` did exactly that: it recorded under version 49, where `INSERT OR IGNORE` silently
+    /// dropped it against `migrate_v49`'s row, and every fresh database then warned about historical drift
+    /// on its first boot.
+    ///
+    /// The invariant the backfill's own doc comment already claims is the stronger one and is what this
+    /// pins: on a clean database the backfill inserts nothing, because every migration recorded itself.
+    /// A placeholder description surviving a fresh `run_migrations` means some migration is stamping a
+    /// version that is not its own.
+    #[test]
+    fn no_migration_relies_on_the_audit_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT version, description FROM migrations ORDER BY version")
+            .unwrap();
+        let rescued: Vec<u32> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .filter(|(_, description)| description.contains("audit-row backfill"))
+            .map(|(version, _)| version)
+            .collect();
+
+        assert!(
+            rescued.is_empty(),
+            "these versions were rescued by the #3538 backfill on a clean database, which means the \
+             migration that applied their DDL stamped a version that is not its own: {rescued:?}"
+        );
+    }
+
+    /// The specific collision from #7924, pinned by description rather than by presence.
+    ///
+    /// Both rows existing is not enough — that was already true, because the backfill supplied the missing
+    /// one. What has to hold is that each version's description names the DDL that version actually applied.
+    #[test]
+    fn v49_and_v50_each_describe_their_own_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let description = |version: u32| -> String {
+            conn.query_row(
+                "SELECT description FROM migrations WHERE version = ?1",
+                [version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|e| panic!("no audit row for v{version}: {e}"))
+        };
+
+        assert!(
+            description(49).contains("owner_agent_id"),
+            "v49 must describe the run-ownership columns it adds (#7714), got: {}",
+            description(49)
+        );
+        assert!(
+            description(50).contains("memories_fts"),
+            "v50 must describe the FTS5 index it adds (#7808), not a backfill placeholder or v49's \
+             description, got: {}",
+            description(50)
+        );
     }
 
     /// Boot-time ladder invariant: a DB whose `migrations` audit table
