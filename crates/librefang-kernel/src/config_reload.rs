@@ -512,6 +512,22 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadAuth);
     }
 
+    // `[[groups]]` (#7745). Every reader — the `/api/groups` handlers, the
+    // per-user reverse lookup, `KernelConfig::roles_for_user` — resolves from
+    // `config_ref()` on each call, so the bare config swap is the whole of what
+    // "reloading" means here: no cache to evict, no subsystem holding a
+    // boot-time copy. It still has to be *declared*, because `should_store_config`
+    // gates the swap on the plan carrying an effective change; a groups-only edit
+    // that classified as nothing at all would be written to disk and then silently
+    // discarded on reload, which is exactly what happened before this branch existed.
+    if field_changed(&old.groups, &new.groups) {
+        plan.noop_changes.push(
+            "groups config changed (effective immediately — group membership and roles are \
+             resolved from the live config on every lookup)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
@@ -1012,6 +1028,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "provider_regions",
         "tool_policy",
         "users",
+        "groups",
         "proactive_memory",
         "queue",
         "budget",

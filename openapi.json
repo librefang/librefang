@@ -6474,6 +6474,257 @@
         }
       }
     },
+    "/api/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "list_groups",
+        "responses": {
+          "200": {
+            "description": "List of configured groups, ordered by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "create_group",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Group created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "409": {
+            "description": "Group already exists"
+          }
+        }
+      }
+    },
+    "/api/groups/{name}": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "get_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "update_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Group updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Rename collides with an existing group"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "delete_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Group deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/groups/{name}/members/{user}": {
+      "put": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "add_group_member",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "path",
+            "description": "User name to add (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Membership after the add",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Group not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "remove_group_member",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "path",
+            "description": "User name to remove (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Membership after the removal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Group not found"
+          }
+        }
+      }
+    },
     "/api/hands": {
       "get": {
         "tags": [
@@ -12849,6 +13100,37 @@
         }
       }
     },
+    "/api/users/{name}/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "user_groups",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups the user belongs to and the roles that confers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserGroupsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/users/{name}/policy": {
       "get": {
         "tags": [
@@ -14495,6 +14777,77 @@
         },
         "additionalProperties": false
       },
+      "GroupUpsert": {
+        "type": "object",
+        "description": "Payload for creating or replacing a group.\n\n`deny_unknown_fields` matches the users surface: a typo'd key is a 422\nrather than a silently ignored field, which is the difference between an\noperator noticing that `member` should have been `members` and a group\nquietly having nobody in it.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupView": {
+        "type": "object",
+        "description": "Wire view of a group.\n\n`members` and `roles` are always sorted and de-duplicated — they are stored\nthat way, so this view does not re-sort; it just carries the invariant to\nthe client. `member_count` is redundant with `members.len()` and present\nbecause the dashboard's list renders a count per row and should not have to\ndepend on the full membership array staying in the list payload if it is\never trimmed.",
+        "required": [
+          "name",
+          "description",
+          "members",
+          "roles",
+          "member_count",
+          "unknown_members"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "member_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unknown_members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Members that do not resolve to a `[[users]]` entry. Not an error (see\nthe module doc-comment on dangling members) — surfaced so the dashboard\ncan badge the row rather than the operator discovering it by accident."
+          }
+        }
+      },
       "HandsHubInstallRequest": {
         "type": "object",
         "description": "Request to install a hand from the remote HandsHub marketplace.",
@@ -15500,6 +15853,32 @@
         },
         "additionalProperties": false
       },
+      "UserGroupsView": {
+        "type": "object",
+        "description": "Response of `GET /api/users/{name}/groups`.\n\n`roles` is the resolved union that `KernelConfig::roles_for_user` computes:\neach group's own name plus every entry in its `roles` list. It deliberately\nexcludes `UserConfig.role` — that is the RBAC privilege level, a different\nladder, and #7746 is where an operator gets to connect the two under an\nexplicit mapping.",
+        "required": [
+          "name",
+          "groups",
+          "roles"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "UserUpsert": {
         "type": "object",
         "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
@@ -15662,6 +16041,10 @@
     {
       "name": "users",
       "description": "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"
+    },
+    {
+      "name": "groups",
+      "description": "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"
     }
   ]
 }

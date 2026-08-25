@@ -38,6 +38,7 @@ class LibreFang {
     this.channels = new ChannelsResource(this);
     this.extensions = new ExtensionsResource(this);
     this.goals = new GoalsResource(this);
+    this.groups = new GroupsResource(this);
     this.hands = new HandsResource(this);
     this.inbox = new InboxResource(this);
     this.mcp = new McpResource(this);
@@ -685,6 +686,44 @@ class GoalsResource {
 
   async listGoalTemplates() {
     return this._c._request("GET", "/api/goals/templates");
+  }
+}
+
+// ── Groups Resource
+
+class GroupsResource {
+  constructor(client) { this._c = client; }
+
+  async listGroups() {
+    return this._c._request("GET", "/api/groups");
+  }
+
+  async createGroup(data) {
+    return this._c._request("POST", "/api/groups", data, undefined);
+  }
+
+  async getGroup(name) {
+    return this._c._request("GET", `/api/groups/${name}`);
+  }
+
+  async updateGroup(name, data) {
+    return this._c._request("PUT", `/api/groups/${name}`, data, undefined);
+  }
+
+  async deleteGroup(name) {
+    return this._c._request("DELETE", `/api/groups/${name}`);
+  }
+
+  async addGroupMember(name, user) {
+    return this._c._request("PUT", `/api/groups/${name}/members/${user}`);
+  }
+
+  async removeGroupMember(name, user) {
+    return this._c._request("DELETE", `/api/groups/${name}/members/${user}`);
+  }
+
+  async userGroups(name) {
+    return this._c._request("GET", `/api/users/${name}/groups`);
   }
 }
 

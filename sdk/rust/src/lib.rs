@@ -273,6 +273,7 @@ pub struct LibreFang {
     pub channels: Arc<ChannelsResource>,
     pub extensions: Arc<ExtensionsResource>,
     pub goals: Arc<GoalsResource>,
+    pub groups: Arc<GroupsResource>,
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
@@ -318,6 +319,7 @@ impl LibreFang {
             channels: Arc::new(ChannelsResource::new(base_url.clone(), client.clone())),
             extensions: Arc::new(ExtensionsResource::new(base_url.clone(), client.clone())),
             goals: Arc::new(GoalsResource::new(base_url.clone(), client.clone())),
+            groups: Arc::new(GroupsResource::new(base_url.clone(), client.clone())),
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
@@ -2066,6 +2068,116 @@ impl GoalsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "goals", "templates"],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Groups ──
+
+#[derive(Debug, Clone)]
+pub struct GroupsResource {
+    base_url: String,
+    client: Client,
+}
+
+impl GroupsResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn list_groups(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "groups"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn create_group(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "groups"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn get_group(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "groups", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_group(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "groups", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_group(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "groups", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn add_group_member(&self, name: &str, user: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "groups", name, "members", user],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn remove_group_member(&self, name: &str, user: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "groups", name, "members", user],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn user_groups(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "users", name, "groups"],
             None,
             &[],
         )

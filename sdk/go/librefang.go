@@ -41,6 +41,7 @@ type Client struct {
 	Channels *ChannelsResource
 	Extensions *ExtensionsResource
 	Goals *GoalsResource
+	Groups *GroupsResource
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
@@ -76,6 +77,7 @@ func New(baseURL string) *Client {
 		c.Channels = &ChannelsResource{client: c}
 		c.Extensions = &ExtensionsResource{client: c}
 		c.Goals = &GoalsResource{client: c}
+		c.Groups = &GroupsResource{client: c}
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
@@ -806,6 +808,42 @@ type GoalsResource struct{ client *Client }
 
 func (r *GoalsResource) ListGoalTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/goals/templates", nil, nil)
+}
+
+// ── Groups Resource
+
+type GroupsResource struct{ client *Client }
+
+func (r *GroupsResource) ListGroups() (interface{}, error) {
+	return r.client.request("GET", "/api/groups", nil, nil)
+}
+
+func (r *GroupsResource) CreateGroup(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/groups", data, nil)
+}
+
+func (r *GroupsResource) GetGroup(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+}
+
+func (r *GroupsResource) UpdateGroup(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s", name), data, nil)
+}
+
+func (r *GroupsResource) DeleteGroup(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+}
+
+func (r *GroupsResource) AddGroupMember(name string, user string) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+}
+
+func (r *GroupsResource) RemoveGroupMember(name string, user string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+}
+
+func (r *GroupsResource) UserGroups(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/groups", name), nil, nil)
 }
 
 // ── Hands Resource
