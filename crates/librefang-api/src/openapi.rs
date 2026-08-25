@@ -32,6 +32,7 @@ use crate::types;
         routes::get_config,
         routes::config_schema,
         routes::config_status,
+        routes::provisioning::provisioning_status,
         routes::config_set,
         routes::config_reload,
         routes::export_config,
