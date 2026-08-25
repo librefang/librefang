@@ -32,6 +32,9 @@ api-error-template-parse-failed = Не вдалося розпарсити те�
 api-error-template-required = Необхідно вказати 'manifest_toml' або 'template'
 api-error-template-invalid-manifest = Недійсний маніфест темплейту
 api-error-template-read-failed = Не вдалося прочитати темплейт
+api-error-agent-type-exists = Тип агента '{ $name }' вже існує
+api-error-agent-type-name-taken = '{ $name }' — це назва активного агента; оберіть іншу назву для типу агента
+api-error-agent-type-not-editable = Тип агента '{ $name }' походить із робочої області активного агента й керується через /api/agents
 
 # Manifest errors
 api-error-manifest-too-large = Маніфест занадто великий (макс. 1MB)
@@ -237,6 +240,10 @@ api-error-backup-finalize-failed = Не вдалося фіналізувати 
 api-error-backup-open-failed = Не вдалося відкрити бекап: { $error }
 api-error-backup-invalid-archive = Недійсний архів бекапу: { $error }
 api-error-backup-delete-failed = Не вдалося видалити бекап: { $error }
+api-error-backup-invalid-keep-config = Недійсне 'keep_config' — має бути логічним значенням
+api-error-backup-invalid-components = Недійсне 'components' — має бути масивом назв компонентів
+api-error-backup-empty-components = 'components' не може бути порожнім — пропустіть це поле, щоб відновити всі компоненти
+api-error-backup-unknown-component = Невідомий компонент бекапу '{ $component }'. Дійсні компоненти: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = Розклад не знайдено

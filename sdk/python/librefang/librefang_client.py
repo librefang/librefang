@@ -118,6 +118,7 @@ class LibreFang:
 
         try:
             buffer = b""
+            data_lines = []
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
@@ -125,27 +126,40 @@ class LibreFang:
                 buffer += chunk
                 lines = buffer.split(b"\n")
                 buffer = lines.pop()
-                for line in lines:
-                    line = line.decode().strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
+                for raw_line in lines:
+                    line = raw_line.decode().removesuffix("\r")
+                    if not line:
+                        if not data_lines:
+                            continue
+                        data_str = "\n".join(data_lines)
+                        data_lines.clear()
                         if data_str == "[DONE]":
                             return
                         try:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+                    elif line.startswith("data:"):
+                        value = line[5:]
+                        if value.startswith(" "):
+                            value = value[1:]
+                        data_lines.append(value)
             # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
             # Parse it here rather than dropping it; the loop above only fires on a newline.
             if buffer:
-                line = buffer.decode().strip()
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str != "[DONE]":
-                        try:
-                            yield json.loads(data_str)
-                        except json.JSONDecodeError:
-                            yield {"raw": data_str}
+                line = buffer.decode().removesuffix("\r")
+                if line.startswith("data:"):
+                    value = line[5:]
+                    if value.startswith(" "):
+                        value = value[1:]
+                    data_lines.append(value)
+            if data_lines:
+                data_str = "\n".join(data_lines)
+                if data_str != "[DONE]":
+                    try:
+                        yield json.loads(data_str)
+                    except json.JSONDecodeError:
+                        yield {"raw": data_str}
         except socket.timeout as e:
             raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:
@@ -207,6 +221,9 @@ class _AgentsResource(_Resource):
 
     def reset_agent_identity(self, name: str, confirm: Any = None):
         return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
+
+    def spawn_ephemeral_agent(self, **data):
+        return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
 
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
@@ -769,6 +786,15 @@ class _ModelsResource(_Resource):
     def remove_custom_model(self, id: str):
         return self._c._request("DELETE", f"/api/models/custom/{id}")
 
+    def get_model_overrides(self, id: str):
+        return self._c._request("GET", f"/api/models/overrides/{id}")
+
+    def set_model_overrides(self, id: str, **data):
+        return self._c._request("PUT", f"/api/models/overrides/{id}", data)
+
+    def delete_model_overrides(self, id: str):
+        return self._c._request("DELETE", f"/api/models/overrides/{id}")
+
     def get_model(self, id: str):
         return self._c._request("GET", f"/api/models/{id}")
 
@@ -942,14 +968,14 @@ class _PluginsResource(_Resource):
 
 class _ProactiveMemoryResource(_Resource):
 
-    def memory_list(self, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list(self, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_add(self, **data):
         return self._c._request("POST", "/api/memory", data)
 
-    def memory_list_agent(self, id: str, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list_agent(self, id: str, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_reset_agent(self, id: str):
         return self._c._request("DELETE", f"/api/memory/agents/{id}")
@@ -978,8 +1004,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_store_relations(self, id: str, **data):
         return self._c._request("POST", f"/api/memory/agents/{id}/relations", data)
 
-    def memory_search_agent(self, id: str, q: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "limit": limit})
+    def memory_search_agent(self, id: str, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats_agent(self, id: str):
         return self._c._request("GET", f"/api/memory/agents/{id}/stats")
@@ -1002,8 +1028,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_history(self, memory_id: str):
         return self._c._request("GET", f"/api/memory/items/{memory_id}/history")
 
-    def memory_search(self, q: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "limit": limit})
+    def memory_search(self, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats(self):
         return self._c._request("GET", "/api/memory/stats")
@@ -1245,8 +1271,17 @@ class _SystemResource(_Resource):
     def list_agent_templates(self):
         return self._c._request("GET", "/api/templates")
 
+    def create_agent_type(self, **data):
+        return self._c._request("POST", "/api/templates", data)
+
     def get_agent_template(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}")
+
+    def update_agent_type(self, name: str, **data):
+        return self._c._request("PUT", f"/api/templates/{name}", data)
+
+    def delete_agent_type(self, name: str):
+        return self._c._request("DELETE", f"/api/templates/{name}")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")

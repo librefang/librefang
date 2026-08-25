@@ -20,6 +20,7 @@ base64 = { workspace = true }
 urlencoding = { workspace = true }
 regex = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

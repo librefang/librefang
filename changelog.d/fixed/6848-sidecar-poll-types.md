@@ -1,1 +1,0 @@
-- **Breaking:** Aligned Rust sidecar poll builder option IDs with the kernel's `u8` wire contract, preventing adapters from constructing out-of-range poll payloads. The Telegram sidecar now rejects out-of-range upstream option IDs at its translation boundary. (@houko)

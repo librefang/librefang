@@ -12,7 +12,7 @@
 //! from a downstream consumer's perspective (the API crate is the
 //! highest-level workspace consumer of the kernel + runtime).
 
-use librefang_runtime::tool_exec_backend::build_backend;
+use librefang_runtime::tool_exec_backend::{build_backend, ExecError};
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::KernelConfig;
 use librefang_types::tool_exec::{resolve_backend_kind, BackendKind, ToolExecConfig};
@@ -45,6 +45,28 @@ fn config_toml_kind_docker_is_loaded() {
     "#;
     let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(cfg.tool_exec.kind, BackendKind::Docker);
+}
+
+#[test]
+fn config_toml_rejects_unknown_backend_kind() {
+    let err = toml::from_str::<KernelConfig>(
+        r#"
+        [tool_exec]
+        kind = "kubernetes"
+    "#,
+    )
+    .expect_err("an unknown tool_exec.kind must fail deserialization");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown variant `kubernetes`"),
+        "{message}"
+    );
+    for expected in ["local", "docker", "ssh", "daytona"] {
+        assert!(
+            message.contains(expected),
+            "error must list supported kind {expected}: {message}"
+        );
+    }
 }
 
 #[test]
@@ -83,6 +105,29 @@ fn config_toml_with_daytona_subtable_round_trips() {
     assert_eq!(dt.api_url, "https://daytona.example.com");
     assert_eq!(dt.api_key_env, "MY_DAYTONA_KEY");
     assert_eq!(dt.image, "python:3.12");
+}
+
+#[test]
+fn tool_exec_validation_rejects_kind_subtable_mismatches() {
+    let ssh_with_daytona = ToolExecConfig {
+        kind: BackendKind::Ssh,
+        daytona: Some(Default::default()),
+        ..Default::default()
+    };
+    assert_eq!(
+        ssh_with_daytona.validate().unwrap_err(),
+        "tool_exec.kind = \"ssh\" but [tool_exec.ssh] subtable is missing"
+    );
+
+    let daytona_with_ssh = ToolExecConfig {
+        kind: BackendKind::Daytona,
+        ssh: Some(Default::default()),
+        ..Default::default()
+    };
+    assert_eq!(
+        daytona_with_ssh.validate().unwrap_err(),
+        "tool_exec.kind = \"daytona\" but [tool_exec.daytona] subtable is missing"
+    );
 }
 
 #[test]
@@ -169,8 +214,8 @@ fn build_backend_docker_dispatches_to_docker_impl() {
 }
 
 #[test]
-fn build_backend_ssh_without_subtable_returns_not_configured() {
-    let cfg = ToolExecConfig::default(); // ssh subtable missing
+fn build_backend_ssh_without_feature_returns_not_configured() {
+    let cfg = ToolExecConfig::default();
     let docker_cfg = librefang_types::config::DockerSandboxConfig::default();
     let result = build_backend(
         BackendKind::Ssh,
@@ -181,12 +226,19 @@ fn build_backend_ssh_without_subtable_returns_not_configured() {
         vec![],
         vec![],
     );
-    assert!(result.is_err(), "ssh without [tool_exec.ssh] must error");
+    match result {
+        Err(ExecError::NotConfigured(message)) => {
+            assert!(message.contains("ssh-backend"), "{message}");
+            assert!(message.contains("feature"), "{message}");
+        }
+        Err(other) => panic!("expected NotConfigured, got {other}"),
+        Ok(_) => panic!("SSH must not build without the ssh-backend feature"),
+    }
 }
 
 #[test]
-fn build_backend_daytona_without_subtable_returns_not_configured() {
-    let cfg = ToolExecConfig::default(); // daytona subtable missing
+fn build_backend_daytona_without_feature_returns_not_configured() {
+    let cfg = ToolExecConfig::default();
     let docker_cfg = librefang_types::config::DockerSandboxConfig::default();
     let result = build_backend(
         BackendKind::Daytona,
@@ -197,10 +249,14 @@ fn build_backend_daytona_without_subtable_returns_not_configured() {
         vec![],
         vec![],
     );
-    assert!(
-        result.is_err(),
-        "daytona without [tool_exec.daytona] must error"
-    );
+    match result {
+        Err(ExecError::NotConfigured(message)) => {
+            assert!(message.contains("daytona-backend"), "{message}");
+            assert!(message.contains("feature"), "{message}");
+        }
+        Err(other) => panic!("expected NotConfigured, got {other}"),
+        Ok(_) => panic!("Daytona must not build without the daytona-backend feature"),
+    }
 }
 
 /// End-to-end resolution: config.toml → manifest.toml → resolver →

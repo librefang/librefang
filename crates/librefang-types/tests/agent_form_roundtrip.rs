@@ -96,7 +96,10 @@ position = "before_user"
     assert_eq!(m.autonomous.as_ref().unwrap().max_iterations, 100);
     assert!(m.routing.is_some());
     assert_eq!(m.routing.as_ref().unwrap().simple_model, "claude-haiku");
-    assert_eq!(m.capabilities.memory_read, vec!["user/*"]);
+    assert_eq!(
+        m.capabilities.memory_read.as_deref(),
+        Some(&["user/*".to_string()][..])
+    );
 }
 
 #[test]

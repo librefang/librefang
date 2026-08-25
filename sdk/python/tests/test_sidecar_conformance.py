@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from librefang.sidecar import protocol
+from librefang.sidecar.runtime import SidecarAdapter
 from librefang.sidecar.protocol import (
     Content,
     Heartbeat,
@@ -65,16 +66,39 @@ def test_corpus_present():
 # ---- events: producer side (builder output == corpus) ----------------
 
 # Each event fixture mapped to the builder call that must reproduce it.
+class _CorpusAdapter(SidecarAdapter):
+    """The corpus `ready` frame, built the way a real adapter builds it.
+
+    ``ready_full.json`` used to be reproduced by calling
+    ``protocol.ready(..., protocol_version=1)`` with the version passed by
+    hand, so the assertion could never notice that
+    ``SidecarAdapter.protocol_version`` defaulted to ``None`` and that no
+    first-party adapter overrode it — every real ``ready`` frame carried
+    ``"protocol_version": null`` while the corpus said ``1`` and the suite
+    stayed green (#7140).
+    Going through ``ready_event()`` puts the declarative defaults every
+    adapter inherits under the corpus assertion.
+    """
+
+    capabilities = ["typing", "reaction", "interactive", "thread", "streaming"]
+    account_id = "bot-1"
+
+    async def on_send(self, cmd):  # pragma: no cover - never invoked here
+        raise AssertionError("conformance adapter does not send")
+
+
 EVENT_BUILDERS = {
-    "ready_full.json": lambda: protocol.ready(
-        capabilities=["typing", "reaction", "interactive", "thread",
-                      "streaming"],
-        account_id="bot-1",
-        protocol_version=1,
-    ),
+    "ready_full.json": lambda: _CorpusAdapter().ready_event(),
     "message_text.json": lambda: protocol.message(
         "42", "Alice", content=Content.text("hello"),
         channel_id="-100123", platform="telegram",
+    ),
+    # The frame a Telegram slash command travels in. `Content.command` was
+    # the one frozen-core content shape with no fixture at all, which is why
+    # nothing failed when the adapter and the daemon disagreed about it.
+    "message_command.json": lambda: protocol.message(
+        "42", "Alice", content=Content.command("agent", ["researcher"]),
+        message_id="8891", channel_id="-100123", platform="telegram",
     ),
     "message_minimal.json": lambda: protocol.message("1", "Bob", text="hi"),
     "error.json": lambda: protocol.error("boom"),

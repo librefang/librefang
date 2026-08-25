@@ -23,7 +23,7 @@ export function formatTriggerPattern(pattern: unknown): string | undefined {
   if (!isRecord(pattern)) return undefined;
 
   const entries = Object.entries(pattern);
-  if (entries.length === 0) return undefined;
+  if (entries.length !== 1) return undefined;
   const [variant, payload] = entries[0];
 
   if (!isRecord(payload)) {
@@ -32,8 +32,9 @@ export function formatTriggerPattern(pattern: unknown): string | undefined {
 
   const values: string[] = [];
   for (const v of Object.values(payload)) {
-    if (typeof v === "string" && v.length > 0) {
-      values.push(v);
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      const value = String(v);
+      if (value.length > 0) values.push(value);
     }
   }
   return values.length > 0 ? `${variant}: ${values.join(" ")}` : variant;

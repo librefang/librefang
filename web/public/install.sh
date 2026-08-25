@@ -412,6 +412,39 @@ detect_user_shell() {
     printf "%s\n" "$USER_SHELL"
 }
 
+# Return 0 when the current process still needs INSTALL_DIR added to PATH.
+# Run in a subshell so the parser variables cannot leak into install().
+session_needs_path_refresh() (
+    _snpr_target=$1
+    _snpr_remaining=${PATH:-}
+
+    while :; do
+        case "$_snpr_remaining" in
+            *:*)
+                _snpr_entry=${_snpr_remaining%%:*}
+                _snpr_remaining=${_snpr_remaining#*:}
+                _snpr_last=0
+                ;;
+            *)
+                _snpr_entry=$_snpr_remaining
+                _snpr_last=1
+                ;;
+        esac
+
+        [ "$_snpr_entry" != "$_snpr_target" ] || return 1
+        [ "$_snpr_last" -eq 0 ] || return 0
+    done
+)
+
+# Prefer the configured login shell, falling back to the detected parent shell.
+restart_shell_for() {
+    if [ -n "${SHELL:-}" ]; then
+        printf "%s\n" "$SHELL"
+    else
+        printf "%s\n" "${1:-}"
+    fi
+}
+
 shell_rc_from_shell() {
     case "${1:-}" in
         */zsh|zsh) printf "%s\n" "$HOME/.zshrc" ;;
@@ -662,10 +695,9 @@ install() {
     fi
 
     SESSION_NEEDS_PATH_REFRESH=0
-    case ":$PATH:" in
-        *":$INSTALL_DIR:"*) ;;
-        *) SESSION_NEEDS_PATH_REFRESH=1 ;;
-    esac
+    if session_needs_path_refresh "$INSTALL_DIR"; then
+        SESSION_NEEDS_PATH_REFRESH=1
+    fi
 
     if "$INSTALL_DIR/librefang" --version >/dev/null 2>&1; then
         INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
@@ -751,8 +783,7 @@ install() {
             # Pick a shell to exec into.  Prefer $SHELL (login shell, survives
             # subshells) over the detected USER_SHELL.  Only exec when we
             # actually wrote the PATH to an rc file the shell will read.
-            RESTART_SHELL="${SHELL:-}"
-            [ -n "$RESTART_SHELL" ] || RESTART_SHELL="$USER_SHELL"
+            RESTART_SHELL=$(restart_shell_for "$USER_SHELL")
 
             if [ -n "$RESTART_SHELL" ] && [ -n "$SHELL_RC" ] && command_exists "$RESTART_SHELL"; then
                 echo ""

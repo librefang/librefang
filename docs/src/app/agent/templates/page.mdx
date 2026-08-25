@@ -181,6 +181,10 @@ memory_write = ["self.*"]           # Memory namespaces agent can write
 agent_spawn = true                  # Can this agent spawn other agents?
 agent_message = ["*"]               # Which agents can it message?
 shell = ["python *", "cargo *"]     # Allowed shell command patterns (whitelist)
+# `memory_read` / `memory_write` also gate automatic memory (#7605): leaving a
+# key out means "unrestricted", but writing `memory_read = []` denies — the
+# agent then gets no memories injected into its prompt, and `memory_write = []`
+# stops the turn being auto-memorized.
 
 # Named shared workspaces (optional).
 # Multiple agents can declare the same path — they share the directory

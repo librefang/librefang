@@ -27,22 +27,27 @@ export function toolPatternMatches(pattern: string, value: string): boolean {
   if (pattern === value) return true;
   if (!pattern.includes("*")) return false;
 
-  const parts = pattern.split("*");
-  // Leading literal must be a prefix.
-  const first = parts[0];
-  if (first && !value.startsWith(first)) return false;
-  // Trailing literal must be a suffix.
-  const last = parts[parts.length - 1];
-  if (last && !value.endsWith(last)) return false;
-  // Interior literals must appear in order, and the prefix/suffix must not overlap — `a*b` should not match `ab` twice over the same characters.
-  let cursor = first.length;
-  for (const segment of parts.slice(1, -1)) {
-    if (!segment) continue;
-    const at = value.indexOf(segment, cursor);
-    if (at === -1) return false;
-    cursor = at + segment.length;
+  if (pattern.startsWith("*")) {
+    const suffix = pattern.slice(1);
+    if (!suffix.includes("*")) return value.endsWith(suffix);
   }
-  return cursor + last.length <= value.length;
+  if (pattern.endsWith("*")) {
+    const prefix = pattern.slice(0, -1);
+    if (!prefix.includes("*")) return value.startsWith(prefix);
+  }
+
+  const starIndex = pattern.indexOf("*");
+  const prefix = pattern.slice(0, starIndex);
+  const suffix = pattern.slice(starIndex + 1);
+  if (suffix.includes("*")) {
+    if (!value.startsWith(prefix)) return false;
+    return toolPatternMatches(suffix, value.slice(prefix.length));
+  }
+  return (
+    value.startsWith(prefix) &&
+    value.endsWith(suffix) &&
+    value.length >= prefix.length + suffix.length
+  );
 }
 
 /** Whether `toolName` is filtered out by a `tool_blocklist`. */
@@ -64,7 +69,7 @@ export function resolveMcpGrantMode(
   mcpServers: readonly string[] | undefined,
   mode: McpGrantMode | undefined,
 ): McpGrantMode {
-  if (mode) return mode;
+  if (mode !== undefined) return mode;
   const servers = mcpServers ?? [];
   if (servers.length === 0) return "none";
   if (servers.some((s) => s === "*")) return "all";
