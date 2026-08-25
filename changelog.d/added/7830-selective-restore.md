@@ -1,0 +1,4 @@
+`POST /api/restore` accepts `keep_config` and `components`, so an archive can be restored onto a machine that is already running instead of only onto an empty one.
+Restore was all-or-nothing and overwrote `config.toml`, which transplanted the source host's API key, bind port and paths onto the target — so cloning a working setup meant repairing the clone by hand, and recovering one deleted cron job meant rolling agents, workspaces and the database back to the moment of the backup.
+`keep_config` skips `config.toml` (clone mode) and is evaluated before the component filter; `components` limits the restore to the classification `create_backup` already writes into `manifest.json`, with unrecognised entries always restored so archive metadata is never dropped.
+The dashboard's restore control exposes both (#7830, #7831) (@DaBlitzStein)

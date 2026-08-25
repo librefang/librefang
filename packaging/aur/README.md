@@ -77,7 +77,7 @@ The automation is inert until a maintainer configures the secrets — when `AUR_
    - `ssh://aur@aur.archlinux.org/librefang-desktop-bin.git`
    - `ssh://aur@aur.archlinux.org/librefang-docker.git`
 
-2. Generate a dedicated CI keypair, register the public half on that AUR account, and add the secrets (`AUR_SSH_PRIVATE_KEY` and the optional `AUR_KNOWN_HOSTS` / `AUR_GIT_NAME` / `AUR_GIT_EMAIL`).
+2. Generate a dedicated CI keypair, register the public half on that AUR account, and add `AUR_SSH_PRIVATE_KEY` plus verified `AUR_KNOWN_HOSTS` entries. `AUR_GIT_NAME` and `AUR_GIT_EMAIL` remain optional.
    See `.github/SECRETS.md` for the exact commands and rotation policy.
 
 3. Validate end-to-end with `workflow_dispatch` on `release.yml` (`channel=current`, `tag=<an existing release tag>`) before the next real release.

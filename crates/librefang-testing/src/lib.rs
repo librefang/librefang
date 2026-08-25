@@ -16,7 +16,9 @@ pub mod test_app;
 
 pub use helpers::{assert_json_error, assert_json_ok, test_request};
 pub use mock_driver::{FailingLlmDriver, MockLlmDriver};
-pub use mock_kernel::{test_catalog_baseline, CatalogSeed, MockKernelBuilder};
+pub use mock_kernel::{
+    ensure_test_vault_key, test_catalog_baseline, CatalogSeed, MockKernelBuilder,
+};
 pub use test_app::TestAppState;
 
 #[cfg(test)]

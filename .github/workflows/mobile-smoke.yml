@@ -31,6 +31,9 @@ on:
 permissions:
   contents: read
 
+env:
+  TAURI_CLI_VERSION: "2.11.4"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -69,6 +72,10 @@ jobs:
         run: |
           NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in ar ranlib nm strip; do
+            [ -x "$NDK_BIN/llvm-$tool" ] || {
+              echo "::error::NDK tool not found: $NDK_BIN/llvm-$tool"
+              exit 1
+            }
             ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/aarch64-linux-android-$tool"
           done
           echo "$NDK_BIN" >> "$GITHUB_PATH"
@@ -106,16 +113,19 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
-            cargo install tauri-cli@^2 --locked
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
+            cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
+        # pnpm 10 does not honor the repository's ignored-builds setting in
+        # this standalone install; pass the shared CI override explicitly.
         run: |
           pnpm install --frozen-lockfile --config.strict-dep-builds=false
           pnpm run build
@@ -182,23 +192,29 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
-            cargo install tauri-cli@^2 --locked
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
+            cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
+        # Keep this aligned with the Android and dashboard CI installs.
         run: |
           pnpm install --frozen-lockfile --config.strict-dep-builds=false
           pnpm run build
 
       - name: Initialise iOS project
         working-directory: crates/librefang-desktop
-        run: cargo tauri ios init
+        # gen/apple contains checked-in placeholders, not an initialized
+        # Xcode project. Tauri treats any existing directory as initialized.
+        run: |
+          rm -rf gen/apple
+          cargo tauri ios init
 
       - name: Build for simulator (unsigned)
         working-directory: crates/librefang-desktop

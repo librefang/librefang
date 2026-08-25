@@ -3,7 +3,11 @@
 //! (see issue #3298). Kept out of `mod.rs` so the unit tests can exercise
 //! it without instantiating a full kernel.
 
-/// Build a deterministic cache key for the per-agent MCP allowlist; sorts and joins with `\x1f` so insertion-order variants share one entry.
+/// Build a deterministic cache key for the per-agent MCP allowlist.
+///
+/// Ordinary names retain the historical sorted `\x1f` join. If a name itself
+/// contains that separator, the key switches to a tagged length-prefixed
+/// encoding so distinct allowlists cannot alias one cache entry.
 ///
 /// An empty allowlist means "no MCP servers" (#5855), not "all"; it gets its
 /// own sentinel key so it never shares a cache slot with the explicit `["*"]`
@@ -14,6 +18,16 @@ pub(super) fn mcp_summary_cache_key(mcp_allowlist: &[String]) -> String {
     }
     let mut sorted = mcp_allowlist.to_vec();
     sorted.sort();
+    if sorted.iter().any(|name| name.contains('\x1f')) {
+        use std::fmt::Write as _;
+
+        let mut key = format!("\x1fencoded\x1f{}:", sorted.len());
+        for name in sorted {
+            write!(key, "{}:", name.len()).expect("writing to a String cannot fail");
+            key.push_str(&name);
+        }
+        return key;
+    }
     sorted.join("\x1f")
 }
 
@@ -113,4 +127,36 @@ pub(super) fn render_mcp_summary(
         );
     }
     summary
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::mcp_summary_cache_key;
+
+    #[test]
+    fn separator_inside_a_name_cannot_collide_with_two_names() {
+        let two_names = vec!["a".to_string(), "b".to_string()];
+        let one_name = vec!["a\x1fb".to_string()];
+
+        assert_ne!(
+            mcp_summary_cache_key(&two_names),
+            mcp_summary_cache_key(&one_name)
+        );
+    }
+
+    #[test]
+    fn encoded_keys_remain_order_independent_and_length_unambiguous() {
+        let first = vec!["tail".to_string(), "a\x1fb".to_string()];
+        let reordered = vec!["a\x1fb".to_string(), "tail".to_string()];
+        let different_split = vec!["a\x1f".to_string(), "btail".to_string()];
+
+        assert_eq!(
+            mcp_summary_cache_key(&first),
+            mcp_summary_cache_key(&reordered)
+        );
+        assert_ne!(
+            mcp_summary_cache_key(&first),
+            mcp_summary_cache_key(&different_split)
+        );
+    }
 }

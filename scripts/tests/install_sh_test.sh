@@ -87,68 +87,63 @@ for falsy in 0 false FALSE no NO off OFF ""; do
 done
 pass "LIBREFANG_AUTO_START flag parser"
 
-# parent-shell detection regression test with mocked ps:
-# 1st comm query -> "sh", ppid query -> "222", 2nd comm query -> "zsh"
+# Parent-shell detection regression test with mocked ps. Responses are keyed
+# by the requested field and PID so an extra ps call cannot silently change
+# what the fixture means.
 FAKE_BIN=$(mktemp -d)
-FAKE_PS_STATE="$FAKE_BIN/ps-state"
 cat > "$FAKE_BIN/ps" <<'PS_EOF'
 #!/bin/sh
+PID=""
+PREVIOUS=""
+for ARG in "$@"; do
+  if [ "$PREVIOUS" = "-p" ]; then PID="$ARG"; fi
+  PREVIOUS="$ARG"
+done
+
 case "$*" in
   *" -o ppid="*) echo "222"; exit 0 ;;
+  *" -o comm="*)
+    if [ "$PID" = "222" ]; then echo "zsh"; else echo "sh"; fi
+    exit 0
+    ;;
 esac
-
-STATE_FILE="${FAKE_PS_STATE:?}"
-COUNT=0
-if [ -f "$STATE_FILE" ]; then
-  COUNT=$(cat "$STATE_FILE" 2>/dev/null || echo 0)
-fi
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "$STATE_FILE"
-
-if [ "$COUNT" -eq 1 ]; then
-  echo "sh"
-else
-  echo "zsh"
-fi
+exit 1
 PS_EOF
 chmod +x "$FAKE_BIN/ps"
 
-rm -f "$FAKE_PS_STATE"
-DETECTED=$(HOME="$TMP_HOME" PATH="$FAKE_BIN:$PATH" SHELL=/bin/bash FAKE_PS_STATE="$FAKE_PS_STATE" INSTALLER_PATH="$INSTALLER_PATH" LIBREFANG_INSTALLER_SOURCE_ONLY=1 sh -c '. "$INSTALLER_PATH"; detect_user_shell')
+if ! DETECTED=$(HOME="$TMP_HOME" PATH="$FAKE_BIN:$PATH" SHELL=/bin/bash INSTALLER_PATH="$INSTALLER_PATH" LIBREFANG_INSTALLER_SOURCE_ONLY=1 sh -c '. "$INSTALLER_PATH"; detect_user_shell'); then
+    fail "detect_user_shell subshell exited non-zero"
+fi
 [ "$DETECTED" = "zsh" ] || fail "detect_user_shell expected zsh, got: $DETECTED"
 pass "detect_user_shell handles curl|sh parent shell"
 
-# SESSION_NEEDS_PATH_REFRESH: detects when install dir is not in PATH
-SESSION_NEEDS_PATH_REFRESH=0
-case ":$PATH:" in
-    *":/nonexistent/test/.librefang/bin:"*) ;;
-    *) SESSION_NEEDS_PATH_REFRESH=1 ;;
-esac
-[ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ] \
-    || fail "SESSION_NEEDS_PATH_REFRESH should be 1 for missing dir"
-
-# SESSION_NEEDS_PATH_REFRESH: 0 when dir already present
+# Exercise the production PATH decision rather than duplicating its case arm.
+session_needs_path_refresh "/nonexistent/test/.librefang/bin" \
+    || fail "missing install dir should require a PATH refresh"
 FIRST_PATH_ENTRY=$(printf "%s" "$PATH" | cut -d: -f1)
-SESSION_NEEDS_PATH_REFRESH=0
-case ":$PATH:" in
-    *":$FIRST_PATH_ENTRY:"*) ;;
-    *) SESSION_NEEDS_PATH_REFRESH=1 ;;
-esac
-[ "$SESSION_NEEDS_PATH_REFRESH" -eq 0 ] \
-    || fail "SESSION_NEEDS_PATH_REFRESH should be 0 for existing dir"
+if session_needs_path_refresh "$FIRST_PATH_ENTRY"; then
+    fail "an existing PATH entry should not require a refresh"
+fi
+
+# INSTALL_DIR is configurable and may contain shell glob characters. The
+# comparison must treat them literally rather than as a case pattern.
+ORIGINAL_PATH=$PATH
+PATH='/tmp/exact:/tmp/literal-star'
+session_needs_path_refresh '/tmp/*' \
+    || fail "a wildcard-like install dir absent from PATH should require a refresh"
+if session_needs_path_refresh '/tmp/literal-star'; then
+    fail "a literal install dir present in PATH should not require a refresh"
+fi
+PATH=$ORIGINAL_PATH
 pass "SESSION_NEEDS_PATH_REFRESH detection"
 
-# RESTART_SHELL: prefers $SHELL over USER_SHELL
-RESTART_SHELL="${SHELL:-}"
-[ -n "$RESTART_SHELL" ] || fail "SHELL should be set in test env"
+# Exercise the production restart-shell choice.
+[ "$(SHELL=/bin/bash restart_shell_for zsh)" = "/bin/bash" ] \
+    || fail "restart_shell_for should prefer SHELL"
 pass "RESTART_SHELL prefers \$SHELL"
 
-# RESTART_SHELL: falls back to USER_SHELL when SHELL is empty
-USER_SHELL="zsh"
-RESTART_SHELL=""
-[ -n "$RESTART_SHELL" ] || RESTART_SHELL="$USER_SHELL"
-[ "$RESTART_SHELL" = "zsh" ] \
-    || fail "RESTART_SHELL should fall back to USER_SHELL, got: $RESTART_SHELL"
+[ "$(SHELL= restart_shell_for zsh)" = "zsh" ] \
+    || fail "restart_shell_for should fall back to USER_SHELL"
 pass "RESTART_SHELL falls back to USER_SHELL when SHELL is empty"
 
 # --- detect_distro: /etc/os-release parsing ------------------------------
@@ -199,6 +194,17 @@ ID=somederivative
 ID_LIKE="ubuntu debian"
 DERIVATIVE_RELEASE_EOF
 
+# os-release permits shell-style assignments, not whitespace around '=' or
+# trailing shell comments. Invalid lookalikes must not shadow a later valid
+# field, while blank lines and comment lines are harmless.
+cat > "$DISTRO_FIXTURES/os-release-edge-syntax" <<'EDGE_RELEASE_EOF'
+
+# ignored comment
+ID = spoofed
+ID=ubuntu
+ID_LIKE=debian
+EDGE_RELEASE_EOF
+
 OS_RELEASE_FILE="$DISTRO_FIXTURES/os-release-nixos"
 NIXOS_MARKER_FILE="$NIXOS_MARKER_ABSENT"
 detect_distro
@@ -239,6 +245,13 @@ detect_distro
     || fail "detect_distro should unquote a multi-entry ID_LIKE, got: $DISTRO_LIKE"
 is_debian_family || fail "an ID_LIKE of \"ubuntu debian\" should be in the debian family"
 pass "detect_distro matches the family through a quoted multi-entry ID_LIKE"
+
+OS_RELEASE_FILE="$DISTRO_FIXTURES/os-release-edge-syntax"
+NIXOS_MARKER_FILE="$NIXOS_MARKER_ABSENT"
+detect_distro
+[ "$DISTRO" = "ubuntu" ] || fail "invalid spaced assignment should not shadow ID, got: $DISTRO"
+[ "$DISTRO_LIKE" = "debian" ] || fail "edge fixture should retain valid ID_LIKE, got: $DISTRO_LIKE"
+pass "detect_distro ignores comments and invalid spaced assignments"
 
 # /etc/NIXOS is authoritative: a container image that carried its base layer's ID=debian into a NixOS host must still be treated as NixOS, because the ELF interpreter the glibc build needs is missing either way.
 OS_RELEASE_FILE="$DISTRO_FIXTURES/os-release-inherited-debian"

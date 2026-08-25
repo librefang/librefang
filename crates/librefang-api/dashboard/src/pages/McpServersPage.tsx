@@ -39,23 +39,38 @@ import { TaintPolicyEditor } from "../components/TaintPolicyEditor";
 // Lazy-load individual lucide icons by name — avoids pulling the full
 // ~1500-icon registry that `lucide-react/dynamic` bundles.
 type IconName = string;
-const lazyIconCache = new Map<string, React.LazyExoticComponent<React.ComponentType<{ className?: string }>>>();
+type IconComponent = React.ComponentType<{ className?: string }>;
+const lazyIconCache = new Map<string, React.LazyExoticComponent<IconComponent>>();
+
+export function resolveLucideIcon(
+  name: string,
+  iconModule: Record<string, unknown>,
+): IconComponent {
+  const pascal = name
+    .split("-")
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join("");
+  return (iconModule[pascal] as IconComponent | undefined) ?? Plug;
+}
+
 function getLazyIcon(name: string) {
   if (!lazyIconCache.has(name)) {
     lazyIconCache.set(
       name,
-      lazy(() =>
-        import("lucide-react").then((mod) => {
-          // Convert kebab-case icon name to PascalCase component name
-          const pascal = name
-            .split("-")
-            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-            .join("");
-          const Component = (mod as Record<string, unknown>)[pascal] as React.ComponentType<{ className?: string }> | undefined;
-          if (!Component) throw new Error(`lucide icon not found: ${pascal}`);
-          return { default: Component };
-        }),
-      ),
+      lazy(async () => {
+        try {
+          const iconModule = await import("lucide-react");
+          return {
+            default: resolveLucideIcon(
+              name,
+              iconModule as unknown as Record<string, unknown>,
+            ),
+          };
+        } catch (error) {
+          console.warn("CatalogIcon: lucide module failed to load.", error);
+          return { default: Plug };
+        }
+      }),
     );
   }
   return lazyIconCache.get(name)!;
@@ -139,12 +154,48 @@ const defaultForm: ServerFormState = {
 
 // Prefer the backend-assigned id, fall back to the user-facing name.
 // Every URL operation (update / delete / auth / reconnect) should use this.
-function serverIdOf(server: McpServerConfigured): string {
-  return server.id ?? server.name;
+export function serverIdOf(server: McpServerConfigured): string {
+  return server.id || server.name;
 }
 
-function serverIdentityOf(server: Pick<McpServerConfigured, "id" | "name"> | Pick<McpServerConnected, "name">): string {
-  return "id" in server && server.id ? server.id : server.name;
+export function serverIdentityOf(server: Pick<McpServerConfigured, "id" | "name"> | Pick<McpServerConnected, "name">): string {
+  return "id" in server ? server.id || server.name : server.name;
+}
+
+const AUTH_POLL_INTERVAL_MS = 2000;
+export const AUTH_POLL_MAX_ATTEMPTS = 150;
+
+export type AuthPollTermination =
+  | "authorized"
+  | "error"
+  | "popup_closed"
+  | "timeout"
+  | null;
+
+export function authPollTermination(
+  authState: string | undefined,
+  popupClosed: boolean,
+  attempts: number,
+): AuthPollTermination {
+  if (authState === "authorized") return "authorized";
+  if (authState === "error") return "error";
+  if (popupClosed) return "popup_closed";
+  if (attempts >= AUTH_POLL_MAX_ATTEMPTS) return "timeout";
+  return null;
+}
+
+export function computeAuthLabel(authState: string, envCount: number): string {
+  if (authState === "authorized") return "oauth";
+  if (authState === "not_required") return envCount > 0 ? "token" : "none";
+  return authState;
+}
+
+export function shouldShowAuthBanner(authState: string | undefined): boolean {
+  return (
+    authState !== undefined &&
+    authState !== "authorized" &&
+    authState !== "not_required"
+  );
 }
 
 function formToPayload(form: ServerFormState): McpServerConfigured {
@@ -354,7 +405,7 @@ function TransportIcon({ type }: { type: TransportType }) {
 
 // ── Auth Badge ──────────────────────────────────────────────────────
 
-function AuthBadge({
+export function AuthBadge({
   server,
   onAuthSuccess,
 }: {
@@ -367,33 +418,71 @@ function AuthBadge({
   const authState = server.auth_state?.state ?? "not_required";
   const [polling, setPolling] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const authWindowRef = useRef<Window | null>(null);
+  const pollAttemptsRef = useRef(0);
+  const pollInFlightRef = useRef(false);
   const startAuthMutation = useStartMcpAuth();
   const revokeAuthMutation = useRevokeMcpAuth();
   const serverIdentity = serverIdentityOf(server);
 
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+    pollInFlightRef.current = false;
+    setPolling(false);
+  }, []);
+
   useEffect(() => {
     if (polling) {
       pollRef.current = setInterval(async () => {
+        const popupClosed = authWindowRef.current?.closed === true;
+        if (pollInFlightRef.current) return;
+        pollInFlightRef.current = true;
+        pollAttemptsRef.current += 1;
         try {
           const status = await queryClient.fetchQuery(mcpQueries.authStatus(serverIdentity));
-          if (status.auth.state === "authorized") {
-            setPolling(false);
+          const termination = authPollTermination(
+            status.auth.state,
+            popupClosed,
+            pollAttemptsRef.current,
+          );
+          if (termination === "authorized") {
+            stopPolling();
             queryClient.invalidateQueries({ queryKey: mcpQueries.servers().queryKey });
             queryClient.invalidateQueries({ queryKey: mcpQueries.health().queryKey });
             onAuthSuccess?.();
-          } else if (status.auth.state === "error") {
-            setPolling(false);
+          } else if (termination === "error") {
+            stopPolling();
             addToast(status.auth.message || t("mcp.auth_failed"), "error");
+          } else if (termination === "popup_closed") {
+            authWindowRef.current = null;
+            stopPolling();
+            addToast(t("mcp.auth_failed"), "error");
+          } else if (termination === "timeout") {
+            stopPolling();
+            addToast(`${t("mcp.auth_failed")}: ${t("runtime.timeout")}`, "error");
           }
         } catch {
           // ignore transient errors during polling
+          if (popupClosed) {
+            authWindowRef.current = null;
+            stopPolling();
+            addToast(t("mcp.auth_failed"), "error");
+          } else if (pollAttemptsRef.current >= AUTH_POLL_MAX_ATTEMPTS) {
+            stopPolling();
+            addToast(`${t("mcp.auth_failed")}: ${t("runtime.timeout")}`, "error");
+          }
+        } finally {
+          pollInFlightRef.current = false;
         }
-      }, 2000);
+      }, AUTH_POLL_INTERVAL_MS);
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+      pollInFlightRef.current = false;
     };
-  }, [authState, polling, serverIdentity, onAuthSuccess, addToast, queryClient, t]);
+  }, [polling, serverIdentity, onAuthSuccess, addToast, queryClient, stopPolling, t]);
 
   const handleStartAuth = useCallback(async () => {
     // We deliberately do NOT pass `noopener` here.  Per the HTML spec
@@ -411,6 +500,8 @@ function AuthBadge({
     // a credential issue here — the OAuth provider already learns
     // the dashboard origin from `redirect_uri`.
     const authWindow = window.open("about:blank", "_blank");
+    authWindowRef.current = authWindow;
+    pollAttemptsRef.current = 0;
     try {
       const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
@@ -429,6 +520,7 @@ function AuthBadge({
       if (authWindow && !authWindow.closed) {
         authWindow.close();
       }
+      authWindowRef.current = null;
       addToast(errorMessage(e, t("mcp.auth_start_failed")), "error");
     }
   }, [serverIdentity, startAuthMutation, addToast, t]);
@@ -525,14 +617,7 @@ function ServerCard({
   const transportType = useMemo(() => getTransportType(server), [server]);
   const transportDetail = useMemo(() => getTransportDetail(server), [server]);
   const authState = server.auth_state?.state ?? "not_required";
-  const authLabel =
-    authState === "authorized"
-      ? "oauth"
-      : authState === "not_required"
-        ? (server.env ?? []).length > 0
-          ? "token"
-          : "none"
-        : authState;
+  const authLabel = computeAuthLabel(authState, (server.env ?? []).length);
 
   return (
     <Card
@@ -799,8 +884,8 @@ function ServerDetailBody({
 
         {tab === "config" && (
           <div className="flex flex-col gap-4">
-            {/* OAuth banner if non-ok */}
-            {server.auth_state && server.auth_state.state !== "ok" && server.auth_state.state !== "not_required" && (
+            {/* OAuth banner if authorization needs attention. */}
+            {server.auth_state && shouldShowAuthBanner(server.auth_state.state) && (
               <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-[12px] text-warning">
                 <p className="font-bold mb-1">{server.auth_state.state}</p>
                 {server.auth_state.message && (

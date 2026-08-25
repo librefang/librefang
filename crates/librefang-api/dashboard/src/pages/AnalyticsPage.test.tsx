@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { AnalyticsPage } from "./AnalyticsPage";
+import { AnalyticsPage, escapeCsvField } from "./AnalyticsPage";
 import {
   useUsageSummary,
   useUsageByAgent,
@@ -225,7 +225,7 @@ describe("AnalyticsPage", () => {
     expect(payload).toEqual({ max_hourly_usd: 5 });
   });
 
-  it("ignores non-numeric and negative values in the budget save payload", () => {
+  it("does not submit an empty payload for invalid global budget values", () => {
     setLoadedEmptyState();
     const mutate = vi.fn();
     setMutationDefault(mutate);
@@ -238,8 +238,67 @@ describe("AnalyticsPage", () => {
 
     fireEvent.click(screen.getByText("common.save"));
 
-    expect(mutate).toHaveBeenCalledTimes(1);
-    expect(mutate.mock.calls[0][0]).toEqual({});
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a partial global budget save when any entered field is invalid", () => {
+    setLoadedEmptyState();
+    const mutate = vi.fn();
+    setMutationDefault(mutate);
+    renderPage();
+
+    const inputs = screen.getAllByPlaceholderText("-");
+    fireEvent.change(inputs[0], { target: { value: "5" } });
+    fireEvent.change(inputs[3], { target: { value: "1.5" } });
+    fireEvent.click(screen.getByText("common.save"));
+    expect(mutate).not.toHaveBeenCalled();
+
+    fireEvent.change(inputs[3], { target: { value: "1000" } });
+    fireEvent.change(inputs[4], { target: { value: "1.1" } });
+    fireEvent.click(screen.getByText("common.save"));
+    expect(mutate).not.toHaveBeenCalled();
+
+    fireEvent.change(inputs[3], { target: { value: "9007199254740993" } });
+    fireEvent.change(inputs[4], { target: { value: "0.8" } });
+    fireEvent.click(screen.getByText("common.save"));
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid provider caps instead of converting them to unlimited", () => {
+    setLoadedEmptyState();
+    const providerMutate = vi.fn();
+    useUpdateProviderBudgetMock.mockReturnValue({
+      mutate: providerMutate,
+      isPending: false,
+      isSuccess: false,
+    });
+    useProviderBudgetsMock.mockReturnValue(makeQuery({
+      alert_threshold: 0.8,
+      providers: [{
+        provider: "openai",
+        unconfigured: false,
+        cap_hourly_usd: 10,
+        cap_daily_usd: 20,
+        cap_monthly_usd: 30,
+        cap_tokens_per_hour: 1000,
+        spend_hourly_usd: 1,
+        spend_daily_usd: 2,
+        spend_monthly_usd: 3,
+        tokens_this_hour: 100,
+        is_exhausted: false,
+        exhaustion_reason: null,
+        exhaustion_remaining_ms: null,
+      }],
+    }));
+    renderPage();
+
+    const row = screen.getByText("openai").closest("tr");
+    expect(row).not.toBeNull();
+    fireEvent.click(within(row!).getByText("analytics.provider_budgets.edit"));
+    fireEvent.change(within(row!).getAllByRole("spinbutton")[0], { target: { value: "" } });
+    fireEvent.click(within(row!).getByText("common.save"));
+
+    expect(providerMutate).not.toHaveBeenCalled();
   });
 
   it("disables the Save button while the budget mutation is pending", () => {
@@ -276,6 +335,7 @@ describe("AnalyticsPage", () => {
       daily: vi.fn().mockResolvedValue(undefined),
       perf: vi.fn().mockResolvedValue(undefined),
       budget: vi.fn().mockResolvedValue(undefined),
+      providerBudgets: vi.fn().mockResolvedValue(undefined),
     };
     useUsageSummaryMock.mockReturnValue(makeQuery({ call_count: 0, total_input_tokens: 0, total_output_tokens: 0, total_cost_usd: 0 }, { refetch: refetches.usage }));
     useUsageByAgentMock.mockReturnValue(makeQuery([], { refetch: refetches.agent }));
@@ -284,7 +344,7 @@ describe("AnalyticsPage", () => {
     useModelPerformanceMock.mockReturnValue(makeQuery([], { refetch: refetches.perf }));
     useBudgetStatusMock.mockReturnValue(makeQuery({}, { refetch: refetches.budget }));
     useProviderBudgetsMock.mockReturnValue(
-      makeQuery({ providers: [], alert_threshold: 0.8 }),
+      makeQuery({ providers: [], alert_threshold: 0.8 }, { refetch: refetches.providerBudgets }),
     );
 
     renderPage();
@@ -301,5 +361,20 @@ describe("AnalyticsPage", () => {
     expect(refetches.daily).toHaveBeenCalledTimes(1);
     expect(refetches.perf).toHaveBeenCalledTimes(1);
     expect(refetches.budget).toHaveBeenCalledTimes(1);
+    expect(refetches.providerBudgets).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("escapeCsvField", () => {
+  it("neutralizes spreadsheet formulas", () => {
+    expect(escapeCsvField("=HYPERLINK(\"https://example.test\")")).toBe("\"'=HYPERLINK(\"\"https://example.test\"\")\"");
+    expect(escapeCsvField("+1+1")).toBe("'+1+1");
+    expect(escapeCsvField("@SUM(A1:A2)")).toBe("'@SUM(A1:A2)");
+    expect(escapeCsvField("\n=1+1")).toBe("\"'\n=1+1\"");
+  });
+
+  it("retains standard CSV quoting", () => {
+    expect(escapeCsvField("plain")).toBe("plain");
+    expect(escapeCsvField("two, fields")).toBe("\"two, fields\"");
   });
 });

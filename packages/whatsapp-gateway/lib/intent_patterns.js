@@ -66,8 +66,8 @@ const DE_RELAY = [
   'leite\\s+an\\s+\\w+\\s+weiter',
   // Exclude "Sag mir" / "Sage uns" (owner→bot self-directed) — same
   // negative-lookahead pattern used by the English "tell" entry.
-  'sag\\s+(?!mir\\b|uns\\b)\\w+',
-  'sage\\s+(?!mir\\b|uns\\b)\\w+',
+  'sag\\s+(?!mir\\b|uns\\b|euch\\b|dir\\b|dich\\b)\\w+',
+  'sage\\s+(?!mir\\b|uns\\b|euch\\b|dir\\b|dich\\b)\\w+',
   'grüße\\s+\\w+',
   'grusse\\s+\\w+',
 ];
@@ -110,8 +110,9 @@ const IT_RELAY = [
 /**
  * Compile a union regex from the requested language packs.
  *
- * `languages` is a list of two-letter codes (`["en", "it"]`). Unknown
- * codes are silently skipped so a config-side typo can't crash boot.
+ * `languages` is a list of two-letter codes (`["en", "it"]`) or locale
+ * identifiers (`["en-US", "it-IT"]`). Unknown codes are skipped with a
+ * warning so a typo cannot silently disable relay detection.
  */
 function compileIntentRegex(languages = ['en']) {
   const packs = {
@@ -123,15 +124,22 @@ function compileIntentRegex(languages = ['en']) {
     pt: PT_RELAY,
   };
   const patterns = [];
-  for (const code of languages) {
-    const pack = packs[code.toLowerCase()];
-    if (pack) patterns.push(...pack);
+  for (const configuredCode of languages) {
+    const code = String(configuredCode).trim().toLowerCase().split(/[-_]/, 1)[0];
+    const pack = packs[code];
+    if (pack) {
+      patterns.push(...pack);
+    } else {
+      console.warn(`[gateway] unknown relay intent language ignored: ${JSON.stringify(configuredCode)}`);
+    }
   }
   if (patterns.length === 0) {
     // Empty config → never match; safer than always-match.
     return /(?!.*)/;
   }
-  return new RegExp('\\b(?:' + patterns.join('|') + ')\\b', 'i');
+  const unicodeWord = '[\\p{L}\\p{N}_]+';
+  const unicodePatterns = patterns.map((pattern) => pattern.replaceAll('\\w+', unicodeWord));
+  return new RegExp('^\\s*(?:' + unicodePatterns.join('|') + ')(?![\\p{L}\\p{N}_])', 'iu');
 }
 
 module.exports = {

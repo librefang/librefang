@@ -198,7 +198,7 @@ pub(super) fn migrate_root_state_files(home_dir: &Path) {
 
 /// Initialize a git repo in the home directory for config version control.
 pub(super) fn init_git_if_missing(home_dir: &Path) {
-    const DEFAULT_GITIGNORE: &str = "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\nworkspaces/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n";
+    const DEFAULT_GITIGNORE: &str = "secrets.env\nvault.enc\ndaemon.json\nlogs/\ncache/\nregistry/\ndata/\ndashboard/\nbackups/\ninbox/\ntransient/\nworkspaces/\n.vscode/\n*.db\n*.db-shm\n*.db-wal\n";
 
     let existing_repo = home_dir.join(".git").exists();
     if !existing_repo && !run_git(home_dir, &["init", "-q", "-b", "main"]) {

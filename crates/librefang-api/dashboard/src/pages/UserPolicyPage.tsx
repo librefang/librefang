@@ -6,7 +6,7 @@
 // `useUpdateUserPolicy`. Validation mirrors the daemon's checks so the
 // user sees errors inline before a round-trip.
 
-import { useCallback, useEffect, useMemo, useId, useState } from "react";
+import { useCallback, useEffect, useMemo, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import {
@@ -93,7 +93,7 @@ function policyToForm(policy: PermissionPolicy | undefined): FormState {
         out[ch] = { allowed: "", denied: "" };
       }
       for (const [ch, rule] of Object.entries(policy?.channel_tool_rules ?? {})) {
-        out[ch] = {
+        out[normalizeChannelKey(ch)] = {
           allowed: formatList(rule.allowed_tools),
           denied: formatList(rule.denied_tools),
         };
@@ -112,13 +112,6 @@ function validateForm(form: FormState, t: ValidatorT): string | null {
   const checkList = (label: string, items: string[]): string | null => {
     const seen = new Set<string>();
     for (const item of items) {
-      if (item.length === 0) {
-        return t(
-          "userPolicy.errors.empty_entry",
-          "{{field}} contains an empty entry",
-          { field: label },
-        );
-      }
       if (seen.has(item)) {
         return t(
           "userPolicy.errors.duplicate_entry",
@@ -246,6 +239,47 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return true;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Reapply only the leaves the operator changed onto a newer server form.
+// This preserves unsaved edits without turning untouched, concurrently
+// updated server fields back into stale values on the next full PUT.
+function rebaseFormEdits(
+  previous: FormState,
+  current: FormState,
+  next: FormState,
+): FormState {
+  const rebaseValue = (base: unknown, local: unknown, remote: unknown): unknown => {
+    if (deepEqual(local, base)) return remote;
+    if (!isRecord(base) || !isRecord(local) || !isRecord(remote)) return local;
+
+    const result: Record<string, unknown> = {};
+    const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)]);
+    for (const key of keys) {
+      const baseHas = Object.prototype.hasOwnProperty.call(base, key);
+      const localHas = Object.prototype.hasOwnProperty.call(local, key);
+      const remoteHas = Object.prototype.hasOwnProperty.call(remote, key);
+
+      if (!baseHas) {
+        if (localHas) result[key] = local[key];
+        else if (remoteHas) result[key] = remote[key];
+        continue;
+      }
+      if (!localHas) continue;
+      if (!remoteHas) {
+        if (!deepEqual(local[key], base[key])) result[key] = local[key];
+        continue;
+      }
+      result[key] = rebaseValue(base[key], local[key], remote[key]);
+    }
+    return result;
+  };
+
+  return rebaseValue(previous, current, next) as FormState;
+}
+
 export function UserPolicyPage() {
   const { t } = useTranslation();
   const { name } = useParams({ from: "/users/$name/policy" });
@@ -254,6 +288,7 @@ export function UserPolicyPage() {
   const updateMutation = useUpdateUserPolicy();
 
   const [form, setForm] = useState<FormState>(() => policyToForm(undefined));
+  const [baselineForm, setBaselineForm] = useState<FormState | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitOk, setSubmitOk] = useState(false);
   // Inline add-channel state. Kept local to the page (not in the form)
@@ -275,30 +310,41 @@ export function UserPolicyPage() {
     [submitOk],
   );
 
-  // Re-hydrate the form whenever the underlying query resolves a new value
-  // (e.g. on initial load or after invalidation).
-  useEffect(() => {
-    if (policyQuery.data) {
-      setForm(policyToForm(policyQuery.data));
-    }
-  }, [policyQuery.data]);
-
   // Track whether the form differs from the last loaded server state so
   // we can enable / disable Discard and surface "Unsaved changes" hint.
   const isDirty = useMemo(() => {
-    if (!policyQuery.data) return false;
-    return !deepEqual(form, policyToForm(policyQuery.data));
-  }, [form, policyQuery.data]);
+    if (!baselineForm) return false;
+    return !deepEqual(form, baselineForm);
+  }, [baselineForm, form]);
+  const baselineFormRef = useRef<FormState | null>(null);
+  const seededNameRef = useRef<string | null>(null);
+
+  // Seed on initial load or route changes. Background refetches may refresh
+  // a clean form. Dirty forms rebase only their local leaf edits onto the
+  // latest server payload so unrelated concurrent changes are not lost.
+  useEffect(() => {
+    if (!policyQuery.data) return;
+    const nextBaseline = policyToForm(policyQuery.data);
+    const previousBaseline = baselineFormRef.current;
+    setForm(current =>
+      seededNameRef.current !== name || !previousBaseline
+        ? nextBaseline
+        : rebaseFormEdits(previousBaseline, current, nextBaseline),
+    );
+    baselineFormRef.current = nextBaseline;
+    setBaselineForm(nextBaseline);
+    seededNameRef.current = name;
+  }, [name, policyQuery.data]);
 
   // Discard: re-seed straight from the last query payload. We keep
   // submitError / submitOk untouched so the user still sees the
   // outcome of their last submit attempt.
   const handleDiscard = useCallback(() => {
-    if (!policyQuery.data) return;
-    setForm(policyToForm(policyQuery.data));
+    if (!baselineForm) return;
+    setForm(baselineForm);
     setNewChannel("");
     setNewChannelError(null);
-  }, [policyQuery.data]);
+  }, [baselineForm]);
 
   const validationError = useMemo(
     () =>
@@ -343,13 +389,22 @@ export function UserPolicyPage() {
       setSubmitError(validationError);
       return;
     }
+    const submittedForm = form;
+    const submittedName = name;
+    const baselineAtSubmit = baselineFormRef.current;
     try {
       await updateMutation.mutateAsync({
-        name,
-        policy: formToPayload(form),
+        name: submittedName,
+        policy: formToPayload(submittedForm),
       });
+      if (seededNameRef.current !== submittedName) return;
+      if (baselineFormRef.current === baselineAtSubmit) {
+        baselineFormRef.current = submittedForm;
+        setBaselineForm(submittedForm);
+      }
       setSubmitOk(true);
     } catch (err) {
+      if (seededNameRef.current !== submittedName) return;
       setSubmitError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -413,7 +468,7 @@ export function UserPolicyPage() {
               type="submit"
               variant="primary"
               size="sm"
-              disabled={updateMutation.isPending || !!validationError}
+              disabled={updateMutation.isPending || !!validationError || !isDirty}
             >
               <Save className="h-3.5 w-3.5" />
               {t("user_policy.save", "Save")}
@@ -883,4 +938,3 @@ function CheckboxLabel({ label, checked, onChange }: CheckboxLabelProps) {
     </label>
   );
 }
-

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { channelLiveness, livenessLabel, type ChannelLivenessState } from "./channelLiveness";
 import type { ChannelItem } from "../api";
 
@@ -8,6 +8,14 @@ describe("channelLiveness", () => {
   function ch(overrides: Partial<ChannelItem>): ChannelItem {
     return { name: "c", configured: true, ...overrides };
   }
+
+  it("reports a neutral setup state for an unconfigured catalog row", () => {
+    expect(channelLiveness(ch({ configured: false }))).toEqual({
+      state: "unconfigured",
+      variant: "default",
+      error: null,
+    });
+  });
 
   it("reports not_supervised when no adapter is registered", () => {
     expect(channelLiveness(ch({ supervised: false, connected: false }))).toMatchObject({
@@ -89,10 +97,28 @@ describe("channelLiveness", () => {
       channelLiveness(ch({ supervised: true, connected: true, last_error: "   " })).error,
     ).toBeNull();
   });
+
+  it("fails visibly when last_error drifts to a non-string payload", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const channel = ch({
+      supervised: true,
+      connected: false,
+      last_error: { message: "boom" } as unknown as string,
+    });
+
+    expect(channelLiveness(channel)).toMatchObject({
+      state: "failed",
+      variant: "error",
+      error: "Invalid last_error payload",
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
 });
 
 describe("livenessLabel", () => {
   const states: ChannelLivenessState[] = [
+    "unconfigured",
     "not_supervised",
     "failed",
     "stopped",
@@ -108,6 +134,7 @@ describe("livenessLabel", () => {
     // colour-only indicator #6606 exists to remove.
     const keys = states.map((s) => livenessLabel(s, (k) => k));
     expect(keys).toEqual([
+      "common.setup",
       "channels.liveness.not_supervised",
       "channels.liveness.failed",
       "channels.liveness.stopped",
@@ -117,5 +144,9 @@ describe("livenessLabel", () => {
       "channels.liveness.connected",
     ]);
     expect(new Set(keys).size).toBe(states.length);
+  });
+
+  it("falls back to an unknown runtime state instead of returning undefined", () => {
+    expect(livenessLabel("future" as ChannelLivenessState, (key) => key)).toBe("future");
   });
 });

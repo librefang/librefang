@@ -1,1 +1,0 @@
-Classify trigger registration failures by cause so missing agents return 404, invalid input returns 400, backpressure returns 503, and unexpected kernel failures return a scrubbed 500. (#7558) (@houko)
