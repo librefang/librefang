@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, LayoutTemplate, Lock, Plus, Trash2 } from "lucide-react";
-import type { AgentTemplate, AgentTypeSpec } from "../api";
+import { Edit2, LayoutTemplate, Lock, Play, Plus, Trash2 } from "lucide-react";
+import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
 import { useAgentType, useAgentTypes } from "../lib/queries/agentTypes";
-import { useTools } from "../lib/queries/agents";
+import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
+  useSpawnEphemeral,
   useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -275,12 +276,153 @@ function AgentTypeEditor({
   );
 }
 
+/**
+ * Run an agent type once, on the spot, and show what came back (#6699).
+ *
+ * The run is an *ephemeral worker*: no agent is registered, no session is
+ * persisted, and the mission workspace is deleted when the turn ends. The only
+ * thing that outlives it is the text below and the spend on the parent's ledger
+ * — which is why picking the parent is a deliberate choice here and not a
+ * hidden default. The parent is billed for the run, its `[resources]` quota is
+ * the one enforced, and its own tool set is the ceiling on the worker's.
+ */
+function QuickRunModal({
+  type,
+  onClose,
+}: {
+  type: AgentTemplate;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const agents = useAgents();
+  const spawn = useSpawnEphemeral();
+
+  const [parent, setParent] = useState("");
+  const [task, setTask] = useState("");
+  const [result, setResult] = useState<SpawnEphemeralResult | null>(null);
+
+  const candidates = useMemo(
+    () => (agents.data ?? []).filter((a) => !a.is_hand),
+    [agents.data],
+  );
+
+  // Preselect the first agent so the common case is two fields, not three.
+  // Guarded on `parent` staying empty so a refetch never moves a choice the
+  // operator already made.
+  useEffect(() => {
+    if (parent === "" && candidates.length > 0) setParent(candidates[0].id);
+  }, [candidates, parent]);
+
+  async function run() {
+    try {
+      const res = await spawn.mutateAsync({
+        parent,
+        message: task,
+        agent_type: type.name,
+        label: type.name,
+      });
+      setResult(res);
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.quick_run_failed")), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.quick_run_title", { name: type.name })}
+    >
+      <div className="space-y-4">
+        <Field label={t("agentTypes.quick_run_parent")} hint={t("agentTypes.quick_run_parent_hint")}>
+          {agents.isLoading ? (
+            <ListSkeleton rows={1} />
+          ) : candidates.length === 0 ? (
+            <p className="text-[12px] text-text-dim">{t("agentTypes.quick_run_no_agents")}</p>
+          ) : (
+            <select
+              value={parent}
+              onChange={(e) => setParent(e.target.value)}
+              className={inputClass}
+            >
+              {candidates.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </Field>
+
+        <Field label={t("agentTypes.quick_run_task")}>
+          <textarea
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            rows={5}
+            placeholder={t("agentTypes.quick_run_task_placeholder")}
+            className={`${inputClass} resize-y`}
+            autoFocus
+          />
+        </Field>
+
+        {result && (
+          <div className="space-y-2 rounded-xl border border-border-subtle bg-main/30 px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-text-dim">
+                {t("agentTypes.quick_run_result")}
+              </span>
+              <Badge variant="default">{result.name}</Badge>
+              <span className="text-[11px] text-text-dim">
+                {t("agentTypes.quick_run_meta", {
+                  iterations: result.iterations,
+                  tools: result.tools.length,
+                })}
+              </span>
+              {typeof result.cost_usd === "number" && (
+                <span className="text-[11px] text-text-dim">
+                  {t("agentTypes.quick_run_cost", { cost: result.cost_usd.toFixed(4) })}
+                </span>
+              )}
+            </div>
+            <p className="whitespace-pre-wrap break-words text-[13px] text-text-main">
+              {result.response}
+            </p>
+            <p className="text-[11px] text-text-dim/70">
+              {t("agentTypes.quick_run_ephemeral_note")}
+            </p>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={onClose} disabled={spawn.isPending}>
+            {t("common.close")}
+          </Button>
+          <Button
+            variant="primary"
+            leftIcon={<Play className="h-3.5 w-3.5" />}
+            onClick={() => void run()}
+            isLoading={spawn.isPending}
+            disabled={parent === "" || task.trim() === ""}
+          >
+            {t("agentTypes.quick_run_submit")}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function AgentTypeRow({
   type,
+  onQuickRun,
   onEdit,
   onDelete,
 }: {
   type: AgentTemplate;
+  onQuickRun: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -300,40 +442,56 @@ function AgentTypeRow({
         )}
       </div>
 
-      {/* A workspace-sourced row is a live agent's own manifest. The write verbs
-          refuse it by design, so rendering Edit/Delete here would offer a control
-          that cannot succeed — point at the surface that can instead (#7731). */}
-      {type.editable ? (
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            type="button"
-            onClick={onEdit}
-            className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
-            aria-label={t("agentTypes.edit")}
-            title={t("agentTypes.edit")}
-          >
-            <Edit2 className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            className="rounded-lg p-1.5 text-text-dim hover:bg-error/10 hover:text-error"
-            aria-label={t("agentTypes.delete")}
-            title={t("agentTypes.delete")}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      ) : (
-        <Link
-          to="/agents"
-          className="flex shrink-0 items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-[11px] text-text-dim hover:text-text-main"
-          title={t("agentTypes.managed_elsewhere_hint")}
+      <div className="flex shrink-0 items-center gap-1">
+        {/* Quick Run is offered on every row, editable or not. Spawnability and
+            writability are different questions: a workspace-sourced row is a live
+            agent's manifest this API refuses to edit, but the spawn engine resolves
+            it by name just as happily as an operator-authored type (#6699). */}
+        <button
+          type="button"
+          onClick={onQuickRun}
+          className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+          aria-label={t("agentTypes.quick_run")}
+          title={t("agentTypes.quick_run")}
         >
-          <Lock className="h-3 w-3" />
-          {t("agentTypes.managed_elsewhere")}
-        </Link>
-      )}
+          <Play className="h-3.5 w-3.5" />
+        </button>
+
+        {/* A workspace-sourced row is a live agent's own manifest. The write verbs
+            refuse it by design, so rendering Edit/Delete here would offer a control
+            that cannot succeed — point at the surface that can instead (#7731). */}
+        {type.editable ? (
+          <>
+            <button
+              type="button"
+              onClick={onEdit}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-text-main"
+              aria-label={t("agentTypes.edit")}
+              title={t("agentTypes.edit")}
+            >
+              <Edit2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-error/10 hover:text-error"
+              aria-label={t("agentTypes.delete")}
+              title={t("agentTypes.delete")}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </>
+        ) : (
+          <Link
+            to="/agents"
+            className="flex items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-[11px] text-text-dim hover:text-text-main"
+            title={t("agentTypes.managed_elsewhere_hint")}
+          >
+            <Lock className="h-3 w-3" />
+            {t("agentTypes.managed_elsewhere")}
+          </Link>
+        )}
+      </div>
     </div>
   );
 }
@@ -345,6 +503,7 @@ export function AgentTypesPage() {
   const deleteMutation = useDeleteAgentType();
 
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
+  const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
   async function confirmDelete() {
@@ -394,6 +553,7 @@ export function AgentTypesPage() {
             <AgentTypeRow
               key={`${type.source}:${type.name}`}
               type={type}
+              onQuickRun={() => setQuickRun(type)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
             />
@@ -404,6 +564,8 @@ export function AgentTypesPage() {
       {editing && (
         <AgentTypeEditor name={editing.name} onClose={() => setEditing(null)} />
       )}
+
+      {quickRun && <QuickRunModal type={quickRun} onClose={() => setQuickRun(null)} />}
 
       <ConfirmDialog
         isOpen={pendingDelete !== null}

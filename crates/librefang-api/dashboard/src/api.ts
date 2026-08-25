@@ -1730,6 +1730,41 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+/**
+ * One ephemeral worker run (#6699).
+ *
+ * `parent` is not a convenience field: an ephemeral worker has no registry entry,
+ * so it has no budget, no `[resources]` quota and no tool allowlist of its own.
+ * The parent supplies all three, is billed for the run, and caps the worker's
+ * tool set — the server refuses a request without one.
+ */
+export interface SpawnEphemeralRequest {
+  parent: string;
+  message: string;
+  label?: string;
+  agent_type?: string;
+  system_prompt?: string;
+  tools?: string[];
+  provider?: string;
+  model?: string;
+  max_iterations?: number;
+}
+
+/** What one ephemeral worker turn produced. The worker itself is already gone. */
+export interface SpawnEphemeralResult {
+  name: string;
+  response: string;
+  iterations: number;
+  cost_usd?: number;
+  tools: string[];
+}
+
+export async function spawnEphemeral(
+  body: SpawnEphemeralRequest,
+): Promise<SpawnEphemeralResult> {
+  return post<SpawnEphemeralResult>("/api/agents/spawn-ephemeral", body);
+}
+
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
   // Refs #4614 — DELETE requires explicit confirmation. The dashboard
   // already wraps this call in a confirmation modal, so we send the

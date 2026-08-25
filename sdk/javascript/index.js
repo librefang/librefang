@@ -185,6 +185,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/identities/${name}/reset`, undefined, query);
   }
 
+  async spawnEphemeralAgent(data) {
+    return this._c._request("POST", "/api/agents/spawn-ephemeral", data, undefined);
+  }
+
   async getAgent(id) {
     return this._c._request("GET", `/api/agents/${id}`);
   }

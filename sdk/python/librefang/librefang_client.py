@@ -208,6 +208,9 @@ class _AgentsResource(_Resource):
     def reset_agent_identity(self, name: str, confirm: Any = None):
         return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
 
+    def spawn_ephemeral_agent(self, **data):
+        return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
+
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 

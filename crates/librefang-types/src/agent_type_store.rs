@@ -30,12 +30,25 @@ fn librefang_home() -> PathBuf {
 ///
 /// Flat rather than a directory per type on purpose: the whole document is a single manifest, so a create or an edit is exactly one atomic rename with nothing to leave half-built if the process dies between two writes.
 pub fn agent_types_dir() -> PathBuf {
-    librefang_home().join("agent-types")
+    agent_types_dir_in(&librefang_home())
+}
+
+/// The agent-type store under an explicitly supplied home directory.
+///
+/// The kernel resolves an agent type against a `home_dir` it was handed rather than against the process environment, so the layout has to be expressible without reading `LIBREFANG_HOME` again.
+/// Both spellings route through this one function so a reader and a writer can never disagree about where the store is (#6699).
+pub fn agent_types_dir_in(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("agent-types")
 }
 
 /// The file backing one agent type. Call [`validate_agent_type_name`] before joining an untrusted name onto this.
 pub fn agent_type_path(name: &str) -> PathBuf {
-    agent_types_dir().join(format!("{name}.toml"))
+    agent_type_path_in(&librefang_home(), name)
+}
+
+/// The file backing one agent type under an explicitly supplied home directory.
+pub fn agent_type_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
+    agent_types_dir_in(home_dir).join(format!("{name}.toml"))
 }
 
 /// Live agent workspaces — the second, read-only source of the agent-type catalog.
