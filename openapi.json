@@ -971,8 +971,8 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents/{id}/ephemeral-runs — what this agent delegated to\nephemeral workers, and what each one cost (refs #7752).",
-        "description": "An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn\nunder its parent's identity and then vanishes — no registry entry, no\npersisted session, and a mission workspace deleted on the way out. Its\nspend reached the parent's ledger through `usage_events.billed_agent_id`,\nbut the *work* behind the spend had no record, so an operator watching an\nagent misbehave through workers had nothing to inspect. This endpoint is\nthat record.\n\nThe rollup covers the same retained rows as `runs`, not all time: the store\nkeeps a bounded number of runs per parent so a path designed to be called\ncheaply and often cannot grow the table without limit.",
+        "summary": "GET /api/agents/{id}/ephemeral-runs — what this agent delegated to ephemeral workers, and what each one cost (refs #7752).",
+        "description": "An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.\nIts spend reached the parent's ledger through `usage_events.billed_agent_id`, but the *work* behind the spend had no record, so an operator watching an agent misbehave through workers had nothing to inspect.\nThis endpoint is that record.\n\nThe rollup covers the same retained rows as `runs`, not all time: the store keeps a bounded number of runs per parent so a path designed to be called cheaply and often cannot grow the table without limit.",
         "operationId": "list_agent_ephemeral_runs",
         "parameters": [
           {
@@ -14485,7 +14485,7 @@
       },
       "EphemeralRunView": {
         "type": "object",
-        "description": "Wire-shape for one ephemeral worker run under a parent agent (refs #7752).\n\nMirrors [`librefang_memory::EphemeralRunRow`], defined here as a\n`utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the\nshape without forcing utoipa into the memory crate.",
+        "description": "Wire-shape for one ephemeral worker run under a parent agent (refs #7752).\n\nMirrors [`librefang_memory::EphemeralRunRow`], defined here as a `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the shape without forcing utoipa into the memory crate.",
         "required": [
           "id",
           "label",
