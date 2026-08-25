@@ -14954,6 +14954,8 @@
         "required": [
           "used_tokens",
           "max_context_tokens",
+          "max_context_tokens_source",
+          "max_context_tokens_assumed",
           "pct",
           "model",
           "pressure"
@@ -14963,6 +14965,14 @@
             "type": "integer",
             "description": "Resolved model context window. Falls back to\n`UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is\nalways positive.",
             "minimum": 0
+          },
+          "max_context_tokens_assumed": {
+            "type": "boolean",
+            "description": "True when `max_context_tokens` is a guess rather than a fact about the\nmodel — i.e. the source is `fallback` (refs #7774).\n\nThe condition behind the report that opened the issue: a gateway-served\nmodel reports no window, the runtime assumes 8192, and a conversation\nwell inside the model's real window is refused for an overflow that\nexists only in that assumption.\nClients render the warning off this flag rather than string-matching the\nsource."
+          },
+          "max_context_tokens_source": {
+            "type": "string",
+            "description": "Which layer of the precedence chain produced `max_context_tokens`\n(refs #7774): `agent_override`, `model_override`, `catalog`,\n`session_hint` or `fallback`.\n\nWithout this the number is unreadable: a window an operator set, one the\nregistry declared and one the runtime invented are all the same integer."
           },
           "model": {
             "type": "string",

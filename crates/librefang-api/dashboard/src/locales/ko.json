@@ -2699,6 +2699,8 @@
     "generating": "생성 중...",
     "clear_chat": "채팅 지우기",
     "context_usage": "{{used}} /{{max}} 토큰 (~{{pct}}%)",
+    "context_usage_assumed": "추정된 윈도우",
+    "context_usage_assumed_detail": "이 모델의 컨텍스트 윈도우를 아는 곳이 없어 {{max}} 토큰은 추정치입니다. 제공자 페이지(또는 TUI 모델 화면)에서 값을 지정하면 측정되지 않은 수치를 기준으로 압축하지 않습니다.",
     "context_usage_aria": "컨텍스트 창 사용량: 약{{pct}}%",
     "session": "세션",
     "session_unpinned": "고정 해제됨",

@@ -1433,6 +1433,10 @@ tui-event-provider-delete-key-failed = Failed to delete key for { $name }
 tui-event-provider-connection-ok = Connection OK
 tui-event-provider-test-failed = Test failed
 tui-event-provider-test-not-available-in-process = Provider test not available in in-process mode
+tui-event-models-load-failed = Failed to load the model catalogue
+tui-event-models-not-available-in-process = Model configuration needs a running daemon; it is not available in in-process mode
+tui-event-model-limits-save-failed = Failed to save limits for { $model }
+tui-event-model-limits-reset-failed = Failed to reset limits for { $model }
 tui-event-hand-activation-failed = Activation failed
 tui-event-hand-activate-failed-error = Failed to activate: { $error }
 tui-event-hand-activation-failed-error = Activation failed: { $error }
@@ -1520,6 +1524,7 @@ tui-tab-sessions = Sessions
 tui-tab-workflows = Flows
 tui-tab-triggers = Triggers
 tui-tab-memory = Memory
+tui-tab-models = Models
 tui-tab-skills = Skills
 tui-tab-hands = Hands
 tui-tab-extensions = Ext
@@ -1572,6 +1577,33 @@ tui-sessions-loading = Loading sessions…
 tui-sessions-empty = No sessions yet. Start a chat to create one.
 tui-sessions-delete-confirm = Delete this session? [y] Yes  [any] Cancel
 tui-sessions-hints = ↑↓ Navigate  Enter Open  d Delete  / Search  r Refresh
+
+# models.rs
+tui-models-title = Models
+tui-models-count =
+    { $count ->
+        [one] 1 model
+       *[other] { $count } models
+    }
+tui-models-header-model = Model
+tui-models-header-provider = Provider
+tui-models-header-window = Window
+tui-models-header-catalog = Catalog
+tui-models-header-max-output = Max output
+tui-models-loading = Loading model catalogue…
+tui-models-empty = No models. Configure a provider in Settings, or add one with `librefang model add`.
+tui-models-window-unknown = unknown
+tui-models-hints = ↑↓ Navigate  / Filter  e Edit limits  d Reset to catalog  r Refresh
+tui-models-status-no-override = No override on this model — nothing to reset.
+tui-models-status-saved = Limits saved for { $model }
+tui-models-status-reset = { $model } reverted to the catalog
+tui-models-field-context-window = Context window
+tui-models-field-max-output = Max output tokens
+tui-models-field-cleared = (cleared — use the catalog)
+tui-models-field-catalog-hint = catalog: { $value }
+tui-models-edit-explainer = Applies to every agent on this model, and survives a registry sync.
+tui-models-edit-not-max-tokens = Context window is the model's total budget, not the per-reply output cap.
+tui-models-edit-hints = Tab Switch field  0-9 Edit  Enter Save  Esc Cancel
 
 # peers.rs
 tui-peers-title = Peers

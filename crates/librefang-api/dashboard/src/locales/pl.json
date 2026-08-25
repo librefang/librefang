@@ -2701,6 +2701,8 @@
     "generating": "Generowanie...",
     "clear_chat": "Wyczyść czat",
     "context_usage": "{{used}} / {{max}} tokenów (~{{pct}}%)",
+    "context_usage_assumed": "Założone okno",
+    "context_usage_assumed_detail": "Żadne źródło nie zna okna kontekstu tego modelu, więc {{max}} tokenów to zgadywanie. Ustaw je na stronie dostawców (lub na ekranie modeli w TUI), aby środowisko nie kompaktowało według niezmierzonej liczby.",
     "context_usage_aria": "Zużycie okna kontekstu: około {{pct}} procent",
     "session": "Sesja",
     "session_unpinned": "Odpięta",

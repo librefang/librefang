@@ -4,8 +4,9 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, ModelCatalogEntry,
-    ModelCatalogFile, ModelOverrides, ModelTier, ProviderCatalogToml, ProviderInfo,
+    AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, LimitSource,
+    ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier, ProviderCatalogToml,
+    ProviderInfo,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -1153,15 +1154,19 @@ impl ModelCatalog {
     pub fn effective_limits(&self, entry: &ModelCatalogEntry) -> EffectiveLimits {
         let key = format!("{}:{}", entry.provider, entry.id);
         let o = self.overrides.get(&key);
+        let (context_window, context_window_source) = rank_limit(
+            o.and_then(|x| x.context_window).filter(|v| *v > 0),
+            known(entry.context_window),
+        );
+        let (max_output_tokens, max_output_tokens_source) = rank_limit(
+            o.and_then(|x| x.max_output_tokens).filter(|v| *v > 0),
+            known(entry.max_output_tokens),
+        );
         EffectiveLimits {
-            context_window: o
-                .and_then(|x| x.context_window)
-                .filter(|v| *v > 0)
-                .or_else(|| known(entry.context_window)),
-            max_output_tokens: o
-                .and_then(|x| x.max_output_tokens)
-                .filter(|v| *v > 0)
-                .or_else(|| known(entry.max_output_tokens)),
+            context_window,
+            context_window_source,
+            max_output_tokens,
+            max_output_tokens_source,
         }
     }
 
@@ -1198,11 +1203,19 @@ impl ModelCatalog {
         let pick = |f: fn(&ModelOverrides) -> Option<u64>| -> Option<u64> {
             candidates.iter().filter_map(|o| f(o)).find(|v| *v > 0)
         };
+        let (context_window, context_window_source) = rank_limit(
+            pick(|o| o.context_window),
+            entry.and_then(|e| known(e.context_window)),
+        );
+        let (max_output_tokens, max_output_tokens_source) = rank_limit(
+            pick(|o| o.max_output_tokens),
+            entry.and_then(|e| known(e.max_output_tokens)),
+        );
         EffectiveLimits {
-            context_window: pick(|o| o.context_window)
-                .or_else(|| entry.and_then(|e| known(e.context_window))),
-            max_output_tokens: pick(|o| o.max_output_tokens)
-                .or_else(|| entry.and_then(|e| known(e.max_output_tokens))),
+            context_window,
+            context_window_source,
+            max_output_tokens,
+            max_output_tokens_source,
         }
     }
 
@@ -2275,6 +2288,25 @@ fn extract_available_model_ids(body: &serde_json::Value) -> Option<Vec<String>> 
 /// `ModelCatalogEntry::context_window` documents for its own fields).
 fn known(value: u64) -> Option<u64> {
     (value > 0).then_some(value)
+}
+
+/// Rank one capacity limit's two candidate layers and report which answered
+/// (refs #7774).
+///
+/// The operator override outranks the catalog because it exists to correct it.
+/// Value and [`LimitSource`] come out of the same expression so they cannot
+/// disagree: a caller that recomputed the provenance separately would
+/// eventually label an override as a catalog value, which is precisely the
+/// confusion #7774's item 5 is about.
+fn rank_limit(
+    override_value: Option<u64>,
+    catalog_value: Option<u64>,
+) -> (Option<u64>, LimitSource) {
+    match (override_value, catalog_value) {
+        (Some(v), _) => (Some(v), LimitSource::Override),
+        (None, Some(v)) => (Some(v), LimitSource::Catalog),
+        (None, None) => (None, LimitSource::Unknown),
+    }
 }
 
 fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogEntry> {

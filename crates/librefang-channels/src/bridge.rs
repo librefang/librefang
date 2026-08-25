@@ -4661,6 +4661,10 @@ async fn dispatch_message(
                 }
             }
 
+            // Broadcast dispatch carries the same `SenderContext` every other channel turn carries (#7140, session dimension).
+            // Without it the kernel's session resolver falls past its channel branch — `resolve_dispatch_session_id` only derives `SessionId::for_sender_scope` when a sender context is present — and lands the turn on the agent's canonical `entry.session_id`, the session the dashboard chat writes to.
+            // The conversation the broadcast user sees then lives somewhere `/new` cannot reach: the reset commands address the per-chat session, so they clear an empty row and report success while the visible history survives.
+            let broadcast_sender_ctx = build_sender_context(message, overrides.as_ref());
             let strategy = router.broadcast_strategy();
             let mut responses = Vec::new();
 
@@ -4673,8 +4677,9 @@ async fn dispatch_message(
                             let t = text.clone();
                             let aid = *aid;
                             let name = name.clone();
+                            let sctx = broadcast_sender_ctx.clone();
                             handles_vec.push(tokio::spawn(async move {
-                                let result = h.send_message(aid, &t).await;
+                                let result = h.send_message_with_sender(aid, &t, &sctx).await;
                                 (name, aid, result)
                             }));
                         }
@@ -4696,7 +4701,10 @@ async fn dispatch_message(
                 librefang_types::config::BroadcastStrategy::Sequential => {
                     for (name, maybe_id) in &targets {
                         if let Some(aid) = maybe_id {
-                            match handle.send_message(*aid, &text).await {
+                            match handle
+                                .send_message_with_sender(*aid, &text, &broadcast_sender_ctx)
+                                .await
+                            {
                                 Ok(r) if !r.is_empty() => responses.push(format!("[{name}]: {r}")),
                                 Ok(_) => {} // silent response — skip
                                 Err(e) => {
@@ -6844,6 +6852,54 @@ async fn dispatch_with_blocks(
     }
 }
 
+/// Which session-reset command a channel user typed.
+#[derive(Clone, Copy)]
+enum ChannelResetKind {
+    New,
+    Reboot,
+    Compact,
+}
+
+/// Apply `/new`, `/reboot` or `/compact` to every agent this chat's traffic reaches.
+///
+/// A sender with broadcast routing configured has each of their turns fanned out to several agents, and after #7140 each of those agents keeps its own per-chat session.
+/// Resetting only the router-resolved agent would leave the rest answering out of the history the user just asked to clear — the same "the command acked but nothing changed" symptom, one agent removed.
+///
+/// Acks are deduplicated, so a single target produces exactly the wording it produced before broadcast was taken into account.
+async fn apply_channel_reset(
+    kind: ChannelResetKind,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    targets: &[AgentId],
+    channel: &str,
+    chat_id: Option<&str>,
+) -> String {
+    let mut replies: Vec<String> = Vec::new();
+    for agent_id in targets {
+        let reply = match kind {
+            ChannelResetKind::New => {
+                handle
+                    .reset_channel_session(*agent_id, channel, chat_id)
+                    .await
+            }
+            ChannelResetKind::Reboot => {
+                handle
+                    .reboot_channel_session(*agent_id, channel, chat_id)
+                    .await
+            }
+            ChannelResetKind::Compact => {
+                handle
+                    .compact_channel_session(*agent_id, channel, chat_id)
+                    .await
+            }
+        }
+        .unwrap_or_else(|e| format!("Error: {e}"));
+        if !replies.contains(&reply) {
+            replies.push(reply);
+        }
+    }
+    replies.join("\n")
+}
+
 /// Handle a bot command (returns the response text).
 ///
 /// `overrides` reflects the merged agent + channel policy for the calling
@@ -6894,6 +6950,24 @@ async fn handle_command(
             sender.librefang_user.as_deref(),
             &ctx,
         )
+    };
+
+    // The agents a `/new` / `/reboot` / `/compact` has to cover.
+    // Normally exactly one: the agent this chat resolves to.
+    // A sender with broadcast routing talks to several at once, and each keeps its own session for this chat, so a reset that stopped at the router-resolved agent would leave the others replying from the cleared history.
+    let reset_targets = || {
+        let mut targets: Vec<AgentId> = Vec::new();
+        if let Some(agent_id) = resolve_for_command() {
+            targets.push(agent_id);
+        }
+        for (_, maybe_id) in router.resolve_broadcast(&sender.platform_id) {
+            if let Some(agent_id) = maybe_id {
+                if !targets.contains(&agent_id) {
+                    targets.push(agent_id);
+                }
+            }
+        }
+        targets
     };
 
     // Channel-account key used to scope user-default writes (e.g. `/agent`)
@@ -7001,48 +7075,51 @@ async fn handle_command(
             }
         }
         "new" => {
-            // Resolve the user's current agent and the channel-derived sid so /new only resets THIS chat (#4868).
+            // Reset only the sessions this chat actually owns (#4868).
             // The (channel, chat_id) pair must match `build_sender_context` exactly so the sid we delete here equals the sid the next inbound message will resolve via `SessionId::for_channel` — hence the shared `session_scope` rather than a re-inlined derivation (#7701).
-            let agent_id = resolve_for_command();
-            match agent_id {
-                Some(aid) => {
-                    let (ch, chat) =
-                        session_scope(channel_type, &sender.platform_id, sender_user_id);
-                    handle
-                        .reset_channel_session(aid, &ch, chat.as_deref())
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
-                None => "No agent selected. Use /agent <name> first.".to_string(),
+            let targets = reset_targets();
+            if targets.is_empty() {
+                return "No agent selected. Use /agent <name> first.".to_string();
             }
+            let (ch, chat) = session_scope(channel_type, &sender.platform_id, sender_user_id);
+            apply_channel_reset(
+                ChannelResetKind::New,
+                handle,
+                &targets,
+                &ch,
+                chat.as_deref(),
+            )
+            .await
         }
         "reboot" => {
-            let agent_id = resolve_for_command();
-            match agent_id {
-                Some(aid) => {
-                    let (ch, chat) =
-                        session_scope(channel_type, &sender.platform_id, sender_user_id);
-                    handle
-                        .reboot_channel_session(aid, &ch, chat.as_deref())
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
-                None => "No agent selected. Use /agent <name> first.".to_string(),
+            let targets = reset_targets();
+            if targets.is_empty() {
+                return "No agent selected. Use /agent <name> first.".to_string();
             }
+            let (ch, chat) = session_scope(channel_type, &sender.platform_id, sender_user_id);
+            apply_channel_reset(
+                ChannelResetKind::Reboot,
+                handle,
+                &targets,
+                &ch,
+                chat.as_deref(),
+            )
+            .await
         }
         "compact" => {
-            let agent_id = resolve_for_command();
-            match agent_id {
-                Some(aid) => {
-                    let (ch, chat) =
-                        session_scope(channel_type, &sender.platform_id, sender_user_id);
-                    handle
-                        .compact_channel_session(aid, &ch, chat.as_deref())
-                        .await
-                        .unwrap_or_else(|e| format!("Error: {e}"))
-                }
-                None => "No agent selected. Use /agent <name> first.".to_string(),
+            let targets = reset_targets();
+            if targets.is_empty() {
+                return "No agent selected. Use /agent <name> first.".to_string();
             }
+            let (ch, chat) = session_scope(channel_type, &sender.platform_id, sender_user_id);
+            apply_channel_reset(
+                ChannelResetKind::Compact,
+                handle,
+                &targets,
+                &ch,
+                chat.as_deref(),
+            )
+            .await
         }
         "model" => {
             let agent_id = resolve_for_command();
@@ -7617,6 +7694,236 @@ mod tests {
         fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
             // Test mock: no event bus to forward to.
         }
+    }
+
+    /// Records every session-reset call with the `(channel, chat_id)` scope it arrived with, so a test can assert which agents a `/new` / `/reboot` / `/compact` actually reached (#7140).
+    struct ResetRecorderHandle {
+        agents: Mutex<Vec<(AgentId, String)>>,
+        resets: Mutex<Vec<(AgentId, String, Option<String>)>>,
+        reboots: Mutex<Vec<(AgentId, String, Option<String>)>>,
+        compacts: Mutex<Vec<(AgentId, String, Option<String>)>>,
+    }
+
+    impl ResetRecorderHandle {
+        fn new(agents: Vec<(AgentId, String)>) -> Self {
+            Self {
+                agents: Mutex::new(agents),
+                resets: Mutex::new(Vec::new()),
+                reboots: Mutex::new(Vec::new()),
+                compacts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn reset_agents(&self) -> Vec<AgentId> {
+            self.resets.lock().unwrap().iter().map(|c| c.0).collect()
+        }
+    }
+
+    #[async_trait]
+    impl ChannelBridgeHandle for ResetRecorderHandle {
+        async fn send_message(&self, _agent_id: AgentId, message: &str) -> Result<String, String> {
+            Ok(format!("Echo: {message}"))
+        }
+        async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+            let agents = self.agents.lock().unwrap();
+            Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+        }
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(self.agents.lock().unwrap().clone())
+        }
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("spawn not implemented in mock".to_string())
+        }
+        async fn reset_channel_session(
+            &self,
+            agent_id: AgentId,
+            channel: &str,
+            chat_id: Option<&str>,
+        ) -> Result<String, String> {
+            self.resets.lock().unwrap().push((
+                agent_id,
+                channel.to_string(),
+                chat_id.map(str::to_string),
+            ));
+            Ok(format!(
+                "Session reset for this {channel} chat. Other surfaces untouched."
+            ))
+        }
+        async fn reboot_channel_session(
+            &self,
+            agent_id: AgentId,
+            channel: &str,
+            chat_id: Option<&str>,
+        ) -> Result<String, String> {
+            self.reboots.lock().unwrap().push((
+                agent_id,
+                channel.to_string(),
+                chat_id.map(str::to_string),
+            ));
+            Ok(format!(
+                "Session rebooted for this {channel} chat. Other surfaces untouched."
+            ))
+        }
+        async fn compact_channel_session(
+            &self,
+            agent_id: AgentId,
+            channel: &str,
+            chat_id: Option<&str>,
+        ) -> Result<String, String> {
+            self.compacts.lock().unwrap().push((
+                agent_id,
+                channel.to_string(),
+                chat_id.map(str::to_string),
+            ));
+            Ok("Compacted.".to_string())
+        }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+            // Test mock: no event bus to forward to.
+        }
+    }
+
+    fn broadcast_router(peer: &str, agents: &[(AgentId, &str)]) -> Arc<AgentRouter> {
+        let router = Arc::new(AgentRouter::new());
+        let mut routes = std::collections::HashMap::new();
+        routes.insert(
+            peer.to_string(),
+            agents.iter().map(|(_, name)| name.to_string()).collect(),
+        );
+        for (id, name) in agents {
+            router.register_agent((*name).to_string(), *id);
+        }
+        router.load_broadcast(librefang_types::config::BroadcastConfig {
+            strategy: librefang_types::config::BroadcastStrategy::Parallel,
+            routes,
+        });
+        router
+    }
+
+    fn channel_user(platform_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: platform_id.to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    /// A sender with broadcast routing talks to several agents at once, and each of them keeps its own session for this chat.
+    /// `/new` resolved a single agent through the router chain, so the other targets kept answering out of the history the user had just asked to clear — the command acked, the conversation did not change (#7140).
+    #[tokio::test]
+    async fn new_resets_every_broadcast_target() {
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let recorder = Arc::new(ResetRecorderHandle::new(vec![
+            (alice, "alice".to_string()),
+            (bob, "bob".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = broadcast_router("vip", &[(alice, "alice"), (bob, "bob")]);
+        router.set_user_default("vip".to_string(), alice);
+        let sender = channel_user("vip");
+
+        let reply = handle_command(
+            "new",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            None,
+            None,
+            "vip",
+        )
+        .await;
+
+        let mut reached = recorder.reset_agents();
+        reached.sort_by_key(|a| a.to_string());
+        let mut expected = vec![alice, bob];
+        expected.sort_by_key(|a| a.to_string());
+        assert_eq!(
+            reached, expected,
+            "every broadcast target must have its session for this chat reset, not just the router-resolved one",
+        );
+        for (_, channel, chat_id) in recorder.resets.lock().unwrap().iter() {
+            assert_eq!(
+                (channel.as_str(), chat_id.as_deref()),
+                ("telegram", Some("vip")),
+                "the reset must address the same per-chat scope the inbound path derives",
+            );
+        }
+        assert_eq!(
+            reply, "Session reset for this telegram chat. Other surfaces untouched.",
+            "identical acks collapse to one line — the wording a single-agent chat has always seen",
+        );
+    }
+
+    /// The overwhelmingly common case must be untouched: no broadcast routing means exactly one reset, for the agent the chat resolves to, with the ack unchanged.
+    #[tokio::test]
+    async fn new_without_broadcast_resets_only_the_resolved_agent() {
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let recorder = Arc::new(ResetRecorderHandle::new(vec![
+            (alice, "alice".to_string()),
+            (bob, "bob".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = Arc::new(AgentRouter::new());
+        router.set_user_default("solo".to_string(), alice);
+        let sender = channel_user("solo");
+
+        let reply = handle_command(
+            "new",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::Telegram,
+            None,
+            None,
+            "solo",
+        )
+        .await;
+
+        assert_eq!(
+            recorder.reset_agents(),
+            vec![alice],
+            "a chat without broadcast routing must reset exactly the agent it resolves to",
+        );
+        assert_eq!(
+            reply,
+            "Session reset for this telegram chat. Other surfaces untouched."
+        );
+    }
+
+    /// `/reboot` and `/compact` share the fan-out with `/new`; a per-command regression would otherwise leave two of the three half-fixed.
+    #[tokio::test]
+    async fn reboot_and_compact_reach_every_broadcast_target() {
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let recorder = Arc::new(ResetRecorderHandle::new(vec![
+            (alice, "alice".to_string()),
+            (bob, "bob".to_string()),
+        ]));
+        let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+        let router = broadcast_router("vip", &[(alice, "alice"), (bob, "bob")]);
+        let sender = channel_user("vip");
+
+        for command in ["reboot", "compact"] {
+            handle_command(
+                command,
+                &[],
+                &handle,
+                &router,
+                &sender,
+                &ChannelType::Telegram,
+                None,
+                None,
+                "vip",
+            )
+            .await;
+        }
+
+        assert_eq!(recorder.reboots.lock().unwrap().len(), 2);
+        assert_eq!(recorder.compacts.lock().unwrap().len(), 2);
     }
 
     /// Helper: replicate the metadata read + key build the bridge does, then
