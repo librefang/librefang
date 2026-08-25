@@ -1,4 +1,6 @@
-use librefang_api::routes::sidecar_describe::{describe_sidecar, SidecarSchema};
+use librefang_api::routes::sidecar_describe::{
+    describe_sidecar, DescribeSidecarError, SidecarSchema,
+};
 
 #[tokio::test]
 async fn describe_telegram_returns_schema_or_skips_when_sdk_missing() {
@@ -35,7 +37,70 @@ async fn describe_failing_command_returns_err() {
         home.path(),
     )
     .await;
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(DescribeSidecarError::Exited { code: 2, .. })
+    ));
+}
+
+#[tokio::test]
+async fn describe_spawn_and_json_failures_are_typed() {
+    let home = tempfile::tempdir().unwrap();
+    let missing = format!("librefang-missing-command-{}", uuid::Uuid::new_v4());
+    assert!(matches!(
+        describe_sidecar(&missing, &[], home.path()).await,
+        Err(DescribeSidecarError::Spawn(_))
+    ));
+
+    assert!(matches!(
+        describe_sidecar(
+            "python3",
+            &["-c".into(), "print('not json')".into()],
+            home.path(),
+        )
+        .await,
+        Err(DescribeSidecarError::InvalidJson { .. })
+    ));
+}
+
+#[tokio::test]
+async fn describe_child_does_not_inherit_unapproved_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let secret_name = format!("LIBREFANG_DESCRIBE_TEST_SECRET_{}", uuid::Uuid::new_v4());
+    std::env::set_var(&secret_name, "must-not-reach-child");
+    let script = format!(
+        "import json, os; print(json.dumps({{'name':'probe','display_name':'Probe','description':str(os.getenv({secret_name:?}) is None),'fields':[]}}))"
+    );
+    let result = describe_sidecar("python3", &["-c".into(), script], home.path()).await;
+    std::env::remove_var(&secret_name);
+
+    let schema = result.expect("probe should return a schema");
+    assert_eq!(schema.description, "True");
+}
+
+#[tokio::test]
+async fn describe_invalid_utf8_stdout_reports_encoding_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let result = describe_sidecar(
+        "python3",
+        &[
+            "-c".into(),
+            "import sys; sys.stdout.buffer.write(bytes([255]))".into(),
+        ],
+        home.path(),
+    )
+    .await;
+    let err = result.expect_err("invalid UTF-8 stdout must fail");
+    assert!(matches!(err, DescribeSidecarError::InvalidUtf8(_)));
+    let err = err.to_string();
+    assert!(
+        err.contains("describe stdout was not valid UTF-8"),
+        "expected an encoding diagnostic, got: {err}"
+    );
+    assert!(
+        !err.contains("invalid describe JSON"),
+        "invalid bytes must not be misclassified as JSON syntax: {err}"
+    );
 }
 
 #[tokio::test]
@@ -59,7 +124,9 @@ async fn describe_missing_sdk_returns_actionable_install_hint() {
         home.path(),
     )
     .await;
-    let err = result.expect_err("missing-SDK shape must surface as Err");
+    let err = result
+        .expect_err("missing-SDK shape must surface as Err")
+        .to_string();
     assert!(
         err.contains("librefang-sdk is not installed"),
         "expected install hint; got: {err}"
@@ -155,7 +222,9 @@ async fn describe_other_failure_modes_keep_raw_stderr() {
         home.path(),
     )
     .await;
-    let err = result.expect_err("non-SDK failure must surface as Err");
+    let err = result
+        .expect_err("non-SDK failure must surface as Err")
+        .to_string();
     assert!(
         !err.contains("librefang-sdk is not installed"),
         "install hint incorrectly fired for unrelated ImportError: {err}"

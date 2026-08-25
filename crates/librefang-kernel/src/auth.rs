@@ -957,6 +957,78 @@ fn translate_slack_role(
     mapped.and_then(UserRole::try_from_str_role)
 }
 
+/// Translate the `roles` claim of a validated OIDC ID token into a LibreFang
+/// [`UserRole`] using `[external_auth.role_map]` (#7744).
+///
+/// This is the same vocabulary as [`Action::required_role`] — `Viewer` <
+/// `User` < `Admin` < `Owner` — and deliberately not the free-form
+/// `BindingContext.roles` strings the channel router matches agent bindings
+/// on. Those two look alike and mean different things: the router's roles
+/// decide *which agent* answers a message, this one decides *what the caller
+/// may do*. Feeding IdP claims into the router's vocabulary would give an
+/// identity provider a say in agent routing and still leave authorization
+/// unanswered, so the claims are translated here, at the boundary, and only
+/// the resulting `UserRole` travels onward.
+///
+/// Returns `None` — meaning "no grant", not "least privilege" — when:
+/// - the operator declared no `role_map` (the default, so an OIDC bearer
+///   authorizes exactly nothing until an operator opts in),
+/// - none of the caller's claim values appear in the map, or
+/// - every matching entry names an unrecognised LibreFang role.
+///
+/// A caller holding several mapped roles gets the **highest-privilege**
+/// match, mirroring [`translate_discord_role`]. Claim ordering is the IdP's
+/// business; letting it decide the effective LibreFang role would move
+/// privilege outside operator control.
+///
+/// A typo'd target (`"admn"`) is skipped rather than resolving to `User`,
+/// so an unrecognised role can never escalate — the caller keeps whatever
+/// the rest of the map granted them, and nothing at all if that was empty.
+pub fn translate_oidc_roles(
+    role_map: &std::collections::BTreeMap<String, String>,
+    claim_roles: &[String],
+) -> Option<UserRole> {
+    if role_map.is_empty() {
+        return None;
+    }
+    let mut best: Option<UserRole> = None;
+    for claim in claim_roles {
+        if let Some(mapped_str) = role_map.get(claim) {
+            if let Some(candidate) = UserRole::try_from_str_role(mapped_str) {
+                best = Some(match best {
+                    Some(prev) => prev.max(candidate),
+                    None => candidate,
+                });
+            }
+        }
+    }
+    best
+}
+
+/// Validate every target role string in `[external_auth.role_map]` and emit
+/// a `tracing::warn!` for each value that won't parse, returning the count.
+///
+/// Same rationale as [`validate_channel_role_mapping`]: the runtime already
+/// fails closed on a typo, so this exists purely so an operator who writes
+/// `"librefang-admins" = "admn"` learns about it at boot instead of
+/// wondering why SSO logins keep getting 401.
+pub fn validate_oidc_role_map(role_map: &std::collections::BTreeMap<String, String>) -> usize {
+    let mut typos = 0usize;
+    for (claim, mapped) in role_map {
+        if UserRole::try_from_str_role(mapped).is_none() {
+            warn!(
+                claim = claim.as_str(),
+                value = mapped.as_str(),
+                "external_auth.role_map has an unrecognized LibreFang role string \
+                 — callers holding this claim will be granted nothing by this entry. \
+                 Valid values: owner, admin, user, viewer, guest"
+            );
+            typos += 1;
+        }
+    }
+    typos
+}
+
 /// Validate every configured role string in `[channel_role_mapping]`
 /// against [`UserRole::try_from_str_role`] and emit a `tracing::warn!`
 /// for each value that won't parse.
@@ -1653,6 +1725,7 @@ mod channel_role_tests {
     use librefang_types::config::{
         ChannelRoleMapping, DiscordRoleMapping, SlackRoleMapping, TelegramRoleMapping,
     };
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1783,6 +1856,82 @@ mod channel_role_tests {
             )
             .await;
         assert_eq!(role, UserRole::User);
+    }
+
+    /// `[external_auth.role_map]` uses the same `UserRole` vocabulary as
+    /// `Action::required_role`, with the same highest-wins rule as the Discord
+    /// mapping above — claim ordering is the identity provider's business and
+    /// must not decide LibreFang privilege (#7744).
+    #[test]
+    fn oidc_role_map_picks_highest_privilege_match() {
+        let map = BTreeMap::from([
+            ("everyone".to_string(), "viewer".to_string()),
+            ("librefang-operators".to_string(), "admin".to_string()),
+        ]);
+        assert_eq!(
+            translate_oidc_roles(
+                &map,
+                &["everyone".to_string(), "librefang-operators".to_string()],
+            ),
+            Some(UserRole::Admin),
+        );
+        // Reversed claim order must produce the identical answer.
+        assert_eq!(
+            translate_oidc_roles(
+                &map,
+                &["librefang-operators".to_string(), "everyone".to_string()],
+            ),
+            Some(UserRole::Admin),
+        );
+    }
+
+    /// An unrecognised target role is skipped rather than resolving to `User`
+    /// the way the lenient `UserRole::from_str_role` would, so a typo can
+    /// neither escalate nor quietly authenticate anyone.
+    #[test]
+    fn oidc_role_map_skips_unrecognised_target_roles() {
+        let typo_only = BTreeMap::from([("librefang-owners".to_string(), "ownr".to_string())]);
+        assert_eq!(
+            translate_oidc_roles(&typo_only, &["librefang-owners".to_string()]),
+            None,
+            "a typo'd target must grant nothing, not `User`"
+        );
+        assert_eq!(validate_oidc_role_map(&typo_only), 1);
+
+        // A typo alongside a good entry leaves the good entry intact.
+        let mixed = BTreeMap::from([
+            ("librefang-owners".to_string(), "ownr".to_string()),
+            ("librefang-readers".to_string(), "viewer".to_string()),
+        ]);
+        assert_eq!(
+            translate_oidc_roles(
+                &mixed,
+                &[
+                    "librefang-owners".to_string(),
+                    "librefang-readers".to_string()
+                ],
+            ),
+            Some(UserRole::Viewer),
+        );
+    }
+
+    /// The default — no map declared — grants nothing no matter what the
+    /// identity provider claims, and neither does a claim nobody mapped.
+    #[test]
+    fn oidc_role_map_grants_nothing_by_default() {
+        let empty = BTreeMap::new();
+        assert_eq!(
+            translate_oidc_roles(&empty, &["librefang-owners".to_string()]),
+            None,
+        );
+        assert_eq!(validate_oidc_role_map(&empty), 0);
+
+        let map = BTreeMap::from([("librefang-owners".to_string(), "owner".to_string())]);
+        assert_eq!(
+            translate_oidc_roles(&map, &["some-other-corporate-group".to_string()]),
+            None,
+        );
+        assert_eq!(translate_oidc_roles(&map, &[]), None);
     }
 
     #[tokio::test]

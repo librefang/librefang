@@ -47,10 +47,15 @@ permissions:
   issues: write
   pull-requests: read
 
+concurrency:
+  group: umbrella-autoclose
+  cancel-in-progress: false
+
 jobs:
   maybe-close-umbrella:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:

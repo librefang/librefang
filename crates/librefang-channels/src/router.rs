@@ -64,6 +64,7 @@ impl AgentRouter {
     fn lock_bindings(&self) -> MutexGuard<'_, Vec<(AgentBinding, String)>> {
         self.bindings.lock().unwrap_or_else(|poisoned| {
             warn!("agent router bindings lock poisoned; recovering inner state");
+            self.bindings.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -71,6 +72,7 @@ impl AgentRouter {
     fn lock_broadcast(&self) -> MutexGuard<'_, BroadcastConfig> {
         self.broadcast.lock().unwrap_or_else(|poisoned| {
             warn!("agent router broadcast lock poisoned; recovering inner state");
+            self.broadcast.clear_poison();
             poisoned.into_inner()
         })
     }
@@ -586,11 +588,14 @@ mod tests {
                 .join()
         });
         assert!(binding_poison.is_err());
+        assert!(router.bindings.is_poisoned());
         assert_eq!(
             router.resolve(&ChannelType::Telegram, "vip_user", None),
             Some(agent_id)
         );
+        assert!(!router.bindings.is_poisoned());
         assert_eq!(router.bindings().len(), 1);
+        assert_eq!(router.bindings.lock().unwrap().len(), 1);
 
         let mut routes = std::collections::HashMap::new();
         routes.insert("vip_user".to_string(), vec!["support".to_string()]);
@@ -607,8 +612,16 @@ mod tests {
                 .join()
         });
         assert!(broadcast_poison.is_err());
+        assert!(router.broadcast.is_poisoned());
         assert!(router.has_broadcast("vip_user"));
+        assert!(!router.broadcast.is_poisoned());
         assert_eq!(router.resolve_broadcast("vip_user")[0].1, Some(agent_id));
+        assert!(router
+            .broadcast
+            .lock()
+            .unwrap()
+            .routes
+            .contains_key("vip_user"));
     }
 
     #[test]

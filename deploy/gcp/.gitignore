@@ -1,5 +1,13 @@
 .terraform/
 *.tfstate
 *.tfstate.backup
-terraform.tfvars
-.terraform.lock.hcl
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+service-account*.json
+credentials*.json
+*.key.json

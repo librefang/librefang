@@ -21,6 +21,10 @@ pub struct PublishNpmBinariesArgs {
     /// Dry run — show what would be published
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Request npm OIDC provenance attestations for every published package.
+    #[arg(long)]
+    pub provenance: bool,
 }
 
 struct Target {
@@ -29,6 +33,13 @@ struct Target {
     arch: &'static str,
     ext: &'static str,
     exe: &'static str,
+}
+
+fn configure_publish(cmd: &mut Command, provenance: bool) {
+    cmd.args(["--access", "public", "--ignore-scripts"]);
+    if provenance {
+        cmd.arg("--provenance");
+    }
 }
 
 const TARGETS: &[Target] = &[
@@ -278,13 +289,8 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
         } else {
             // --ignore-scripts blocks lifecycle hooks so a malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
             let mut cmd = Command::new("npm");
-            cmd.args([
-                "publish",
-                &pkg_dir.to_string_lossy(),
-                "--access",
-                "public",
-                "--ignore-scripts",
-            ]);
+            cmd.args(["publish", &pkg_dir.to_string_lossy()]);
+            configure_publish(&mut cmd, args.provenance);
             for a in &npm_tag_args {
                 cmd.arg(a);
             }
@@ -345,8 +351,8 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
             fs::write(&pkg_path, serde_json::to_string_pretty(&pkg)? + "\n")?;
 
             let mut cmd = Command::new("npm");
-            cmd.args(["publish", "--access", "public", "--ignore-scripts"])
-                .current_dir(&wrapper_dir);
+            cmd.arg("publish").current_dir(&wrapper_dir);
+            configure_publish(&mut cmd, args.provenance);
             for a in &npm_tag_args {
                 cmd.arg(a);
             }
@@ -378,4 +384,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), Box<dyn std::error::
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn provenance_is_an_explicit_publish_opt_in() {
+        for (enabled, expected) in [(false, false), (true, true)] {
+            let mut command = Command::new("npm");
+            command.arg("publish");
+            configure_publish(&mut command, enabled);
+            let arguments: Vec<&OsStr> = command.get_args().collect();
+
+            assert_eq!(arguments.contains(&OsStr::new("--provenance")), expected);
+            assert!(arguments.contains(&OsStr::new("--ignore-scripts")));
+            assert!(arguments
+                .windows(2)
+                .any(|pair| pair == [OsStr::new("--access"), OsStr::new("public")]));
+        }
+    }
 }

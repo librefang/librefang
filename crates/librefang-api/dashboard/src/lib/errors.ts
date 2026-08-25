@@ -18,12 +18,36 @@ function deepestCauseMessage(err: Error): string | undefined {
   return found;
 }
 
+function messageWithCause(err: Error, includeCause: boolean): string {
+  if (!includeCause) return err.message;
+  const extra = deepestCauseMessage(err);
+  return extra ? `${err.message}: ${extra}` : err.message;
+}
+
+/** @internal Exported for explicit production/development contract tests. */
+export function formatToastError(
+  err: unknown,
+  fallback: string,
+  includeCause: boolean,
+): string {
+  if (err instanceof ApiError) {
+    return `[${err.status}] ${messageWithCause(err, includeCause)}`;
+  }
+
+  if (err instanceof Error && err.message) {
+    return messageWithCause(err, includeCause);
+  }
+
+  if (typeof err === "string" && err) return err;
+  return fallback;
+}
+
 /**
  * Extract a user-facing error message from an unknown thrown value.
  *
  * Priority order (highest → lowest):
- *  1. ApiError — includes status code + deepest cause message
- *  2. Error instance — message + deepest cause message
+ *  1. ApiError — includes status code and its public message
+ *  2. Error instance — includes its public message
  *  3. Raw string — returned as-is
  *  4. Fallback — caller-provided default
  */
@@ -32,17 +56,5 @@ export function toastErr(err: unknown, fallback: string): string {
     console.error("[toastErr]", err);
   }
 
-  if (err instanceof ApiError) {
-    const extra = deepestCauseMessage(err);
-    const body = extra ? `${err.message}: ${extra}` : err.message;
-    return `[${err.status}] ${body}`;
-  }
-
-  if (err instanceof Error && err.message) {
-    const extra = deepestCauseMessage(err);
-    return extra ? `${err.message}: ${extra}` : err.message;
-  }
-
-  if (typeof err === "string" && err) return err;
-  return fallback;
+  return formatToastError(err, fallback, import.meta.env.DEV);
 }

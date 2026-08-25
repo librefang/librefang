@@ -22,5 +22,5 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 )]
 pub async fn inbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = state.kernel.inbox_status();
-    Json(serde_json::json!(status))
+    Json(status)
 }

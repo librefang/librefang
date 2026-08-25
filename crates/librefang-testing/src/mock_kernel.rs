@@ -54,6 +54,7 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         input_cost_per_m: 0.15,
         output_cost_per_m: 0.6,
         pricing_known: true,
+        limits_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: true,
@@ -66,26 +67,20 @@ pub fn test_catalog_baseline() -> CatalogSeed {
     (providers, models)
 }
 
-/// Pin a deterministic vault master key for the test process the first
-/// time a mock kernel is built. Without this, parallel integration tests
-/// race on the process-shared `<data_local_dir>/librefang/.keyring` file
-/// (or OS keyring entry): one test's `init()` overwrites another's master
-/// key, and the loser's later `vault_get`/`vault_set` calls open a fresh
-/// `CredentialVault` whose `resolve_master_key` then loads the wrong key
-/// and fails to decrypt its own vault file (TOTP test flake on CI).
+/// Pin a deterministic vault master key for the test process before any kernel or vault is constructed.
+///
+/// Without this, parallel tests race on the process-shared `<data_local_dir>/librefang/.keyring` file (or OS keyring entry): one test's `init()` overwrites another's master key, and the loser's later `vault_get`/`vault_set` calls open a fresh `CredentialVault` whose `resolve_master_key` then loads the wrong key and fails to decrypt its own vault file.
+///
+/// This function is the single test-process owner of `LIBREFANG_VAULT_KEY`. Tests that access a vault directly must call it before doing so; `MockKernelBuilder::build` calls it automatically. An externally supplied key is preserved.
 ///
 /// 32 zero bytes, base64-encoded — value is irrelevant, only stability is.
 static VAULT_KEY_INIT: Once = Once::new();
 const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-fn ensure_test_vault_key() {
+pub fn ensure_test_vault_key() {
     VAULT_KEY_INIT.call_once(|| {
         if std::env::var_os("LIBREFANG_VAULT_KEY").is_none() {
-            // SAFETY: only runs once, before any kernel is booted in this
-            // process — no other thread can be reading the env at this point
-            // because all paths into the vault go through MockKernelBuilder
-            // (or `LibreFangKernel::boot_with_config`, which the builder
-            // owns the entry to).
+            // SAFETY: the shared Once makes this the only test helper that writes the variable, and callers invoke it before constructing a kernel or vault.
             std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
         }
     });
@@ -233,6 +228,18 @@ impl MockKernelBuilder {
         // Use in-memory SQLite (setting path to :memory: doesn't work; boot_with_config uses file paths)
         // So we use a file path under the temp directory instead
         self.config.memory.sqlite_path = Some(self.config.data_dir.join("test.db"));
+        // #7743: be explicitly driverless rather than accidentally driverless.
+        // `KernelConfig::default()` carries `default_model.provider = "auto"`, which makes
+        // `boot_with_config` interrogate the host — provider API-key env vars, a TCP probe
+        // for a local Ollama, a coding-agent CLI on `PATH` — and adopt the first thing it
+        // finds. A test kernel built that way has no driver on a CI runner and a live,
+        // billable `claude-code` driver on the laptop of anyone who develops LibreFang with
+        // Claude Code installed, so any test that reaches an agent turn either asserts
+        // "the run failed" for the wrong reason or spawns the real CLI against the checkout.
+        //
+        // Applied before `config_fn`, so a test that needs a driver (a mock
+        // OpenAI-compatible server, `provider = "ollama"`, …) still overrides it there.
+        self.config.default_model = librefang_types::config::DefaultModelConfig::driverless();
 
         // Apply custom configuration
         if let Some(f) = self.config_fn.take() {

@@ -12,10 +12,14 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::Json;
+use base64::Engine as _;
+use futures::StreamExt;
 use librefang_kernel::kernel_handle::prelude::*;
 use librefang_kernel::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
-use librefang_types::message::{ContentBlock, Message, MessageContent, Role, StopReason};
+use librefang_types::message::{
+    validate_image, ContentBlock, Message, MessageContent, Role, StopReason,
+};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -188,6 +192,22 @@ fn resolve_agent(state: &AppState, model: &str) -> Option<(AgentId, String)> {
 
 // ── Message conversion ──────────────────────────────────────────────────────
 
+fn parse_image_data_uri(url: &str) -> Option<ContentBlock> {
+    let rest = url.strip_prefix("data:")?;
+    let (metadata, data) = rest.split_once(',')?;
+    let media_type = metadata.strip_suffix(";base64")?;
+    if data.is_empty() || validate_image(media_type, data).is_err() {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    Some(ContentBlock::Image {
+        media_type: media_type.to_string(),
+        data: data.to_string(),
+    })
+}
+
 fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
     oai_messages
         .iter()
@@ -210,23 +230,9 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
                                 provider_metadata: None,
                             }),
                             OaiContentPart::ImageUrl { image_url } => {
-                                // Parse data URI: data:{media_type};base64,{data}
-                                if let Some(rest) = image_url.url.strip_prefix("data:") {
-                                    let parts: Vec<&str> = rest.splitn(2, ',').collect();
-                                    if parts.len() == 2 {
-                                        let media_type = parts[0]
-                                            .strip_suffix(";base64")
-                                            .unwrap_or(parts[0])
-                                            .to_string();
-                                        let data = parts[1].to_string();
-                                        Some(ContentBlock::Image { media_type, data })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    // URL-based images not supported (would require fetching)
-                                    None
-                                }
+                                // URL-based images require fetching and non-base64 data URIs do
+                                // not match the provider image-block contract.
+                                parse_image_data_uri(&image_url.url)
                             }
                         })
                         .collect();
@@ -599,6 +605,16 @@ fn finish_or_error_frame(ended_cleanly: bool, req_id: &str, created: u64, model:
     }
 }
 
+async fn observe_forwarder(handle: tokio::task::JoinHandle<bool>) -> bool {
+    match handle.await {
+        Ok(ended_cleanly) => ended_cleanly,
+        Err(error) => {
+            warn!("OpenAI compat: streaming forwarder failed to join: {error}");
+            false
+        }
+    }
+}
+
 /// Build an SSE stream response for streaming completions.
 async fn stream_response(
     state: Arc<AppState>,
@@ -649,7 +665,9 @@ async fn stream_response(
     // Spawn forwarder task — streams ALL agent-loop iterations, flattened into
     // one OpenAI completion, until the event channel closes.
     let req_id = request_id.clone();
-    tokio::spawn(async move {
+    let final_req_id = req_id.clone();
+    let final_agent_name = agent_name.clone();
+    let forwarder = tokio::spawn(async move {
         let mut fwd = ForwarderState {
             tool_index: 0,
             saw_terminal: false,
@@ -681,12 +699,23 @@ async fn stream_response(
                 }
             }
         }
-        let final_json = finish_or_error_frame(ended_cleanly, &req_id, created, &agent_name);
-        let _ = tx.send(Ok(SseEvent::default().data(final_json))).await;
-        let _ = tx.send(Ok(SseEvent::default().data("[DONE]"))).await;
+        ended_cleanly
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
+    // ReceiverStream ends when the forwarder drops its sender. Chain the
+    // terminal frames after that point while retaining and observing the
+    // forwarder's JoinHandle. A panic therefore becomes an in-band error
+    // instead of silently truncating an already-committed HTTP 200 stream.
+    let terminal_stream = futures::stream::once(async move {
+        let ended_cleanly = observe_forwarder(forwarder).await;
+        let final_json =
+            finish_or_error_frame(ended_cleanly, &final_req_id, created, &final_agent_name);
+        Ok::<SseEvent, Infallible>(SseEvent::default().data(final_json))
+    })
+    .chain(futures::stream::once(async {
+        Ok::<SseEvent, Infallible>(SseEvent::default().data("[DONE]"))
+    }));
+    let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx).chain(terminal_stream);
     Ok(Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
@@ -805,6 +834,23 @@ mod tests {
             }
             _ => panic!("Expected Blocks"),
         }
+    }
+
+    #[test]
+    fn image_data_uri_requires_valid_base64_image_payload() {
+        let valid = parse_image_data_uri("data:image/png;base64,iVBORw0KGgo=");
+        assert!(matches!(
+            valid,
+            Some(ContentBlock::Image { media_type, data })
+                if media_type == "image/png" && data == "iVBORw0KGgo="
+        ));
+
+        assert!(parse_image_data_uri("data:image/png,raw-bytes").is_none());
+        assert!(parse_image_data_uri("data:image/png;base64,not!base64").is_none());
+        assert!(parse_image_data_uri("data:image/svg+xml;base64,PHN2Zz4=").is_none());
+        assert!(parse_image_data_uri("data:image/png;charset=utf-8;base64,AA==").is_none());
+        assert!(parse_image_data_uri("data:text/plain;base64,dGV4dA==").is_none());
+        assert!(parse_image_data_uri("https://example.com/image.png").is_none());
     }
 
     #[test]
@@ -1061,6 +1107,13 @@ mod tests {
         assert_eq!(aj["error"]["type"], "server_error");
         assert!(aj.get("choices").is_none());
         assert!(!aborted.contains("\"finish_reason\":\"stop\""));
+    }
+
+    #[tokio::test]
+    async fn forwarder_panic_is_observed_as_failure() {
+        let handle: tokio::task::JoinHandle<bool> =
+            tokio::spawn(async { panic!("simulated forwarder panic") });
+        assert!(!observe_forwarder(handle).await);
     }
 
     // Regression (audit finding 13): an image-only user turn must be accepted

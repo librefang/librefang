@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
+use tracing::warn;
 
 use crate::context_engine::HookTrace;
 
@@ -50,7 +51,8 @@ impl TraceStore {
                 success         INTEGER NOT NULL,
                 error           TEXT,
                 input_preview   TEXT,
-                output_preview  TEXT
+                output_preview  TEXT,
+                annotations     TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_started_at      ON hook_traces(started_at);
             CREATE INDEX IF NOT EXISTS idx_plugin_hook     ON hook_traces(plugin, hook);
@@ -58,6 +60,21 @@ impl TraceStore {
             CREATE INDEX IF NOT EXISTS idx_correlation_id  ON hook_traces(correlation_id);
             ",
         )?;
+        let has_annotations = {
+            let mut stmt = conn.prepare("PRAGMA table_info(hook_traces)")?;
+            let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for column in columns {
+                if column? == "annotations" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_annotations {
+            conn.execute("ALTER TABLE hook_traces ADD COLUMN annotations TEXT", [])?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS circuit_breaker_states (
                 key        TEXT PRIMARY KEY,
@@ -68,6 +85,14 @@ impl TraceStore {
         Ok(Self {
             conn: std::sync::Mutex::new(conn),
             insert_counter: AtomicU64::new(0),
+        })
+    }
+
+    fn lock_connection(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| {
+            warn!("Trace store connection lock poisoned; recovering inner state");
+            self.conn.clear_poison();
+            poisoned.into_inner()
         })
     }
 
@@ -91,19 +116,23 @@ impl TraceStore {
     /// call from any sync context (including tests); from a tokio task, call
     /// [`TraceStore::insert`] instead so the work is moved off the worker.
     pub fn insert_blocking(&self, plugin: &str, trace: &HookTrace) {
-        let Ok(conn) = self.conn.lock() else { return };
+        let conn = self.lock_connection();
 
         let input_preview = serde_json::to_string(&trace.input_preview).ok();
         let output_preview = trace
             .output_preview
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok());
+        let annotations = trace
+            .annotations
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
 
         let inserted = conn
             .execute(
                 "INSERT INTO hook_traces \
-                 (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview, annotations) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     trace.trace_id,
                     trace.correlation_id,
@@ -115,6 +144,7 @@ impl TraceStore {
                     trace.error,
                     input_preview,
                     output_preview,
+                    annotations,
                 ],
             )
             .is_ok();
@@ -145,10 +175,7 @@ impl TraceStore {
         limit: usize,
         only_failures: bool,
     ) -> rusqlite::Result<Vec<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -174,7 +201,7 @@ impl TraceStore {
 
         let sql = format!(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
-             input_preview, output_preview \
+             input_preview, output_preview, annotations \
              FROM hook_traces {where_clause} ORDER BY id DESC LIMIT {limit}"
         );
 
@@ -184,6 +211,7 @@ impl TraceStore {
             params.iter().map(|p| p.as_ref()).collect();
 
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let annotations = optional_json_column(row, 10)?;
             Ok(serde_json::json!({
                 "trace_id":        row.get::<_, String>(0)?,
                 "correlation_id":  row.get::<_, String>(1)?,
@@ -195,6 +223,7 @@ impl TraceStore {
                 "error":           row.get::<_, Option<String>>(7)?,
                 "input_preview":   row.get::<_, Option<String>>(8)?,
                 "output_preview":  row.get::<_, Option<String>>(9)?,
+                "annotations":     annotations,
             }))
         })?;
         rows.collect()
@@ -202,17 +231,15 @@ impl TraceStore {
 
     /// Look up a single trace by its trace_id.
     ///
-    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails (poisoned mutex, corrupt row, or other SQLite error).
+    /// Returns `Ok(None)` if no trace matches; `Err` if the lookup itself fails.
     pub fn query_by_trace_id(&self, trace_id: &str) -> rusqlite::Result<Option<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.query_row(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
-             input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
+             input_preview, output_preview, annotations FROM hook_traces WHERE trace_id = ?1",
             [trace_id],
             |row| {
+                let annotations = optional_json_column(row, 10)?;
                 Ok(serde_json::json!({
                     "trace_id":       row.get::<_, String>(0)?,
                     "correlation_id": row.get::<_, String>(1)?,
@@ -224,6 +251,7 @@ impl TraceStore {
                     "error":          row.get::<_, Option<String>>(7)?,
                     "input_preview":  row.get::<_, Option<String>>(8)?,
                     "output_preview": row.get::<_, Option<String>>(9)?,
+                    "annotations":    annotations,
                 }))
             },
         )
@@ -232,10 +260,7 @@ impl TraceStore {
 
     /// Count traces, optionally filtered by plugin and/or failure status.
     pub fn count(&self, plugin: Option<&str>, only_failures: bool) -> rusqlite::Result<i64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
 
         // Build parameterized WHERE clause — never interpolate user values directly.
         let mut conditions: Vec<&str> = Vec::new();
@@ -272,10 +297,7 @@ impl TraceStore {
         failures: u32,
         opened_at: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.execute(
             "INSERT INTO circuit_breaker_states (key, failures, opened_at)
              VALUES (?1, ?2, ?3)
@@ -291,10 +313,7 @@ impl TraceStore {
     ///
     /// Returns a map of `key → (failures, opened_at)`.
     pub fn load_circuit_states(&self) -> rusqlite::Result<HashMap<String, (u32, Option<String>)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         let mut stmt =
             conn.prepare("SELECT key, failures, opened_at FROM circuit_breaker_states")?;
         let rows = stmt.query_map([], |row| {
@@ -315,16 +334,30 @@ impl TraceStore {
     /// Remove the persisted state for a key (e.g. when circuit resets to closed
     /// with zero failures).
     pub fn delete_circuit_state(&self, key: &str) -> rusqlite::Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| rusqlite::Error::InvalidParameterName("mutex poisoned".to_string()))?;
+        let conn = self.lock_connection();
         conn.execute(
             "DELETE FROM circuit_breaker_states WHERE key = ?1",
             rusqlite::params![key],
         )?;
         Ok(())
     }
+}
+
+fn optional_json_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<serde_json::Value>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
@@ -367,6 +400,66 @@ mod tests {
         assert_eq!(store.count(None, true).unwrap(), 1);
         assert_eq!(store.count(Some("my-plugin"), false).unwrap(), 2);
         assert_eq!(store.count(Some("other-plugin"), false).unwrap(), 0);
+    }
+
+    #[test]
+    fn annotations_survive_legacy_schema_migration_and_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("traces.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE hook_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id TEXT NOT NULL DEFAULT '',
+                    correlation_id TEXT NOT NULL DEFAULT '',
+                    plugin TEXT NOT NULL,
+                    hook TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    elapsed_ms INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    error TEXT,
+                    input_preview TEXT,
+                    output_preview TEXT
+                );
+                INSERT INTO hook_traces (
+                    trace_id, correlation_id, plugin, hook, started_at,
+                    elapsed_ms, success
+                ) VALUES (
+                    'legacy0000000000', '', 'legacy-plugin', 'legacy-hook',
+                    '2026-04-06T00:00:00Z', 7, 1
+                );",
+            )
+            .unwrap();
+        }
+
+        let annotations = serde_json::json!({
+            "decision": "keep",
+            "scores": [0.25, 0.75],
+            "nested": {"source": "hook"}
+        });
+        {
+            let store = TraceStore::open(&db_path).unwrap();
+            let legacy = store
+                .query_by_trace_id("legacy0000000000")
+                .unwrap()
+                .expect("legacy trace should survive migration");
+            assert!(legacy["annotations"].is_null());
+
+            let mut trace = make_trace("annotated", true);
+            trace.annotations = Some(annotations.clone());
+            store.insert_blocking("plugin-a", &trace);
+
+            let queried = store.query(None, None, 10, false).unwrap();
+            assert_eq!(queried[0]["annotations"], annotations);
+        }
+
+        let reopened = TraceStore::open(&db_path).unwrap();
+        let trace = reopened
+            .query_by_trace_id("test000000000000")
+            .unwrap()
+            .expect("trace should survive reopen");
+        assert_eq!(trace["annotations"], annotations);
     }
 
     #[test]
@@ -529,5 +622,43 @@ mod tests {
 
         assert!(store.query(None, None, 100, false).is_err());
         assert!(store.query_by_trace_id("test000000000000").is_err());
+    }
+
+    #[test]
+    fn store_recovers_all_connection_operations_after_lock_poison() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(TraceStore::open(&tmp.path().join("traces.db")).unwrap());
+        store.insert_blocking("before-panic", &make_trace("before", true));
+        store
+            .save_circuit_state("preserved", 2, Some("2026-08-14T00:00:00Z"))
+            .unwrap();
+
+        let poisoned_store = store.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poisoned_store.conn.lock().unwrap();
+            panic!("poison trace store connection lock");
+        });
+        assert!(store.conn.is_poisoned());
+
+        store.insert_blocking("after-panic", &make_trace("after", false));
+        assert!(!store.conn.is_poisoned());
+        assert_eq!(store.count(None, false).unwrap(), 2);
+        assert_eq!(store.count(None, true).unwrap(), 1);
+        assert_eq!(store.query(None, None, 10, false).unwrap().len(), 2);
+        assert!(store
+            .query_by_trace_id("test000000000000")
+            .unwrap()
+            .is_some());
+
+        let states = store.load_circuit_states().unwrap();
+        assert_eq!(states["preserved"].0, 2);
+        store.save_circuit_state("new", 3, None).unwrap();
+        assert_eq!(store.load_circuit_states().unwrap()["new"].0, 3);
+        store.delete_circuit_state("preserved").unwrap();
+        assert!(!store
+            .load_circuit_states()
+            .unwrap()
+            .contains_key("preserved"));
+        assert!(store.conn.lock().is_ok());
     }
 }

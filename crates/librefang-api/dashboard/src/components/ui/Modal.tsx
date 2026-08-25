@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useId, memo, type ReactNode } from 
 import { X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
+import { APPLE_EASE, fadeInScale, slideInRight } from "../../lib/motion";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 
 interface ModalProps {
@@ -64,9 +65,63 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   "7xl": "sm:max-w-7xl",
 };
 
-// Apple-style easing, mirrors --apple-ease in index.css so motion-driven
-// transitions match the existing CSS keyframes for non-Modal animations.
-const APPLE_EASE: [number, number, number, number] = [0.25, 0.1, 0.25, 1];
+let bodyScrollLockCount = 0;
+let bodyOverflowBeforeLock = "";
+
+function lockBodyScroll(): () => void {
+  if (bodyScrollLockCount === 0) {
+    bodyOverflowBeforeLock = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  bodyScrollLockCount += 1;
+
+  return () => {
+    bodyScrollLockCount = Math.max(0, bodyScrollLockCount - 1);
+    if (bodyScrollLockCount === 0) {
+      document.body.style.overflow = bodyOverflowBeforeLock;
+    }
+  };
+}
+
+interface OpenModal {
+  token: symbol;
+  zIndex: number;
+  sequence: number;
+  close: () => void;
+}
+
+const openModals: OpenModal[] = [];
+let nextModalSequence = 0;
+
+function handleModalEscape(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== "Escape") return;
+  const topModal = openModals.reduce<OpenModal | undefined>((top, modal) => {
+    if (!top || modal.zIndex > top.zIndex) return modal;
+    if (modal.zIndex === top.zIndex && modal.sequence > top.sequence) return modal;
+    return top;
+  }, undefined);
+  if (!topModal) return;
+
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  topModal.close();
+}
+
+function registerOpenModal(modal: Omit<OpenModal, "sequence">): () => void {
+  if (openModals.length === 0) {
+    window.addEventListener("keydown", handleModalEscape);
+  }
+  const entry = { ...modal, sequence: nextModalSequence++ };
+  openModals.push(entry);
+
+  return () => {
+    const index = openModals.findIndex((candidate) => candidate.token === entry.token);
+    if (index !== -1) openModals.splice(index, 1);
+    if (openModals.length === 0) {
+      window.removeEventListener("keydown", handleModalEscape);
+    }
+  };
+}
 
 /// Shared modal shell. Handles the cross-cutting concerns every page
 /// modal needs:
@@ -167,21 +222,18 @@ export const Modal = memo(function Modal({
 
   useEffect(() => {
     if (!isOpen || isDrawer) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
+    return lockBodyScroll();
   }, [isOpen, isDrawer]);
 
   useEffect(() => {
     if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCloseRef.current();
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen]);
+    const token = Symbol("modal");
+    return registerOpenModal({
+      token,
+      zIndex,
+      close: () => onCloseRef.current(),
+    });
+  }, [isOpen, zIndex]);
 
   const handleBackdropClick = (e: React.MouseEvent) => {
     // Stop the click from bubbling to an ancestor backdrop.
@@ -193,7 +245,7 @@ export const Modal = memo(function Modal({
     // closing this one via backdrop would otherwise also
     // close its parent. See codex review on #2722.
     e.stopPropagation();
-    onClose();
+    onCloseRef.current();
   };
 
   // Three layout shapes:
@@ -212,19 +264,7 @@ export const Modal = memo(function Modal({
     ? `${isDrawer ? "pointer-events-auto " : ""}relative w-full ${SIZE_CLASSES[size]} h-full sm:rounded-l-2xl sm:border-l border-border-subtle bg-surface shadow-2xl ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`
     : `relative w-full ${SIZE_CLASSES[size]} rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl max-h-[90vh] ${overflowVisible ? "overflow-visible" : "overflow-hidden"} flex flex-col`;
 
-  const dialogMotion = isRightDocked
-    ? {
-        initial: { x: "100%" as const, opacity: 0.6 },
-        animate: { x: 0, opacity: 1 },
-        exit: { x: "100%" as const, opacity: 0.6 },
-        transition: { duration: 0.28, ease: APPLE_EASE },
-      }
-    : {
-        initial: { opacity: 0, scale: 0.92, filter: "blur(8px)" },
-        animate: { opacity: 1, scale: 1, filter: "blur(0px)" },
-        exit: { opacity: 0, scale: 0.96, filter: "blur(6px)" },
-        transition: { duration: 0.22, ease: APPLE_EASE },
-      };
+  const dialogVariants = isRightDocked ? slideInRight : fadeInScale;
 
   return (
     <AnimatePresence>
@@ -247,9 +287,15 @@ export const Modal = memo(function Modal({
               ? { role: "complementary" as const }
               : { role: "dialog" as const, "aria-modal": true })}
             {...(title ? { "aria-labelledby": titleId } : {})}
+            {...(isDrawer && !title
+              ? { "aria-label": t("common.details", { defaultValue: "Details" }) }
+              : {})}
             className={dialogClass}
             onClick={(e) => e.stopPropagation()}
-            {...dialogMotion}
+            variants={dialogVariants}
+            initial="initial"
+            animate="animate"
+            exit="exit"
           >
             {(title || !hideCloseButton) && (
               <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
@@ -259,7 +305,7 @@ export const Modal = memo(function Modal({
                 {!hideCloseButton && (
                   <button
                     ref={closeButtonRef}
-                    onClick={onClose}
+                    onClick={() => onCloseRef.current()}
                     className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     aria-label={t("common.close", { defaultValue: "Close" })}
                   >

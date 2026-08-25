@@ -369,7 +369,9 @@ pub async fn create_user(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -469,7 +471,9 @@ pub async fn update_user(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -506,7 +510,9 @@ pub async fn delete_user(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -715,7 +721,9 @@ pub async fn import_users(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -815,7 +823,9 @@ pub async fn rotate_user_key(
                 PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
                 PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
                 PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-                PersistError::Managed => crate::routes::managed_config_response(),
+                PersistError::Managed => {
+                    crate::routes::managed_config_response(state.kernel.config_path())
+                }
             };
         }
     };
@@ -1181,7 +1191,7 @@ pub(crate) async fn persist_users<F, R>(
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
-    if crate::routes::guard_config_write().is_some() {
+    if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistError::Managed);
     }
     let _guard = state.config_write_lock.lock().await;
@@ -1189,16 +1199,9 @@ where
     let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
     let captured = mutate(&mut users)?;
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(PersistError::BadRequest(
-            "invalid config file path".to_string(),
-        ));
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Read the existing file. A read failure on an existing file (permission
     // denied, hardware fault, …) MUST abort — falling back to "" would
@@ -1683,6 +1686,8 @@ pub async fn update_user_policy(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
