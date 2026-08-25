@@ -214,6 +214,7 @@ fn assert_event_matches_fixture(name: &str, fixture: &Value, event: &SidecarEven
 fn events_deserialize_into_expected_variant() {
     let expected = [
         "error.json",
+        "message_command.json",
         "message_minimal.json",
         "message_text.json",
         "qr_ready.json",
