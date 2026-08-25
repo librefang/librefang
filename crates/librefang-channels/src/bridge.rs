@@ -12814,10 +12814,13 @@ mod tests {
         /// One recorded `roster_upsert`, in the argument order the trait declares.
         type RosterCall = (String, String, String, String, Option<String>);
 
-        /// Records every `roster_upsert` with the exact arguments it arrived with.
+        /// Records every `roster_upsert` and `roster_upsert_enumerated` with the exact arguments each arrived with.
+        ///
+        /// The two land in separate vectors on purpose: which write a message produced is the whole assertion for #7086, and a recorder that merged them could not tell a rostered speaker from a rostered stranger.
         #[derive(Default)]
         struct RosterRecorder {
             calls: Mutex<Vec<RosterCall>>,
+            enumerated: Mutex<Vec<RosterCall>>,
         }
 
         #[async_trait]
@@ -12847,6 +12850,23 @@ mod tests {
                 username: Option<&str>,
             ) -> Result<(), String> {
                 self.calls.lock().unwrap().push((
+                    channel.to_string(),
+                    chat_id.to_string(),
+                    user_id.to_string(),
+                    display_name.to_string(),
+                    username.map(str::to_string),
+                ));
+                Ok(())
+            }
+            async fn roster_upsert_enumerated(
+                &self,
+                channel: &str,
+                chat_id: &str,
+                user_id: &str,
+                display_name: &str,
+                username: Option<&str>,
+            ) -> Result<(), String> {
+                self.enumerated.lock().unwrap().push((
                     channel.to_string(),
                     chat_id.to_string(),
                     user_id.to_string(),
@@ -12897,6 +12917,28 @@ mod tests {
             upsert_sender_into_roster(&handle, message).await;
             let calls = recorder.calls.lock().unwrap().clone();
             calls
+        }
+
+        /// Run both roster writes over one message, the way the inbound paths do, and return `(observed, enumerated)`.
+        async fn record_both(message: &ChannelMessage) -> (Vec<RosterCall>, Vec<RosterCall>) {
+            let recorder = Arc::new(RosterRecorder::default());
+            let handle: Arc<dyn ChannelBridgeHandle> = recorder.clone();
+            upsert_sender_into_roster(&handle, message).await;
+            upsert_enumerated_members_into_roster(&handle, message).await;
+            let observed = recorder.calls.lock().unwrap().clone();
+            let enumerated = recorder.enumerated.lock().unwrap().clone();
+            (observed, enumerated)
+        }
+
+        /// Attach a platform member list to a message the way the Slack sidecar does with `SLACK_ENUMERATE_MEMBERS` on.
+        fn with_group_members(
+            mut message: ChannelMessage,
+            members: serde_json::Value,
+        ) -> ChannelMessage {
+            message
+                .metadata
+                .insert("group_members".to_string(), members);
+            message
         }
 
         /// The #7086 payoff: a name the Slack adapter resolved through `users.info` has to survive the bridge to reach `group_roster.display_name`, because that column is verbatim what `channel_members` hands the model.
@@ -12977,6 +13019,118 @@ mod tests {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].0, "whatsapp");
             assert_eq!(calls[0].1, "123@g.us");
+        }
+
+        // --- bulk enumeration (#7086) -------------------------------------
+
+        /// The two writes must stay distinguishable all the way through the bridge.
+        /// The speaker earns an observed row and therefore `channel_dm` reachability; everyone the platform merely listed earns an enumerated one and does not.
+        /// If both ended up on the same call, bulk enumeration would have silently widened the DM authorization set — the escalation the whole `source` split exists to prevent.
+        #[tokio::test]
+        async fn a_platform_member_list_writes_enumerated_rows_and_the_speaker_writes_an_observed_one(
+        ) {
+            let message = with_group_members(
+                slack_message(true, Some("U09ABC"), "Ada Lovelace", Some("ada")),
+                serde_json::json!([
+                    {"user_id": "U09ABC", "display_name": "Ada Lovelace", "username": "ada"},
+                    {"user_id": "U0SILENT", "display_name": "Never Spoken"},
+                ]),
+            );
+
+            let (observed, enumerated) = record_both(&message).await;
+
+            assert_eq!(observed.len(), 1, "only the speaker is observed");
+            assert_eq!(observed[0].2, "U09ABC");
+
+            assert_eq!(
+                enumerated,
+                vec![
+                    (
+                        "slack".to_string(),
+                        "C0DESIGN".to_string(),
+                        "U09ABC".to_string(),
+                        "Ada Lovelace".to_string(),
+                        Some("ada".to_string()),
+                    ),
+                    (
+                        "slack".to_string(),
+                        "C0DESIGN".to_string(),
+                        "U0SILENT".to_string(),
+                        "Never Spoken".to_string(),
+                        None,
+                    ),
+                ],
+                "every listed member is enumerated, including the speaker — the store refuses to demote the observed row it already has"
+            );
+        }
+
+        /// Every adapter that has not opted in sends no `group_members` key, and that must cost nothing.
+        #[tokio::test]
+        async fn a_message_without_a_member_list_enumerates_nothing() {
+            let (_, enumerated) =
+                record_both(&slack_message(true, Some("U09ABC"), "Ada", None)).await;
+            assert!(enumerated.is_empty());
+        }
+
+        /// A DM has no membership to enumerate, and a one-to-one `platform_id` is the peer rather than a conversation.
+        #[tokio::test]
+        async fn a_direct_message_enumerates_nothing() {
+            let message = with_group_members(
+                slack_message(false, Some("U09ABC"), "Ada", None),
+                serde_json::json!([{"user_id": "U0SILENT", "display_name": "Never Spoken"}]),
+            );
+            let (_, enumerated) = record_both(&message).await;
+            assert!(enumerated.is_empty());
+        }
+
+        /// A member with no name renders as a blank line in `channel_members`, which reads as a broken tool rather than as an unresolved id.
+        /// An empty user id is not a member at all and is skipped outright.
+        #[tokio::test]
+        async fn a_nameless_member_falls_back_to_its_id_and_an_idless_one_is_skipped() {
+            let message = with_group_members(
+                slack_message(true, Some("U09ABC"), "Ada", None),
+                serde_json::json!([
+                    {"user_id": "U0SILENT", "display_name": ""},
+                    {"user_id": "", "display_name": "no id at all"},
+                ]),
+            );
+
+            let (_, enumerated) = record_both(&message).await;
+            assert_eq!(enumerated.len(), 1);
+            assert_eq!(enumerated[0].2, "U0SILENT");
+            assert_eq!(enumerated[0].3, "U0SILENT");
+        }
+
+        /// The sidecar wire is not a trusted source of list lengths.
+        /// A workspace channel can list tens of thousands of people, and one message must not turn into an unbounded run of SQLite transactions and stored identities.
+        #[tokio::test]
+        async fn an_oversized_member_list_is_truncated_at_the_cap() {
+            let members: Vec<serde_json::Value> = (0..MAX_ENUMERATED_MEMBERS_PER_MESSAGE + 25)
+                .map(|i| serde_json::json!({"user_id": format!("U{i:05}"), "display_name": "x"}))
+                .collect();
+            let message = with_group_members(
+                slack_message(true, Some("U09ABC"), "Ada", None),
+                serde_json::Value::Array(members),
+            );
+
+            let (_, enumerated) = record_both(&message).await;
+            assert_eq!(enumerated.len(), MAX_ENUMERATED_MEMBERS_PER_MESSAGE);
+        }
+
+        /// Same key agreement the observed write needs: the roster is keyed on the bare channel type, and the WhatsApp gateway stamps `whatsapp:<jid>` (#5227).
+        #[tokio::test]
+        async fn enumerated_rows_use_the_bare_channel_type() {
+            let mut msg = with_group_members(
+                slack_message(true, Some("44@s.whatsapp.net"), "Ada", None),
+                serde_json::json!([{"user_id": "55@s.whatsapp.net", "display_name": "Bo"}]),
+            );
+            msg.channel = ChannelType::WhatsApp;
+            msg.sender.platform_id = "123@g.us".to_string();
+
+            let (_, enumerated) = record_both(&msg).await;
+            assert_eq!(enumerated.len(), 1);
+            assert_eq!(enumerated[0].0, "whatsapp");
+            assert_eq!(enumerated[0].1, "123@g.us");
         }
     }
 }
