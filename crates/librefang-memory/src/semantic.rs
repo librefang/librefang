@@ -629,17 +629,36 @@ impl SemanticStore {
         // pool connection + preparing a statement (audit:
         // memory-recall-n+1-update — second sub-finding). At K=50
         // that was 50 round-trips for what is a single SELECT
-        // WHERE id IN (?,?,...). Parse all ANN-returned ids first
-        // (so a single malformed UUID fails the whole hydrate
-        // rather than silently skipping), then issue one batched
-        // SELECT. The batch preserves the ANN ranking order by
-        // re-ordering against the input vec after fetch.
+        // WHERE id IN (?,?,...). Parse all ANN-returned ids first,
+        // then issue one batched SELECT. The batch preserves the ANN
+        // ranking order by re-ordering against the input vec after fetch.
+        //
+        // An id that is not a UUID is dropped, not propagated as an error.
+        // The id space belongs to an untrusted external backend, and a single
+        // unparseable row used to abort the whole recall — one malformed
+        // entry in a result set of fifty denied the agent every memory it
+        // would otherwise have recalled, which is a denial of service handed
+        // to whoever controls the backend's id column.
+        // Dropping it also makes this loop consistent with the hydrate loop
+        // below, where `by_id.remove` already skips an id SQLite does not
+        // know about: both are "the backend named something we cannot use",
+        // and they now degrade the same way.
         let mut ordered_ids: Vec<MemoryId> = Vec::with_capacity(results.len());
         for r in &results {
-            let mem_id = uuid::Uuid::parse_str(&r.id)
-                .map(MemoryId)
-                .map_err(LibreFangError::memory)?;
-            ordered_ids.push(mem_id);
+            match uuid::Uuid::parse_str(&r.id) {
+                Ok(uuid) => ordered_ids.push(MemoryId(uuid)),
+                Err(e) => {
+                    // The id is backend-controlled, so cap it before it
+                    // reaches the log line.
+                    let shown: String = r.id.chars().take(64).collect();
+                    warn!(
+                        backend = vs.backend_name(),
+                        vector_id = %shown,
+                        error = %e,
+                        "vector store returned a non-UUID id; dropping that result and continuing with the rest of the recall"
+                    );
+                }
+            }
         }
         let mut by_id = self.get_by_ids_batch(
             &ordered_ids,
@@ -1291,6 +1310,45 @@ fn fragment_matches_filter(frag: &MemoryFragment, f: &MemoryFilter) -> bool {
     if let Some(ref before) = f.before {
         if frag.created_at >= *before {
             return false;
+        }
+    }
+    // Metadata equality, mirroring the `json_extract(metadata, '$.key') = ?`
+    // predicates `recall_impl` pushes into SQLite. Without this the
+    // vector-store hydrate path re-checked every filter field except this
+    // one, so a caller that scoped a recall by metadata got that scope
+    // enforced on the SQLite path and silently dropped on the external-backend
+    // path — the divergence the defense-in-depth re-check exists to prevent.
+    for (key, want) in &f.metadata {
+        // Same key and value-kind admissibility as the SQL builder: a
+        // non-identifier key or a null/array/object value yields no predicate
+        // there, so it must yield no predicate here either, or the two paths
+        // would disagree in the opposite direction. `recall_impl` already
+        // warned about both; warning again would double-log the same filter.
+        if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        match want {
+            serde_json::Value::String(_) | serde_json::Value::Bool(_) => {
+                if frag.metadata.get(key) != Some(want) {
+                    return false;
+                }
+            }
+            serde_json::Value::Number(n) => {
+                // SQLite compares json_extract's numeric result under type
+                // affinity, where 1 and 1.0 are equal; serde_json's `Value`
+                // equality treats them as distinct. Compare as f64 so the two
+                // paths agree.
+                let matches = frag
+                    .metadata
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .zip(n.as_f64())
+                    .is_some_and(|(have, want)| have == want);
+                if !matches {
+                    return false;
+                }
+            }
+            _ => {}
         }
     }
     true
@@ -2100,6 +2158,118 @@ mod tests {
         );
         assert_eq!(results[0].agent_id, agent_a);
         assert_eq!(results[0].content, "Alpha secret for agent A");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_via_vector_store_drops_non_uuid_ids_instead_of_failing_the_recall() {
+        // An external backend controls the id column, so one row whose id is
+        // not a UUID must cost the caller that one row — not the entire
+        // recall. Before this fix the parse error propagated out of
+        // `recall_via_vector_store` and every hydratable memory in the same
+        // result set was denied along with it.
+        let mut store = setup();
+        let agent = AgentId::new();
+
+        let good = store
+            .remember(
+                agent,
+                "A memory the backend indexed correctly",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+        let also_good = store
+            .remember(
+                agent,
+                "A second correctly indexed memory",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        // The malformed id is first in ANN order, so a fix that only tolerates
+        // trailing garbage would not pass this.
+        store.set_vector_store(Arc::new(LeakyVectorStore {
+            ids: vec![
+                "not-a-uuid".to_string(),
+                good.0.to_string(),
+                String::new(),
+                also_good.0.to_string(),
+            ],
+        }));
+
+        let query = [0.1_f32, 0.2, 0.3];
+        let results = store
+            .recall_with_embedding("memory", 10, Some(MemoryFilter::agent(agent)), Some(&query))
+            .expect("a non-UUID id must not fail the whole recall");
+
+        let contents: Vec<&str> = results.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            vec![
+                "A memory the backend indexed correctly",
+                "A second correctly indexed memory"
+            ],
+            "both hydratable memories must survive, in ANN order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recall_via_vector_store_reapplies_metadata_filter_against_leaky_backend() {
+        // `MemoryFilter.metadata` is a tenancy dimension on the SQLite path
+        // (`json_extract(metadata, '$.key') = ?`). The hydrate path's
+        // defense-in-depth re-check must enforce it too, or a backend that
+        // ignores the filter widens the caller's scope on the external path
+        // only.
+        let mut store = setup();
+        let agent = AgentId::new();
+
+        let mut tenant_a = HashMap::new();
+        tenant_a.insert("tenant".to_string(), serde_json::json!("acme"));
+        let mut tenant_b = HashMap::new();
+        tenant_b.insert("tenant".to_string(), serde_json::json!("globex"));
+
+        let id_a = store
+            .remember(
+                agent,
+                "Acme quarterly numbers",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_a,
+            )
+            .unwrap();
+        let id_b = store
+            .remember(
+                agent,
+                "Globex quarterly numbers",
+                MemorySource::Conversation,
+                "episodic",
+                tenant_b,
+            )
+            .unwrap();
+
+        store.set_vector_store(Arc::new(LeakyVectorStore {
+            ids: vec![id_a.0.to_string(), id_b.0.to_string()],
+        }));
+
+        let mut filter = MemoryFilter::agent(agent);
+        filter
+            .metadata
+            .insert("tenant".to_string(), serde_json::json!("acme"));
+        let query = [0.1_f32, 0.2, 0.3];
+        let results = store
+            .recall_with_embedding("quarterly", 10, Some(filter), Some(&query))
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "the metadata filter must survive the external-backend path, got: {:?}",
+            results.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].content, "Acme quarterly numbers");
     }
 
     /// A VectorStore backend that records every `insert` it receives and can

@@ -483,6 +483,9 @@ impl LibreFangKernel {
         );
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id: parent_id,
+            // An ephemeral worker has no registry entry of its own, so there is no `AgentEntry` for `billed_agent_for` to read a parent from.
+            // The parent IS the billed agent by construction — the worker runs on its behalf and its budget — which is the same answer that helper returns for a parented agent (#7714, #6699).
+            billed_agent_id: Some(parent_id),
             provider: result
                 .actual_provider
                 .clone()
