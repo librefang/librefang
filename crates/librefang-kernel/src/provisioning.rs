@@ -305,7 +305,7 @@ pub fn scan_agents(root: &Path) -> (Vec<DesiredAgent>, Vec<ProvisioningFailure>)
                 continue;
             }
         };
-        let manifest: librefang_types::agent::AgentManifest = match toml::from_str(&text) {
+        let mut manifest: librefang_types::agent::AgentManifest = match toml::from_str(&text) {
             Ok(manifest) => manifest,
             Err(e) => {
                 failures.push(ProvisioningFailure {
@@ -315,14 +315,27 @@ pub fn scan_agents(root: &Path) -> (Vec<DesiredAgent>, Vec<ProvisioningFailure>)
                 continue;
             }
         };
-        let name = manifest.name.trim().to_string();
-        if name.is_empty() {
-            failures.push(ProvisioningFailure {
-                source: path.display().to_string(),
-                error: "the manifest has no `name`, which is the resource identifier".to_string(),
-            });
-            continue;
-        }
+        // `AgentManifest::name` has a serde default of `"unnamed"`, so a manifest that never
+        // declares one deserialises perfectly and would be provisioned as an agent called
+        // `unnamed`. Here the name is the resource identity, so it has to be present in the file
+        // rather than supplied by the deserialiser — otherwise `nmae = "researcher"` provisions
+        // `unnamed`, and a second such typo collides with the first for no visible reason.
+        let declared_name = toml::from_str::<toml::Table>(&text)
+            .ok()
+            .and_then(|t| t.get("name").and_then(|v| v.as_str()).map(str::to_string));
+        let name = match declared_name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => {
+                failures.push(ProvisioningFailure {
+                    source: path.display().to_string(),
+                    error:
+                        "the manifest declares no `name`, which is the resource identifier — add a \
+                         top-level `name = \"…\"`"
+                            .to_string(),
+                });
+                continue;
+            }
+        };
         if !seen.insert(name.clone()) {
             failures.push(ProvisioningFailure {
                 source: path.display().to_string(),
@@ -333,6 +346,10 @@ pub fn scan_agents(root: &Path) -> (Vec<DesiredAgent>, Vec<ProvisioningFailure>)
             });
             continue;
         }
+        // The resource key is the trimmed name, and `find_by_name` matches on the manifest's
+        // own field, so the two must be the same string or a reconcile would create a second
+        // agent every boot.
+        manifest.name.clone_from(&name);
         desired.push(DesiredAgent {
             name,
             source: path.clone(),

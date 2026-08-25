@@ -569,12 +569,12 @@ async fn a_changed_declaration_is_applied_to_the_existing_agent_on_the_next_boot
     let id = agent_id(&h.app, "researcher")
         .await
         .expect("still one agent");
-    let (status, body) = send(h.app.clone(), auth_get(&format!("/api/agents/{id}/config"))).await;
+    let (status, body) = send(h.app.clone(), auth_get(&format!("/api/agents/{id}"))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    let described = String::from_utf8_lossy(&body).to_string();
-    assert!(
-        described.contains("revised"),
-        "the new declaration must be in effect; got {described}"
+    let agent: serde_json::Value = serde_json::from_slice(&body).expect("agent body is JSON");
+    assert_eq!(
+        agent["description"], "Provisioned by the deployment, revised",
+        "the new declaration must be in effect on the same agent"
     );
 }
 
