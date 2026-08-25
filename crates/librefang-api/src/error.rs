@@ -35,8 +35,12 @@ use axum::http::StatusCode;
 /// | `InvalidInput` / `InvalidState` / `ManifestParse` | 400  |
 /// | `Conflict`                                      | 409    |
 /// | `AuthDenied` / `CapabilityDenied`               | 403    |
+/// | `QuotaExceeded`                                 | 429    |
 /// | `Unavailable` / `ShuttingDown`                  | 503    |
 /// | everything else                                 | 500    |
+///
+/// `QuotaExceeded` was in the `_ => 500` bucket until #6699, which meant a self-imposed budget ceiling reached the client as a scrubbed "Internal server error" — indistinguishable from a crash, and an invitation for a client to retry the request that just refused it.
+/// `routes/memory.rs` had already reached 429 through a hand-rolled local error type; this is the same answer, in the one place every other route inherits.
 pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
     match err {
         KernelOpError::AgentNotFound(_)
@@ -47,6 +51,7 @@ pub fn kernel_op_status(err: &KernelOpError) -> StatusCode {
         | KernelOpError::ManifestParse(_) => StatusCode::BAD_REQUEST,
         KernelOpError::Conflict(_) => StatusCode::CONFLICT,
         KernelOpError::AuthDenied(_) | KernelOpError::CapabilityDenied(_) => StatusCode::FORBIDDEN,
+        KernelOpError::QuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
         KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
             StatusCode::SERVICE_UNAVAILABLE
         }
@@ -77,6 +82,7 @@ pub fn kernel_op_error_code(err: &KernelOpError) -> ErrorCode {
         KernelOpError::Conflict(_) => ErrorCode::Conflict,
         KernelOpError::AuthDenied(_) => ErrorCode::Forbidden,
         KernelOpError::CapabilityDenied(_) => ErrorCode::CapabilityDenied,
+        KernelOpError::QuotaExceeded(_) => ErrorCode::QuotaExceeded,
         KernelOpError::Unavailable(_) | KernelOpError::ShuttingDown => {
             ErrorCode::ServiceUnavailable
         }
@@ -113,6 +119,21 @@ impl From<KernelOpError> for ApiErrorResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A budget ceiling is the caller's own configuration, not a fault, so it must arrive as 429 with its message intact rather than as a scrubbed 500.
+    #[test]
+    fn an_exhausted_quota_is_a_429_that_keeps_its_message() {
+        let response = ApiErrorResponse::from(KernelOpError::QuotaExceeded(
+            "hourly cost budget exhausted".to_string(),
+        ));
+        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.code.as_deref(), Some("quota_exceeded"));
+        assert!(
+            response.error.contains("hourly cost budget"),
+            "a client-side refusal must not be scrubbed, got: {}",
+            response.error
+        );
+    }
 
     #[test]
     fn internal_kernel_errors_are_scrubbed_but_keep_typed_code() {

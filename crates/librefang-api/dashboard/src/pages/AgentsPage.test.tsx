@@ -107,6 +107,10 @@ describe("SystemPromptSection (#6187)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Bind from library/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Bind$/i }));
     expect(bindMutate).toHaveBeenCalledTimes(1);
-    expect(bindMutate.mock.calls[0][0]).toEqual({ agentId: "agent-1", version });
+    expect(bindMutate.mock.calls[0][0]).toEqual({
+      agentId: "agent-1",
+      version,
+      previousSystemPrompt: "original prompt",
+    });
   });
 });

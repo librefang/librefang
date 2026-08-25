@@ -26,8 +26,26 @@ pub fn client_builder() -> ClientBuilder {
         .redirect(reqwest::redirect::Policy::limited(5))
 }
 
-pub fn new_client() -> reqwest::Client {
-    client_builder()
-        .build()
-        .expect("HTTP client with bundled CA roots should always build")
+pub fn new_client() -> Result<reqwest::Client, reqwest::Error> {
+    build_client(client_builder())
+}
+
+fn build_client(builder: ClientBuilder) -> Result<reqwest::Client, reqwest::Error> {
+    builder.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_build_errors_are_returned() {
+        let builder = ClientBuilder::new().user_agent("invalid\nuser-agent");
+        assert!(build_client(builder).is_err());
+    }
+
+    #[test]
+    fn shared_client_builds_with_bundled_roots() {
+        assert!(new_client().is_ok());
+    }
 }

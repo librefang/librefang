@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -255,9 +256,46 @@ pub struct SidecarReadyParams {
     /// auth is only emitted for URLs whose host matches exactly.
     #[serde(default)]
     pub header_rules: Vec<(String, Vec<(String, String)>)>,
-    /// Reserved for skew diagnostics (logged, never enforced).
+    /// Wire-protocol version the adapter implements, compared against [`SIDECAR_PROTOCOL_VERSION`] on arrival.
+    /// Still never *enforced* — a mismatch downgrades the adapter to a `WARN`, it does not refuse the connection — but it is no longer merely logged: [`classify_protocol_version`] turns the value into an operator-visible diagnostic, which is the whole point of carrying it.
+    /// `None` means the adapter declared nothing, not "version 0".
     #[serde(default)]
     pub protocol_version: Option<u32>,
+}
+
+/// The sidecar wire-protocol version this daemon implements.
+///
+/// This constant is the source of truth for the number.
+/// Four other places encode the same value and every one of them is pinned to this constant by `crates/librefang-channels/tests/sidecar_version_contract.rs`: `docs/architecture/sidecar-protocol.md`, the shared corpus fixture `conformance/sidecar/corpus/events/ready_full.json`, the Python SDK's `librefang.sidecar.protocol.PROTOCOL_VERSION`, and the Rust SDK's `librefang_sidecar::protocol::PROTOCOL_VERSION`.
+///
+/// Bump it only when a frozen-core frame changes in a non-additive way (a removed or renamed field, a changed type, a new required field); adding an optional field, a capability string, or a whole new frame method is additive and does not move this number.
+pub const SIDECAR_PROTOCOL_VERSION: u32 = 1;
+
+/// How an adapter's declared `ready.params.protocol_version` compares to
+/// [`SIDECAR_PROTOCOL_VERSION`].
+///
+/// Split out from the reader loop so the decision is unit-testable without spawning a subprocess — the reason the field sat unexamined for so long is that checking it used to mean writing a process-level test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolSkew {
+    /// The adapter declared exactly the version this daemon speaks.
+    Match,
+    /// The adapter declared nothing.
+    /// Every SDK-built adapter has declared a version since #7140, so this now means either a hand-rolled adapter or an SDK install old enough to predate the default — which is the case the reporter hit.
+    Unspecified,
+    /// The adapter speaks an older protocol than this daemon.
+    Older(u32),
+    /// The adapter speaks a newer protocol than this daemon.
+    Newer(u32),
+}
+
+/// Classify a `ready` frame's declared protocol version.
+pub fn classify_protocol_version(declared: Option<u32>) -> ProtocolSkew {
+    match declared {
+        None => ProtocolSkew::Unspecified,
+        Some(v) if v == SIDECAR_PROTOCOL_VERSION => ProtocolSkew::Match,
+        Some(v) if v < SIDECAR_PROTOCOL_VERSION => ProtocolSkew::Older(v),
+        Some(v) => ProtocolSkew::Newer(v),
+    }
 }
 
 /// Commands from LibreFang TO the sidecar process (one JSON per line on stdin).
@@ -633,11 +671,20 @@ struct SpawnCtx {
 /// operator needs escaped values they should set the env var via
 /// `crate::secrets_env::upsert_secret` (which writes a known shape) or
 /// export it from their shell.
-fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
-    let content = match std::fs::read_to_string(path) {
+async fn parse_secrets_env(path: &Path) -> Vec<(String, String)> {
+    let content = match tokio::fs::read_to_string(path).await {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
+    parse_secrets_env_contents(&content)
+}
+
+/// Parse the lightweight dotenv syntax accepted by sidecar `secrets.env` files.
+///
+/// This content-level entry point lets callers that already hold a consistent
+/// file snapshot reuse the sidecar runtime's exact key and value semantics
+/// without reading the path again.
+pub fn parse_secrets_env_contents(content: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -758,7 +805,7 @@ pub fn warn_secret_prefix_collisions(names: &[String]) -> usize {
     collisions.len()
 }
 
-fn build_spawn_env(
+async fn build_spawn_env(
     home_dir: &Path,
     instance_name: &str,
     ctx_env: &HashMap<String, String>,
@@ -767,7 +814,7 @@ fn build_spawn_env(
     let secrets_path = home_dir.join("secrets.env");
     let prefix = format!("{}__", instance_secret_prefix(instance_name));
     let mut instance_scoped: HashMap<String, String> = HashMap::new();
-    for (k, v) in parse_secrets_env(&secrets_path) {
+    for (k, v) in parse_secrets_env(&secrets_path).await {
         if let Some(bare) = k.strip_prefix(prefix.as_str()) {
             // Per-instance secret (`<NAME>__KEY`): scoped to this instance; wins over
             // the global bare key and the parent env so two sidecars can hold their
@@ -781,6 +828,12 @@ fn build_spawn_env(
             // namespaced secret from a global key that merely contains `__`. Both are
             // intentionally withheld from the child: a bare global secret in
             // secrets.env must not contain `__` (see librefang.toml.example).
+            debug!(
+                key = %k,
+                instance = %instance_name,
+                expected_prefix = %prefix,
+                "Withholding namespaced secrets.env key from sidecar instance"
+            );
             continue;
         } else if std::env::var(&k).is_err() {
             // Global secrets.env: parent process env wins (dotenv precedence).
@@ -862,17 +915,34 @@ fn resolve_sidecar_command(command: &str, home_dir: &Path) -> String {
     command.to_string()
 }
 
-/// Cheap, dependency-free jitter: 0..=20% of `base`, seeded off the
-/// wall clock. Backoff jitter does not need a CSPRNG.
+/// Cheap, dependency-free jitter: 0..=20% of `base`.
+///
+/// A process-local sequence is mixed with the wall clock so adapters that
+/// restart on the same clock tick do not deterministically choose the same
+/// delay. Backoff jitter does not need a CSPRNG.
 fn backoff_with_jitter(attempt: u32, initial_ms: u64, max_ms: u64) -> std::time::Duration {
+    static JITTER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let exp = initial_ms.saturating_mul(1u64 << attempt.min(20));
     let base = exp.min(max_ms);
     let span = base / 5 + 1;
-    let nanos = std::time::SystemTime::now()
+    let clock = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64)
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    std::time::Duration::from_millis(base + nanos % span)
+    let sequence = JITTER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mixed = mix_jitter_entropy(clock, sequence);
+    std::time::Duration::from_millis(base.saturating_add(mixed % span))
+}
+
+fn mix_jitter_entropy(clock: u64, sequence: u64) -> u64 {
+    let mut mixed = clock ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    mixed ^= mixed >> 30;
+    mixed = mixed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed ^= mixed >> 27;
+    mixed = mixed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^= mixed >> 31;
+    mixed
 }
 
 /// Spawn the child once and wire stdin/stdout/stderr. Returns the
@@ -893,6 +963,7 @@ async fn spawn_once(
     // parent process env is the highest precedence and the child
     // already inherits it via the default `Command` setup.
     let mut env_map: HashMap<String, String> = build_spawn_env(&ctx.home_dir, &ctx.name, &ctx.env)
+        .await
         .into_iter()
         .collect();
     // Embedded-SDK fallback: when the spawn command is a Python
@@ -1019,12 +1090,42 @@ async fn spawn_once(
                                     }
                                     let _ = account_id_cell
                                         .set(params.account_id.clone());
-                                    info!(
-                                        adapter = %adapter_name,
-                                        capabilities = cap_count,
-                                        protocol_version = params.protocol_version,
-                                        "Sidecar adapter ready"
-                                    );
+                                    match classify_protocol_version(params.protocol_version) {
+                                        ProtocolSkew::Match => info!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            protocol_version = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter ready"
+                                        ),
+                                        ProtocolSkew::Unspecified => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter declared no protocol_version — \
+                                             it predates the SDK default and may misparse or \
+                                             silently drop frames this daemon sends. \
+                                             Upgrade the adapter's librefang-sdk install, or \
+                                             have a hand-rolled adapter declare \
+                                             protocol_version in its ready frame."
+                                        ),
+                                        ProtocolSkew::Older(v) => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            declared = v,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter speaks an older sidecar protocol \
+                                             than this daemon — upgrade its librefang-sdk \
+                                             install to match the daemon"
+                                        ),
+                                        ProtocolSkew::Newer(v) => warn!(
+                                            adapter = %adapter_name,
+                                            capabilities = cap_count,
+                                            declared = v,
+                                            expected = SIDECAR_PROTOCOL_VERSION,
+                                            "Sidecar adapter speaks a newer sidecar protocol \
+                                             than this daemon — upgrade the daemon to match"
+                                        ),
+                                    }
                                     if let Some(t) = ready_tx.take() {
                                         let _ = t.send(());
                                     }
@@ -1429,6 +1530,9 @@ pub struct SidecarAdapter {
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Owned supervisor task. `stop()` joins this before its final child
+    /// cleanup so no in-flight restart can outlive adapter shutdown.
+    supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Current status.
     status: Arc<std::sync::Mutex<ChannelStatus>>,
     /// Capabilities declared by the adapter's `ready` event.
@@ -1573,6 +1677,7 @@ impl SidecarAdapter {
             child: Arc::new(Mutex::new(None)),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
+            supervisor: Mutex::new(None),
             status: Arc::new(std::sync::Mutex::new(ChannelStatus::default())),
             caps: Arc::new(RwLock::new(Caps::default())),
             account_id_cell: Arc::new(OnceLock::new()),
@@ -1649,7 +1754,11 @@ impl ChannelAdapter for SidecarAdapter {
         // after the configured max retries; never restart on a clean
         // shutdown, once the bridge dropped the stream, or when
         // `restart = false`.
-        tokio::spawn(async move {
+        let mut supervisor = self.supervisor.lock().await;
+        if supervisor.is_some() {
+            return Err("Sidecar supervisor is already running".into());
+        }
+        let handle = tokio::spawn(async move {
             let mut attempt: u32 = 0;
             loop {
                 if *shutdown_rx.borrow() {
@@ -1788,6 +1897,8 @@ impl ChannelAdapter for SidecarAdapter {
             }
             debug!(adapter = %ctx.name, "Sidecar supervisor exiting");
         });
+        *supervisor = Some(handle);
+        drop(supervisor);
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Box::pin(stream))
@@ -1838,6 +1949,26 @@ impl ChannelAdapter for SidecarAdapter {
         {
             let mut guard = self.stdin_tx.lock().await;
             *guard = None;
+        }
+
+        // Wait for the restart loop to observe shutdown before the final
+        // child cleanup. Otherwise a spawn already in progress can publish a
+        // new child after the cleanup below and survive `stop()`.
+        let supervisor = self.supervisor.lock().await.take();
+        if let Some(mut supervisor) = supervisor {
+            let timeout =
+                std::time::Duration::from_secs(self.sup.shutdown_grace_secs.saturating_add(1));
+            match tokio::time::timeout(timeout, &mut supervisor).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!(name = %self.name, %error, "Sidecar supervisor task failed during shutdown");
+                }
+                Err(_) => {
+                    warn!(name = %self.name, "Sidecar supervisor did not stop in time; aborting task");
+                    supervisor.abort();
+                    let _ = supervisor.await;
+                }
+            }
         }
 
         // Wait briefly, then kill the child process
@@ -2431,56 +2562,78 @@ mod tests {
         f
     }
 
-    #[test]
-    fn parse_secrets_env_strips_double_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_strips_double_quotes() {
         let f = write_tmp_secrets("KEY=\"value\"\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_strips_single_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_strips_single_quotes() {
         let f = write_tmp_secrets("KEY='value'\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_keeps_internal_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_keeps_internal_quotes() {
         // Not a paired outer pair — the quote is in the middle of the
         // value, so the contract says leave it verbatim.
         let f = write_tmp_secrets("KEY=a\"b\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "a\"b".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_keeps_mismatched_outer_quotes() {
+    #[tokio::test]
+    async fn parse_secrets_env_keeps_mismatched_outer_quotes() {
         // `"abc'` — outer pair are different quote types, not a match.
         let f = write_tmp_secrets("KEY=\"abc'\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "\"abc'".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_trims_whitespace() {
+    #[tokio::test]
+    async fn parse_secrets_env_trims_whitespace() {
         let f = write_tmp_secrets("  KEY = value  \n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
     }
 
-    #[test]
-    fn parse_secrets_env_handles_empty_quoted_value() {
+    #[tokio::test]
+    async fn parse_secrets_env_handles_empty_quoted_value() {
         let f = write_tmp_secrets("KEY=\"\"\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), String::new())]);
     }
 
-    #[test]
-    fn parse_secrets_env_skips_comments_and_blanks() {
+    #[tokio::test]
+    async fn parse_secrets_env_skips_comments_and_blanks() {
         let f = write_tmp_secrets("# a comment\n\nKEY=value\n");
-        let pairs = parse_secrets_env(f.path());
+        let pairs = parse_secrets_env(f.path()).await;
         assert_eq!(pairs, vec![("KEY".to_string(), "value".to_string())]);
+    }
+
+    #[test]
+    fn jitter_sequence_decorrelates_equal_clock_samples() {
+        let clock = 123_456_789;
+        let offsets: HashSet<_> = (0..32)
+            .map(|sequence| mix_jitter_entropy(clock, sequence) % 201)
+            .collect();
+        assert!(
+            offsets.len() > 1,
+            "concurrent restarts sampled on one clock tick need distinct jitter candidates"
+        );
+    }
+
+    #[test]
+    fn backoff_jitter_stays_within_twenty_percent() {
+        for attempt in 0..8 {
+            let delay = backoff_with_jitter(attempt, 100, 10_000).as_millis() as u64;
+            let base = 100_u64.saturating_mul(1_u64 << attempt).min(10_000);
+            assert!(delay >= base);
+            assert!(delay <= base.saturating_add(base / 5));
+        }
     }
 
     #[test]
@@ -2497,6 +2650,48 @@ mod tests {
             }
             _ => panic!("Expected Message variant"),
         }
+    }
+
+    /// The March-SDK case from #7140: an adapter old enough to predate the
+    /// SDK's `protocol_version` default sends `ready` with the field absent,
+    /// and until now that was indistinguishable from a current adapter
+    /// because the value was logged and thrown away.
+    #[test]
+    fn absent_protocol_version_is_unspecified_not_a_match() {
+        let bare: SidecarEvent = serde_json::from_str(r#"{"method":"ready"}"#).unwrap();
+        let SidecarEvent::Ready { params } = bare else {
+            panic!("expected Ready");
+        };
+        assert_eq!(
+            classify_protocol_version(params.protocol_version),
+            ProtocolSkew::Unspecified
+        );
+
+        let explicit_null: SidecarEvent =
+            serde_json::from_str(r#"{"method":"ready","params":{"protocol_version":null}}"#)
+                .unwrap();
+        let SidecarEvent::Ready { params } = explicit_null else {
+            panic!("expected Ready");
+        };
+        assert_eq!(
+            classify_protocol_version(params.protocol_version),
+            ProtocolSkew::Unspecified
+        );
+    }
+
+    #[test]
+    fn protocol_version_skew_is_classified_by_direction() {
+        assert_eq!(
+            classify_protocol_version(Some(SIDECAR_PROTOCOL_VERSION)),
+            ProtocolSkew::Match
+        );
+        assert_eq!(
+            classify_protocol_version(Some(SIDECAR_PROTOCOL_VERSION + 1)),
+            ProtocolSkew::Newer(SIDECAR_PROTOCOL_VERSION + 1)
+        );
+        // `Older` is only reachable once the constant leaves 1; assert the
+        // boundary that exists today rather than a version that cannot occur.
+        assert_eq!(classify_protocol_version(Some(0)), ProtocolSkew::Older(0));
     }
 
     #[test]
@@ -3421,6 +3616,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_waits_for_the_owned_supervisor_task() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let adapter = dummy_adapter();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_by_task = Arc::clone(&finished);
+        *adapter.supervisor.lock().await = Some(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            finished_by_task.store(true, Ordering::Release);
+        }));
+
+        adapter.stop().await.unwrap();
+
+        assert!(finished.load(Ordering::Acquire));
+        assert!(adapter.supervisor.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_and_reaps_a_stuck_supervisor() {
+        struct MarkDropped(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let mut adapter = dummy_adapter();
+        adapter.sup.shutdown_grace_secs = 0;
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_by_task = Arc::clone(&dropped);
+        *adapter.supervisor.lock().await = Some(tokio::spawn(async move {
+            let _mark_dropped = MarkDropped(dropped_by_task);
+            std::future::pending::<()>().await;
+        }));
+        tokio::task::yield_now().await;
+
+        adapter.stop().await.unwrap();
+
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(adapter.supervisor.lock().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_sidecar_adapter_spawn_echo() {
         // Integration test: spawn the Python echo adapter if python3 is available
         let python = which_python();
@@ -3785,8 +4024,8 @@ mod tests {
     // private to LibreFang test scope, and the assertions are about
     // presence/absence of *that key alone*.
 
-    #[test]
-    fn build_spawn_env_secrets_env_visible_to_child() {
+    #[tokio::test]
+    async fn build_spawn_env_secrets_env_visible_to_child() {
         // secrets.env is the only source of a key — it must appear.
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -3801,7 +4040,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_SECRETS_ONLY")
@@ -3810,8 +4049,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_spawn_env_parent_env_beats_secrets() {
+    #[tokio::test]
+    async fn build_spawn_env_parent_env_beats_secrets() {
         // dotenv precedence: shell-exported value beats secrets.env.
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -3825,7 +4064,7 @@ mod tests {
         }
 
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         // The merge skipped the secrets.env entry because the parent
         // env already had the key; the child still inherits the parent
@@ -3842,8 +4081,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_spawn_env_ctx_env_beats_secrets() {
+    #[tokio::test]
+    async fn build_spawn_env_ctx_env_beats_secrets() {
         // config.toml [sidecar_channels.env] explicit overrides win
         // over secrets.env (operator-explicit > file-loaded fallback).
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3862,7 +4101,7 @@ mod tests {
             "LIBREFANG_TEST_BSE_CTX_WINS".to_string(),
             "from_config".to_string(),
         );
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_CTX_WINS").map(|s| s.as_str()),
@@ -3871,19 +4110,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_spawn_env_missing_file_is_not_an_error() {
+    #[tokio::test]
+    async fn build_spawn_env_missing_file_is_not_an_error() {
         // secrets.env does not exist → empty contribution, ctx_env passes through.
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut ctx_env: HashMap<String, String> = HashMap::new();
         ctx_env.insert("FOO".to_string(), "bar".to_string());
-        let merged = build_spawn_env(tmp.path(), "test", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "test", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(got.get("FOO").map(|s| s.as_str()), Some("bar"));
     }
 
-    #[test]
-    fn build_spawn_env_per_instance_secret_overrides_global_and_parent() {
+    #[tokio::test]
+    async fn build_spawn_env_per_instance_secret_overrides_global_and_parent() {
         // #6169: a `<NAME>__KEY` secret resolves to bare KEY for this instance and
         // beats both the global bare key and a shell-exported parent value, so two
         // sidecars can each hold their own token from secrets.env.
@@ -3898,7 +4137,7 @@ mod tests {
             std::env::set_var("LIBREFANG_TEST_BSE_PI", "from_parent");
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert_eq!(
             got.get("LIBREFANG_TEST_BSE_PI").map(|s| s.as_str()),
@@ -3911,8 +4150,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
+    #[tokio::test]
+    async fn build_spawn_env_other_instance_namespaced_secret_does_not_leak() {
         // A different instance's `<NAME>__KEY` secret must not reach this child,
         // neither under the bare name nor under the namespaced name.
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3926,7 +4165,7 @@ mod tests {
             std::env::remove_var("LIBREFANG_TEST_BSE_LEAK");
         }
         let ctx_env: HashMap<String, String> = HashMap::new();
-        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env);
+        let merged = build_spawn_env(tmp.path(), "agent-a", &ctx_env).await;
         let got: HashMap<_, _> = merged.into_iter().collect();
         assert!(
             !got.contains_key("LIBREFANG_TEST_BSE_LEAK")

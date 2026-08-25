@@ -15,6 +15,14 @@ export interface DiffLine {
   text: string;
 }
 
+export const MAX_DIFF_LINES = 4_000;
+export const MAX_LCS_CELLS = 1_000_000;
+
+const flatReplacement = (oldLines: string[], newLines: string[]): DiffLine[] => [
+  ...oldLines.map((text): DiffLine => ({ kind: "remove", text })),
+  ...newLines.map((text): DiffLine => ({ kind: "add", text })),
+];
+
 /**
  * Compute a line-level unified diff between `oldText` and `newText`.
  *
@@ -26,11 +34,20 @@ export function unifiedLineDiff(oldText: string, newText: string): DiffLine[] {
   const a = splitLines(oldText);
   const b = splitLines(newText);
 
-  // LCS length table over lines. n/m are bounded by the skill body size,
-  // which the daemon caps (MAX_PROMPT_CONTEXT_CHARS) — fine for an O(n*m)
-  // table here.
   const n = a.length;
   const m = b.length;
+  // The daemon's body limit is measured in characters, not lines. Dense
+  // short-line inputs can therefore make an O(n*m) table enormous. Preserve
+  // a useful preview without risking a synchronous browser OOM.
+  if (
+    n > MAX_DIFF_LINES ||
+    m > MAX_DIFF_LINES ||
+    (n + 1) * (m + 1) > MAX_LCS_CELLS
+  ) {
+    return flatReplacement(a, b);
+  }
+
+  // LCS length table over lines, bounded by the guards above.
   const lcs: number[][] = Array.from({ length: n + 1 }, () =>
     new Array<number>(m + 1).fill(0),
   );

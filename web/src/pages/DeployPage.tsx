@@ -33,13 +33,40 @@ interface ProgressStep {
 
 // ---- Copy button hook ----
 
-function useCopy() {
+export function useCopy() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const clearCopiedRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyRequestRef = useRef(0)
+
+  useEffect(() => () => {
+    copyRequestRef.current += 1
+    if (clearCopiedRef.current !== null) clearTimeout(clearCopiedRef.current)
+    clearCopiedRef.current = null
+  }, [])
 
   const copy = useCallback((key: string, text: string) => {
-    navigator.clipboard.writeText(text)
-    setCopiedKey(key)
-    setTimeout(() => setCopiedKey(null), 2000)
+    const request = ++copyRequestRef.current
+    if (clearCopiedRef.current !== null) {
+      clearTimeout(clearCopiedRef.current)
+      clearCopiedRef.current = null
+    }
+    setCopiedKey(null)
+
+    void Promise.resolve()
+      .then(() => navigator.clipboard.writeText(text))
+      .then(
+        () => {
+          if (request !== copyRequestRef.current) return
+          setCopiedKey(key)
+          clearCopiedRef.current = setTimeout(() => {
+            if (request === copyRequestRef.current) setCopiedKey(null)
+            clearCopiedRef.current = null
+          }, 2000)
+        },
+        () => {
+          if (request === copyRequestRef.current) setCopiedKey(null)
+        },
+      )
   }, [])
 
   return { copiedKey, copy }
@@ -524,9 +551,9 @@ export function FlyDeployForm({ onBack, text }: { onBack: () => void; text: Depl
     } catch (err) {
       if (controller.signal.aborted) return
       setError(err instanceof Error ? err.message : text.deployFailed)
-      setDeploying(false)
       setSteps(DEPLOY_STEP_IDS.map(id => ({ id, status: 'pending' as ProgressStepStatus })))
     } finally {
+      if (!controller.signal.aborted) setDeploying(false)
       if (deployRequestRef.current === controller) {
         deployRequestRef.current = null
       }
@@ -534,7 +561,7 @@ export function FlyDeployForm({ onBack, text }: { onBack: () => void; text: Depl
   }, [text.deployFailed, text.tokenRequired, token])
 
   return (
-    <div>
+    <div aria-busy={deploying}>
       {/* Back button */}
       <button
         onClick={onBack}

@@ -20,7 +20,7 @@ export function formatRelativeMs(
   now: number,
   locale: string,
   tNever: () => string,
-  tJustNow?: () => string,
+  tJustNow: () => string,
 ): string {
   if (ts === undefined || ts === 0) return tNever();
   const diff = ts - now;
@@ -28,17 +28,26 @@ export function formatRelativeMs(
   // Anything within ~30s reads as "just now" rather than "in 0 minutes" /
   // "this minute" — Intl.RelativeTimeFormat with numeric:"auto" produces
   // locale-dependent and frequently awkward strings at the zero-crossing.
-  if (absSeconds < 30) return tJustNow ? tJustNow() : "just now";
-  const absMinutes = Math.abs(diff) / 60_000;
+  if (absSeconds < 30) return tJustNow();
   const rtf = getRelativeTimeFormat(locale);
-  if (absMinutes < 60) {
-    return rtf.format(Math.round(diff / 60_000), "minute");
+  const direction = Math.sign(diff);
+  const roundedMinutes = Math.round(absSeconds / 60);
+  if (roundedMinutes < 60) {
+    return rtf.format(direction * roundedMinutes, "minute");
   }
-  const absHours = absMinutes / 60;
-  if (absHours < 24) {
-    return rtf.format(parseFloat((diff / 3_600_000).toFixed(1)), "hour");
+  const roundedHours = Math.round((absSeconds / 3_600) * 10) / 10;
+  if (roundedHours < 24) {
+    return rtf.format(direction * roundedHours, "hour");
   }
-  return rtf.format(parseFloat((diff / 86_400_000).toFixed(1)), "day");
+  const roundedDays = Math.round((absSeconds / 86_400) * 10) / 10;
+  return rtf.format(direction * roundedDays, "day");
+}
+
+function formatUnitValue(value: number): string {
+  const nearestInteger = Math.round(value);
+  return Math.abs(value - nearestInteger) < 1e-9
+    ? nearestInteger.toFixed(0)
+    : value.toFixed(1);
 }
 
 // Human-readable duration for effective_min_hours. Switches between minutes,
@@ -48,15 +57,15 @@ export function formatHours(
   unit: { minute: string; hour: string; day: string; week: string },
 ): string {
   if (hours < 1) return `${(hours * 60).toFixed(0)}${unit.minute}`;
-  if (hours < 24) return `${hours % 1 === 0 ? hours.toFixed(0) : hours.toFixed(1)}${unit.hour}`;
+  if (hours < 24) return `${formatUnitValue(hours)}${unit.hour}`;
   const days = hours / 24;
-  if (days < 7) return `${days % 1 === 0 ? days.toFixed(0) : days.toFixed(1)}${unit.day}`;
+  if (days < 7) return `${formatUnitValue(days)}${unit.day}`;
   const weeks = days / 7;
-  return `${weeks % 1 === 0 ? weeks.toFixed(0) : weeks.toFixed(1)}${unit.week}`;
+  return `${formatUnitValue(weeks)}${unit.week}`;
 }
 
-// Truncate long KV values for table rendering. Full value remains in the
-// title attribute on hover (capped separately via KV_TITLE_TRUNCATE).
+// Serialize KV values to display strings. AgentKvRows applies its separate
+// table-cell and title-preview truncation limits after calling this helper.
 export function formatKvValue(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;

@@ -121,9 +121,23 @@ fn read_proc_rss_kb(_pid: u32) -> Option<u64> {
 /// Provides mutual exclusion within a single process. Cross-process safety
 /// (e.g. two daemon instances) is out of scope — only one daemon should own
 /// a plugin's state file at a time.
-static STATE_FILE_LOCKS: once_cell::sync::Lazy<
-    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+type StateFileLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+type StateFileLockMap = std::collections::HashMap<String, StateFileLock>;
+type StateFileLocks = std::sync::Mutex<StateFileLockMap>;
+
+static STATE_FILE_LOCKS: once_cell::sync::Lazy<StateFileLocks> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn lock_state_file_registry(locks: &StateFileLocks) -> std::sync::MutexGuard<'_, StateFileLockMap> {
+    match locks.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("plugin state-file lock registry poisoned; preserving entries and recovering");
+            locks.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
 
 /// Acquire the in-process advisory lock for a shared state file path.
 ///
@@ -138,7 +152,7 @@ static STATE_FILE_LOCKS: once_cell::sync::Lazy<
 /// one daemon owns a plugin's state file at a time.
 pub async fn lock_state_file(path: &std::path::Path) -> tokio::sync::OwnedMutexGuard<()> {
     let arc = {
-        let mut map = STATE_FILE_LOCKS.lock().unwrap();
+        let mut map = lock_state_file_registry(&STATE_FILE_LOCKS);
         map.entry(path.to_string_lossy().into_owned())
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -1683,6 +1697,9 @@ struct PersistentProcess {
     child: tokio::process::Child,
 }
 
+type HookProcessSlot = std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>;
+type HookProcessMap = std::collections::HashMap<String, HookProcessSlot>;
+
 /// Pool of persistent hook subprocesses, keyed by script path.
 ///
 /// Each entry is `Arc<tokio::sync::Mutex<Option<PersistentProcess>>>` — `None` means
@@ -1691,17 +1708,25 @@ struct PersistentProcess {
 /// during a hook call (hooks are not reentrant by design).
 #[derive(Default)]
 pub struct HookProcessPool {
-    procs: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
-        >,
-    >,
+    procs: std::sync::Mutex<HookProcessMap>,
 }
 
 impl HookProcessPool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn lock_processes(&self) -> std::sync::MutexGuard<'_, HookProcessMap> {
+        match self.procs.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    "persistent plugin process registry poisoned; preserving slots and recovering"
+                );
+                self.procs.clear_poison();
+                poisoned.into_inner()
+            }
+        }
     }
 
     /// Call a hook via a persistent subprocess.
@@ -1730,7 +1755,7 @@ impl HookProcessPool {
         });
 
         let slot = {
-            let mut map = self.procs.lock().unwrap();
+            let mut map = self.lock_processes();
             map.entry(script_path.to_string())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
                 .clone()
@@ -1951,7 +1976,7 @@ impl HookProcessPool {
             String,
             std::sync::Arc<tokio::sync::Mutex<Option<PersistentProcess>>>,
         )> = {
-            let procs = self.procs.lock().unwrap();
+            let procs = self.lock_processes();
             procs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
         };
         for (key, slot_arc) in entries {
@@ -1984,7 +2009,7 @@ impl HookProcessPool {
     /// caller re-enters `call()`.
     pub async fn evict(&self, script_path: &str) {
         let slot = {
-            let guard = self.procs.lock().unwrap();
+            let guard = self.lock_processes();
             guard.get(script_path).cloned()
         };
         if let Some(arc) = slot {
@@ -2000,7 +2025,7 @@ impl HookProcessPool {
     /// Evict all subprocesses in the pool, forcing fresh spawns on the next calls.
     pub async fn evict_all(&self) {
         let keys: Vec<String> = {
-            let guard = self.procs.lock().unwrap();
+            let guard = self.lock_processes();
             guard.keys().cloned().collect()
         };
         for key in keys {
@@ -2053,7 +2078,7 @@ impl HookProcessPool {
         // Acquire (or create) the slot arc under the std::sync::Mutex, then
         // lock the inner tokio Mutex to swap the PersistentProcess.
         let slot_arc = {
-            let mut procs = self.procs.lock().unwrap();
+            let mut procs = self.lock_processes();
             procs
                 .entry(script_path.to_string())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))
@@ -2088,7 +2113,7 @@ impl HookProcessPool {
         // Use the same key as `call()` so the pre-warmed slot is found on first use.
         let key = script_path.to_string();
         let slot_arc = {
-            let mut procs = self.procs.lock().unwrap();
+            let mut procs = self.lock_processes();
             procs
                 .entry(key.clone())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(None)))

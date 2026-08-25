@@ -54,15 +54,33 @@ mod wandb;
 
 pub use error::ExportError;
 
+use std::time::Duration;
+
 use chrono::{DateTime, Utc};
+
+/// Total wall-clock budget for one upstream request attempt.
+///
+/// The shared HTTP builder already bounds connection setup and individual
+/// response reads. A total timeout is still required here because an upstream
+/// can otherwise keep a request alive indefinitely by sending data slowly.
+const EXPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn build_export_http_client_with(
     builder: reqwest::ClientBuilder,
     resolution: &ssrf::ResolvedEgress,
 ) -> Result<reqwest::Client, ExportError> {
+    build_export_http_client_with_timeout(builder, resolution, EXPORT_REQUEST_TIMEOUT)
+}
+
+fn build_export_http_client_with_timeout(
+    builder: reqwest::ClientBuilder,
+    resolution: &ssrf::ResolvedEgress,
+    request_timeout: Duration,
+) -> Result<reqwest::Client, ExportError> {
     let mut builder = builder
         .no_proxy()
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(request_timeout);
     if let Some(hostname) = &resolution.hostname {
         builder = builder.resolve_to_addrs(hostname, &resolution.addresses);
     }
@@ -463,6 +481,34 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert_eq!(target.received_requests().await.unwrap().len(), 1);
         assert!(proxy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_client_bounds_total_request_time() {
+        let target = MockServer::start().await;
+        Mock::given(path("/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(1)))
+            .mount(&target)
+            .await;
+
+        let resolution = ssrf::ResolvedEgress {
+            hostname: None,
+            addresses: Vec::new(),
+        };
+        let client = build_export_http_client_with_timeout(
+            reqwest::Client::builder(),
+            &resolution,
+            Duration::from_millis(25),
+        )
+        .expect("export client should build");
+
+        let error = client
+            .get(format!("{}/slow", target.uri()))
+            .send()
+            .await
+            .expect_err("slow response must exceed the total request budget");
+
+        assert!(error.is_timeout(), "expected timeout, got {error}");
     }
 
     /// `*_env` indirection: an empty env-var name fails fast with

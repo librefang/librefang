@@ -424,6 +424,24 @@ pub struct WebhookStore {
     path: PathBuf,
 }
 
+fn settle_webhook_write(
+    path: &std::path::Path,
+    result: Result<(), crate::AtomicWriteError>,
+) -> std::io::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(crate::AtomicWriteError::BeforeCommit(error)) => Err(error),
+        Err(crate::AtomicWriteError::AfterCommit(error)) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "Webhook store replaced but parent directory sync failed"
+            );
+            Ok(())
+        }
+    }
+}
+
 impl WebhookStore {
     /// Load or create a webhook store at the given path.
     ///
@@ -478,7 +496,8 @@ impl WebhookStore {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            crate::atomic_write(&path, json.as_bytes())?;
+            let write_result = crate::atomic_write_detailed(&path, json.as_bytes());
+            settle_webhook_write(&path, write_result)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -532,6 +551,8 @@ impl WebhookStore {
         data.webhooks.push(webhook.clone());
         if let Err(e) = self.persist(&data).await {
             tracing::warn!("Failed to persist webhook store: {e}");
+            data.webhooks.pop();
+            return Err("webhook persistence failed".to_string());
         }
         Ok(webhook)
     }
@@ -543,11 +564,13 @@ impl WebhookStore {
         req: UpdateWebhookRequest,
     ) -> Result<WebhookSubscription, String> {
         let mut data = self.data.write().await;
-        let webhook = data
+        let index = data
             .webhooks
-            .iter_mut()
-            .find(|w| w.id == id)
+            .iter()
+            .position(|w| w.id == id)
             .ok_or_else(|| "webhook not found".to_string())?;
+        let previous = data.webhooks[index].clone();
+        let mut updated = previous.clone();
 
         if let Some(ref name) = req.name {
             if name.trim().is_empty() {
@@ -559,7 +582,7 @@ impl WebhookStore {
                     MAX_NAME_LEN
                 ));
             }
-            webhook.name = name.clone();
+            updated.name = name.clone();
         }
         if let Some(ref url_str) = req.url {
             if url_str.trim().is_empty() {
@@ -572,34 +595,36 @@ impl WebhookStore {
                 ));
             }
             validate_webhook_url(url_str)?;
-            webhook.url = url_str.clone();
+            updated.url = url_str.clone();
         }
         if let Some(ref secret) = req.secret {
             if secret.is_empty() {
                 // Treat empty string as "clear the secret"
-                webhook.secret = None;
+                updated.secret = None;
             } else if secret.len() > MAX_SECRET_LEN {
                 return Err(format!(
                     "secret exceeds maximum length of {} chars",
                     MAX_SECRET_LEN
                 ));
             } else {
-                webhook.secret = Some(secret.clone());
+                updated.secret = Some(secret.clone());
             }
         }
         if let Some(ref events) = req.events {
             if events.is_empty() {
                 return Err("events must not be empty".to_string());
             }
-            webhook.events = events.clone();
+            updated.events = events.clone();
         }
         if let Some(enabled) = req.enabled {
-            webhook.enabled = enabled;
+            updated.enabled = enabled;
         }
-        webhook.updated_at = Utc::now();
-        let updated = webhook.clone();
+        updated.updated_at = Utc::now();
+        data.webhooks[index] = updated.clone();
         if let Err(e) = self.persist(&data).await {
             tracing::warn!("Failed to persist webhook store: {e}");
+            data.webhooks[index] = previous;
+            return Err("webhook persistence failed".to_string());
         }
         Ok(updated)
     }
@@ -607,15 +632,16 @@ impl WebhookStore {
     /// Delete a webhook subscription.
     pub async fn delete(&self, id: WebhookId) -> bool {
         let mut data = self.data.write().await;
-        let before = data.webhooks.len();
-        data.webhooks.retain(|w| w.id != id);
-        let removed = data.webhooks.len() < before;
-        if removed {
-            if let Err(e) = self.persist(&data).await {
-                tracing::warn!("Failed to persist webhook store: {e}");
-            }
+        let Some(index) = data.webhooks.iter().position(|webhook| webhook.id == id) else {
+            return false;
+        };
+        let removed = data.webhooks.remove(index);
+        if let Err(e) = self.persist(&data).await {
+            tracing::warn!("Failed to persist webhook store: {e}");
+            data.webhooks.insert(index, removed);
+            return false;
         }
-        removed
+        true
     }
 }
 
@@ -646,6 +672,56 @@ mod tests {
         }
     }
 
+    fn failing_store_with(webhooks: Vec<WebhookSubscription>) -> (WebhookStore, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"block parent creation").unwrap();
+        let store = WebhookStore {
+            data: RwLock::new(StoreData { webhooks }),
+            path: blocker.join("webhooks.json"),
+        };
+        (store, dir)
+    }
+
+    fn webhook_fixture() -> WebhookSubscription {
+        let now = Utc::now();
+        WebhookSubscription {
+            id: WebhookId(Uuid::new_v4()),
+            name: "persisted-hook".to_string(),
+            url: "https://example.com/hook".to_string(),
+            secret: Some("secret".to_string()),
+            events: vec![WebhookEvent::AgentSpawned],
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn webhook_write_accepts_only_post_commit_sync_failures() {
+        let path = std::path::Path::new("webhooks.json");
+        let post_commit = super::settle_webhook_write(
+            path,
+            Err(crate::AtomicWriteError::AfterCommit(std::io::Error::other(
+                "injected parent sync failure",
+            ))),
+        );
+        assert!(post_commit.is_ok());
+
+        let before_commit = super::settle_webhook_write(
+            path,
+            Err(crate::AtomicWriteError::BeforeCommit(
+                std::io::Error::other("injected write failure"),
+            )),
+        );
+        assert_eq!(
+            before_commit
+                .expect_err("pre-commit failure must propagate")
+                .to_string(),
+            "injected write failure"
+        );
+    }
+
     #[tokio::test]
     async fn create_and_list() {
         let (store, _dir) = temp_store();
@@ -653,6 +729,16 @@ mod tests {
         let wh = store.create(valid_create_req()).await.unwrap();
         assert_eq!(wh.name, "test-hook");
         assert_eq!(store.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_persist_failure_rolls_back_and_returns_error() {
+        let (store, _dir) = failing_store_with(Vec::new());
+
+        let error = store.create(valid_create_req()).await.unwrap_err();
+
+        assert_eq!(error, "webhook persistence failed");
+        assert!(store.list().await.is_empty());
     }
 
     #[tokio::test]
@@ -891,6 +977,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_persist_failure_restores_previous_subscription() {
+        let webhook = webhook_fixture();
+        let (store, _dir) = failing_store_with(vec![webhook.clone()]);
+
+        let error = store
+            .update(
+                webhook.id,
+                UpdateWebhookRequest {
+                    name: Some("not-durable".to_string()),
+                    url: None,
+                    secret: None,
+                    events: None,
+                    enabled: Some(false),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "webhook persistence failed");
+        let restored = store.get(webhook.id).await.unwrap();
+        assert_eq!(restored.name, webhook.name);
+        assert_eq!(restored.enabled, webhook.enabled);
+        assert_eq!(restored.updated_at, webhook.updated_at);
+    }
+
+    #[tokio::test]
     async fn update_clears_secret_with_empty_string() {
         let (store, _dir) = temp_store();
         let wh = store.create(valid_create_req()).await.unwrap();
@@ -937,6 +1049,15 @@ mod tests {
         assert!(store.delete(wh.id).await);
         assert!(store.list().await.is_empty());
         assert!(!store.delete(wh.id).await);
+    }
+
+    #[tokio::test]
+    async fn delete_persist_failure_restores_subscription_and_reports_false() {
+        let webhook = webhook_fixture();
+        let (store, _dir) = failing_store_with(vec![webhook.clone()]);
+
+        assert!(!store.delete(webhook.id).await);
+        assert_eq!(store.get(webhook.id).await.unwrap().name, webhook.name);
     }
 
     #[tokio::test]
