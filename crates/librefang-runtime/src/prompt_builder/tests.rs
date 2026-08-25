@@ -159,26 +159,537 @@ fn test_format_memory_items_empty() {
     assert!(ctx.is_empty());
 }
 
+/// The section total is now owned. Previously each item was capped
+/// independently and nothing bounded their sum.
+///
+/// The fixture deliberately contains no whitespace: content with an early space
+/// collapses through the word-boundary path and never approaches the ceiling,
+/// which is how the first version of this test passed against a section that
+/// actually overran by 74 characters.
 #[test]
-fn test_memory_cap_at_10() {
-    let memories: Vec<(String, String)> = (0..15)
-        .map(|i| (format!("k{i}"), format!("value {i}")))
-        .collect();
-    let section = build_memory_section(&memories);
-    assert!(section.contains("[k0]"));
-    assert!(section.contains("[k9]"));
-    assert!(!section.contains("[k10]"));
+fn memory_section_total_stays_within_budget() {
+    for filler in ["a", "\u{5b57}"] {
+        let memories: Vec<(String, String)> = (0..20)
+            .map(|_| (String::new(), filler.repeat(4000)))
+            .collect();
+
+        let ctx = format_memory_items_as_personal_context(&memories);
+        let body = memory_body_chars(&ctx);
+        assert!(
+            body <= MEMORY_SECTION_BUDGET_CHARS,
+            "filler {filler:?}: body consumed {body} chars, budget is {MEMORY_SECTION_BUDGET_CHARS}"
+        );
+    }
 }
 
+/// The budget must hold for keyed memories too.
+///
+/// The other budget test uses empty keys, so the framing charged per item is a constant 3 and the skip path is structurally unreachable from it.
+/// That is the path a breach travels: a key eats its item's share, the item is skipped, its share is spent by the others, and the notice it triggers is written past the limit.
+///
+/// Both dimensions are swept as ranges rather than from literals.
+/// A breach on this path needs an item count high enough for the share to run out but below `MEMORY_SECTION_MAX_ITEMS`, so that the item cut does not reserve for the notice by itself, and a key length inside a window that moves with the constants.
+/// A literal sweep only lands in those windows for whatever the constants happened to be when it was written: `[1, 9, 10, 11, 40]` covered the count at 10 and missed a live 5031-against-5000 overrun at 27 items once the constant reached 30, and `[1, 30, 64, 500]` covers the key length until `MEMORY_SECTION_MIN_ITEM_CHARS` climbs toward the per-item ceiling, where the window narrows to lengths near 48 and every literal misses it.
 #[test]
-fn test_memory_content_capped() {
-    let long_content = "x".repeat(1000);
-    let memories = vec![("k".to_string(), long_content)];
-    let section = build_memory_section(&memories);
-    // Content should be capped at 500 chars + "..."
-    assert!(section.contains("..."));
-    // The section includes the natural-use preamble + capped content
-    assert!(section.len() < 2000);
+fn memory_section_budget_holds_with_keys() {
+    let key_lengths = (0..=MEMORY_SECTION_MAX_KEY_CHARS * 2)
+        .step_by(8)
+        .chain([MEMORY_SECTION_MAX_KEY_CHARS, 500]);
+    for key_len in key_lengths {
+        for n in (1..=MEMORY_SECTION_MAX_ITEMS + 1).chain([MEMORY_SECTION_MAX_ITEMS * 4]) {
+            let memories: Vec<(String, String)> = (0..n)
+                .map(|_| ("k".repeat(key_len), "x".repeat(4000)))
+                .collect();
+            let ctx = format_memory_items_as_personal_context(&memories);
+            let body = memory_body_chars(&ctx);
+            assert!(
+                body <= MEMORY_SECTION_BUDGET_CHARS,
+                "key {key_len}, n {n}: body {body} exceeds {MEMORY_SECTION_BUDGET_CHARS}"
+            );
+        }
+    }
+}
+
+/// Everything after the framing header, counted whole.
+///
+/// Counting only lines that start with `- ` misses the continuations of
+/// multi-line memories, which are the dominant shape in a real corpus, so the
+/// budget check has to measure the body rather than sample it.
+fn memory_body_chars(ctx: &str) -> usize {
+    let header_end = ctx
+        .find("conversation over stored context.\n\n")
+        .map(|i| i + "conversation over stored context.\n\n".len())
+        .expect("framing header must be present");
+    ctx[header_end..].chars().count()
+}
+
+/// The per-item share must do the limiting early, not the per-item ceiling.
+///
+/// Comparing the first bullet with the last is what separates the two
+/// mechanisms. Early items are bound by the equal share; by the last item the
+/// share has absorbed every predecessor's surplus and grown past the ceiling,
+/// so the ceiling binds instead. Remove the share recomputation and every
+/// bullet becomes the same size.
+///
+/// Measuring only the longest bullet cannot see this — the longest is the last
+/// one, and it is ceiling-bound either way.
+#[test]
+fn per_item_share_binds_before_the_ceiling_does() {
+    let memories: Vec<(String, String)> = (0..MEMORY_SECTION_MAX_ITEMS)
+        .map(|_| (String::new(), "word ".repeat(400)))
+        .collect();
+    let ctx = format_memory_items_as_personal_context(&memories);
+
+    let sizes: Vec<usize> = ctx
+        .lines()
+        .filter(|l| l.starts_with("- word"))
+        .map(|l| l.chars().count())
+        .collect();
+    assert_eq!(
+        sizes.len(),
+        MEMORY_SECTION_MAX_ITEMS,
+        "every memory should have rendered"
+    );
+
+    let first = sizes[0];
+    let last = *sizes.last().unwrap();
+    assert!(
+        first < last,
+        "share never bound anything: first bullet {first}, last {last} — \
+         identical sizes mean the ceiling did all the limiting"
+    );
+    assert!(
+        first < MEMORY_SECTION_MAX_ITEM_CHARS,
+        "first bullet {first} reached the ceiling {MEMORY_SECTION_MAX_ITEM_CHARS}"
+    );
+}
+
+/// The ceiling must bind when the share cannot.
+///
+/// With few memories the equal share grows to most of the section, so only the
+/// per-item ceiling stands between one pathological row — an attachment stored
+/// verbatim — and the whole budget.
+#[test]
+fn per_item_ceiling_binds_when_the_share_is_large() {
+    let memories = vec![
+        (String::new(), "x".repeat(200_000)),
+        (String::new(), "Prefers brief answers.".to_string()),
+    ];
+    let ctx = format_memory_items_as_personal_context(&memories);
+
+    let biggest = ctx
+        .lines()
+        .filter(|l| l.starts_with("- x"))
+        .map(|l| l.chars().count())
+        .max()
+        .expect("the long memory must render");
+    // Deliberately a literal rather than `MEMORY_SECTION_MAX_ITEM_CHARS + n`.
+    // A bound derived from the constant moves with it, so raising the ceiling
+    // would keep this test green — which is exactly the regression it exists to
+    // catch. Update the literal knowingly if the ceiling ever changes.
+    const CEILING_PLUS_BULLET_OVERHEAD: usize = 510;
+    assert!(
+        biggest <= CEILING_PLUS_BULLET_OVERHEAD,
+        "one row took {biggest} chars; the per-item ceiling should have held it near 500"
+    );
+    let share = MEMORY_SECTION_BUDGET_CHARS / 2;
+    assert!(
+        biggest < share,
+        "the share of {share} was the only thing limiting it, so the ceiling is untested"
+    );
+}
+
+/// One oversized fragment must not starve the rest.
+#[test]
+fn one_long_memory_does_not_starve_the_others() {
+    let memories = vec![
+        (String::new(), "x".repeat(9000)),
+        (String::new(), "Prefers brief answers.".to_string()),
+        (String::new(), "Works in Rust.".to_string()),
+    ];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    assert!(ctx.contains("Prefers brief answers."));
+    assert!(ctx.contains("Works in Rust."));
+}
+
+/// Short items are returned whole — the budget must not clip an extracted fact
+/// that already fits, which is the common case.
+#[test]
+fn short_memories_are_not_truncated() {
+    let memories = vec![
+        (String::new(), "Communicates in Russian.".to_string()),
+        (
+            "pref".to_string(),
+            "Prefers very brief writing.".to_string(),
+        ),
+    ];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    assert!(ctx.contains("- Communicates in Russian.\n"));
+    assert!(ctx.contains("- [pref] Prefers very brief writing.\n"));
+}
+
+/// The boundary chosen must be the last one that fits, not the first.
+#[test]
+fn truncation_prefers_a_sentence_boundary() {
+    let text = "First sentence here. Second sentence follows. Third one trails off with a lot of extra words that will not fit";
+    let cut = truncate_at_sentence_boundary(text, 60);
+    assert_eq!(
+        cut, "First sentence here. Second sentence follows. ...",
+        "expected the last fitting sentence break, kept whole, with the marker"
+    );
+}
+
+/// With no sentence break in range, fall back to a word boundary rather than
+/// splitting a word.
+#[test]
+fn truncation_falls_back_to_word_boundary() {
+    let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+    let cut = truncate_at_sentence_boundary(text, 24);
+    assert_eq!(
+        cut, "alpha beta gamma...",
+        "expected a word-boundary cut carrying the marker"
+    );
+}
+
+/// A sentence break very early in the window discards too much; the word-level
+/// fallback carries more of the memory.
+#[test]
+fn truncation_ignores_a_too_early_sentence_break() {
+    let text = "Ok. Then a much longer continuation follows that carries the actual content of this memory";
+    let cut = truncate_at_sentence_boundary(text, 60);
+    assert!(cut.len() > "Ok. ...".len(), "kept only {cut:?}");
+    assert!(cut.starts_with("Ok. Then a much longer"));
+}
+
+/// The word fallback needs the same halfway guard as the sentence branch.
+///
+/// A window whose tail is one unbroken token — a URL, a path, a hash — puts the
+/// last whitespace near the start, and an unguarded `rfind` throws the rest of
+/// the allowance away.
+#[test]
+fn truncation_does_not_collapse_on_an_unbroken_tail() {
+    let text = format!("Reference for the current task: {}", "x".repeat(3000));
+    let cut = truncate_at_sentence_boundary(&text, 500);
+    let kept = cut.chars().count();
+    assert!(
+        kept > 400,
+        "collapsed to {kept} chars: {:?}",
+        &cut[..cut.len().min(80)]
+    );
+}
+
+/// Truncation must stay inside the limit it was given, marker included, so the
+/// section can budget against that limit rather than against an unstated
+/// overhead.
+#[test]
+fn truncation_never_exceeds_its_limit() {
+    let samples = [
+        "word ".repeat(200),
+        "x".repeat(1000),
+        "\u{5b57}".repeat(1000),
+        "Sentence one. Sentence two. ".repeat(40),
+    ];
+    for s in &samples {
+        for limit in [5usize, 17, 120, 499, 500] {
+            let cut = truncate_at_sentence_boundary(s, limit);
+            assert!(
+                cut.chars().count() <= limit,
+                "limit {limit} produced {} chars for {:?}",
+                cut.chars().count(),
+                &s[..s.len().min(20)]
+            );
+        }
+    }
+}
+
+/// Multi-byte input must never be split inside a character, and the kept prefix
+/// must actually come from the input.
+#[test]
+fn truncation_is_utf8_safe_and_faithful() {
+    let text = "\u{41f}\u{43e}\u{43b}\u{44c}\u{437}\u{43e}\u{432}\u{430}\u{442}\u{435}\u{43b}\u{44c} \u{43f}\u{440}\u{435}\u{434}\u{43f}\u{43e}\u{447}\u{438}\u{442}\u{430}\u{435}\u{442} \u{43a}\u{440}\u{430}\u{442}\u{43a}\u{438}\u{435} \u{43e}\u{442}\u{432}\u{435}\u{442}\u{44b} \u{431}\u{435}\u{437} \u{43e}\u{433}\u{43e}\u{432}\u{43e}\u{440}\u{43e}\u{43a} ".repeat(4);
+    for limit in [7usize, 33, 120, 501] {
+        let cut = truncate_at_sentence_boundary(&text, limit);
+        let body = cut.trim_end_matches('.').trim_end();
+        assert!(
+            text.starts_with(body),
+            "limit {limit}: kept text is not a prefix of the input: {body:?}"
+        );
+    }
+}
+
+/// Dropped items are reported.
+#[test]
+fn omitted_memories_are_reported() {
+    let many_short: Vec<(String, String)> = (0..40)
+        .map(|i| {
+            (
+                String::new(),
+                format!("memory number {i} with some padding text"),
+            )
+        })
+        .collect();
+    let ctx = format_memory_items_as_personal_context(&many_short);
+    assert!(
+        ctx.contains("- [+30 further memories not shown]"),
+        "expected an omission notice naming the count: {ctx}"
+    );
+}
+
+/// The notice reserve is held back only when something can actually be
+/// omitted.
+///
+/// Reserving unconditionally cost every prompt 96 characters of content for a
+/// line it would never print.
+#[test]
+fn notice_reserve_is_not_charged_when_nothing_is_dropped() {
+    let exactly_full: Vec<(String, String)> = (0..MEMORY_SECTION_MAX_ITEMS)
+        .map(|_| (String::new(), "x".repeat(4000)))
+        .collect();
+    // Everything below assumes a skip cannot fire.
+    // Once `SKIP_POSSIBLE` is true the reserve is held unconditionally and must be: a skipped item leaves its share spendable, so the notice it triggers has to be paid for in advance.
+    // Which assertion reports it depends on how far the share has shrunk, and only ever one of them does, since the first aborts the test before the second runs.
+    // Up to about four times the shipped item count the share still covers every memory, so the skip drops nothing and only the budget assertion fires.
+    // Past that the skip starts dropping memories the fixture assumes are present, and the first assertion fires instead.
+    // Either way the smallest edit satisfying the message is removing `|| SKIP_POSSIBLE`, which reopens the overrun `memory_section_budget_holds_with_keys` covers.
+    //
+    // The guard sits above both for that reason.
+    // Placed between them it still let the lower-budget tripwire trip the first assertion and lead a reader to the same wrong edit.
+    if SKIP_POSSIBLE {
+        return;
+    }
+
+    let ctx = format_memory_items_as_personal_context(&exactly_full);
+    assert!(
+        !ctx.contains("not shown"),
+        "nothing should have been dropped"
+    );
+
+    let body = memory_body_chars(&ctx);
+    // Deliberately a literal. Deriving this from `OMISSION_NOTICE_RESERVE`
+    // would move with it and stop detecting the regression; shrinking the
+    // reserve must not quietly re-hide an unconditional charge. Update it
+    // knowingly if the framing overhead changes.
+    const MAX_UNSPENT_FRAMING: usize = 60;
+    assert!(
+        body > MEMORY_SECTION_BUDGET_CHARS - MAX_UNSPENT_FRAMING,
+        "body of {body} leaves more than {MAX_UNSPENT_FRAMING} unspent; the \
+         reserve was charged even though no notice was possible"
+    );
+    assert!(body <= MEMORY_SECTION_BUDGET_CHARS);
+}
+
+/// Multi-byte content must keep as much of its allowance as ASCII does.
+///
+/// `safe_truncate_str` takes a *byte* count, so a window computed in bytes is
+/// still memory-safe but silently holds a third of the characters for
+/// three-byte scripts. Asserting only that the kept text is a valid prefix
+/// cannot see that: a naive byte cut passes it.
+#[test]
+fn truncation_keeps_multibyte_content_to_its_allowance() {
+    for filler in ["\u{43f}", "\u{5b57}", "\u{1f600}"] {
+        let text = filler.repeat(3000);
+        let cut = truncate_at_sentence_boundary(&text, 500);
+        let kept = cut.chars().count();
+        assert!(
+            kept >= 490,
+            "{filler:?}: kept only {kept} of a 500-char allowance — \
+             the window was measured in bytes, not characters"
+        );
+    }
+}
+
+/// Terminal punctuation at the very end of the window is the case the marker
+/// reserve is sized for.
+///
+/// The sentence branch inserts a separator before the marker, so the reserve
+/// carries an extra character beyond the marker itself. Every earlier sample
+/// happened to avoid landing a full stop on the last position of the window,
+/// which left that extra character unpinned.
+#[test]
+fn truncation_respects_its_limit_with_punctuation_at_the_window_edge() {
+    // The head length is swept rather than fixed. The window edge sits at
+    // `limit - 5` for the reserve as written, but a test pinned to that one
+    // offset only exercises the edge while the reserve is correct — change the
+    // reserve and the full stop moves off the edge, which is how an earlier
+    // version of this test passed against an arithmetic it was written to
+    // guard. Sweeping guarantees some sample lands on the edge whatever the
+    // reserve is.
+    for limit in [40usize, 120, 200, 500] {
+        for back in 3..=8usize {
+            let head = "a".repeat(limit.saturating_sub(back));
+            let text = format!("{head}. and then a continuation that will not fit at all");
+            let cut = truncate_at_sentence_boundary(&text, limit);
+            assert!(
+                cut.chars().count() <= limit,
+                "limit {limit}, head {}: produced {} chars: {cut:?}",
+                limit - back,
+                cut.chars().count()
+            );
+        }
+    }
+}
+
+/// A long key must not take the section down with it.
+///
+/// Key length is charged against the item's own allowance, and nothing
+/// upstream bounds it. Before the label was capped, ten memories with a
+/// 375-character key rendered zero bullets: the guard tripped on the first
+/// item and `break` discarded the rest.
+#[test]
+fn a_long_key_does_not_empty_the_section() {
+    let memories: Vec<(String, String)> = (0..MEMORY_SECTION_MAX_ITEMS)
+        .map(|_| {
+            (
+                "k".repeat(375),
+                "Prefers brief answers about Rust.".to_string(),
+            )
+        })
+        .collect();
+    let ctx = format_memory_items_as_personal_context(&memories);
+
+    let rendered = ctx.lines().filter(|l| l.starts_with("- [k")).count();
+    assert_eq!(
+        rendered, MEMORY_SECTION_MAX_ITEMS,
+        "expected every memory to render; got {rendered}"
+    );
+    assert!(
+        memory_body_chars(&ctx) <= MEMORY_SECTION_BUDGET_CHARS,
+        "capping the key must not push the section past its budget"
+    );
+}
+
+/// The rendered label is capped, and the cap is what bounds the framing cost.
+#[test]
+fn key_label_is_capped() {
+    let memories = vec![("k".repeat(500), "Some content.".to_string())];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    let label = ctx
+        .lines()
+        .find(|l| l.starts_with("- [k"))
+        .expect("the bullet must render");
+    let key_chars = label.chars().skip(3).take_while(|&c| c != ']').count();
+    // Literal rather than derived: a bound taken from the constant it guards
+    // moves with it and stops detecting a change.
+    assert!(key_chars <= 67, "key rendered {key_chars} chars");
+}
+
+/// The truncation marker must survive clamping intact.
+///
+/// A clamp that trims from the end eats the marker's own tail, leaving a
+/// bullet that ends in `..` — the "context was cut" signal degraded into what
+/// reads as punctuation. No length assertion can see that, which is why it
+/// needs its own test.
+#[test]
+fn clamping_never_eats_the_marker() {
+    for max in [8usize, 17, 40, 120] {
+        for over in [1usize, 2, 3, 7] {
+            let s = format!("{}{TRUNCATION_MARKER}", "a".repeat(max + over));
+            let out = clamp_to(s, max);
+            assert!(out.chars().count() <= max, "clamp exceeded {max}: {out:?}");
+            assert!(
+                out.ends_with(TRUNCATION_MARKER),
+                "marker degraded at max {max}, over {over}: {out:?}"
+            );
+        }
+    }
+}
+
+/// Every path that shortens content ends with the whole marker.
+#[test]
+fn truncation_always_ends_with_the_whole_marker() {
+    let samples = [
+        "word ".repeat(200),
+        "x".repeat(1000),
+        "\u{5b57}".repeat(1000),
+        "Sentence one. Sentence two. ".repeat(40),
+        format!("{}. tail continues", "a".repeat(300)),
+    ];
+    for s in &samples {
+        for limit in [17usize, 40, 120, 499] {
+            let cut = truncate_at_sentence_boundary(s, limit);
+            if cut.chars().count() < s.chars().count() {
+                assert!(
+                    cut.ends_with(TRUNCATION_MARKER),
+                    "limit {limit}: shortened without a full marker: {:?}",
+                    cut.chars().rev().take(8).collect::<String>()
+                );
+            }
+        }
+    }
+}
+
+/// The skip rule is exercised at inputs the shipped constants do not reach.
+///
+/// The rule cannot be pinned by comparing `SKIP_POSSIBLE` against a
+/// re-derivation: dropping `MAX_BULLET_FRAMING_CHARS` from the definition
+/// leaves the value unchanged at the shipped constants, so both sides stay
+/// `false` and the mistake — the same wrong-quantity error this branch already
+/// made once in the guard — survives every test while re-opening the
+/// 5031-against-5000 overrun a widened key cap produces.
+#[test]
+fn skip_rule_reacts_to_each_input() {
+    // Shipped shape: a 500-character share against a 193-character demand.
+    assert!(!skip_possible(5000, 10, 120, 73));
+
+    // Each of the three documented tripwires, one at a time.
+    assert!(
+        skip_possible(5000, 10, 120, 409),
+        "a 400-char key cap must flip it"
+    );
+    assert!(skip_possible(5000, 40, 120, 73), "40 items must flip it");
+    assert!(
+        skip_possible(1250, 10, 120, 73),
+        "a 1250 budget must flip it"
+    );
+
+    // The framing term has to participate: without it the first tripwire is
+    // invisible, which is exactly the mutation that survived.
+    assert_ne!(
+        skip_possible(5000, 10, 120, 409),
+        skip_possible(5000, 10, 120, 0),
+        "framing must affect the result"
+    );
+
+    // Boundary: equality is not a skip.
+    assert!(!skip_possible(1930, 10, 120, 73));
+    assert!(skip_possible(1929, 10, 120, 73));
+}
+
+/// The shipped constants sit on the safe side of that rule.
+#[test]
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "the subject is a constant: this pins that the shipped values \
+              stay on the safe side of the skip rule"
+)]
+fn shipped_constants_do_not_allow_a_skip() {
+    assert!(!SKIP_POSSIBLE);
+    assert_eq!(
+        SKIP_POSSIBLE,
+        skip_possible(
+            MEMORY_SECTION_BUDGET_CHARS,
+            MEMORY_SECTION_MAX_ITEMS,
+            MEMORY_SECTION_MIN_ITEM_CHARS,
+            MAX_BULLET_FRAMING_CHARS
+        )
+    );
+}
+
+/// Worst-case framing counts the ellipsis `cap_str` appends.
+#[test]
+fn framing_accounts_for_the_cap_str_ellipsis() {
+    let memories = vec![("k".repeat(500), "Some content.".to_string())];
+    let ctx = format_memory_items_as_personal_context(&memories);
+    let label = ctx
+        .lines()
+        .find(|l| l.starts_with("- [k"))
+        .expect("the bullet must render");
+    let key_chars = label.chars().skip(3).take_while(|&c| c != ']').count();
+    assert_eq!(
+        MAX_BULLET_FRAMING_CHARS,
+        key_chars + 6,
+        "framing constant must match the rendered label plus `- `, `[] ` and the newline"
+    );
 }
 
 #[test]

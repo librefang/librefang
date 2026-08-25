@@ -615,6 +615,172 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
     out
 }
 
+/// Maximum number of memory bullets rendered into the section.
+pub const MEMORY_SECTION_MAX_ITEMS: usize = 10;
+
+/// Character budget for the memory bullets, excluding the framing header.
+///
+/// The section has three independent producers — substrate recall capped at `MEMORY_RECALL_LIMIT`, proactive items appended after it, and the `MEMORY_SECTION_MAX_ITEMS` cut here — and before this budget existed none of them owned the total.
+/// Each item was independently capped, so the section's real ceiling was the product of the two caps and nothing stated it.
+///
+/// The value is the former implicit ceiling (10 items × 500 chars), but it is a ceiling on the section rather than on content alone, so the reachable maximum is lower.
+/// The `- ` and newline framing each bullet is charged against its allowance, and a notice reserve is held back whenever memories were dropped.
+/// Measured worst case is 5000 characters of body — the budget exactly — against the 5060 the unbudgeted version produced, about 1 % less content in exchange for a limit that is stated and enforced.
+/// At roughly four characters per token the budget is about 1250 tokens.
+pub const MEMORY_SECTION_BUDGET_CHARS: usize = 5000;
+
+/// Below this an item is not worth rendering — a fragment this short carries no usable context and only spends budget.
+///
+/// The equal share never decreases — a bullet can never cost more than the share it was granted — and its floor is about 490.
+/// The guard compares the share minus this item's framing, whose worst case is `MAX_BULLET_FRAMING_CHARS` — 73 with the key capped at 64, since `cap_str` adds three characters of its own — so it cannot fire as the constants stand.
+/// It is kept as a tripwire: raising the item count, lowering the budget or widening the key cap should drop a memory rather than emit an unusable fragment, and skipping one item leaves the rest of the section intact.
+pub const MEMORY_SECTION_MIN_ITEM_CHARS: usize = 120;
+
+/// Characters held back for the omission notice.
+///
+/// The notice is `- [+N further memories not shown]\n`: 33 characters of fixed text plus the count.
+/// The count is bounded only by the caller's input, so the widest form is a twenty-digit `usize`, giving 53.
+/// The reserve keeps headroom above that so a future rewording does not silently overrun.
+/// Held back before any bullet is emitted, because discovering afterwards that the notice does not fit leaves no way to honour the budget without dropping a bullet that was already rendered.
+const OMISSION_NOTICE_RESERVE: usize = 96;
+
+/// Worst-case framing charged to one bullet: `- `, the newline, the `[key] ` wrapper, the capped key, and the `...` that `cap_str` appends when it truncates.
+///
+/// The ellipsis is counted here for the same reason `SKILL_BOILERPLATE_OVERHEAD` counts it — `cap_str` returns up to `max_chars + 3`, so a cap of 64 renders up to 67.
+const MAX_BULLET_FRAMING_CHARS: usize = MEMORY_SECTION_MAX_KEY_CHARS + 9;
+
+/// Whether an item can be skipped for its own framing cost.
+///
+/// Derived from the constants rather than asserted, so that widening the key cap, raising the item count or lowering the budget flips it automatically.
+/// When it is true a notice can appear with fewer memories than the item cut allows, and the reserve has to be held for that case too — otherwise the notice is written past the budget.
+const SKIP_POSSIBLE: bool = skip_possible(
+    MEMORY_SECTION_BUDGET_CHARS,
+    MEMORY_SECTION_MAX_ITEMS,
+    MEMORY_SECTION_MIN_ITEM_CHARS,
+    MAX_BULLET_FRAMING_CHARS,
+);
+
+/// Whether the smallest equal share can fall under the floor once an item's
+/// worst-case framing is taken out of it.
+///
+/// A free function rather than an inline expression so the rule can be exercised at inputs the shipped constants do not reach.
+/// Comparing `SKIP_POSSIBLE` against a re-derivation beside it proves nothing: a definition that drops a term still evaluates to the same value at the shipped constants, and the disagreement only appears once one of them moves.
+const fn skip_possible(budget: usize, items: usize, floor: usize, framing: usize) -> bool {
+    budget / items < floor + framing
+}
+
+/// Ceiling for the rendered key label.
+///
+/// Keys reach this function through a `pub` entry point and a `pub` field, and nothing upstream bounds their length.
+/// An unbounded key is charged against its own item's allowance, so without this cap a long enough label pushes the allowance below `MEMORY_SECTION_MIN_ITEM_CHARS` and the memory cannot render at all.
+/// A label longer than this carries no additional meaning to the model.
+/// `cap_str` appends `...` when it truncates, so the rendered label reaches 67; `MAX_BULLET_FRAMING_CHARS` accounts for that.
+pub const MEMORY_SECTION_MAX_KEY_CHARS: usize = 64;
+
+/// Ceiling for a single bullet, independent of how much budget is free.
+///
+/// The section budget alone is not sufficient protection: with few memories the per-item share grows to the whole section, and a single pathological row — an attachment stored verbatim, for instance — would then fill it.
+/// Keeping the historical per-item cap means this change makes the total explicit without altering how much any one memory may contribute.
+pub const MEMORY_SECTION_MAX_ITEM_CHARS: usize = 500;
+
+/// Marker appended whenever content was dropped, so the model can tell a shortened memory from a complete one.
+const TRUNCATION_MARKER: &str = "...";
+
+/// Truncate at the last sentence boundary that fits, falling back to a word boundary and then to a hard cut.
+///
+/// Cutting mid-sentence is what the previous fixed per-item cap did, and on a corpus where raw conversational excerpts dominate it left the majority of bullets ending mid-clause.
+/// A truncated sentence reads as a claim the speaker did not finish, which is worse than a shorter but complete one.
+///
+/// Every truncating branch appends [`TRUNCATION_MARKER`], including the sentence-boundary one.
+/// A cut that ends on a full stop is indistinguishable from a memory that simply ended there, and silent shortening is worse than visible shortening: the model has no way to know context is missing.
+///
+/// The returned string never exceeds `max_chars` including the marker, so callers can budget against the limit they passed rather than against the limit plus an unstated overhead.
+fn truncate_at_sentence_boundary(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    // The marker is part of the budget, so the content window shrinks to make
+    // room for it.
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    let content_chars = max_chars.saturating_sub(marker_chars + 1);
+    if content_chars == 0 {
+        // Unreachable from the section, whose allowance floor is
+        // `MEMORY_SECTION_MIN_ITEM_CHARS`, but the helper is `max_chars`-generic
+        // and must not hand back more than it was given.
+        // Counted in chars, not bytes: `safe_truncate_str` takes a byte count,
+        // and passing a char count to it only happens to work while the marker
+        // is ASCII.
+        return TRUNCATION_MARKER.chars().take(max_chars).collect();
+    }
+    let cut = s
+        .char_indices()
+        .nth(content_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    let window = safe_truncate_str(s, cut);
+
+    // Terminal punctuation followed by whitespace, or at the very end of the
+    // window. Bare `.` is not enough — abbreviations and version numbers.
+    let sentence_end = window
+        .char_indices()
+        .filter(|&(i, c)| {
+            if !matches!(c, '.' | '!' | '?' | '…') {
+                return false;
+            }
+            let after = &window[i + c.len_utf8()..];
+            after.is_empty() || after.starts_with(char::is_whitespace)
+        })
+        .map(|(i, c)| i + c.len_utf8())
+        .next_back();
+
+    // A boundary before the halfway mark discards more than it keeps, so it is
+    // rejected in favour of the next strategy down.
+    // Both boundary searches need this guard, not just the sentence one: the
+    // word fallback runs precisely when the sentence guard rejected a break,
+    // and `rfind` is just as capable of landing at position 1 when the window
+    // ends in an unbroken token such as a URL, a path or a hash.
+    let halfway_ok = |end: usize| end * 2 >= window.len();
+
+    if let Some(end) = sentence_end.filter(|&e| halfway_ok(e)) {
+        return clamp_to(
+            format!("{} {TRUNCATION_MARKER}", window[..end].trim_end()),
+            max_chars,
+        );
+    }
+
+    let out = match window.rfind(char::is_whitespace) {
+        Some(sp) if sp > 0 && halfway_ok(sp) => {
+            format!("{}{TRUNCATION_MARKER}", window[..sp].trim_end())
+        }
+        _ => format!("{}{TRUNCATION_MARKER}", window.trim_end()),
+    };
+
+    clamp_to(out, max_chars)
+}
+
+/// Last line of defence for the `max_chars` contract.
+///
+/// The reserve is sized for the separator the sentence branch inserts, and an arithmetic slip there would be invisible in release, where `debug_assert` is compiled out.
+/// `format_memories_with_budget` clamps for the same reason.
+/// Applied on every return path, including the sentence branch — that branch is the one which spends the reserved character, so guarding only the paths that keep a spare would leave the case this exists for uncovered.
+fn clamp_to(s: String, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s;
+    }
+    // Trim content, never the marker. A plain `take(max_chars)` eats the
+    // marker's tail instead, leaving a bullet that ends in `..` — the signal
+    // that context was cut, silently degraded into something that reads like
+    // punctuation. That failure is invisible to a length assertion, which is
+    // the only thing a clamp can otherwise be tested by.
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    if max_chars <= marker_chars {
+        return TRUNCATION_MARKER.chars().take(max_chars).collect();
+    }
+    let keep = max_chars - marker_chars;
+    let body: String = s.chars().take(keep).collect();
+    format!("{}{TRUNCATION_MARKER}", body.trim_end())
+}
+
 /// Format recalled memories as a natural personal-context block.
 ///
 /// Used by both the system prompt (appended to the Memory section) and
@@ -647,14 +813,91 @@ pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) ->
          - If a memory is clearly outdated or the user contradicts it, trust the current \
          conversation over stored context.\n\n",
     );
-    for (key, content) in memories.iter().take(10) {
-        let capped = cap_str(content, 500);
-        if key.is_empty() {
-            out.push_str(&format!("- {capped}\n"));
+    let header_chars = out.chars().count();
+    let selected: Vec<&(String, String)> = memories.iter().take(MEMORY_SECTION_MAX_ITEMS).collect();
+
+    // The omission notice is itself part of the section, so its worst case is
+    // reserved up front rather than appended past the limit. Same discipline as
+    // `librefang_types::memory::format_memories_with_budget`, which reserves
+    // before emitting bullets for exactly this reason.
+    // Reserved only when a notice is actually possible. Holding it back
+    // unconditionally spent 96 characters on every prompt that had nothing to
+    // omit, which is the common case.
+    //
+    // Two limits can drop a memory, and both have to be modelled here. The
+    // item cut is the reachable one today; the framing skip is not, but a
+    // skip emits a notice while leaving the budget fully spendable by the
+    // remaining items, so failing to reserve for it writes the notice past the
+    // limit. `SKIP_POSSIBLE` is derived from the constants so that the three
+    // changes which make the skip reachable also turn the reserve back on.
+    let notice_possible = memories.len() > MEMORY_SECTION_MAX_ITEMS || SKIP_POSSIBLE;
+    let mut remaining_budget = if notice_possible {
+        MEMORY_SECTION_BUDGET_CHARS.saturating_sub(OMISSION_NOTICE_RESERVE)
+    } else {
+        MEMORY_SECTION_BUDGET_CHARS
+    };
+    let mut rendered = 0usize;
+
+    for (idx, (key, content)) in selected.iter().enumerate() {
+        let items_left = selected.len() - idx;
+        // `- ` plus the trailing newline, and the `[key] ` prefix when present.
+        // Charged against the allowance rather than discovered afterwards —
+        // deducting it only after the bullet was built is what let the section
+        // run past its own limit.
+        //
+        // The key is capped before it is charged. Nothing validates key length
+        // upstream, and an unbounded key spends the item's whole allowance on
+        // its own label: at 375 characters the remaining allowance drops under
+        // `MEMORY_SECTION_MIN_ITEM_CHARS` and the item cannot render at all.
+        let key = cap_str(key, MEMORY_SECTION_MAX_KEY_CHARS);
+        let overhead = 3 + if key.is_empty() {
+            0
         } else {
-            out.push_str(&format!("- [{key}] {capped}\n"));
+            key.chars().count() + 3
+        };
+        // Equal share of what is left, so one long fragment cannot consume the
+        // section. Recomputing each step lets an item shorter than its share
+        // hand the surplus to later items — which is the common case, since
+        // extracted facts run an order of magnitude shorter than raw excerpts.
+        let allowance = (remaining_budget / items_left)
+            .saturating_sub(overhead)
+            .min(MEMORY_SECTION_MAX_ITEM_CHARS);
+        if allowance < MEMORY_SECTION_MIN_ITEM_CHARS {
+            // Skip this item rather than ending the section. The share is
+            // non-decreasing, so a later item with a shorter key can still fit,
+            // and `break` here would discard every remaining memory because one
+            // of them carried an expensive label.
+            continue;
         }
+        let capped = truncate_at_sentence_boundary(content, allowance);
+        let bullet = if key.is_empty() {
+            format!("- {capped}\n")
+        } else {
+            format!("- [{key}] {capped}\n")
+        };
+        remaining_budget = remaining_budget.saturating_sub(bullet.chars().count());
+        out.push_str(&bullet);
+        rendered += 1;
     }
+
+    if rendered < memories.len() {
+        let dropped = memories.len() - rendered;
+        // Deliberately does not name a cause. Two limits can drop a memory —
+        // `MEMORY_SECTION_MAX_ITEMS` and, for an item whose framing eats its
+        // share, `MEMORY_SECTION_MIN_ITEM_CHARS` — and naming one of them would
+        // be wrong for the other. The count is what the reader can act on.
+        out.push_str(&format!(
+            "- [+{dropped} further memor{plural} not shown]\n",
+            plural = if dropped == 1 { "y" } else { "ies" }
+        ));
+    }
+
+    debug_assert!(
+        out.chars().count() - header_chars <= MEMORY_SECTION_BUDGET_CHARS,
+        "memory section body exceeded its budget: {} > {}",
+        out.chars().count() - header_chars,
+        MEMORY_SECTION_BUDGET_CHARS
+    );
     out
 }
 
