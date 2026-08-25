@@ -1,9 +1,10 @@
-//! Installer — pure transforms from MCP catalog entries to
+//! Installer — resolves MCP catalog entries and credentials into
 //! `McpServerConfigEntry` values that can be persisted into `config.toml`.
 //!
-//! No side effects — callers (API / CLI) decide when to store the returned
-//! server config and credentials. The old "integrations.toml" file is gone;
-//! all MCP server state lives in `config.toml` under `[[mcp_servers]]`.
+//! Provided credentials are persisted to the configured vault before a
+//! successful result is returned. Callers (API / CLI) decide when to persist
+//! the returned server config. The old "integrations.toml" file is gone; all
+//! MCP server state lives in `config.toml` under `[[mcp_servers]]`.
 
 use crate::catalog::McpCatalog;
 use crate::credentials::CredentialResolver;
@@ -12,7 +13,7 @@ use librefang_types::config::{McpOAuthConfig, McpServerConfigEntry, McpTransport
 use librefang_types::mcp::{McpCatalogEntry, McpCatalogTransport, McpStatus};
 use librefang_types::oauth::OAuthTemplate;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::info;
 use zeroize::Zeroizing;
 
 /// Result of an installation attempt.
@@ -75,12 +76,10 @@ pub fn install_integration(
         .ok_or_else(|| ExtensionError::NotFound(id.to_string()))?
         .clone();
 
-    // 2. Store provided keys in vault (best effort)
+    // 2. Store provided keys in the vault. A success response must not claim
+    // the integration is ready unless every supplied credential is durable.
     for (key, value) in provided_keys {
-        if let Err(e) = resolver.store_in_vault(key, Zeroizing::new(value.clone())) {
-            warn!("Could not store {} in vault: {}", key, e);
-            // Fall through — the key is still in the provided_keys map
-        }
+        resolver.store_in_vault(key, Zeroizing::new(value.clone()))?;
     }
 
     // 3. Check all required credentials
@@ -292,6 +291,27 @@ mod tests {
         let err = install_integration(&catalog, &mut resolver, "does-not-exist", &HashMap::new())
             .unwrap_err();
         assert!(matches!(err, ExtensionError::NotFound(_)));
+    }
+
+    #[test]
+    fn install_fails_when_provided_credential_cannot_be_persisted() {
+        ensure_registry();
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        let mut catalog = McpCatalog::new(&home);
+        catalog.load(&home);
+        let credential = catalog
+            .get("github")
+            .and_then(|entry| entry.required_env.first())
+            .expect("github fixture should require a credential")
+            .name
+            .clone();
+        let provided = HashMap::from([(credential, "secret".to_string())]);
+        let mut resolver = CredentialResolver::new(None, None);
+
+        let error = install_integration(&catalog, &mut resolver, "github", &provided)
+            .expect_err("missing vault must fail instead of reporting Ready");
+
+        assert!(matches!(error, ExtensionError::Vault(_)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 pkgname=librefang-docker
 pkgver=2026.6.24_beta.23
 _upstream_ver=${pkgver/_/-}
-pkgrel=2
+pkgrel=3
 pkgdesc="Container-managed LibreFang Agent OS service"
 arch=('any')
 url="https://librefang.ai"
@@ -19,14 +19,14 @@ source=(
 )
 sha256sums=(
   'd4330a3004bd990da1830124b1ccccb51129ebb8b5a70a0b79d5626b7c1226a0'
-  '4cda49f3a630072e8b57579d908e4c4a97a9fe976e3b2b735f6f3e75ffa42da6'
+  '7faa652fc88e75de178b101936f759617bea33a76aa9fff3a909af1ecb0b0d70'
   'b49ff94ecd34a4b9a6edc5a7be614ecc31f9f93024434d24b771138dd4a8e0a4'
-  '99992ba5a6fe18d67e04e165af8b4c038c6a4db1b3510a501d655c0ccb92dc6f'
+  'fa29d944c0bdc12a48e060d6be866b73b692f057cb32e2c57bc7b19be013f99f'
 )
 
 package() {
   install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/${pkgname}/LICENSE"
   install -Dm755 "$srcdir/librefang-docker" "$pkgdir/usr/bin/librefang-docker"
   install -Dm644 "$srcdir/librefang-docker.service" "$pkgdir/usr/lib/systemd/system/librefang-docker.service"
-  install -Dm644 "$srcdir/librefang-docker.env" "$pkgdir/etc/librefang/docker.env"
+  install -Dm600 "$srcdir/librefang-docker.env" "$pkgdir/etc/librefang/docker.env"
 }

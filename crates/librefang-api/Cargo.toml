@@ -65,7 +65,7 @@ dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
-argon2 = "0.5"
+argon2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
@@ -100,6 +100,11 @@ wiremock = "0.6"
 # Test-only; the same workspace version the memory crate compiles.
 rusqlite = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# Manifest-parity route tests (#7742): the `manifest_toml` fixtures are serialized
+# from a real `AgentManifest` rather than hand-written, so a field rename cannot
+# leave the test asserting against a document the production parser no longer
+# produces.
+toml = { workspace = true }
 
 [features]
 # Default = telemetry only. Channel adapters all run as out-of-process

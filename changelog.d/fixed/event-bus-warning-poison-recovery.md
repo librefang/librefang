@@ -1,1 +1,0 @@
-- Recover poisoned kernel and plugin event-bus drop-warning locks so overload and consumer-lag diagnostics remain visible. (@xiaomo)

@@ -1,1 +1,0 @@
-Restore both `config.toml` and `secrets.env` when a sidecar configuration write fails, reuse the runtime's canonical dotenv parser for shadow detection, and serialize registry metadata directly from its typed response. (#7412) (@houko)

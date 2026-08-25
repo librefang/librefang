@@ -16,9 +16,8 @@
 //!
 //! ## Precedence
 //!
-//! The embedded copy is a **fallback**, not a hijack. On every spawn
-//! we run a one-shot `<command> -c "import librefang.sidecar"` (cached
-//! per command path) and:
+//! The embedded copy is a **fallback**, not a hijack.
+//! On every spawn we run a one-shot `<command> -c "import librefang, librefang.sidecar; print(librefang.__version__)"` (cached per command path) and:
 //!
 //! - If the interpreter already imports `librefang.sidecar`
 //!   successfully (the developer case — editable / pip / venv), we do
@@ -33,6 +32,9 @@
 //! developers' editable installs authoritative — the embedded copy
 //! never gets a chance to shadow a freshly-edited
 //! `sdk/python/librefang/sidecar/adapters/telegram.py`.
+//!
+//! The probe reads the installed `__version__` rather than only asking whether the import succeeds, because precedence without visibility is what #7140 was: a `librefang-sdk` four months older than the daemon imports perfectly well, wins this contest, and leaves no trace above `debug`.
+//! The installed copy still wins; a version that differs from [`embedded_sdk_version`] now says so at `WARN`.
 //!
 //! ## Filesystem layout
 //!
@@ -294,42 +296,84 @@ fn command_is_python_interpreter(command: &str) -> bool {
         .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Returns `true` iff `<command> -c "import librefang.sidecar"` exits 0.
+/// The version of the SDK tree compiled into this binary.
+///
+/// Read from `sdk/python/pyproject.toml` at compile time — the extracted copy cannot report its own version, because `librefang.__init__._package_version()` resolves it from a sibling `pyproject.toml` (absent in the extracted tree) or from installed package metadata (absent for a PYTHONPATH-only tree), and would answer `0+unknown`.
+/// The daemon therefore has to carry the number itself.
+pub fn embedded_sdk_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        const PYPROJECT: &str = include_str!("../../../sdk/python/pyproject.toml");
+        parse_pyproject_version(PYPROJECT)
+            .unwrap_or("0+unknown")
+            .to_string()
+    })
+}
+
+/// First `version = "…"` at the start of a line in a `pyproject.toml`.
+///
+/// Deliberately not a TOML parse: this crate has no TOML dependency, the input is a file in this repository rather than user data, and `tests/sidecar_version_contract.rs` fails the build if the extraction ever stops matching what the packaging metadata says.
+fn parse_pyproject_version(pyproject: &str) -> Option<&str> {
+    pyproject.lines().find_map(|line| {
+        let rest = line.strip_prefix("version")?.trim_start();
+        let rest = rest.strip_prefix('=')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        rest.split('"').next()
+    })
+}
+
+/// The `librefang.__version__` reported by `<command>`, or `None` when the
+/// interpreter cannot import `librefang.sidecar` at all.
+///
 /// Cached per command string for the lifetime of the daemon — the SDK's
 /// installed/missing state on a developer machine does not flicker
 /// under a running daemon, and the cache keeps the spawn-time pre-check
 /// at one subprocess per unique command path.
-fn has_real_sdk_installed(command: &str) -> bool {
-    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+///
+/// Reading the version rather than only probing importability is what makes the #7140 failure visible: a pip install four months older than the daemon still imports, so an importability-only probe reported exactly the same thing for a matching install and for a stale one that silently shadows the embedded tree.
+fn installed_sdk_version(command: &str) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     probe_sdk_cached(cache, command, || {
-        Command::new(command)
-            .args(["-c", "import librefang.sidecar"])
+        let out = Command::new(command)
+            .args([
+                "-c",
+                "import librefang, librefang.sidecar; print(librefang.__version__)",
+            ])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // Importable but version-less is still importable: the interpreter wins the precedence contest either way, so fall back to a marker rather than reporting "not installed" and shadowing their copy.
+        let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Some(if reported.is_empty() {
+            "0+unknown".to_string()
+        } else {
+            reported
+        })
     })
 }
 
 fn probe_sdk_cached(
-    cache: &Mutex<HashMap<String, bool>>,
+    cache: &Mutex<HashMap<String, Option<String>>>,
     command: &str,
-    probe: impl FnOnce() -> bool,
-) -> bool {
+    probe: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     let mut guard = cache.lock().unwrap_or_else(|poisoned| {
         warn!("embedded SDK probe cache lock poisoned; recovering inner state");
         cache.clear_poison();
         poisoned.into_inner()
     });
-    if let Some(&installed) = guard.get(command) {
-        return installed;
+    if let Some(installed) = guard.get(command) {
+        return installed.clone();
     }
 
     let installed = probe();
-    guard.insert(command.to_string(), installed);
+    guard.insert(command.to_string(), installed.clone());
     installed
 }
 
@@ -366,11 +410,30 @@ pub fn pythonpath_with_embedded(
     if !command_is_python_interpreter(command) {
         return None;
     }
-    if has_real_sdk_installed(command) {
-        debug!(
-            command,
-            "librefang-sdk already importable by interpreter; skipping embedded fallback"
-        );
+    if let Some(installed) = installed_sdk_version(command) {
+        let embedded = embedded_sdk_version();
+        if installed == embedded {
+            debug!(
+                command,
+                version = %installed,
+                "librefang-sdk already importable by interpreter; skipping embedded fallback"
+            );
+        } else {
+            // The installed copy still wins — a developer's editable install
+            // must stay authoritative — but #7140 showed that letting it win
+            // silently is how a four-month-old adapter ends up paired with a
+            // current daemon with nothing in the log above `debug`.
+            warn!(
+                command,
+                installed = %installed,
+                embedded = %embedded,
+                "Interpreter's installed librefang-sdk differs from the copy bundled \
+                 with this daemon and takes precedence over it; adapters may misparse \
+                 or silently drop frames. Run `pip install --upgrade librefang-sdk` \
+                 (or `pip install -e sdk/python/` from a source checkout), or uninstall \
+                 it to fall back to the bundled copy."
+            );
+        }
         return None;
     }
     let extracted = match ensure_extracted(home_dir) {
@@ -577,8 +640,8 @@ mod tests {
     fn pythonpath_composition_keeps_operator_entries_first() {
         // Drives the no-real-sdk branch via an interpreter path whose
         // basename matches the Python detector (`python3`) but whose
-        // file does NOT exist, so `has_real_sdk_installed` reliably
-        // returns false (subprocess spawn fails) regardless of the
+        // file does NOT exist, so `installed_sdk_version` reliably
+        // returns `None` (subprocess spawn fails) regardless of the
         // test host's actual python3.
         let tmp = TempDir::new().unwrap();
         let fake_python = tmp.path().join("nonexistent-bin-dir").join("python3");
@@ -670,6 +733,37 @@ mod tests {
     }
 
     #[test]
+    fn embedded_sdk_version_matches_the_packaged_version() {
+        // The daemon has to carry this number itself: the extracted tree has
+        // no sibling `pyproject.toml` and no installed distribution metadata,
+        // so `librefang.__version__` would answer `0+unknown` from inside it.
+        let version = embedded_sdk_version();
+        assert_ne!(
+            version, "0+unknown",
+            "failed to read the version out of sdk/python/pyproject.toml"
+        );
+        assert!(
+            version.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "expected a PEP 440 version, got {version:?}"
+        );
+    }
+
+    #[test]
+    fn pyproject_version_extraction_ignores_other_version_keys() {
+        // `requires-python` and a dependency pin both contain the substring
+        // `version`; only a line that *starts* a `version = "…"` assignment
+        // is the project's own version.
+        let pyproject = concat!(
+            "[project]\n",
+            "name = \"librefang-sdk\"\n",
+            "requires-python = \">=3.8\"\n",
+            "version = \"2026.8.19\"\n",
+        );
+        assert_eq!(parse_pyproject_version(pyproject), Some("2026.8.19"));
+        assert_eq!(parse_pyproject_version("name = \"x\"\n"), None);
+    }
+
+    #[test]
     fn sdk_probe_cache_coalesces_concurrent_misses() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let probes = Arc::new(AtomicUsize::new(0));
@@ -685,13 +779,13 @@ mod tests {
                 probe_sdk_cached(&cache, "/test/python3", || {
                     probes.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(10));
-                    true
+                    Some("2026.8.19".to_string())
                 })
             }));
         }
 
         for thread in threads {
-            assert!(thread.join().unwrap());
+            assert_eq!(thread.join().unwrap().as_deref(), Some("2026.8.19"));
         }
         assert_eq!(probes.load(Ordering::SeqCst), 1);
         assert_eq!(cache.lock().unwrap().len(), 1);
@@ -701,7 +795,7 @@ mod tests {
     fn sdk_probe_cache_recovers_poison_and_preserves_entries() {
         let cache = Arc::new(Mutex::new(HashMap::from([(
             "/cached/python3".to_string(),
-            true,
+            Some("2026.8.19".to_string()),
         )])));
         let poisoned_cache = cache.clone();
         let _ = std::panic::catch_unwind(move || {
@@ -711,17 +805,22 @@ mod tests {
         assert!(cache.is_poisoned());
 
         let probes = AtomicUsize::new(0);
-        assert!(probe_sdk_cached(&cache, "/cached/python3", || {
-            probes.fetch_add(1, Ordering::SeqCst);
-            false
-        }));
+        assert_eq!(
+            probe_sdk_cached(&cache, "/cached/python3", || {
+                probes.fetch_add(1, Ordering::SeqCst);
+                None
+            })
+            .as_deref(),
+            Some("2026.8.19"),
+        );
         assert_eq!(probes.load(Ordering::SeqCst), 0);
         assert!(!cache.is_poisoned());
 
-        assert!(!probe_sdk_cached(&cache, "/new/python3", || {
+        assert!(probe_sdk_cached(&cache, "/new/python3", || {
             probes.fetch_add(1, Ordering::SeqCst);
-            false
-        }));
+            None
+        })
+        .is_none());
         assert_eq!(probes.load(Ordering::SeqCst), 1);
         assert_eq!(cache.lock().unwrap().len(), 2);
     }

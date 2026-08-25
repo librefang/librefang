@@ -11,6 +11,29 @@ import {
 } from "../http/client";
 import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
+export class ProviderProbeError extends Error {
+  constructor(public readonly status: string, message?: string) {
+    super(message || "test_failed");
+    this.name = "ProviderProbeError";
+  }
+}
+
+export type EveryApiConnectPhase = "create" | "key_after_create";
+
+export class EveryApiConnectError extends Error {
+  public readonly cause: unknown;
+
+  constructor(public readonly phase: EveryApiConnectPhase, cause: unknown) {
+    const detail = cause instanceof Error && cause.message ? `: ${cause.message}` : "";
+    const summary = phase === "create"
+      ? "EveryAPI provider creation failed"
+      : "EveryAPI provider was created, but its relay key could not be saved";
+    super(`${summary}${detail}`);
+    this.name = "EveryApiConnectError";
+    this.cause = cause;
+  }
+}
+
 // Probes the provider and persists `latency_ms` + `last_tested` on the
 // kernel side, so callers must refetch the provider list to see the new
 // values. Use `onSettled` (not `onSuccess`) because the backend records the
@@ -108,14 +131,11 @@ export function useSetProviderDiscovery() {
 }
 
 /**
- * POST /registry/content/{contentType} — generic registry content creation.
+ * POST /registry/content/provider — provider registry creation.
  *
- * Today the only call site is the "Add provider" wizard on ProvidersPage,
- * which writes a `provider` content entry. We invalidate `providerKeys.all`
- * (list refresh) and `modelKeys.lists()` (a new provider may surface new
- * models on the next list fetch) for that case. Other content types are
- * accepted but currently invalidate the same scoped slices because no other
- * caller exists yet — extend here when a non-provider call site lands.
+ * This hook is intentionally provider-specific even though the transport API
+ * accepts arbitrary registry content. A future content type must define its
+ * own cache contract instead of silently inheriting provider invalidation.
  */
 export function useCreateRegistryContent() {
   const qc = useQueryClient();
@@ -124,14 +144,12 @@ export function useCreateRegistryContent() {
       contentType,
       values,
     }: {
-      contentType: string;
+      contentType: "provider";
       values: Record<string, unknown>;
     }) => createRegistryContent(contentType, values),
-    onSuccess: (_data, variables) => {
-      if (variables.contentType === "provider") {
-        qc.invalidateQueries({ queryKey: providerKeys.all });
-        qc.invalidateQueries({ queryKey: modelKeys.lists() });
-      }
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },
   });
 }
@@ -194,15 +212,23 @@ export function useConnectEveryApi() {
       const trimmedKey = relayKey.trim();
       if (!trimmedKey) throw new Error("empty_relay_key");
       const trimmedBase = (baseUrl ?? "").trim();
-      await createRegistryContent("provider", {
-        id: EVERYAPI_PROVIDER.id,
-        display_name: EVERYAPI_PROVIDER.displayName,
-        api_key_env: EVERYAPI_PROVIDER.apiKeyEnv,
-        base_url: trimmedBase || EVERYAPI_PROVIDER.defaultBaseUrl,
-        key_required: true,
-        models: [],
-      });
-      await setProviderKey(EVERYAPI_PROVIDER.id, trimmedKey);
+      try {
+        await createRegistryContent("provider", {
+          id: EVERYAPI_PROVIDER.id,
+          display_name: EVERYAPI_PROVIDER.displayName,
+          api_key_env: EVERYAPI_PROVIDER.apiKeyEnv,
+          base_url: trimmedBase || EVERYAPI_PROVIDER.defaultBaseUrl,
+          key_required: true,
+          models: [],
+        });
+      } catch (error) {
+        throw new EveryApiConnectError("create", error);
+      }
+      try {
+        await setProviderKey(EVERYAPI_PROVIDER.id, trimmedKey);
+      } catch (error) {
+        throw new EveryApiConnectError("key_after_create", error);
+      }
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
@@ -239,10 +265,10 @@ export function useValidateProviderKey() {
       }
       const test = await testProvider(providerId);
       if (!TEST_SUCCESS_STATUSES.has(test.status ?? "")) {
-        throw new Error(test.message || "test_failed");
+        throw new ProviderProbeError(test.status ?? "unknown", test.message);
       }
     },
-    onSuccess: () => {
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
     },

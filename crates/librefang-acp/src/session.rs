@@ -15,11 +15,11 @@
 //! 3. A [`tokio_util::sync::CancellationToken`] used by `session/cancel`
 //!    notifications to interrupt the active prompt pump.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use agent_client_protocol::schema::v1::SessionId as AcpSessionId;
-use dashmap::DashMap;
 use librefang_types::agent::SessionId as LfSessionId;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -49,6 +49,14 @@ impl SessionState {
     /// `Uuid::new_v5`-derived LibreFang session id. Stable: same input
     /// always produces the same kernel-side id, so a reconnecting
     /// editor's `session/load` rejoins the existing session.
+    ///
+    /// The ACP id is a same-user bearer capability, not an independent
+    /// authorization token. Production ids are random UUID v4 values minted
+    /// by `session/new`, and the daemon transports admit only the daemon's OS
+    /// user (owner-only UDS permissions plus peer UID on Unix, owner-only pipe
+    /// DACL on Windows). A future remote or multi-user transport must bind
+    /// load/resume to an authenticated principal instead of reusing this
+    /// deterministic derivation as an access-control decision.
     pub(crate) fn for_acp_id(acp_id: &AcpSessionId, cwd: PathBuf) -> Self {
         let lf_uuid = Uuid::new_v5(&ACP_SESSION_NS, acp_id.0.as_bytes());
         Self {
@@ -76,8 +84,19 @@ impl SessionState {
 /// `Arc<SessionStore>` is cloned into every handler closure so all
 /// handlers see the same map.
 #[derive(Debug, Default)]
+struct SessionMaps {
+    by_acp_id: HashMap<AcpSessionId, Arc<SessionState>>,
+    /// Permission events carry only the LibreFang session id. Keep the
+    /// reverse mapping alongside the primary store so approval routing is an
+    /// O(1) lookup instead of scanning all active sessions.
+    by_librefang_id: HashMap<LfSessionId, AcpSessionId>,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct SessionStore {
-    inner: DashMap<AcpSessionId, SessionState>,
+    /// Both indexes share one lock so insert, replacement, removal, and drain
+    /// publish atomically to readers.
+    maps: RwLock<SessionMaps>,
 }
 
 impl SessionStore {
@@ -85,48 +104,104 @@ impl SessionStore {
         Arc::new(Self::default())
     }
 
-    pub(crate) fn insert(&self, id: AcpSessionId, state: SessionState) {
-        self.inner.insert(id, state);
+    fn read_maps(&self) -> RwLockReadGuard<'_, SessionMaps> {
+        self.maps.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("ACP session store read lock poisoned; recovering state");
+            let guard = poisoned.into_inner();
+            self.maps.clear_poison();
+            guard
+        })
     }
 
-    pub(crate) fn get(&self, id: &AcpSessionId) -> Option<SessionState> {
-        self.inner.get(id).map(|r| r.value().clone())
+    fn write_maps(&self) -> RwLockWriteGuard<'_, SessionMaps> {
+        self.maps.write().unwrap_or_else(|poisoned| {
+            tracing::warn!("ACP session store write lock poisoned; recovering state");
+            let guard = poisoned.into_inner();
+            self.maps.clear_poison();
+            guard
+        })
+    }
+
+    /// Insert or replace a session.
+    ///
+    /// Replacement cancels the displaced state's prompt token before
+    /// returning it to the caller for downstream handle cleanup.
+    pub(crate) fn insert(
+        &self,
+        id: AcpSessionId,
+        state: SessionState,
+    ) -> Option<Arc<SessionState>> {
+        let librefang_id = state.librefang_session_id;
+        let mut maps = self.write_maps();
+        let previous = maps.by_acp_id.insert(id.clone(), Arc::new(state));
+        if let Some(previous) = previous.as_ref() {
+            let previous_librefang_id = previous.librefang_session_id;
+            if previous_librefang_id != librefang_id
+                && maps
+                    .by_librefang_id
+                    .get(&previous_librefang_id)
+                    .is_some_and(|mapped| mapped == &id)
+            {
+                maps.by_librefang_id.remove(&previous_librefang_id);
+            }
+        }
+        maps.by_librefang_id.insert(librefang_id, id);
+        drop(maps);
+
+        if let Some(previous) = previous.as_ref() {
+            previous.cancel.cancel();
+        }
+        previous
+    }
+
+    pub(crate) fn get(&self, id: &AcpSessionId) -> Option<Arc<SessionState>> {
+        self.read_maps().by_acp_id.get(id).map(Arc::clone)
     }
 
     /// Reverse lookup used by the permission bridge to translate a kernel
     /// `ApprovalRequest.session_id` (LibreFang `SessionId` serialised as
     /// a UUID string) back to the ACP `SessionId` we should target.
     pub(crate) fn find_by_librefang_id(&self, lf_id: &LfSessionId) -> Option<AcpSessionId> {
-        self.inner
-            .iter()
-            .find(|entry| entry.value().librefang_session_id == *lf_id)
-            .map(|entry| entry.key().clone())
+        self.read_maps().by_librefang_id.get(lf_id).cloned()
     }
 
     /// Enumerate `(acp_id, cwd)` for every active session. Used by the
     /// `session/list` handler. Cheap enough to do un-paginated for Phase 1
     /// — daemon-attached mode in Phase 2 will need a real cursor scheme.
     pub(crate) fn list(&self) -> Vec<(AcpSessionId, std::path::PathBuf)> {
-        self.inner
+        self.read_maps()
+            .by_acp_id
             .iter()
-            .map(|entry| (entry.key().clone(), entry.value().cwd.clone()))
+            .map(|(id, state)| (id.clone(), state.cwd.clone()))
             .collect()
     }
 
     /// Remove a session by id. Returns the removed state if it
     /// existed so callers (`session/close`) can pull the
     /// LibreFang session id back out for downstream cleanup.
-    pub(crate) fn remove(&self, id: &AcpSessionId) -> Option<SessionState> {
-        self.inner.remove(id).map(|(_, state)| state)
+    pub(crate) fn remove(&self, id: &AcpSessionId) -> Option<Arc<SessionState>> {
+        let mut maps = self.write_maps();
+        let state = maps.by_acp_id.remove(id)?;
+        let librefang_id = state.librefang_session_id;
+        if maps
+            .by_librefang_id
+            .get(&librefang_id)
+            .is_some_and(|mapped| mapped == id)
+        {
+            maps.by_librefang_id.remove(&librefang_id);
+        }
+        drop(maps);
+        state.cancel.cancel();
+        Some(state)
     }
 
     /// Trigger the cancel token for `id` if it exists. Returns `true`
     /// if a session was found, regardless of whether it was already
     /// cancelled — ACP `session/cancel` is fire-and-forget.
     pub(crate) fn cancel(&self, id: &AcpSessionId) -> bool {
-        match self.inner.get(id) {
+        match self.read_maps().by_acp_id.get(id) {
             Some(state) => {
-                state.value().cancel.cancel();
+                state.cancel.cancel();
                 true
             }
             None => false,
@@ -147,19 +222,17 @@ impl SessionStore {
     /// `unregister_session_terminal` directly without re-looking-up
     /// each entry.
     pub(crate) fn drain_active(&self) -> Vec<(AcpSessionId, LfSessionId)> {
-        let mut out = Vec::with_capacity(self.inner.len());
-        // `DashMap` doesn't expose `drain`; we iterate keys, then
-        // remove each. The shard locking is per-key so no deadlock
-        // hazard with concurrent handlers — by the time `drain_active`
-        // runs the connection is dead and no handler closure will
-        // observe the store again.
-        let keys: Vec<AcpSessionId> = self.inner.iter().map(|e| e.key().clone()).collect();
-        for k in keys {
-            if let Some((id, state)) = self.inner.remove(&k) {
-                out.push((id, state.librefang_session_id));
-            }
-        }
-        out
+        let mut maps = self.write_maps();
+        maps.by_librefang_id.clear();
+        let states = std::mem::take(&mut maps.by_acp_id);
+        drop(maps);
+        states
+            .into_iter()
+            .map(|(id, state)| {
+                state.cancel.cancel();
+                (id, state.librefang_session_id)
+            })
+            .collect()
     }
 }
 
@@ -173,11 +246,23 @@ mod tests {
         let id: AcpSessionId = "sess-1".into();
         let state = SessionState::new(PathBuf::from("/tmp/proj"));
         let lf_id = state.librefang_session_id;
-        store.insert(id.clone(), state.clone());
+        let cancel = state.cancel.clone();
+        assert!(store.insert(id.clone(), state).is_none());
         let fetched = store.get(&id).expect("session should exist");
         assert_eq!(fetched.cwd, PathBuf::from("/tmp/proj"));
+        let fetched_again = store.get(&id).expect("session should still exist");
+        assert!(
+            Arc::ptr_eq(&fetched, &fetched_again),
+            "reads should clone only the shared state Arc"
+        );
         let reverse = store.find_by_librefang_id(&lf_id).expect("reverse lookup");
         assert_eq!(reverse, id);
+
+        let removed = store.remove(&id).expect("remove session");
+        assert_eq!(removed.librefang_session_id, lf_id);
+        assert!(cancel.is_cancelled());
+        assert!(store.get(&id).is_none());
+        assert!(store.find_by_librefang_id(&lf_id).is_none());
     }
 
     #[test]
@@ -186,7 +271,7 @@ mod tests {
         let id: AcpSessionId = "sess-2".into();
         let state = SessionState::new(PathBuf::from("/tmp"));
         let token = state.cancel.clone();
-        store.insert(id.clone(), state);
+        assert!(store.insert(id.clone(), state).is_none());
         assert!(!token.is_cancelled());
         assert!(store.cancel(&id));
         assert!(token.is_cancelled());
@@ -204,5 +289,72 @@ mod tests {
         let store = SessionStore::default();
         let phantom = LfSessionId(Uuid::new_v4());
         assert!(store.find_by_librefang_id(&phantom).is_none());
+    }
+
+    #[test]
+    fn replacing_a_session_removes_its_stale_reverse_entry() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "replace-me".into();
+        let first = SessionState::new(PathBuf::from("/first"));
+        let first_lf_id = first.librefang_session_id;
+        let second = SessionState::new(PathBuf::from("/second"));
+        let second_lf_id = second.librefang_session_id;
+
+        let first_cancel = first.cancel.clone();
+        assert!(store.insert(id.clone(), first).is_none());
+        let displaced = store.insert(id.clone(), second).expect("displaced state");
+
+        assert_eq!(displaced.librefang_session_id, first_lf_id);
+        assert!(first_cancel.is_cancelled());
+        assert!(store.find_by_librefang_id(&first_lf_id).is_none());
+        assert_eq!(store.find_by_librefang_id(&second_lf_id), Some(id));
+    }
+
+    #[test]
+    fn drain_active_clears_both_indexes() {
+        let store = SessionStore::default();
+        let id: AcpSessionId = "drain-me".into();
+        let state = SessionState::new(PathBuf::from("/tmp"));
+        let lf_id = state.librefang_session_id;
+        let cancel = state.cancel.clone();
+        assert!(store.insert(id.clone(), state).is_none());
+
+        assert_eq!(store.drain_active(), vec![(id.clone(), lf_id)]);
+        assert!(cancel.is_cancelled());
+        assert!(store.get(&id).is_none());
+        assert!(store.find_by_librefang_id(&lf_id).is_none());
+    }
+
+    #[test]
+    fn deterministic_ids_are_stable_and_distinct() {
+        let first_id: AcpSessionId = "server-minted-id-1".into();
+        let second_id: AcpSessionId = "server-minted-id-2".into();
+        let first = SessionState::for_acp_id(&first_id, PathBuf::from("/one"));
+        let first_again = SessionState::for_acp_id(&first_id, PathBuf::from("/two"));
+        let second = SessionState::for_acp_id(&second_id, PathBuf::from("/one"));
+
+        assert_eq!(first.librefang_session_id, first_again.librefang_session_id);
+        assert_ne!(first.librefang_session_id, second.librefang_session_id);
+    }
+
+    #[test]
+    fn poisoned_store_lock_recovers_both_indexes() {
+        let store = SessionStore::new_arc();
+        let panicking_store = Arc::clone(&store);
+        let panic = std::thread::spawn(move || {
+            let _guard = panicking_store.maps.write().expect("initial write lock");
+            panic!("poison session store");
+        });
+        assert!(panic.join().is_err());
+        assert!(store.maps.is_poisoned());
+
+        let id: AcpSessionId = "after-poison".into();
+        let state = SessionState::new(PathBuf::from("/tmp"));
+        let lf_id = state.librefang_session_id;
+        assert!(store.insert(id.clone(), state).is_none());
+
+        assert!(!store.maps.is_poisoned());
+        assert!(store.get(&id).is_some());
+        assert_eq!(store.find_by_librefang_id(&lf_id), Some(id));
     }
 }
