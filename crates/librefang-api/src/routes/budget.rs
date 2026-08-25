@@ -107,6 +107,13 @@ const MAX_DAILY_DAYS: u32 = 366;
 /// mistyped `start_date` that silently yields zero rows reads as "we spent
 /// nothing last month", which is the specific way a cost report goes wrong
 /// without anyone noticing.
+//
+// `ApiErrorResponse` trips clippy's `result_large_err` lint (see the same
+// suppression on `consume_oauth_nonce` in `oauth.rs` and the closure at
+// budget.rs:1599); every call site here is `Err(e) => return
+// e.into_response()`, not a hot loop, so one allocation on the rare
+// malformed-input path is fine.
+#[allow(clippy::result_large_err)]
 fn parse_range(
     start_date: Option<&str>,
     end_date: Option<&str>,
