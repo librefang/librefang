@@ -67,20 +67,21 @@ same corpus file.
 
 ## `protocol_version`
 
-`ready.params.protocol_version` is an optional integer. **Current
-value: `1`.** It is carried for skew diagnostics and is **logged, not
-enforced** — the supervisor does not reject a mismatching adapter
-(`sidecar.rs` records it via `tracing`; the SDK's `ready()` accepts it
-as a keyword). Absent ⇒ treated as "unspecified", not as a specific
-version. The field exists today on both sides; v1 formalizes its
-meaning, it does not introduce the mechanism.
+`ready.params.protocol_version` is an optional integer. **Current value: `1`.**
 
-The version increments when a **frozen-core** frame changes in a
-non-additive-optional way (a removed/renamed field, a changed type, a
-new required field). Adding a new optional field, a new capability
-string, or a new frame method is additive and does **not** bump the
-version (older peers tolerate it via the unknown-method / `serde
-default` paths).
+`librefang_channels::sidecar::SIDECAR_PROTOCOL_VERSION` is the source of truth for that number.
+Every other copy of it — this sentence, the corpus fixture `conformance/sidecar/corpus/events/ready_full.json`, the Python SDK's `librefang.sidecar.protocol.PROTOCOL_VERSION`, and the Rust SDK's `librefang_sidecar::protocol::PROTOCOL_VERSION` — is pinned to the constant by `crates/librefang-channels/tests/sidecar_version_contract.rs`, which fails the build when any of them drifts.
+
+**Checked, not enforced.**
+The supervisor classifies the declared value against its own constant (`classify_protocol_version`) and logs a `WARN` naming the adapter when the two differ in either direction, or when the adapter declared nothing at all.
+It still does not reject the adapter or close the connection — a skewed sidecar keeps running, it just stops being invisible.
+
+Absent ⇒ treated as "unspecified", not as a specific version, and warned about.
+Every SDK-built adapter has declared a version since #7140, so an absent value now means either a hand-rolled adapter or an SDK install old enough to predate the default — both worth an operator's attention, which is why the bare-`ready` case warns rather than passing silently.
+Adapters inherit the value from `SidecarAdapter.protocol_version` in either SDK and should not set it per adapter; override it only when an adapter deliberately speaks an older protocol.
+
+The version increments when a **frozen-core** frame changes in a non-additive-optional way (a removed/renamed field, a changed type, a new required field).
+Adding a new optional field, a new capability string, or a new frame method is additive and does **not** bump the version (older peers tolerate it via the unknown-method / `serde default` paths).
 
 ## Frozen core (v1)
 
@@ -95,6 +96,7 @@ above.
 | `ready` (full) | `capabilities[]`, `account_id`, `suppress_error_responses`, `notification_recipients[]`, `header_rules[]`, `protocol_version` | Capability strings gate the optional adapter features. |
 | `ready` (minimal) | *(omitted)* | Bare legacy form. Rust must accept; the SDK never emits it. |
 | `message` (content) | `user_id`, `user_name`, `content`, `text` (mirror), `channel_id`, `platform`, … | `content` supersedes `text`; plain text is mirrored into `text` for pre-capability supervisors. |
+| `message` (command) | `user_id`, `user_name`, `content` = `{"Command": {"name", "args"}}`, `message_id`, `channel_id`, `platform` | A slash command. No `text` mirror exists — only plain-text `content` has a lossless flattening — so a supervisor that reads `text` and ignores `content` sees an empty message. |
 | `message` (minimal) | `user_id`, `user_name`, `text` | Legacy text-only adapter. |
 | `error` | `message` | |
 | `typing` | `user_id`, `user_name`, `is_typing` | |

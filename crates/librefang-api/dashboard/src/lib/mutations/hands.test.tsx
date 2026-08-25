@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import * as http from "../http/client";
 import { renderHook } from "@testing-library/react";
-import type { HandMessageResponse } from "../../api";
+import type { HandInstanceItem, HandMessageResponse } from "../../api";
 import {
   useActivateHand,
   useDeactivateHand,
@@ -107,6 +107,24 @@ describe("usePauseHand", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
+
+  it("does not overwrite cached fields with undefined response values", async () => {
+    vi.mocked(http.pauseHand).mockResolvedValue({
+      instance_id: "inst-1",
+      hand_id: undefined,
+      status: "Paused",
+    } as unknown as HandInstanceItem);
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(handKeys.active(), [
+      { instance_id: "inst-1", hand_id: "hand-1", status: "Active" },
+    ]);
+
+    const { result } = renderHook(() => usePauseHand(), { wrapper });
+    await result.current.mutateAsync("inst-1");
+
+    expect(queryClient.getQueryData<HandInstanceItem[]>(handKeys.active())?.[0])
+      .toMatchObject({ hand_id: "hand-1", status: "Paused" });
+  });
 });
 
 describe("useResumeHand", () => {
@@ -153,7 +171,7 @@ describe("useUninstallHand", () => {
 });
 
 describe("useSetHandSecret", () => {
-  it("invalidates handKeys.lists() and handKeys.detail(handId)", async () => {
+  it("invalidates hand, agent, overview, and detail caches", async () => {
     const args: SetHandSecretInput = { handId: "h1", key: "k", value: "v" };
     vi.mocked(http.setHandSecret).mockResolvedValue({ ok: true });
     const { queryClient, wrapper } = createQueryClientWrapper();
@@ -164,8 +182,10 @@ describe("useSetHandSecret", () => {
     await result.current.mutateAsync(args);
 
     expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.lists(),
+      queryKey: handKeys.all,
     });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.detail("h1"),
     });
@@ -208,7 +228,7 @@ describe("useUpdateHandSettings", () => {
 });
 
 describe("useSendHandMessage", () => {
-  it("invalidates the session query and calls mutationFn with correct args", async () => {
+  it("invalidates message-derived caches and calls mutationFn with correct args", async () => {
     const response: HandMessageResponse = { response: "ok" };
     vi.mocked(http.sendHandMessage).mockResolvedValue(response);
     const { queryClient, wrapper } = createQueryClientWrapper();
@@ -221,6 +241,9 @@ describe("useSendHandMessage", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: handKeys.session("inst-1"),
     });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: handKeys.stats("inst-1") });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
     expect(http.sendHandMessage).toHaveBeenCalledWith("inst-1", "hello");
   });
 });

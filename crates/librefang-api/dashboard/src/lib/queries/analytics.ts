@@ -13,47 +13,43 @@ import { withOverrides, type QueryOverrides } from "./options";
 
 const REFRESH_MS = 30_000;
 const STALE_MS = 20_000;
+// #3393: analytics stay live while visible without polling hidden tabs.
+const analyticsQueryPolicy = {
+  staleTime: STALE_MS,
+  refetchInterval: REFRESH_MS,
+  refetchIntervalInBackground: false,
+} as const;
 
 export const usageQueries = {
   summary: () =>
     queryOptions({
       queryKey: usageKeys.summary(),
       queryFn: getUsageSummary,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false, // #3393: skip polling when tab is hidden
+      ...analyticsQueryPolicy,
     }),
   byAgent: () =>
     queryOptions({
       queryKey: usageKeys.byAgent(),
       queryFn: listUsageByAgent,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false,
+      ...analyticsQueryPolicy,
     }),
   byModel: () =>
     queryOptions({
       queryKey: usageKeys.byModel(),
       queryFn: listUsageByModel,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false,
+      ...analyticsQueryPolicy,
     }),
   daily: () =>
     queryOptions({
       queryKey: usageKeys.daily(),
       queryFn: getUsageDaily,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false,
+      ...analyticsQueryPolicy,
     }),
   modelPerformance: () =>
     queryOptions({
       queryKey: usageKeys.modelPerformance(),
       queryFn: getUsageByModelPerformance,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false,
+      ...analyticsQueryPolicy,
     }),
 };
 
@@ -62,9 +58,7 @@ export const budgetQueries = {
     queryOptions({
       queryKey: budgetKeys.status(),
       queryFn: getBudgetStatus,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false, // #3393
+      ...analyticsQueryPolicy,
     }),
   // Per-provider spend snapshot (#5650). Same refresh cadence as the
   // global budget query so the dashboard's two budget cards stay in
@@ -73,9 +67,7 @@ export const budgetQueries = {
     queryOptions({
       queryKey: budgetKeys.providers(),
       queryFn: getProviderBudgets,
-      staleTime: STALE_MS,
-      refetchInterval: REFRESH_MS,
-      refetchIntervalInBackground: false, // #3393
+      ...analyticsQueryPolicy,
     }),
 };
 

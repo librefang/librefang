@@ -20,7 +20,10 @@ export function useRemoveCustomModel() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: removeCustomModel,
-    onSuccess: () => qc.invalidateQueries({ queryKey: modelKeys.lists() }),
+    onSuccess: (_data, modelId) => {
+      qc.removeQueries({ queryKey: modelKeys.overrides(modelId) });
+      qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
   });
 }
 
@@ -49,7 +52,7 @@ export function useDeleteModelOverrides() {
     mutationFn: deleteModelOverrides,
     onSuccess: (_data, modelKey) => {
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
-      qc.invalidateQueries({ queryKey: modelKeys.overrides(modelKey) });
+      qc.removeQueries({ queryKey: modelKeys.overrides(modelKey) });
     },
   });
 }

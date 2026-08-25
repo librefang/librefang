@@ -1,74 +1,74 @@
 # LibreFang i18n — Simplified Chinese (zh-CN)
 #
-# This file provides a TOML key-value reference for all translatable
-# error messages. The runtime uses Fluent (.ftl) files under
-# crates/librefang-types/locales/ for actual translation lookup.
-# This TOML file serves as a human-readable catalog and can be used
-# by external tooling or future TOML-based i18n backends.
+# This file provides a curated TOML key-value reference for common error
+# messages. It is not an exhaustive catalog. The runtime Fluent (.ftl) files
+# under crates/librefang-types/locales/ are the authoritative catalogs.
+# TOML placeholders use `{name}`; a consumer must map them to its own
+# interpolation syntax (Fluent uses `{ $name }`).
 
 [agent]
-not-found        = "\u672a\u627e\u5230\u667a\u80fd\u4f53"
-spawn-failed     = "\u521b\u5efa\u667a\u80fd\u4f53\u5931\u8d25"
-invalid-id       = "\u65e0\u6548\u7684\u667a\u80fd\u4f53 ID"
-already-exists   = "\u667a\u80fd\u4f53\u5df2\u5b58\u5728"
+not-found        = "未找到智能体"
+spawn-failed     = "创建智能体失败"
+invalid-id       = "无效的智能体 ID"
+already-exists   = "智能体已存在"
 
 [message]
-too-large        = "\u6d88\u606f\u8fc7\u5927\uff08\u6700\u5927 64KB\uff09"
-delivery-failed  = "\u6d88\u606f\u53d1\u9001\u5931\u8d25\uff1a{reason}"
+too-large        = "消息过大（最大 64KB）"
+delivery-failed  = "消息发送失败：{reason}"
 
 [template]
-invalid-name     = "\u65e0\u6548\u7684\u6a21\u677f\u540d\u79f0"
-not-found        = "\u672a\u627e\u5230\u6a21\u677f '{name}'"
-parse-failed     = "\u89e3\u6790\u6a21\u677f\u5931\u8d25\uff1a{error}"
-required         = "\u5fc5\u987b\u63d0\u4f9b 'manifest_toml' \u6216 'template'"
+invalid-name     = "无效的模板名称"
+not-found        = "未找到模板 '{name}'"
+parse-failed     = "解析模板失败：{error}"
+required         = "必须提供 'manifest_toml' 或 'template'"
 
 [manifest]
-too-large            = "\u6e05\u5355\u6587\u4ef6\u8fc7\u5927\uff08\u6700\u5927 1MB\uff09"
-invalid-format       = "\u65e0\u6548\u7684\u6e05\u5355\u683c\u5f0f"
-signature-mismatch   = "\u7b7e\u540d\u6e05\u5355\u5185\u5bb9\u4e0e manifest_toml \u4e0d\u5339\u914d"
-signature-failed     = "\u6e05\u5355\u7b7e\u540d\u9a8c\u8bc1\u5931\u8d25"
+too-large            = "清单文件过大（最大 1MB）"
+invalid-format       = "无效的清单格式"
+signature-mismatch   = "签名清单内容与 manifest_toml 不匹配"
+signature-failed     = "清单签名验证失败"
 
 [auth]
-invalid-key      = "\u65e0\u6548\u7684 API \u5bc6\u94a5"
-missing-header   = "\u7f3a\u5c11 Authorization: Bearer <api_key> \u8bf7\u6c42\u5934"
+invalid-key      = "无效的 API 密钥"
+missing-header   = "缺少 Authorization: Bearer <api_key> 请求头"
 
 [session]
-load-failed      = "\u52a0\u8f7d\u4f1a\u8bdd\u5931\u8d25"
-not-found        = "\u672a\u627e\u5230\u4f1a\u8bdd"
+load-failed      = "加载会话失败"
+not-found        = "未找到会话"
 
 [workflow]
-missing-steps       = "\u7f3a\u5c11 'steps' \u6570\u7ec4"
-step-needs-agent    = "\u6b65\u9aa4 '{step}' \u9700\u8981 'agent_id' \u6216 'agent_name'"
-invalid-id          = "\u65e0\u6548\u7684\u5de5\u4f5c\u6d41 ID"
-execution-failed    = "\u5de5\u4f5c\u6d41\u6267\u884c\u5931\u8d25"
+missing-steps       = "缺少 'steps' 数组"
+step-needs-agent    = "步骤 '{step}' 需要 'agent_id' 或 'agent_name'"
+invalid-id          = "无效的工作流 ID"
+execution-failed    = "工作流执行失败"
 
 [trigger]
-missing-agent-id      = "\u7f3a\u5c11 'agent_id'"
-invalid-agent-id      = "\u65e0\u6548\u7684 agent_id"
-invalid-pattern       = "\u65e0\u6548\u7684\u89e6\u53d1\u5668\u6a21\u5f0f"
-missing-pattern       = "\u7f3a\u5c11 'pattern'"
-registration-failed   = "\u89e6\u53d1\u5668\u6ce8\u518c\u5931\u8d25\uff08\u667a\u80fd\u4f53\u672a\u627e\u5230\uff1f\uff09"
-invalid-id            = "\u65e0\u6548\u7684\u89e6\u53d1\u5668 ID"
-not-found             = "\u672a\u627e\u5230\u89e6\u53d1\u5668"
+missing-agent-id      = "缺少 'agent_id'"
+invalid-agent-id      = "无效的 agent_id"
+invalid-pattern       = "无效的触发器模式"
+missing-pattern       = "缺少 'pattern'"
+registration-failed   = "触发器注册失败（智能体未找到？）"
+invalid-id            = "无效的触发器 ID"
+not-found             = "未找到触发器"
 
 [budget]
-invalid-amount   = "\u65e0\u6548\u7684\u9884\u7b97\u91d1\u989d"
-update-failed    = "\u66f4\u65b0\u9884\u7b97\u5931\u8d25"
+invalid-amount   = "无效的预算金额"
+update-failed    = "更新预算失败"
 
 [config]
-parse-failed     = "\u89e3\u6790\u914d\u7f6e\u5931\u8d25\uff1a{error}"
-write-failed     = "\u5199\u5165\u914d\u7f6e\u5931\u8d25\uff1a{error}"
+parse-failed     = "解析配置失败：{error}"
+write-failed     = "写入配置失败：{error}"
 
 [profile]
-not-found        = "\u672a\u627e\u5230\u914d\u7f6e\u6587\u4ef6 '{name}'"
+not-found        = "未找到配置文件 '{name}'"
 
 [cron]
-invalid-id       = "\u65e0\u6548\u7684\u5b9a\u65f6\u4efb\u52a1 ID"
-not-found        = "\u672a\u627e\u5230\u5b9a\u65f6\u4efb\u52a1"
-create-failed    = "\u521b\u5efa\u5b9a\u65f6\u4efb\u52a1\u5931\u8d25\uff1a{error}"
+invalid-id       = "无效的定时任务 ID"
+not-found        = "未找到定时任务"
+create-failed    = "创建定时任务失败：{error}"
 
 [general]
-not-found        = "\u672a\u627e\u5230\u8d44\u6e90"
-internal         = "\u5185\u90e8\u670d\u52a1\u5668\u9519\u8bef"
-bad-request      = "\u8bf7\u6c42\u65e0\u6548\uff1a{reason}"
-rate-limited     = "\u8bf7\u6c42\u9891\u7387\u8d85\u9650\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"
+not-found        = "未找到资源"
+internal         = "内部服务器错误"
+bad-request      = "请求无效：{reason}"
+rate-limited     = "请求频率超限，请稍后重试。"

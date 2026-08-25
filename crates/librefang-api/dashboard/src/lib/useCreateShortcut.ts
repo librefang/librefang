@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { CREATE_EVENT } from "./useKeyboardShortcuts";
 
 /// Subscribe to the global `n` keyboard shortcut. When the user presses
@@ -9,8 +9,12 @@ import { CREATE_EVENT } from "./useKeyboardShortcuts";
 /// a page removes its listener, so navigating away automatically
 /// re-wires `n` to whatever the next page registers.
 export function useCreateShortcut(handler: () => void) {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
   useEffect(() => {
-    window.addEventListener(CREATE_EVENT, handler);
-    return () => window.removeEventListener(CREATE_EVENT, handler);
-  }, [handler]);
+    const listener = () => handlerRef.current();
+    window.addEventListener(CREATE_EVENT, listener);
+    return () => window.removeEventListener(CREATE_EVENT, listener);
+  }, []);
 }

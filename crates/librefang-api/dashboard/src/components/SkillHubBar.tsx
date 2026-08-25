@@ -16,12 +16,31 @@ import { SKILL_HUBS, type SkillHub, type SkillHubId, getSkillHub } from "../lib/
 export type HubFilter = "all" | SkillHubId;
 
 /**
- * A hub's wire health for the source bar dot. We map the dashboard's
- * existing query state to this — fetching → "checking", error → "down",
- * success → "live". The page computes this from the React Query
- * `isFetching` / `isError` flags it already has.
+ * A hub's wire health for the source bar dot.
+ *
+ * `"unknown"` is the state the bar used to be unable to express: a hub whose query is disabled — the page has never asked it anything, so it is neither live nor down.
+ * Collapsing that into `"live"` painted a green dot on a marketplace that had not been contacted, which is how a dead hub read as healthy until someone clicked it (#7387).
  */
-export type HubHealth = "live" | "checking" | "down";
+export type HubHealth = "live" | "checking" | "down" | "unknown";
+
+/** The subset of a React Query result the health mapping reads. */
+export interface HubQueryState {
+  isError: boolean;
+  isFetching: boolean;
+  /** False until the query has resolved once — a disabled query never sets it. */
+  isFetched: boolean;
+}
+
+/**
+ * Map a hub's query state onto its wire health.
+ *
+ * Order matters: an errored query that React Query is already retrying reports both `isError` and `isFetching`, and the honest answer there is still "down".
+ */
+export function hubHealthFrom(query: HubQueryState): HubHealth {
+  if (query.isError) return "down";
+  if (query.isFetching) return "checking";
+  return query.isFetched ? "live" : "unknown";
+}
 
 export type HubCounts = Partial<Record<SkillHubId, number>>;
 export type HubHealthMap = Partial<Record<SkillHubId, HubHealth>>;
@@ -40,17 +59,36 @@ interface SkillHubBarProps {
 function dotColor(h: HubHealth | undefined): string {
   if (h === "down") return "var(--color-error, #ef4444)";
   if (h === "checking") return "var(--color-warning, #f59e0b)";
+  if (h === "unknown") return "var(--color-text-dim, #6b7280)";
   return "var(--color-success, #22c55e)";
 }
 
-function HubHealthDot({ health }: { health?: HubHealth }) {
+/** Translation key naming each health state, used for the dot's screen-reader text and the pill tooltip. */
+function healthLabelKey(h: HubHealth | undefined): string {
+  if (h === "down") return "skills.hub_unreachable";
+  if (h === "checking") return "skills.hub_checking";
+  if (h === "unknown") return "skills.hub_not_checked";
+  return "skills.hub_live";
+}
+
+/**
+ * The colored dot, plus the same information as text for anyone not looking at colors.
+ * The dot stays `aria-hidden`; the sibling `sr-only` span carries the hub name and its state, so a dead hub is reachable without hovering the pill for a `title`.
+ */
+function HubHealthDot({ hubName, health }: { hubName: string; health?: HubHealth }) {
+  const { t } = useTranslation();
   const color = dotColor(health);
   return (
-    <span
-      aria-hidden="true"
-      className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
-      style={{ background: color, boxShadow: `0 0 0 2px ${color}33` }}
-    />
+    <>
+      <span
+        aria-hidden="true"
+        className="inline-block w-1.5 h-1.5 rounded-full shrink-0"
+        style={{ background: color, boxShadow: `0 0 0 2px ${color}33` }}
+      />
+      <span className="sr-only">
+        {t("skills.hub_status", { hub: hubName, status: t(healthLabelKey(health)) })}
+      </span>
+    </>
   );
 }
 
@@ -93,9 +131,7 @@ function HubPill({
   onClick: () => void;
 }) {
   const { t } = useTranslation();
-  const HealthIcon =
-    health === "down" ? AlertCircle : health === "checking" ? Loader2 : Check;
-  const showSpinner = health === "checking";
+  const statusText = t(healthLabelKey(health));
   return (
     <button
       type="button"
@@ -109,15 +145,22 @@ function HubPill({
         borderColor: active ? `${hub.color}60` : "var(--color-border-subtle)",
         color: active ? hub.color : "var(--color-text-main)",
       }}
-      title={`${hub.domain}${health === "down" ? ` · ${t("skills.hub_unreachable")}` : health === "checking" ? ` · ${t("skills.hub_checking")}` : ""}`}
+      title={`${hub.domain} · ${statusText}`}
     >
       <span className="text-[13px] leading-none">{hub.glyph}</span>
       <span>{hub.name}</span>
-      <HubHealthDot health={health} />
-      {showSpinner ? (
+      <HubHealthDot hubName={hub.name} health={health} />
+      {health === "checking" ? (
         <Loader2 className="w-3 h-3 animate-spin opacity-60" aria-hidden="true" />
+      ) : health === "down" ? (
+        // Previously rendered at `opacity-0` like the other glyphs, which meant the one state worth interrupting for was the one state nobody could see.
+        <AlertCircle
+          className="w-3 h-3"
+          style={{ color: "var(--color-error, #ef4444)" }}
+          aria-hidden="true"
+        />
       ) : (
-        <HealthIcon className="w-3 h-3 opacity-0" aria-hidden="true" />
+        <Check className="w-3 h-3 opacity-0" aria-hidden="true" />
       )}
       <span className="font-mono text-[10.5px] text-text-dim/80 tabular-nums">
         {count ?? "—"}

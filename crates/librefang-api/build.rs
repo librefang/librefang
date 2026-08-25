@@ -30,11 +30,10 @@ fn main() {
     let git_sha = resolve_git_sha();
     println!("cargo:rustc-env=GIT_SHA={git_sha}");
 
-    // Capture build date (UTC, date only) via `chrono::Utc::now()` rather
-    // than shelling out to `date -u +%Y-%m-%d`. Removes a platform-specific
-    // process spawn (BSD `date` and GNU `date` accept different flags) and
-    // keeps the build script reproducible across hosts.
-    let build_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    // Capture the UTC build date without spawning a platform-specific
+    // `date` process. Reproducible builds can supply `SOURCE_DATE_EPOCH`;
+    // local builds fall back to the current date when it is absent.
+    let build_date = resolve_build_date();
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
     // Capture rustc version.
@@ -98,4 +97,23 @@ fn short_sha(sha: &str) -> String {
     // git's default short SHA length is 7. Match it for parity with the
     // `git rev-parse --short HEAD` fallback.
     sha.chars().take(7).collect()
+}
+
+fn resolve_build_date() -> String {
+    match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(raw_epoch) => {
+            let epoch = raw_epoch
+                .trim()
+                .parse::<i64>()
+                .expect("SOURCE_DATE_EPOCH must be an integer Unix timestamp");
+            chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0)
+                .expect("SOURCE_DATE_EPOCH is outside the supported timestamp range")
+                .format("%Y-%m-%d")
+                .to_string()
+        }
+        Err(std::env::VarError::NotPresent) => chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("SOURCE_DATE_EPOCH must be valid UTF-8")
+        }
+    }
 }

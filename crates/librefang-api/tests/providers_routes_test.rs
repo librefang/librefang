@@ -179,6 +179,59 @@ async fn list_models_filters_by_unknown_provider_yields_empty() {
     assert_eq!(body["models"].as_array().unwrap().len(), 0);
 }
 
+/// Regression #7780, end to end through `GET /api/models`.
+///
+/// A model discovered behind an OpenAI-compatible gateway used to enter the catalog with `context_window: 131_072` regardless of what the gateway said, so the route served a fabricated number that neither an operator nor the budget math behind `resolve_context_window` could tell from a measured one.
+/// This asserts both halves of the fix on the wire: a reported capacity survives to the response, and an unreported one is served as the catalog's `unknown` encoding with `limits_known: false` rather than as the old literal.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_models_serves_probed_capacity_and_never_the_hardcoded_literal() {
+    let h = boot();
+    h._state.kernel.model_catalog_update(&mut |catalog| {
+        catalog.merge_discovered_models(
+            "openai",
+            &[
+                // LiteLLM in front of a build that answers /model/info.
+                librefang_kernel::provider_health::DiscoveredModelInfo {
+                    context_window: Some(8_192),
+                    max_output_tokens: Some(2_048),
+                    ..librefang_kernel::provider_health::DiscoveredModelInfo::bare(
+                        "gw-reports-capacity",
+                    )
+                },
+                // The reproduction from the issue: the bare OpenAI shape, which carries `id` / `object` / `created` / `owned_by` and nothing else.
+                librefang_kernel::provider_health::DiscoveredModelInfo::bare("gw-reports-nothing"),
+            ],
+        );
+    });
+
+    let (status, body) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let rows = body["models"].as_array().expect("models array");
+    let by_id = |id: &str| {
+        rows.iter()
+            .find(|m| m["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("{id} missing from {body}"))
+    };
+
+    let reported = by_id("gw-reports-capacity");
+    assert_eq!(reported["context_window"], 8_192);
+    assert_eq!(reported["max_output_tokens"], 2_048);
+    assert_eq!(reported["limits_known"], true);
+
+    let silent = by_id("gw-reports-nothing");
+    assert_ne!(
+        silent["context_window"], 131_072,
+        "the fabricated literal must not reach any surface: {silent}"
+    );
+    assert_eq!(silent["context_window"], 0);
+    assert_eq!(silent["max_output_tokens"], 0);
+    assert_eq!(
+        silent["limits_known"], false,
+        "the route must say the numbers have no source, so a reader can tell \
+         `unknown` apart from an image model's `not applicable`"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/models/{id}
 // ---------------------------------------------------------------------------
@@ -663,6 +716,216 @@ async fn capability_override_partial_only_flips_set_fields() {
         "supports_tools must keep its catalog default when not in override payload"
     );
     assert_eq!(body["supports_vision"].as_bool(), Some(!base_vision));
+}
+
+// ---------------------------------------------------------------------------
+// Capacity-limit overrides (refs #7774)
+// `context_window` / `max_output_tokens` are operator-editable at any time
+// through PUT /api/models/overrides/{id}, and the effective value must show up
+// on every surface that reports a model's limits, with the raw catalog value
+// kept alongside under `limits_catalog` so a revert-target UI can render it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn context_window_override_flips_effective_value_on_every_model_surface() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    // Baseline: no override, so every surface reports the catalog value and
+    // `limits_catalog` agrees with it.
+    let (status, base) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let catalog_window = base["context_window"].as_u64().unwrap();
+    let catalog_max_out = base["max_output_tokens"].as_u64().unwrap();
+    assert!(catalog_window > 0, "fixture sanity: {base}");
+    assert_eq!(
+        base["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+    assert_eq!(
+        base["limits_catalog"]["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+
+    // The correction an operator makes when the gateway under-reports: half
+    // the catalog window, and a distinct output cap.
+    let corrected_window = catalog_window / 2;
+    let corrected_max_out = catalog_max_out / 2;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({
+            "context_window": corrected_window,
+            "max_output_tokens": corrected_max_out,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["context_window"].as_u64(),
+        Some(corrected_window),
+        "PUT must echo the persisted context_window: {body}"
+    );
+    assert_eq!(body["max_output_tokens"].as_u64(), Some(corrected_max_out));
+
+    // GET the override back — the field round-trips through
+    // `model_overrides.json`, which is what makes it editable at any time.
+    let (status, stored) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored["context_window"].as_u64(), Some(corrected_window));
+
+    // GET /api/models/{id} — effective value shifts, catalog value does not.
+    let (status, detail) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(
+        detail["max_output_tokens"].as_u64(),
+        Some(corrected_max_out)
+    );
+    assert_eq!(
+        detail["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window),
+        "limits_catalog must stay unmerged so the UI can offer a revert: {detail}"
+    );
+    assert_eq!(
+        detail["limits_catalog"]["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+
+    // GET /api/models — the list surface agrees with the detail surface.
+    let (status, listed) = json_request(&h, Method::GET, "/api/models?provider=openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in the openai catalog slice");
+    assert_eq!(entry["context_window"].as_u64(), Some(corrected_window));
+    assert_eq!(
+        entry["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+
+    // GET /api/providers/{name} — the drilldown surface too.
+    let (status, prov) = json_request(&h, Method::GET, "/api/providers/openai", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let prov_entry = prov["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(model_id))
+        .expect("gpt-4o-mini should be in /api/providers/openai");
+    assert_eq!(
+        prov_entry["context_window"].as_u64(),
+        Some(corrected_window)
+    );
+    assert_eq!(
+        prov_entry["limits_catalog"]["context_window"].as_u64(),
+        Some(catalog_window)
+    );
+
+    // DELETE — every surface reverts to the catalog value.
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/models/overrides/{key}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, reverted) =
+        json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reverted["context_window"].as_u64(), Some(catalog_window));
+    assert_eq!(
+        reverted["max_output_tokens"].as_u64(),
+        Some(catalog_max_out)
+    );
+}
+
+/// Refs #7774. Backward compatibility: an overrides document that carries only
+/// inference parameters must leave the reported limits exactly where they were.
+/// This is the guard against the new field quietly changing what an existing
+/// install reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overrides_document_without_limits_leaves_reported_limits_unchanged() {
+    let h = boot();
+    let model_id = "gpt-4o-mini";
+    let key = "openai:gpt-4o-mini";
+
+    let (_, base) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    let catalog_window = base["context_window"].as_u64().unwrap();
+    let catalog_max_out = base["max_output_tokens"].as_u64().unwrap();
+
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "temperature": 0.3, "max_tokens": 4_096 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, after) = json_request(&h, Method::GET, &format!("/api/models/{model_id}"), None).await;
+    assert_eq!(after["context_window"].as_u64(), Some(catalog_window));
+    assert_eq!(after["max_output_tokens"].as_u64(), Some(catalog_max_out));
+    assert!(
+        after["overrides"]["context_window"].is_null(),
+        "an unset limit must not be serialized: {after}"
+    );
+}
+
+/// Refs #7774 / #6209. `max_tokens` — the per-request output cap — stays ahead
+/// of the `max_output_tokens` capacity correction in the provider headline,
+/// while the capacity correction still beats the catalog. Pins the three-way
+/// order so neither field silently swallows the other.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_headline_ranks_max_tokens_above_the_capacity_override() {
+    let h = boot();
+    let key = "openai:gpt-4o-mini";
+    let headline = |body: &serde_json::Value| -> Option<u64> {
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"].as_str() == Some("openai"))
+            .and_then(|p| p["max_output_tokens"].as_u64())
+    };
+
+    // Capacity correction alone → it wins over the catalog value.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "max_output_tokens": 6_000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(headline(&body), Some(6_000));
+
+    // Both set → the explicit per-request cap wins.
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/models/overrides/{key}"),
+        Some(serde_json::json!({ "max_output_tokens": 6_000, "max_tokens": 2_000 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = json_request(&h, Method::GET, "/api/providers", None).await;
+    assert_eq!(headline(&body), Some(2_000));
 }
 
 // ---------------------------------------------------------------------------
@@ -1468,6 +1731,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         input_cost_per_m: 0.0,
         output_cost_per_m: 0.0,
         pricing_known: true,
+        limits_known: true,
         image_input_cost_per_m: None,
         image_output_cost_per_m: None,
         supports_tools: false,
@@ -2445,6 +2709,111 @@ async fn custom_provider_without_the_flag_is_not_probed_for_models() {
     );
 }
 
+/// #7775: the models a self-hosted OpenAI-compatible gateway serves must reach `GET /api/models`, which is the list every surface picks a model from.
+///
+/// The ids belong to the operator, so no checked-in catalogue can ship them — and before this fix `list_models` refreshed a live catalogue for OpenRouter and EveryAPI only, then merely *read* the probe cache to filter static entries.
+/// A gateway had nothing static to filter and nothing live to add, so the list came back with only whatever the operator had hand-registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_served_models_reach_the_model_list() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                { "id": "sensor-model-generic" },
+                { "id": "sensor-model-generic-high" },
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-gateway".to_string(),
+        display_name: "ACME Gateway".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_GATEWAY_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: false,
+        auth_status: AuthStatus::NotRequired,
+        discover_models: true,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models?provider=acme-gateway", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"sensor-model-generic") && ids.contains(&"sensor-model-generic-high"),
+        "every model the gateway lists must be selectable from /api/models; got {ids:?}"
+    );
+    // The hand-registered entry is not collateral: the live filter (#3191) runs against the same probe result and must not drop a custom-tier model the operator added themselves.
+    assert!(
+        ids.contains(&"acme-gateway-test-model"),
+        "discovery must not evict an operator-registered model; got {ids:?}"
+    );
+}
+
+/// The counterpart guard: `/api/models` must not turn into a probe of every configured provider.
+/// A provider that never opted into discovery is left alone entirely — no request, not merely no merge — so enabling this on one gateway does not start billing round-trips against the others.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_list_does_not_probe_a_provider_that_never_opted_in() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "id": "should-never-be-listed" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let h = boot_with_provider(ProviderInfo {
+        id: "acme-quiet".to_string(),
+        display_name: "ACME Quiet".to_string(),
+        api_key_env: "LIBREFANG_TEST_ACME_QUIET_API_KEY".to_string(),
+        base_url: server.uri(),
+        key_required: true,
+        auth_status: AuthStatus::Configured,
+        ..ProviderInfo::default()
+    });
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models?provider=acme-quiet", None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let ids: Vec<&str> = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"should-never-be-listed"),
+        "a provider without the opt-in must not gain live models; got {ids:?}"
+    );
+    let received = server
+        .received_requests()
+        .await
+        .expect("wiremock records requests");
+    assert!(
+        received.is_empty(),
+        "no listing request should have been sent at all; got {:?}",
+        received
+            .iter()
+            .map(|r| r.url.to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// `PUT /api/providers/{name}/discovery` flips the flag, reports it back on
 /// `/api/providers`, and persists it into the provider's own TOML so the
 /// opt-in survives a daemon restart.
@@ -2499,6 +2868,31 @@ async fn set_provider_discovery_flips_flag_and_persists_to_the_provider_file() {
     assert!(
         persisted.contains("discover_models = true"),
         "the opt-in must survive a restart; file content:\n{persisted}"
+    );
+
+    // The assertion above is not enough on its own: the file used to be written
+    // with `id` + `discover_models` and nothing else, which failed the catalog
+    // loader's required fields, so the loader discarded it whole and the flag
+    // reverted on every boot (#7776). Reload the way the daemon does at boot and
+    // assert the record actually comes back.
+    let reloaded = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(
+        &h._state.kernel.home_dir().join("providers"),
+    );
+    let round_tripped = reloaded.get_provider("acme-toggle").unwrap_or_else(|| {
+        panic!("the persisted file must load back as a provider; file content:\n{persisted}")
+    });
+    assert!(
+        round_tripped.discover_models,
+        "the reloaded catalog must carry the opt-in; file content:\n{persisted}"
+    );
+    assert_eq!(
+        round_tripped.base_url, "http://127.0.0.1:59999/v1",
+        "the endpoint has to be written too, or the probe loop has nothing to poll"
+    );
+    assert_eq!(round_tripped.display_name, "ACME Toggle");
+    assert_eq!(
+        round_tripped.api_key_env,
+        "LIBREFANG_TEST_ACME_TOGGLE_API_KEY"
     );
 
     // Turning it back off rewrites the same key rather than appending a second one.

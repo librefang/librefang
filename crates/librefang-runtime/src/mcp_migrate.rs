@@ -104,10 +104,13 @@ struct LegacyTemplate {
 
 /// Run the migration if a legacy layout is detected.
 ///
+/// `home_dir` locates the legacy `integrations/` layout being migrated *from*; `config_path` is the `config.toml` the synthesised `[[mcp_servers]]` entries are written *to*.
+/// The two are separate arguments rather than one, because the caller may have loaded its configuration from outside the home directory (`LIBREFANG_CONFIG_PATH`, `--config`), and a migration that wrote into `home_dir/config.toml` would deposit the migrated servers in a file the daemon never reads (#6695).
+///
 /// Returns `Ok(Some(summary))` when any work was performed, `Ok(None)` when
 /// nothing needed migrating, and `Err(_)` only for unexpected I/O errors
 /// during the migration itself (missing source files are not errors).
-pub fn migrate_if_needed(home_dir: &Path) -> Result<Option<String>, String> {
+pub fn migrate_if_needed(home_dir: &Path, config_path: &Path) -> Result<Option<String>, String> {
     let legacy_dir = home_dir.join("integrations");
     let new_dir = home_dir.join("mcp").join("catalog");
     let legacy_file = home_dir.join("integrations.toml");
@@ -180,7 +183,6 @@ pub fn migrate_if_needed(home_dir: &Path) -> Result<Option<String>, String> {
             }
         };
 
-        let config_path = home_dir.join("config.toml");
         let mut synth_count = 0usize;
         let mut skipped_count = 0usize;
         for inst in &parsed.installed {
@@ -217,7 +219,7 @@ pub fn migrate_if_needed(home_dir: &Path) -> Result<Option<String>, String> {
                     continue;
                 }
             };
-            if let Err(e) = upsert_mcp_server_from_template(&config_path, inst, &template) {
+            if let Err(e) = upsert_mcp_server_from_template(config_path, inst, &template) {
                 warn!("migration: could not upsert '{}': {e}", inst.id);
                 skipped_count += 1;
                 continue;
@@ -510,7 +512,7 @@ mod tests {
     #[test]
     fn no_legacy_no_op() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = migrate_if_needed(tmp.path()).unwrap();
+        let result = migrate_if_needed(tmp.path(), &tmp.path().join("config.toml")).unwrap();
         assert!(result.is_none());
     }
 
@@ -602,7 +604,7 @@ mod tests {
             &old.join("github.toml"),
             "id = \"github\"\n[transport]\ntype = \"stdio\"\ncommand = \"echo\"\n",
         );
-        let result = migrate_if_needed(tmp.path()).unwrap();
+        let result = migrate_if_needed(tmp.path(), &tmp.path().join("config.toml")).unwrap();
         assert!(result.is_some(), "expected migration to report work");
         assert!(!old.exists(), "legacy integrations dir should be gone");
         assert!(tmp
@@ -648,7 +650,7 @@ enabled = true
 "#,
         );
 
-        let result = migrate_if_needed(tmp.path()).unwrap();
+        let result = migrate_if_needed(tmp.path(), &tmp.path().join("config.toml")).unwrap();
         assert!(result.is_some(), "expected migration to report work");
         // Old file backed up, new catalog present, config.toml has entry.
         assert!(
@@ -703,7 +705,7 @@ installed_at = "2026-02-23T10:00:00Z"
 enabled = false
 "#,
         );
-        migrate_if_needed(tmp.path()).unwrap();
+        migrate_if_needed(tmp.path(), &tmp.path().join("config.toml")).unwrap();
         let config_path = tmp.path().join("config.toml");
         let config = std::fs::read_to_string(&config_path).unwrap_or_default();
         assert!(
@@ -753,7 +755,7 @@ url = "https://manual.example.com/mcp"
 "#,
         );
 
-        migrate_if_needed(tmp.path()).unwrap();
+        migrate_if_needed(tmp.path(), &tmp.path().join("config.toml")).unwrap();
 
         let config = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
         // Manual entry must survive — we only detect by name.
