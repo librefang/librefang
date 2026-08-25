@@ -123,6 +123,18 @@ describe("MultiSelectCmdk", () => {
     expect(within(list).getByText("beta")).toBeInTheDocument();
   });
 
+  it("exposes cmdk's active option to assistive technology", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    await user.click(getInput());
+
+    const list = await screen.findByRole("listbox");
+    expect(within(list).getByRole("option", { selected: true })).toHaveTextContent(
+      "alpha",
+    );
+  });
+
   it("renders description metadata under each option (#5049)", async () => {
     const user = userEvent.setup();
     function MetaHarness() {
@@ -234,6 +246,37 @@ describe("MultiSelectCmdk", () => {
       screen.getAllByRole("button", { name: "Remove custom_tool" }),
     ).toHaveLength(1);
     // Input is cleared so the user can keep typing.
+    expect(input).toHaveValue("");
+  });
+
+  it("does not add a case-variant duplicate free-text chip", async () => {
+    const user = userEvent.setup();
+    function FreeTextHarness() {
+      const [value, setValue] = useState<string[]>(["custom_tool"]);
+      return (
+        <MultiSelectCmdk
+          options={["alpha", "beta"]}
+          value={value}
+          onChange={(next) =>
+            setValue((prev) => (typeof next === "function" ? next(prev) : next))
+          }
+          placeholder="Search…"
+          allowFreeText
+        />
+      );
+    }
+    render(<FreeTextHarness />);
+    const input = screen.getByPlaceholderText("Add more…");
+    await user.click(input);
+    await user.type(input, "CUSTOM_TOOL");
+    await user.keyboard("{Enter}");
+
+    expect(
+      screen.getAllByRole("button", { name: "Remove custom_tool" }),
+    ).toHaveLength(1);
+    expect(
+      screen.queryByRole("button", { name: "Remove CUSTOM_TOOL" }),
+    ).not.toBeInTheDocument();
     expect(input).toHaveValue("");
   });
 

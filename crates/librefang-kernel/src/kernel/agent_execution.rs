@@ -15,6 +15,27 @@ use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
 use crate::MeteringSubsystemApi;
 
+/// The agent a call's cost rolls up to (#7714).
+///
+/// A worker spawned by another agent spends on its spawner's behalf, so the
+/// spawner needs that cost on its own budget line rather than scattered
+/// across throwaway children it cannot enumerate. A top-level agent has no
+/// parent and bills to itself, which is the pre-#7714 behaviour for every
+/// agent.
+///
+/// This deliberately does **not** touch the quota subject. `UsageRecord::agent_id`
+/// stays the executing agent at every write site, so the pre-call
+/// `check_quota(agent_id, &entry.manifest.resources)` and the post-call
+/// `check_all_and_record(&record, &manifest.resources, ..)` keep asking about
+/// the same agent against that same agent's ceiling. Re-pointing `agent_id`
+/// at the parent instead would have made the pre-call check read the child's
+/// spend and the post-call check read the parent's, both compared against the
+/// child's limits — attribution and enforcement have to stay independent
+/// dimensions.
+pub(crate) fn billed_agent_for(entry: &AgentEntry) -> AgentId {
+    entry.parent.unwrap_or(entry.id)
+}
+
 /// Detect + strip the cron `[SILENT]` marker at the start of a message.
 ///
 /// Returns `(message_for_llm, is_silent)`.
@@ -71,7 +92,7 @@ impl LibreFangKernel {
 
         info!(agent = %entry.name, path = %wasm_path.display(), "Executing WASM agent");
 
-        let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
+        let wasm_bytes = tokio::fs::read(&wasm_path).await.map_err(|e| {
             KernelError::LibreFang(LibreFangError::Internal(format!(
                 "Failed to read WASM module '{}': {e}",
                 wasm_path.display()
@@ -612,11 +633,10 @@ impl LibreFangKernel {
             let is_default_model =
                 manifest.model.model.is_empty() || manifest.model.model == "default";
             if is_default_provider && is_default_model {
-                let override_guard = self
-                    .llm
-                    .default_model_override
-                    .read()
-                    .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                let override_guard = read_config_override(
+                    &self.llm.default_model_override,
+                    "default_model_override",
+                );
                 let dm = override_guard.as_ref().unwrap_or(&cfg.default_model);
                 if !dm.provider.is_empty() {
                     manifest.model.provider = dm.provider.clone();
@@ -727,10 +747,14 @@ impl LibreFangKernel {
                 self.agents.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
-            let ws_meta = manifest
-                .workspace
-                .as_ref()
-                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+            let ws_meta = if let Some(workspace) = manifest.workspace.as_ref() {
+                Some(
+                    self.cached_workspace_metadata_async(workspace, manifest.autonomous.is_some())
+                        .await,
+                )
+            } else {
+                None
+            };
 
             // Use cached skill metadata (summary + prompt context)
             let skill_meta = if manifest.skills_disabled {
@@ -844,7 +868,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                active_goals: self.active_goals_for_prompt(Some(agent_id)),
+                active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
             };
@@ -1035,14 +1059,16 @@ impl LibreFangKernel {
 
         let driver = self.resolve_driver_for_owner(&manifest, owner)?;
 
-        // Resolve the context window: agent.toml override > catalog > session
-        // (#6568). See `manifest_helpers::resolve_context_window` for why the
-        // manifest override has to come first.
+        // Resolve the context window: agent.toml override > per-model operator
+        // override > catalog > session (#6568, #7774). See
+        // `manifest_helpers::resolve_context_window` for why the manifest
+        // override has to come first.
         let ctx_window = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &manifest.model,
             Some(session.context_window_tokens),
-        );
+        )
+        .map(|resolved| resolved.tokens);
 
         // Inject model_supports_tools for auto web search augmentation.
         // Refs #4745: honour user capability overrides via effective_capabilities.
@@ -1463,6 +1489,11 @@ impl LibreFangKernel {
             user_id: billed_user_id,
             channel: attribution_channel.clone(),
             session_id: Some(effective_session_id),
+            // #7714: a step agent (or any spawned worker) bills its spend to
+            // the agent that spawned it, so the spawner keeps budget
+            // visibility over work done on its behalf. `agent_id` above is
+            // untouched and remains the quota subject — see `billed_agent_for`.
+            billed_agent_id: Some(billed_agent_for(entry)),
         };
         if let Err(e) = self.metering.engine.check_all_and_record(
             &usage_record,
@@ -1605,5 +1636,42 @@ mod silent_marker_tests {
             strip_silent_cron_marker("[SILENT] note: keep this [SILENT] tag literal", true);
         assert_eq!(out, "note: keep this [SILENT] tag literal");
         assert!(silent);
+    }
+}
+
+#[cfg(test)]
+mod billing_attribution_tests {
+    use super::billed_agent_for;
+    use librefang_types::agent::{AgentEntry, AgentId};
+
+    fn entry_with_parent(parent: Option<AgentId>) -> AgentEntry {
+        AgentEntry {
+            id: AgentId::new(),
+            name: "worker".to_string(),
+            parent,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_top_level_agent_bills_to_itself() {
+        // #7714: no parent means no rollup — this is the pre-#7714 behaviour
+        // for every agent, and must stay untouched.
+        let entry = entry_with_parent(None);
+        assert_eq!(billed_agent_for(&entry), entry.id);
+    }
+
+    #[test]
+    fn a_spawned_worker_bills_to_its_spawner() {
+        // The whole point of the column: a worker spends on its spawner's
+        // behalf, so the cost belongs on the spawner's budget line.
+        let parent = AgentId::new();
+        let entry = entry_with_parent(Some(parent));
+        assert_eq!(billed_agent_for(&entry), parent);
+        assert_ne!(
+            billed_agent_for(&entry),
+            entry.id,
+            "a parented worker must not also bill to itself"
+        );
     }
 }

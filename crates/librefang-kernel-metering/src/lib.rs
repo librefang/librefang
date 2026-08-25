@@ -40,10 +40,15 @@ struct CostReservationLedger {
 
 impl CostReservationLedger {
     fn lock_reserved(&self) -> MutexGuard<'_, f64> {
-        self.reserved_usd.lock().unwrap_or_else(|poisoned| {
-            warn!("cost reservation ledger lock poisoned; recovering pending budget state");
-            poisoned.into_inner()
-        })
+        match self.reserved_usd.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("cost reservation ledger lock poisoned; recovering pending budget state");
+                let guard = poisoned.into_inner();
+                self.reserved_usd.clear_poison();
+                guard
+            }
+        }
     }
 
     fn current(&self) -> f64 {
@@ -385,12 +390,15 @@ impl MeteringEngine {
     }
 
     /// Get budget status — current spend vs limits for all time windows.
-    pub fn budget_status(&self, budget: &librefang_types::config::BudgetConfig) -> BudgetStatus {
-        let hourly = self.store.query_global_hourly().unwrap_or(0.0);
-        let daily = self.store.query_today_cost().unwrap_or(0.0);
-        let monthly = self.store.query_global_monthly().unwrap_or(0.0);
+    pub fn budget_status(
+        &self,
+        budget: &librefang_types::config::BudgetConfig,
+    ) -> LibreFangResult<BudgetStatus> {
+        let hourly = self.store.query_global_hourly()?;
+        let daily = self.store.query_today_cost()?;
+        let monthly = self.store.query_global_monthly()?;
 
-        BudgetStatus {
+        Ok(BudgetStatus {
             hourly_spend: hourly,
             hourly_limit: budget.max_hourly_usd,
             hourly_pct: if budget.max_hourly_usd > 0.0 {
@@ -414,7 +422,7 @@ impl MeteringEngine {
             },
             alert_threshold: budget.alert_threshold,
             default_max_llm_tokens_per_hour: budget.default_max_llm_tokens_per_hour,
-        }
+        })
     }
 
     /// Get a usage summary, optionally filtered by agent.
@@ -810,6 +818,21 @@ mod tests {
         MeteringEngine::new(store)
     }
 
+    #[test]
+    fn budget_status_surfaces_usage_query_errors() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let pool = substrate.pool();
+        let engine = MeteringEngine::new(Arc::new(UsageStore::new(pool.clone())));
+        pool.get()
+            .unwrap()
+            .execute("DROP TABLE usage_events", [])
+            .unwrap();
+
+        assert!(engine
+            .budget_status(&librefang_types::config::BudgetConfig::default())
+            .is_err());
+    }
+
     fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
         let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
         librefang_runtime::model_catalog::ModelCatalog::new(&home)
@@ -829,7 +852,9 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(ledger.reserved_usd.is_poisoned());
         assert_eq!(ledger.current(), 0.4);
+        assert!(!ledger.reserved_usd.is_poisoned());
         let (pending_before, added) = ledger.check_and_add(0.5, &[(1.0, 0.0)]).unwrap();
         assert_eq!(pending_before, 0.4);
         assert_eq!(added, 0.5);
@@ -837,6 +862,7 @@ mod tests {
         assert!(ledger.check_and_add(0.2, &[(1.0, 0.0)]).is_err());
         ledger.release(0.5);
         assert!((ledger.current() - 0.4).abs() < f64::EPSILON);
+        assert!((*ledger.reserved_usd.lock().unwrap() - 0.4).abs() < f64::EPSILON);
     }
 
     #[test]

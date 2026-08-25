@@ -24,7 +24,7 @@
 //! protection independent of the general token budget. See [`AuthLoginLimiter`].
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, Response, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::middleware::Next;
 use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
@@ -122,6 +122,21 @@ fn has_forwarding_header(headers: &HeaderMap) -> bool {
     headers.contains_key("x-forwarded-for")
         || headers.contains_key("x-real-ip")
         || headers.contains_key("forwarded")
+}
+
+fn rate_limit_response(error: &str, retry_after_secs: u64) -> Response<Body> {
+    let mut response = Response::new(Body::from(serde_json::json!({"error": error}).to_string()));
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from_str(&retry_after_secs.to_string())
+            .expect("a decimal u64 is always a valid HTTP header value"),
+    );
+    response
 }
 
 pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
@@ -228,15 +243,7 @@ pub async fn gcra_rate_limit(
     };
     if rate_limited {
         tracing::warn!(ip = %ip, cost = cost.get(), path = %path, "GCRA rate limit exceeded");
-        let retry_after = state.retry_after_secs.to_string();
-        return Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header("content-type", "application/json")
-            .header("retry-after", retry_after)
-            .body(Body::from(
-                serde_json::json!({"error": "Rate limit exceeded"}).to_string(),
-            ))
-            .unwrap_or_default();
+        return rate_limit_response("Rate limit exceeded", state.retry_after_secs);
     }
 
     next.run(request).await
@@ -419,17 +426,10 @@ pub async fn auth_rate_limit_layer(
             max_attempts,
             "Auth rate limit exceeded"
         );
-        return Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header("content-type", "application/json")
-            .header("retry-after", AUTH_RATE_LIMIT_RETRY_AFTER_SECS.to_string())
-            .body(Body::from(
-                serde_json::json!({
-                    "error": "Too many login attempts. Please wait before trying again."
-                })
-                .to_string(),
-            ))
-            .unwrap_or_default();
+        return rate_limit_response(
+            "Too many login attempts. Please wait before trying again.",
+            AUTH_RATE_LIMIT_RETRY_AFTER_SECS,
+        );
     }
 
     next.run(request).await
@@ -449,6 +449,14 @@ mod tests {
     use axum::Router;
     use std::net::SocketAddr;
     use tower::ServiceExt;
+
+    #[test]
+    fn rate_limit_response_is_fail_closed() {
+        let response = rate_limit_response("limited", 42);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::RETRY_AFTER], "42");
+    }
 
     /// Regression: a small-quota limiter must actually start rejecting
     /// after the burst is drained. Before this fix the nested-Result

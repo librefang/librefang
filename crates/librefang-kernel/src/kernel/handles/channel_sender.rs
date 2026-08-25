@@ -339,8 +339,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         self.memory
             .substrate
             .roster()
-            .upsert(channel, chat_id, user_id, display_name, username);
-        Ok(())
+            .upsert(channel, chat_id, user_id, display_name, username)
     }
 
     fn roster_members(
@@ -348,7 +347,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         channel: &str,
         chat_id: &str,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
-        let members = self.memory.substrate.roster().members(channel, chat_id);
+        let members = self.memory.substrate.roster().members(channel, chat_id)?;
         Ok(members
             .into_iter()
             .map(|(user_id, display_name, username)| {
@@ -370,8 +369,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         self.memory
             .substrate
             .roster()
-            .remove_member(channel, chat_id, user_id);
-        Ok(())
+            .remove_member(channel, chat_id, user_id)
     }
 
     fn resolve_channel_owner(
@@ -418,7 +416,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // the first equal-specificity match — `max_by_key` would keep the
         // *last*, drifting from inbound on a tie.
         let bound_agent = {
-            let bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+            let bindings = super::super::bindings_and_handle::lock_bindings(&self.mesh.bindings);
             let mut best: Option<&librefang_types::config::AgentBinding> = None;
             for b in bindings
                 .iter()

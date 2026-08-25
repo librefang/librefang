@@ -1,0 +1,6 @@
+Managed configuration mode (`LIBREFANG_CONFIG_MODE=managed`) now reaches the dashboard and the last four route domains that were still rewriting `config.toml` behind its back.
+Previously an operator in a managed deployment got a bare `423` on save from a UI that had offered an editable control, with nothing on screen saying which settings were locked or why; the config editor now reads `GET /api/config/status`, renders locked settings as locked, and names the file the deployment owns along with its checksum so a rollout can be confirmed.
+Server-side, the dashboard password change, both sidecar-channel routes, the extension install/uninstall aliases, and the MCP server writes are now refused rather than silently drifting the running config away from the manifest.
+The MCP refusal is scoped to `mcp_runtime_store = "file"` on purpose — under the `db` store those writes never touch `config.toml`, so locking them would take the install surface away from a deployment that had already moved that persistence off the managed file.
+MCP OAuth, reconnect/reload, plugins, and the per-agent `agent.toml` surface stay writable for the same reason, and `docs/operations/managed-config.md` now states the classification for each so it can be argued with rather than rediscovered.
+(#7868) (@houko)

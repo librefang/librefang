@@ -1595,7 +1595,10 @@ impl SessionStore {
                 )
                 .map_err(LibreFangError::memory)?;
 
-            rows.filter_map(|r| r.ok()).collect()
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| {
+                warn!(error = %e, "session FTS search: row decode failed");
+                LibreFangError::memory(e)
+            })?
         } else {
             let mut stmt = conn
                 .prepare(
@@ -1621,7 +1624,10 @@ impl SessionStore {
                 )
                 .map_err(LibreFangError::memory)?;
 
-            rows.filter_map(|r| r.ok()).collect()
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| {
+                warn!(error = %e, "session FTS search: row decode failed");
+                LibreFangError::memory(e)
+            })?
         };
 
         Ok(results)
@@ -2849,6 +2855,25 @@ mod tests {
         // Empty query should return nothing
         let results = store.search_sessions("", None).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn fts_search_surfaces_corrupt_result_rows() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+                rusqlite::params![vec![0xff_u8], agent_id.0.to_string(), "corruptneedle"],
+            )
+            .unwrap();
+        }
+
+        assert!(store.search_sessions("corruptneedle", None).is_err());
+        assert!(store
+            .search_sessions("corruptneedle", Some(&agent_id))
+            .is_err());
     }
 
     /// search_sessions_paginated must:

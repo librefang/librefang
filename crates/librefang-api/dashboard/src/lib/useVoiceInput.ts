@@ -10,8 +10,11 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
   const streamRef = useRef<MediaStream | null>(null);
   const recordingRef = useRef(false);
   const onTranscriptRef = useRef(onTranscript);
+  const mountedRef = useRef(true);
 
-  onTranscriptRef.current = onTranscript;
+  useEffect(() => {
+    onTranscriptRef.current = onTranscript;
+  }, [onTranscript]);
 
   const hasMediaDevices = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
 
@@ -23,7 +26,7 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
     mediaRecorderRef.current = null;
     chunksRef.current = [];
     recordingRef.current = false;
-    setIsRecording(false);
+    if (mountedRef.current) setIsRecording(false);
   }, []);
 
   const startRecording = useCallback(async () => {
@@ -32,6 +35,10 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
 
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -54,17 +61,21 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
           return;
         }
 
+        if (!mountedRef.current) return;
         setIsTranscribing(true);
         try {
           const result = await transcribeAudio(blob);
+          if (!mountedRef.current) return;
           if (result.text.trim()) {
             onTranscriptRef.current(result.text.trim());
           }
         } catch (err) {
           console.error("Transcription failed:", err);
         } finally {
-          setIsTranscribing(false);
-          cleanup();
+          if (mountedRef.current) {
+            setIsTranscribing(false);
+            cleanup();
+          }
         }
       };
 
@@ -93,7 +104,11 @@ export function useVoiceInput(onTranscript: (text: string) => void) {
   }, [startRecording, stopRecording]);
 
   useEffect(() => {
-    return () => { cleanup(); };
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
   }, [cleanup]);
 
   return {

@@ -10,6 +10,12 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+fn secrets_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> {
     // The dotenv reader (`librefang_extensions::dotenv`) silently strips
@@ -56,7 +62,21 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
         return Err(format!("invalid secret key `{key}`"));
     }
 
-    let original = fs::read_to_string(path).unwrap_or_default();
+    // Serialize the complete read-modify-write transaction.
+    // Unique temporary names prevent collisions but do not prevent the last
+    // rename from discarding a different key read from the same old snapshot.
+    let lock = secrets_write_lock();
+    let _write_guard = lock.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("recovering poisoned secrets.env write lock");
+        lock.clear_poison();
+        poisoned.into_inner()
+    });
+
+    let original = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("read {path:?}: {error}")),
+    };
     let mut out = String::with_capacity(original.len() + key.len() + value.len() + 2);
     let mut replaced = false;
     for line in original.lines() {
@@ -91,18 +111,16 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".secrets.env.tmp.{}.{seq}", std::process::id()));
     let write_result = (|| -> Result<(), String> {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(|e| format!("open {tmp:?}: {e}"))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let perm = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&tmp, perm).map_err(|e| format!("chmod 600 {tmp:?}: {e}"))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let mut f = options
+            .open(&tmp)
+            .map_err(|e| format!("open {tmp:?}: {e}"))?;
         f.write_all(out.as_bytes())
             .map_err(|e| format!("write {tmp:?}: {e}"))?;
         f.sync_all().map_err(|e| format!("sync {tmp:?}: {e}"))?;
@@ -137,6 +155,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     fn read(path: &Path) -> String {
@@ -176,25 +195,53 @@ mod tests {
     }
 
     #[test]
-    fn rename_failure_cleans_up_staging_file() {
+    fn existing_secret_read_error_does_not_replace_target() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("secrets.env");
-        // Make the destination an existing directory so the final
-        // `fs::rename(tmp, path)` fails (ENOTDIR/EISDIR) without touching
-        // the write/fsync stage at all — this exercises the rename-failure
-        // cleanup path specifically, distinct from the write-failure path.
+        // A directory at the target path reliably produces a non-NotFound
+        // read error on every supported platform.
         fs::create_dir(&path).unwrap();
 
         let err = upsert_secret(&path, "OPENAI_API_KEY", "sk-123").unwrap_err();
-        assert!(err.contains("rename"), "got: {err}");
+        assert!(err.contains("read"), "got: {err}");
+        assert!(path.is_dir(), "the unreadable target must remain untouched");
 
-        // Only the pre-existing `secrets.env/` directory should remain;
-        // the `.secrets.env.tmp.*` staging file must not survive a failed
-        // rename.
         assert_eq!(
             fs::read_dir(dir.path()).unwrap().count(),
             1,
-            "leftover staging file after failed rename"
+            "a read failure must not create a secret-bearing staging file"
         );
+    }
+
+    #[test]
+    fn concurrent_upserts_preserve_every_key() {
+        const WRITERS: usize = 16;
+        let dir = TempDir::new().unwrap();
+        let path = Arc::new(dir.path().join("secrets.env"));
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    upsert_secret(&path, &format!("KEY_{index}"), &format!("value-{index}"))
+                })
+            })
+            .collect();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+
+        let content = read(&path);
+        for index in 0..WRITERS {
+            assert!(
+                content
+                    .lines()
+                    .any(|line| line == format!("KEY_{index}=value-{index}")),
+                "missing KEY_{index} from {content:?}"
+            );
+        }
     }
 }

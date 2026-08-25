@@ -173,6 +173,7 @@ fn read_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockRe
             state,
             "media driver state read lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -183,6 +184,7 @@ fn write_media_state<'a, T>(lock: &'a RwLock<T>, state: &'static str) -> RwLockW
             state,
             "media driver state write lock poisoned; recovering inner state"
         );
+        lock.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -381,9 +383,11 @@ mod tests {
                 .join()
         });
         assert!(urls_poison.is_err());
+        assert!(cache.provider_urls.is_poisoned());
 
         cache
             .update_provider_urls([("custom".to_string(), "https://media.example/v1".to_string())]);
+        assert!(!cache.provider_urls.is_poisoned());
         assert!(cache.get_or_create("custom", None).is_ok());
 
         let providers_poison = std::thread::scope(|scope| {
@@ -396,12 +400,11 @@ mod tests {
                 .join()
         });
         assert!(providers_poison.is_err());
+        assert!(cache.media_providers.is_poisoned());
         assert!(read_media_state(&cache.media_providers, "media_providers").is_empty());
-        *write_media_state(&cache.media_providers, "media_providers") = vec!["custom".into()];
-        assert_eq!(
-            read_media_state(&cache.media_providers, "media_providers").as_slice(),
-            ["custom"]
-        );
+        assert!(!cache.media_providers.is_poisoned());
+        *cache.media_providers.write().unwrap() = vec!["custom".into()];
+        assert_eq!(cache.media_providers.read().unwrap().as_slice(), ["custom"]);
     }
 
     #[test]

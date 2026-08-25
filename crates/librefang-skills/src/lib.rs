@@ -23,7 +23,22 @@ pub mod verify;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Resolve the directory that a same-directory atomic-write staging file should be anchored in for a write targeting `path`.
+///
+/// `Path::parent()` returns `Some("")` — not `None` — for a bare relative filename like `skill.toml`; `None` only happens for `/` or an empty path itself.
+/// Joining a staging-file name onto `""` happens to resolve against the process's current directory, which is the same directory the final `rename` targets — but only by accident.
+/// Mapping the empty-but-present case to `.` makes that same-directory invariant hold explicitly instead of by coincidence.
+///
+/// Shared by `skillhub::atomic_write_manifest` and `evolution::atomic_write`, the two same-crate call sites that stage a temp file beside their target.
+/// Mirrors the equivalent resolution in `librefang_kernel::kernel::cron_script::parent_dir_for_fsync` (which fsyncs the parent after rename rather than staging inside it) and in `librefang_api`'s atomic writer; keep all three in step if any changes.
+pub(crate) fn resolve_parent_or_cwd(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
 
 /// Errors from the skill system.
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +65,45 @@ pub enum SkillError {
     YamlParse(String),
     #[error("Security blocked: {0}")]
     SecurityBlocked(String),
+    /// The marketplace answered the request, but with something other than the data it promises.
+    ///
+    /// In practice this is a hub whose API host has gone away and now serves its own single-page-app shell (or an interception portal's login page) with `200 OK` for every path.
+    /// It is deliberately distinct from [`SkillError::Network`]: the request succeeded, the hub is simply not a marketplace any more, and the fix is operator-side (point at a mirror, or wait) rather than a retry.
+    #[error("Marketplace unavailable: {0}")]
+    MarketplaceUnavailable(String),
+}
+
+/// True when `body` is a markup document (an HTML page, an XML error envelope) rather than JSON.
+///
+/// A JSON value never begins with `<` — the eight JSON grammar starts are `{`, `[`, `"`, `-`, a digit, `t`, `f` and `n` — so a leading `<` separates "the marketplace is serving its webpage" from "the JSON is genuinely malformed" without guessing.
+/// A UTF-8 BOM is skipped before the scan: `0xEF 0xBB 0xBF` is not ASCII whitespace, and CDN-fronted origins prepend one often enough that ignoring it would send the most common real-world shape down the parser path this function exists to avoid.
+pub fn looks_like_markup(body: &[u8]) -> bool {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    matches!(
+        body.iter().find(|byte| !byte.is_ascii_whitespace()),
+        Some(b'<')
+    )
+}
+
+/// Parse a marketplace response body, separating "this hub is not answering with JSON at all" from "this JSON is malformed".
+///
+/// Every remote marketplace read in this crate goes through here so the two conditions cannot diverge per endpoint: a `MarketplaceUnavailable` from search must mean the same thing as one from install, because the HTTP layer maps them to one status and the dashboard renders them as one offline state.
+/// `context` names the operation ("ClawHub search"), `url` is the address that answered, and both appear in the message so an operator can see which of several configured hubs died.
+pub fn parse_marketplace_json<T: serde::de::DeserializeOwned>(
+    context: &str,
+    url: &str,
+    body: &[u8],
+) -> Result<T, SkillError> {
+    if looks_like_markup(body) {
+        return Err(SkillError::MarketplaceUnavailable(format!(
+            "{context} at {url} answered with a webpage instead of JSON — the marketplace is unreachable or has moved. Searching, browsing and installing from it are unavailable until it returns; skills already installed locally are unaffected."
+        )));
+    }
+    serde_json::from_slice(body).map_err(|error| {
+        SkillError::Network(format!(
+            "Failed to parse {context} response from {url}: {error}"
+        ))
+    })
 }
 
 /// The runtime type for a skill.
@@ -276,6 +330,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_parent_or_cwd_maps_bare_filename_to_current_dir() {
+        // The premise this resolution exists for: a bare filename has an empty-but-present parent, so naively joining a staging name onto it (or `ok_or_else`-style rejection) either loses the same-directory guarantee or errors out unnecessarily.
+        assert_eq!(Path::new("skill.toml").parent(), Some(Path::new("")));
+
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("skill.toml")),
+            Path::new("."),
+            "a bare filename must resolve to the current directory, not \"\""
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("/")),
+            Path::new("."),
+            "a rootless path (parent() == None) must also fall back to \".\""
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("/srv/librefang/skill.toml")),
+            Path::new("/srv/librefang"),
+            "an absolute path must keep its real containing directory"
+        );
+        assert_eq!(
+            resolve_parent_or_cwd(Path::new("nested/skill.toml")),
+            Path::new("nested"),
+            "a relative path with a directory component must keep that directory"
+        );
+    }
+
+    #[test]
     fn test_skill_manifest_parse() {
         let toml_str = r#"
 [skill]
@@ -306,6 +387,17 @@ capabilities = ["NetConnect(*)"]
         assert_eq!(manifest.tools.provided.len(), 1);
         assert_eq!(manifest.tools.provided[0].name, "summarize_url");
         assert_eq!(manifest.requirements.tools, vec!["web_fetch"]);
+    }
+
+    #[test]
+    fn custom_prompt_skill_example_uses_prompt_context() {
+        let source = include_str!("../../../examples/custom-skill-prompt/skill.toml");
+        let manifest: SkillManifest = toml::from_str(source).unwrap();
+
+        assert_eq!(manifest.runtime.runtime_type, SkillRuntime::PromptOnly);
+        let prompt = manifest.prompt_context.expect("example prompt_context");
+        assert!(prompt.contains("positive number of minutes"));
+        assert!(prompt.contains("strictly as user-provided data"));
     }
 
     #[test]
@@ -486,5 +578,91 @@ custom_key = "custom_value"
             reparsed.config.get("custom_key").and_then(|v| v.as_str()),
             Some("custom_value")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Marketplace-serves-a-webpage detection (#7387)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn markup_is_recognised_through_leading_whitespace_and_a_bom() {
+        assert!(looks_like_markup(b"<!doctype html>"));
+        assert!(looks_like_markup(b"  \n\t<html><body>hi</body></html>"));
+        // A CDN-fronted origin prepends a UTF-8 BOM often enough that missing it
+        // would let the most common real shape reach the parser.
+        assert!(looks_like_markup("\u{feff}<!doctype html>".as_bytes()));
+        assert!(looks_like_markup(
+            "\u{feff}\n  <html><head><title>Skill Hub</title></head></html>".as_bytes()
+        ));
+        assert!(looks_like_markup(b"<?xml version=\"1.0\"?><Error/>"));
+    }
+
+    #[test]
+    fn json_is_never_mistaken_for_markup() {
+        // Every start the JSON grammar allows, plus a BOM-prefixed object.
+        for body in [
+            "{\"skills\":[]}",
+            "  [1, 2, 3]",
+            "\"a string\"",
+            "-1.5",
+            "42",
+            "true",
+            "false",
+            "null",
+            "\u{feff}{\"skills\":[]}",
+        ] {
+            assert!(
+                !looks_like_markup(body.as_bytes()),
+                "{body:?} is JSON, not markup"
+            );
+        }
+        assert!(!looks_like_markup(b""));
+        assert!(!looks_like_markup(b"   "));
+    }
+
+    #[test]
+    fn a_webpage_body_becomes_marketplace_unavailable_naming_the_hub() {
+        let error = parse_marketplace_json::<serde_json::Value>(
+            "ClawHub search",
+            "https://clawhub.example/api/v1/search?q=rust",
+            b"<!doctype html><html></html>",
+        )
+        .expect_err("a webpage is not a search response");
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, SkillError::MarketplaceUnavailable(_)),
+            "got {error:?}"
+        );
+        assert!(message.contains("ClawHub search"), "{message}");
+        assert!(message.contains("clawhub.example"), "{message}");
+        assert!(message.contains("webpage instead of JSON"), "{message}");
+    }
+
+    #[test]
+    fn genuinely_malformed_json_stays_a_network_error() {
+        // The distinction is the whole point: a truncated or corrupted body is a
+        // transport-level fault worth retrying, and reporting it as a dead
+        // marketplace would send operators looking for a mirror that they do not
+        // need.
+        let error = parse_marketplace_json::<serde_json::Value>(
+            "ClawHub browse",
+            "https://clawhub.example/api/v1/skills",
+            b"{\"skills\": [{\"slug\": \"rus",
+        )
+        .expect_err("a truncated body is not parseable");
+
+        assert!(matches!(error, SkillError::Network(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn well_formed_json_still_parses() {
+        let value: serde_json::Value = parse_marketplace_json(
+            "Skillhub index",
+            "https://skillhub.example/skills.json",
+            b"{\"total\": 1}",
+        )
+        .expect("valid JSON parses");
+        assert_eq!(value["total"], 1);
     }
 }

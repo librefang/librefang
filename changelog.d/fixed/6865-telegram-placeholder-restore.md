@@ -1,1 +1,0 @@
-- Restored Telegram inline-code placeholders in one linear pass instead of repeatedly rescanning and reallocating the whole message. (@houko)

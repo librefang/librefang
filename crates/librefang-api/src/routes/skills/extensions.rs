@@ -113,19 +113,31 @@ pub async fn get_extension(
 
 /// POST /api/extensions/install — Install a catalog entry (alias for
 /// POST /api/mcp/servers with template_id).
+///
+/// Refused with `423 Locked` in managed mode (#6695), and refused **unconditionally** rather than per-store the way `persist_mcp_upsert` is.
+/// The difference is not a policy choice: this handler calls `upsert_mcp_server_config` directly, with no `mcp_runtime_store` check, so it rewrites `config.toml` even when the store is `"db"`.
+/// While that remains true the guard has to be unconditional or it would miss the write it exists to stop.
+/// The route it aliases (`POST /api/mcp/servers`) honours the store, so a managed deployment that wants an install surface sets `mcp_runtime_store = "db"` and uses that route.
 #[utoipa::path(
     post,
     path = "/api/extensions/install",
     tag = "extensions",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a catalog entry", body = crate::types::JsonObject)
+        (status = 200, description = "Install a catalog entry", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; declare the server in the manifest, or use POST /api/mcp/servers with `mcp_runtime_store = \"db\"`.", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_extension(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionInstallRequest>,
 ) -> impl IntoResponse {
+    // Ahead of `install_integration`, which reloads the on-disk catalog and resolves credentials out of the vault.
+    // Neither is durable, but both are work done on behalf of a request that cannot succeed.
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+        return locked;
+    }
+
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
@@ -154,12 +166,7 @@ pub async fn install_extension(
         Ok(r) => r,
         Err(e) => {
             let err_str = e.to_string();
-            let status = match e {
-                librefang_types::integration::IntegrationError::NotFound(_) => {
-                    StatusCode::NOT_FOUND
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let status = extension_install_error_status(&e);
             // 404 echoes the "not found" message (caller-useful); the
             // 500 catch-all scrubs (audit: rusqlite-errors-leak) and
             // logs the full error for operators.
@@ -173,7 +180,7 @@ pub async fn install_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if let Err(e) = upsert_mcp_server_config(&config_path, &result.server) {
         // Scrub the config-write io error (audit:
         // rusqlite-errors-leak) — path / permission detail stays in
@@ -188,11 +195,14 @@ pub async fn install_extension(
     // [[mcp_servers]] entry is invisible and the endpoint reports "installed"
     // without actually connecting anything.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension install: {e}");
+        return extension_reload_error("install", "config", e);
     }
 
     state.kernel.mcp_health().register(&result.server.name);
-    let connected = state.kernel.clone().reload_mcp_servers().await.unwrap_or(0);
+    let connected = match state.kernel.clone().reload_mcp_servers().await {
+        Ok(connected) => connected,
+        Err(e) => return extension_reload_error("install", "MCP servers", e),
+    };
 
     (
         StatusCode::OK,
@@ -205,19 +215,27 @@ pub async fn install_extension(
 }
 
 /// POST /api/extensions/uninstall — Uninstall by catalog id (template_id).
+///
+/// Refused with `423 Locked` in managed mode (#6695), unconditionally, for the same reason as `install_extension`: it calls `remove_mcp_server_config` without consulting `mcp_runtime_store`.
+/// Without the guard an uninstall would delete a `[[mcp_servers]]` entry the manifest declares and the next rollout would restore it, which is drift in both directions.
 #[utoipa::path(
     post,
     path = "/api/extensions/uninstall",
     tag = "extensions",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Uninstall a catalog-backed MCP server", body = crate::types::JsonObject)
+        (status = 200, description = "Uninstall a catalog-backed MCP server", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; remove the server from the manifest instead.", body = crate::types::JsonObject)
     )
 )]
 pub async fn uninstall_extension(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionUninstallRequest>,
 ) -> impl IntoResponse {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+        return locked;
+    }
+
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return ApiErrorResponse::bad_request("Missing or empty 'name' field").into_json_tuple();
@@ -240,7 +258,7 @@ pub async fn uninstall_extension(
         }
     };
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if let Err(e) = remove_mcp_server_config(&config_path, &server_name) {
         return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
@@ -250,13 +268,13 @@ pub async fn uninstall_extension(
     // removed entry and `reload_mcp_servers` happily reconnects the server
     // we just deleted.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config after extension uninstall: {e}");
+        return extension_reload_error("uninstall", "config", e);
     }
 
     state.kernel.mcp_health().unregister(&server_name);
     state.kernel.disconnect_mcp_server(&server_name).await;
     if let Err(e) = state.kernel.clone().reload_mcp_servers().await {
-        tracing::warn!("Failed to reload MCP servers after uninstall: {e}");
+        return extension_reload_error("uninstall", "MCP servers", e);
     }
 
     (
@@ -266,4 +284,69 @@ pub async fn uninstall_extension(
             "name": name,
         })),
     )
+}
+
+fn extension_install_error_status(
+    error: &librefang_types::integration::IntegrationError,
+) -> StatusCode {
+    match error {
+        librefang_types::integration::IntegrationError::NotFound(_)
+        | librefang_types::integration::IntegrationError::NotInstalled(_)
+        | librefang_types::integration::IntegrationError::CredentialNotFound(_) => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn extension_reload_error(
+    action: &str,
+    target: &str,
+    error: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    ApiErrorResponse::internal_scrub(format!(
+        "failed to reload {target} after extension {action}: {error}"
+    ))
+    .into_json_tuple()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_extension_resources_return_not_found() {
+        use librefang_types::integration::IntegrationError;
+
+        let errors = [
+            IntegrationError::NotFound("github".to_string()),
+            IntegrationError::NotInstalled("github".to_string()),
+            IntegrationError::CredentialNotFound("GITHUB_TOKEN".to_string()),
+        ];
+
+        for error in errors {
+            assert_eq!(
+                extension_install_error_status(&error),
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        assert_eq!(
+            extension_install_error_status(&IntegrationError::Vault("locked".to_string())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn extension_reload_errors_return_scrubbed_server_error() {
+        let (status, Json(body)) = extension_reload_error(
+            "install",
+            "config",
+            "invalid TOML at /srv/private/config.toml",
+        );
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "Internal server error");
+        assert!(!body.to_string().contains("/srv/private"));
+    }
 }

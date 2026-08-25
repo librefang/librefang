@@ -16,6 +16,7 @@ api-error-agent-execution-failed = エージェントの実行に失敗しまし
 api-error-agent-clone-spawn-failed = クローンの作成に失敗しました: { $error }
 api-error-agent-error = エージェントエラー: { $error }
 api-error-agent-not-found-with-id = エージェントが見つかりません: { $id }
+api-error-agent-invalid-sort = 無効なソートフィールド '{ $field }' です。有効なフィールド: { $valid }
 
 # メッセージエラー
 api-error-message-too-large = メッセージが大きすぎます（最大 64KB）
@@ -31,6 +32,9 @@ api-error-template-parse-failed = テンプレートの解析に失敗しまし�
 api-error-template-required = 'manifest_toml' または 'template' が必要です
 api-error-template-invalid-manifest = 無効なテンプレートマニフェスト
 api-error-template-read-failed = テンプレートの読み込みに失敗しました
+api-error-agent-type-exists = エージェントタイプ '{ $name }' はすでに存在します
+api-error-agent-type-name-taken = '{ $name }' は稼働中のエージェントの名前です。別の名前を指定してください
+api-error-agent-type-not-editable = エージェントタイプ '{ $name }' は稼働中のエージェントのワークスペース由来で、/api/agents で管理されます
 
 # マニフェストエラー
 api-error-manifest-too-large = マニフェストが大きすぎます（最大 1MB）
@@ -219,6 +223,10 @@ api-error-webhook-invalid-events = イベントタイプは文字列である必
 api-error-webhook-event-types-required = 少なくとも 1 つのイベントタイプが必要です
 api-error-webhook-url-unreachable = Webhook URL に到達できません: { $error }
 api-error-webhook-event-publish-failed = イベントの発行に失敗しました: { $error }
+api-error-webhook-invalid-url = Webhook URL の形式が無効です
+api-error-webhook-agent-exec-failed = Webhook エージェントの実行に失敗しました: { $error }
+api-error-webhook-reach-failed = Webhook URL への接続に失敗しました: { $error }
+api-error-webhook-unknown-event = 不明なイベントタイプ '{ $event }' です。有効なタイプ: { $valid }
 
 # バックアップエラー
 api-error-backup-not-found = バックアップが見つかりません
@@ -232,6 +240,10 @@ api-error-backup-finalize-failed = バックアップの完了に失敗しまし
 api-error-backup-open-failed = バックアップの開封に失敗しました: { $error }
 api-error-backup-invalid-archive = 無効なバックアップアーカイブ: { $error }
 api-error-backup-delete-failed = バックアップの削除に失敗しました: { $error }
+api-error-backup-invalid-keep-config = 'keep_config' が不正です — 真偽値である必要があります
+api-error-backup-invalid-components = 'components' が不正です — コンポーネント名の文字列配列である必要があります
+api-error-backup-empty-components = 'components' を空にはできません — すべてのコンポーネントを復元する場合はフィールドを省略してください
+api-error-backup-unknown-component = 不明なバックアップコンポーネント '{ $component }' です。有効なコンポーネント: { $valid }
 
 # スケジュールエラー
 api-error-schedule-not-found = スケジュールが見つかりません

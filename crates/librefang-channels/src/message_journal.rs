@@ -13,9 +13,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+
+static NEXT_COMPACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Status of a journaled message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +62,7 @@ pub fn parse_defer_marker(err: &str) -> Option<u64> {
 }
 
 /// A single journal entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// Platform-specific unique message ID.
     pub message_id: String,
@@ -175,12 +178,14 @@ impl MessageJournal {
     /// async reactor; the lock is `tokio::sync::Mutex`, so we can hold it
     /// across the `.await` without blocking other tokio tasks (only other
     /// journal mutators queue, which is what we want).
-    pub async fn record(&self, entry: JournalEntry) {
+    /// Returns `true` only after the entry is durable and present in the in-memory recovery index.
+    /// Callers must not dispatch when this returns `false`, otherwise the write-ahead guarantee has been lost.
+    pub async fn record(&self, entry: JournalEntry) -> bool {
         let line = match serde_json::to_string(&entry) {
             Ok(l) => l,
             Err(e) => {
                 error!(error = %e, id = %entry.message_id, "Failed to serialize journal entry");
-                return;
+                return false;
             }
         };
         let mut inner = self.inner.lock().await;
@@ -191,80 +196,95 @@ impl MessageJournal {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(error = %e, id = %entry.message_id, "Failed to write journal entry");
-                return;
+                return false;
             }
             Err(e) => {
                 error!(error = %e, id = %entry.message_id, "spawn_blocking panicked writing journal");
-                return;
+                return false;
             }
         }
         inner.pending.insert(entry.message_id.clone(), entry);
+        true
     }
 
     /// Record a terminal dispatch outcome.
     ///
     /// Routes the entry to one of three statuses based on the kernel result:
     /// * `success = true` → `Completed` (entry purged on next compaction).
-    /// * `success = false` and the error string carries the
-    ///   [`RATE_LIMIT_DEFER_MARKER`] suffix → `Deferred` with the parsed
-    ///   retry-after window (the periodic ticker re-dispatches it once due).
+    /// * `success = false` and the error string carries the [`RATE_LIMIT_DEFER_MARKER`] suffix → `Deferred` with the parsed retry-after window (the periodic ticker re-dispatches it once due).
     /// * Any other failure → `Failed` (counts against the 3-strike retry budget).
-    pub async fn record_outcome(&self, message_id: &str, success: bool, err_str: Option<String>) {
+    ///
+    /// Returns `false` when the entry is missing or the transition cannot be persisted.
+    pub async fn record_outcome(
+        &self,
+        message_id: &str,
+        success: bool,
+        err_str: Option<String>,
+    ) -> bool {
         if success {
-            self.update_status(message_id, JournalStatus::Completed, None)
+            return self
+                .update_status(message_id, JournalStatus::Completed, None)
                 .await;
-            return;
         }
         if let Some(ref s) = err_str {
             if let Some(ms) = parse_defer_marker(s) {
-                self.defer(
-                    message_id,
-                    chrono::Duration::milliseconds(ms as i64),
-                    Some(s.clone()),
-                )
-                .await;
-                return;
+                if let Ok(ms) = i64::try_from(ms) {
+                    let retry_after = chrono::Duration::milliseconds(ms);
+                    if Utc::now().checked_add_signed(retry_after).is_some() {
+                        return self.defer(message_id, retry_after, Some(s.clone())).await;
+                    }
+                }
+                warn!(
+                    id = message_id,
+                    defer_ms = ms,
+                    "Ignoring defer marker outside chrono's supported range"
+                );
             }
         }
         self.update_status(message_id, JournalStatus::Failed, err_str)
-            .await;
+            .await
     }
 
     /// Mark an entry as `Deferred` and schedule a retry.
     ///
-    /// Use this when a dispatch failure is recoverable on its own
-    /// (provider rate-limit / overload). The retry budget is NOT bumped —
-    /// waiting for a quota window to reset is not a real failure. The
-    /// entry stays on disk and is picked up by [`due_deferred_entries`]
-    /// once `now >= next_retry_after`.
+    /// Use this when a dispatch failure is recoverable on its own (provider rate-limit / overload).
+    /// The retry budget is NOT bumped — waiting for a quota window to reset is not a real failure.
+    /// The entry stays on disk and is picked up by [`due_deferred_entries`] once `now >= next_retry_after`.
     ///
-    /// Existing failed `attempts` count is preserved so that a Deferred
-    /// entry that previously failed for non-rate-limit reasons still
-    /// honors the 3-strike cap when it fails again post-retry.
+    /// Existing failed `attempts` count is preserved so that a Deferred entry that previously failed for non-rate-limit reasons still honors the 3-strike cap when it fails again post-retry.
+    /// Returns `false` without changing memory when the entry is missing, the deadline is invalid, or persistence fails.
     pub async fn defer(
         &self,
         message_id: &str,
         retry_after: chrono::Duration,
         last_error: Option<String>,
-    ) {
+    ) -> bool {
         let mut inner = self.inner.lock().await;
         let path = inner.path.clone();
 
         let (line, updated) = {
             let entry = match inner.pending.get(message_id) {
                 Some(e) => e,
-                None => return,
+                None => return false,
             };
             let mut updated = entry.clone();
+            let now = Utc::now();
+            let Some(retry_at) = now.checked_add_signed(retry_after) else {
+                error!(
+                    id = message_id,
+                    "Journal retry deadline is outside chrono's supported range"
+                );
+                return false;
+            };
             updated.status = JournalStatus::Deferred;
-            updated.updated_at = Utc::now();
-            updated.next_retry_after = Some(Utc::now() + retry_after);
+            updated.updated_at = now;
+            updated.next_retry_after = Some(retry_at);
             updated.last_error = last_error;
             let line = match serde_json::to_string(&updated) {
                 Ok(l) => l,
                 Err(e) => {
                     error!(error = %e, id = message_id, "Failed to serialize defer update");
-                    return;
+                    return false;
                 }
             };
             (line, updated)
@@ -276,100 +296,101 @@ impl MessageJournal {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(error = %e, id = message_id, "Failed to write defer entry");
-                return;
+                return false;
             }
             Err(e) => {
                 error!(error = %e, id = message_id, "spawn_blocking panicked deferring journal");
-                return;
+                return false;
             }
         }
 
         if let Some(entry) = inner.pending.get_mut(message_id) {
             *entry = updated;
         }
+        true
+    }
+
+    fn is_stale(entry: &JournalEntry, now: DateTime<Utc>) -> bool {
+        let age_from = if entry.status == JournalStatus::Deferred {
+            entry.next_retry_after.unwrap_or(entry.updated_at)
+        } else {
+            entry.received_at
+        };
+        now - age_from > Self::MAX_RECOVERY_AGE
+    }
+
+    /// Remove stale entries from the in-memory index as an explicit maintenance operation.
+    pub async fn sweep_stale(&self) -> usize {
+        let now = Utc::now();
+        let mut inner = self.inner.lock().await;
+        let before = inner.pending.len();
+        inner.pending.retain(|id, entry| {
+            let keep = !Self::is_stale(entry, now);
+            if !keep {
+                debug!(
+                    id,
+                    status = ?entry.status,
+                    "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
+                );
+            }
+            keep
+        });
+        before - inner.pending.len()
     }
 
     /// Return Deferred entries whose `next_retry_after` deadline has passed.
     ///
-    /// Skips entries older than [`Self::MAX_RECOVERY_AGE`] — the same stale
-    /// window applied by [`pending_entries`].
+    /// Skips entries whose retry deadline is older than [`Self::MAX_RECOVERY_AGE`] — the same stale window applied by [`pending_entries`].
     pub async fn due_deferred_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
-        let mut inner = self.inner.lock().await;
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        let inner = self.inner.lock().await;
         inner
             .pending
             .values()
             .filter(|e| {
-                matches!(e.status, JournalStatus::Deferred)
+                !Self::is_stale(e, now)
+                    && matches!(e.status, JournalStatus::Deferred)
                     && e.next_retry_after.map(|d| d <= now).unwrap_or(false)
             })
             .cloned()
             .collect()
     }
 
-    /// Union of [`pending_entries`] (crash-recovery) and
-    /// [`due_deferred_entries`] (rate-limit retries that are due now).
+    /// Union of [`pending_entries`] (crash-recovery) and [`due_deferred_entries`] (rate-limit retries that are due now).
     ///
-    /// Single-pass: takes the inner lock once, runs the stale-entry sweep
-    /// once, and walks the map once. The two-call composition is correct
-    /// but acquires the lock and copies entries twice, with no upside.
+    /// Takes the inner lock once, filters stale entries from the snapshot, and walks the map once.
+    /// The two-call composition is correct but acquires the lock and copies entries twice, with no upside.
     pub async fn recoverable_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
-        let mut inner = self.inner.lock().await;
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        let inner = self.inner.lock().await;
         inner
             .pending
             .values()
-            .filter(|e| match e.status {
-                JournalStatus::Pending | JournalStatus::Processing => true,
-                JournalStatus::Deferred => e.next_retry_after.map(|d| d <= now).unwrap_or(false),
-                JournalStatus::Completed | JournalStatus::Failed => false,
+            .filter(|e| {
+                !Self::is_stale(e, now)
+                    && match e.status {
+                        JournalStatus::Pending | JournalStatus::Processing => true,
+                        JournalStatus::Deferred => {
+                            e.next_retry_after.map(|d| d <= now).unwrap_or(false)
+                        }
+                        JournalStatus::Completed | JournalStatus::Failed => false,
+                    }
             })
             .cloned()
             .collect()
     }
 
     /// Update the status of an existing entry.
+    /// Returns `false` without changing memory when the entry is missing or persistence fails.
     ///
-    /// Disk-then-memory ordering: serialize the *desired* new state, write
-    /// it under the inner lock, and only mutate the in-memory entry on
-    /// success.  The earlier "memory-first, release lock, write disk"
-    /// shape (audit of #3967) corrupted the index on transient I/O
-    /// failure: in-memory `attempts` was bumped while disk still had the
-    /// old count, and after enough retries the in-memory `attempts >= 3`
-    /// removed the entry from the retry pool entirely while the disk
-    /// record stayed at 0.
+    /// Disk-then-memory ordering serializes the *desired* new state, writes it under the inner lock, and mutates the in-memory entry only on success.
+    /// The earlier "memory-first, release lock, write disk" shape (audit of #3967) corrupted the index on transient I/O failure: in-memory `attempts` was bumped while disk still had the old count, and after enough retries the in-memory `attempts >= 3` removed the entry from the retry pool entirely while the disk record stayed at 0.
     pub async fn update_status(
         &self,
         message_id: &str,
         status: JournalStatus,
         error: Option<String>,
-    ) {
+    ) -> bool {
         let mut inner = self.inner.lock().await;
         let path = inner.path.clone();
 
@@ -378,7 +399,7 @@ impl MessageJournal {
         let (line, updated, should_remove) = {
             let entry = match inner.pending.get(message_id) {
                 Some(e) => e,
-                None => return,
+                None => return false,
             };
             let mut updated = entry.clone();
             updated.status = status;
@@ -397,7 +418,7 @@ impl MessageJournal {
                 Ok(l) => l,
                 Err(e) => {
                     error!(error = %e, id = message_id, "Failed to serialize journal update");
-                    return;
+                    return false;
                 }
             };
             let should_remove = status == JournalStatus::Completed
@@ -414,11 +435,11 @@ impl MessageJournal {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(error = %e, id = message_id, "Failed to update journal entry");
-                return;
+                return false;
             }
             Err(e) => {
                 error!(error = %e, id = message_id, "spawn_blocking panicked updating journal");
-                return;
+                return false;
             }
         }
 
@@ -428,6 +449,7 @@ impl MessageJournal {
         } else if let Some(entry) = inner.pending.get_mut(message_id) {
             *entry = updated;
         }
+        true
     }
 
     /// Atomically claim an entry for re-dispatch by transitioning its status
@@ -473,9 +495,7 @@ impl MessageJournal {
             let mut updated = entry.clone();
             updated.status = JournalStatus::Processing;
             updated.updated_at = Utc::now();
-            // Keep `next_retry_after` so that a later defer() that
-            // observes the still-set deadline can use it as the
-            // round-trip start without a clock query.
+            updated.next_retry_after = None;
             let line = match serde_json::to_string(&updated) {
                 Ok(l) => l,
                 Err(e) => {
@@ -522,30 +542,23 @@ impl MessageJournal {
         None => unreachable!(),
     };
 
+    /// Pending and Processing entries age from receipt. Deferred entries age
+    /// from their retry deadline, so a long provider quota window cannot make
+    /// them stale before they are eligible to run.
+    ///
     /// Get all entries that need (re-)processing.
     /// Returns entries with status Pending or Processing (from a previous crash).
     /// Skips entries older than `MAX_RECOVERY_AGE` — they are too stale to recover.
     pub async fn pending_entries(&self) -> Vec<JournalEntry> {
         let now = Utc::now();
-        let mut inner = self.inner.lock().await;
-        // Remove stale entries
-        let stale_ids: Vec<String> = inner
-            .pending
-            .values()
-            .filter(|e| now - e.received_at > Self::MAX_RECOVERY_AGE)
-            .map(|e| e.message_id.clone())
-            .collect();
-        for id in &stale_ids {
-            debug!(
-                id,
-                "Discarding stale journal entry (older than MAX_RECOVERY_AGE)"
-            );
-            inner.pending.remove(id);
-        }
+        let inner = self.inner.lock().await;
         inner
             .pending
             .values()
-            .filter(|e| matches!(e.status, JournalStatus::Pending | JournalStatus::Processing))
+            .filter(|e| {
+                !Self::is_stale(e, now)
+                    && matches!(e.status, JournalStatus::Pending | JournalStatus::Processing)
+            })
             .cloned()
             .collect()
     }
@@ -570,23 +583,21 @@ impl MessageJournal {
     ///    holding it across `sync_all` serializes all channel traffic
     ///    behind the compactor regardless of which scheduler runs the I/O).
     /// 3. **Re-acquire lock for atomic rename** — before swapping
-    ///    `tmp.jsonl → journal.jsonl`, take the lock again and verify no
-    ///    new entries were appended to `pending` since the snapshot. If
-    ///    any are present, `record()` has already appended their lines to
-    ///    the live file; renaming our stale tmp over it would truncate
-    ///    those lines and lose just-journaled messages on the next crash
-    ///    (audit of #3967). When that happens, abort this compaction
-    ///    (the next tick retries) and clean up the tmp file.
+    ///    `tmp.jsonl → journal.jsonl`, take the lock again and verify the
+    ///    complete pending map still matches the snapshot. Any addition,
+    ///    removal, or status update was already appended to the live file;
+    ///    renaming our stale tmp over it would lose that transition on the
+    ///    next restart. When the map changed, abort this compaction (the
+    ///    next tick retries) and clean up the tmp file.
     pub async fn compact(&self) {
-        use std::collections::HashSet;
-        let (path, snapshot_ids, entries) = {
+        let (path, snapshot, entries) = {
             let inner = self.inner.lock().await;
             let path = inner.path.clone();
-            let snapshot_ids: HashSet<String> = inner.pending.keys().cloned().collect();
+            let snapshot = inner.pending.clone();
             let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
-            (path, snapshot_ids, entries)
+            (path, snapshot, entries)
         };
-        let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        let tmp_path = Self::compaction_temp_path(&path);
         let remaining = entries.len();
 
         let tmp_for_write = tmp_path.clone();
@@ -622,21 +633,24 @@ impl MessageJournal {
         // Re-acquire the lock for the rename. `record()` holds this same
         // mutex across its disk-append spawn_blocking, so once we own it
         // again no append can interleave with our rename. We also detect
-        // any append that happened *during* the slow write window above
-        // and abort if so — otherwise the rename would overwrite those
-        // freshly-journaled lines on disk.
+        // any mutation that happened *during* the slow write window above
+        // and abort if so — otherwise the rename would overwrite newer
+        // lines on disk with the stale snapshot.
         let inner = self.inner.lock().await;
-        let raced: Vec<String> = inner
-            .pending
-            .keys()
-            .filter(|id| !snapshot_ids.contains(*id))
-            .cloned()
-            .collect();
-        if !raced.is_empty() {
+        if !Self::compaction_snapshot_is_current(&snapshot, &inner.pending) {
+            let changed = snapshot
+                .iter()
+                .filter(|(id, entry)| inner.pending.get(*id) != Some(*entry))
+                .count()
+                + inner
+                    .pending
+                    .keys()
+                    .filter(|id| !snapshot.contains_key(*id))
+                    .count();
             drop(inner);
             warn!(
-                appended = raced.len(),
-                "Journal compaction aborted: entries were appended during compact; will retry next cycle",
+                changed,
+                "Journal compaction aborted: entries changed during compact; will retry next cycle",
             );
             let cleanup = tmp_path.clone();
             let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
@@ -645,9 +659,11 @@ impl MessageJournal {
 
         let path_for_rename = path.clone();
         let tmp_for_rename = tmp_path.clone();
-        let rename_join =
-            tokio::task::spawn_blocking(move || std::fs::rename(&tmp_for_rename, &path_for_rename))
-                .await;
+        let rename_join = tokio::task::spawn_blocking(move || {
+            std::fs::rename(&tmp_for_rename, &path_for_rename)?;
+            Self::sync_parent_directory(&path_for_rename)
+        })
+        .await;
         drop(inner);
 
         match rename_join {
@@ -665,7 +681,7 @@ impl MessageJournal {
         }
     }
 
-    /// Spawn a background task that compacts the journal every hour.
+    /// Spawn a background task that explicitly sweeps stale entries and compacts the journal every hour.
     pub fn spawn_compaction_timer(&self) {
         let journal = self.clone();
         tokio::spawn(async move {
@@ -673,6 +689,7 @@ impl MessageJournal {
             interval.tick().await; // skip first immediate tick
             loop {
                 interval.tick().await;
+                journal.sweep_stale().await;
                 journal.compact().await;
             }
         });
@@ -683,12 +700,49 @@ impl MessageJournal {
     /// Intended for use inside `tokio::task::spawn_blocking` so that the
     /// sync `OpenOptions::open` + `flush` calls do not stall the async runtime.
     fn write_line_to_path(path: &Path, line: &str) -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
+        let (mut file, created) = match std::fs::OpenOptions::new()
             .append(true)
-            .open(path)?;
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (std::fs::OpenOptions::new().append(true).open(path)?, false)
+            }
+            Err(error) => return Err(error),
+        };
         writeln!(file, "{line}")?;
         file.flush()?;
+        file.sync_data()?;
+        if created {
+            Self::sync_parent_directory(path)?;
+        }
+        Ok(())
+    }
+
+    fn compaction_snapshot_is_current(
+        snapshot: &HashMap<String, JournalEntry>,
+        current: &HashMap<String, JournalEntry>,
+    ) -> bool {
+        snapshot == current
+    }
+
+    fn compaction_temp_path(path: &Path) -> PathBuf {
+        let sequence = NEXT_COMPACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        path.with_extension(format!("jsonl.tmp.{}.{sequence}", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -728,6 +782,56 @@ mod tests {
 
         let pending = journal.pending_entries().await;
         assert_eq!(pending.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_reports_failure_and_does_not_index_unpersisted_entry() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("message_journal.jsonl")).unwrap();
+
+        assert!(!journal.record(test_entry("msg-1")).await);
+        assert!(journal.pending_entries().await.is_empty());
+    }
+
+    #[test]
+    fn compaction_snapshot_detects_every_pending_map_change() {
+        let mut snapshot = HashMap::new();
+        snapshot.insert("msg-1".to_string(), test_entry("msg-1"));
+        snapshot.insert("msg-2".to_string(), test_entry("msg-2"));
+
+        assert!(MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &snapshot
+        ));
+
+        let mut removed = snapshot.clone();
+        removed.remove("msg-1");
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &removed
+        ));
+
+        let mut updated = snapshot.clone();
+        updated.get_mut("msg-1").unwrap().status = JournalStatus::Processing;
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &updated
+        ));
+
+        let mut appended = snapshot.clone();
+        appended.insert("msg-3".to_string(), test_entry("msg-3"));
+        assert!(!MessageJournal::compaction_snapshot_is_current(
+            &snapshot, &appended
+        ));
+    }
+
+    #[test]
+    fn concurrent_compactions_use_distinct_staging_paths() {
+        let path = Path::new("message_journal.jsonl");
+        let first = MessageJournal::compaction_temp_path(path);
+        let second = MessageJournal::compaction_temp_path(path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        assert_eq!(second.parent(), path.parent());
     }
 
     #[tokio::test]
@@ -928,6 +1032,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_staleness_starts_at_retry_deadline() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        let now = Utc::now();
+        let mut entry = test_entry("msg-old-but-deferred");
+        entry.received_at = now - chrono::Duration::hours(7);
+        entry.updated_at = entry.received_at;
+        entry.status = JournalStatus::Deferred;
+        entry.next_retry_after = Some(now + chrono::Duration::hours(1));
+        assert!(journal.record(entry).await);
+
+        assert!(journal.pending_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+        assert!(journal.recoverable_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+        assert!(journal.due_deferred_entries().await.is_empty());
+        assert!(journal.contains("msg-old-but-deferred").await);
+
+        let mut inner = journal.inner.lock().await;
+        inner
+            .pending
+            .get_mut("msg-old-but-deferred")
+            .unwrap()
+            .next_retry_after = Some(now - chrono::Duration::hours(7));
+        drop(inner);
+
+        assert!(journal.due_deferred_entries().await.is_empty());
+        assert!(
+            journal.contains("msg-old-but-deferred").await,
+            "query methods must not mutate the journal"
+        );
+        assert_eq!(journal.sweep_stale().await, 1);
+        assert!(!journal.contains("msg-old-but-deferred").await);
+    }
+
+    #[tokio::test]
     async fn defer_does_not_consume_retry_budget() {
         let dir = TempDir::new().unwrap();
         let journal = MessageJournal::open(dir.path()).unwrap();
@@ -1065,6 +1205,7 @@ mod tests {
         let pending = journal.pending_entries().await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].status, JournalStatus::Processing);
+        assert!(pending[0].next_retry_after.is_none());
     }
 
     #[tokio::test]
@@ -1075,6 +1216,56 @@ mod tests {
             !journal.claim("does-not-exist").await,
             "claiming a missing message must return false, not panic"
         );
+    }
+
+    #[tokio::test]
+    async fn status_mutations_report_persistence_failures() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        assert!(journal.record(test_entry("msg-1")).await);
+        let path = dir.path().join("message_journal.jsonl");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(
+            !journal
+                .defer("msg-1", chrono::Duration::seconds(60), None)
+                .await
+        );
+        assert!(
+            !journal
+                .update_status("msg-1", JournalStatus::Completed, None)
+                .await
+        );
+        assert!(!journal.claim("msg-1").await);
+        assert!(!journal.record_outcome("msg-1", true, None).await);
+
+        let inner = journal.inner.lock().await;
+        let entry = inner.pending.get("msg-1").unwrap();
+        assert_eq!(entry.status, JournalStatus::Pending);
+        assert_eq!(entry.attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_defer_markers_become_hard_failures() {
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+        for (id, ms) in [
+            ("chrono-overflow", i64::MAX as u64),
+            ("cast-overflow", u64::MAX),
+        ] {
+            assert!(journal.record(test_entry(id)).await);
+            let error = format!("rate limited {RATE_LIMIT_DEFER_MARKER}={ms}");
+
+            assert!(journal.record_outcome(id, false, Some(error.clone())).await);
+
+            let inner = journal.inner.lock().await;
+            let entry = inner.pending.get(id).unwrap();
+            assert_eq!(entry.status, JournalStatus::Failed);
+            assert_eq!(entry.attempts, 1);
+            assert_eq!(entry.last_error.as_deref(), Some(error.as_str()));
+            assert!(entry.next_retry_after.is_none());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

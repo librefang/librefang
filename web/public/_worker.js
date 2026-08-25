@@ -24,7 +24,7 @@ const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 // constant in lockstep; scripts/check-pubkey-lockstep.sh enforces the set.
 const REGISTRY_PUBLIC_KEY = 'joY8IYrUbbACfKRyp2CTcEbcEty8wcBwP1MTxU+vjaM=';
 
-function addHeaders(response, url) {
+function addHeaders(response, url, cacheAssets = true) {
   const headers = new Headers(response.headers);
 
   // Security headers for all responses
@@ -34,7 +34,7 @@ function addHeaders(response, url) {
 
   // Cache headers for hashed static assets
   const path = url.pathname;
-  if (path.startsWith('/assets/')) {
+  if (cacheAssets && path.startsWith('/assets/')) {
     headers.set('Cache-Control', IMMUTABLE_CACHE);
   }
 
@@ -45,7 +45,13 @@ function addHeaders(response, url) {
   });
 }
 
-const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es'];
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl', 'uk'];
+const TRAILING_SLASH_ROOTS = new Set([
+  ...LOCALES.map((locale) => '/' + locale),
+  '/deploy',
+  '/changelog',
+  '/privacy',
+]);
 
 // Pretty installer URL → actual asset, chosen by client User-Agent so that
 // `curl -fsSL https://librefang.ai/install | sh` and the PowerShell one-liner
@@ -62,83 +68,100 @@ function installerAssetFor(pathname, userAgent) {
   return null;
 }
 
-// Canonicalize URLs: locale roots get a trailing slash ( /zh → /zh/ ), while
-// sub-paths stay un-slashed ( /zh/skills/ → /zh/skills ). Returns the
+// Canonicalize URLs: published roots get a trailing slash ( /zh → /zh/ ),
+// while sub-paths stay un-slashed ( /zh/skills/ → /zh/skills ). Returns the
 // canonical pathname, or null if the request is already canonical.
 function canonicalPath(pathname) {
   if (pathname === '/') return null;
-  // Locale root without trailing slash — add one.
-  for (const loc of LOCALES) {
-    if (pathname === '/' + loc) return '/' + loc + '/';
-  }
-  // Anything else with a trailing slash and more than one segment — strip it.
-  // Keeps /zh/ and /deploy/ alone but redirects /zh/skills/ → /zh/skills.
+
+  if (TRAILING_SLASH_ROOTS.has(pathname)) return pathname + '/';
+
+  // Normalize repeated root slashes, or strip them from sub-paths.
   if (pathname.length > 1 && pathname.endsWith('/')) {
-    const segs = pathname.split('/').filter(Boolean);
-    const isLocaleRoot = segs.length === 1 && LOCALES.includes(segs[0]);
-    const isBlessedTrailingSlashPath = /^\/(deploy|changelog|privacy)\/?$/.test(pathname);
-    if (!isLocaleRoot && !isBlessedTrailingSlashPath) {
-      return pathname.replace(/\/+$/, '');
+    const withoutTrailingSlash = pathname.replace(/\/+$/, '');
+    if (TRAILING_SLASH_ROOTS.has(withoutTrailingSlash)) {
+      return pathname === withoutTrailingSlash + '/' ? null : withoutTrailingSlash + '/';
     }
+    return withoutTrailingSlash;
   }
   return null;
+}
+
+function internalErrorResponse(url) {
+  return addHeaders(
+    new Response('Internal Server Error', {
+      status: 500,
+      headers: {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      },
+    }),
+    url,
+    false,
+  );
+}
+
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
+
+  // Serve the registry pubkey BEFORE asset/SPA fallback — otherwise the SPA
+  // catch-all hands daemons an HTML page that fails base64 validation.
+  if (url.pathname === '/.well-known/registry-pubkey') {
+    return new Response(REGISTRY_PUBLIC_KEY + '\n', {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=86400',
+        ...SECURITY_HEADERS,
+      },
+    });
+  }
+
+  // 301 redirect to the canonical URL before serving. Preserves the query.
+  const canonical = canonicalPath(url.pathname);
+  if (canonical !== null) {
+    const target = canonical + url.search;
+    return Response.redirect(new URL(target, url).toString(), 301);
+  }
+
+  // Rewrite /install → /install.sh or /install.ps1 for CLI clients so the
+  // suffix-less install one-liners work. Must happen before the asset fetch
+  // (which would 404 on /install) and before the SPA fallback (which would
+  // hand the CLI an HTML page, causing `sh: newline unexpected`).
+  const installerAsset = installerAssetFor(
+    url.pathname,
+    request.headers.get('user-agent') || '',
+  );
+  if (installerAsset) {
+    const installerUrl = new URL(installerAsset, request.url);
+    const installerResponse = await env.ASSETS.fetch(new Request(installerUrl, request));
+    return addHeaders(installerResponse, url);
+  }
+
+  // Try serving static asset first
+  const assetResponse = await env.ASSETS.fetch(request);
+
+  // Static asset found — return with headers
+  if (assetResponse.status !== 404) {
+    return addHeaders(assetResponse, url);
+  }
+
+  // SPA fallback — serve index.html for navigation requests.
+  const indexResponse = await env.ASSETS.fetch(new URL('/', request.url));
+  if (!indexResponse.ok) {
+    console.error('SPA fallback index failed with status', indexResponse.status);
+    return internalErrorResponse(url);
+  }
+  return addHeaders(indexResponse, url, false);
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    // Serve the registry pubkey BEFORE asset/SPA fallback — otherwise the SPA
-    // catch-all hands daemons an HTML page that fails base64 validation.
-    if (url.pathname === '/.well-known/registry-pubkey') {
-      return new Response(REGISTRY_PUBLIC_KEY + '\n', {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'public, max-age=86400',
-          ...SECURITY_HEADERS,
-        },
-      });
+    try {
+      return await handleRequest(request, env);
+    } catch (error) {
+      console.error('Cloudflare Pages asset request failed', error);
+      return internalErrorResponse(url);
     }
-
-    // 301 redirect to canonical URL before serving. Preserves query + hash.
-    const canonical = canonicalPath(url.pathname);
-    if (canonical !== null) {
-      const target = canonical + url.search + url.hash;
-      return Response.redirect(new URL(target, url).toString(), 301);
-    }
-
-    // Rewrite /install → /install.sh or /install.ps1 for CLI clients so the
-    // suffix-less install one-liners work. Must happen before the asset fetch
-    // (which would 404 on /install) and before the SPA fallback (which would
-    // hand the CLI an HTML page, causing `sh: newline unexpected`).
-    const installerAsset = installerAssetFor(
-      url.pathname,
-      request.headers.get('user-agent') || '',
-    );
-    if (installerAsset) {
-      const installerUrl = new URL(installerAsset, request.url);
-      const installerResponse = await env.ASSETS.fetch(new Request(installerUrl, request));
-      return addHeaders(installerResponse, url);
-    }
-
-    // Try serving static asset first
-    const assetResponse = await env.ASSETS.fetch(request);
-
-    // Static asset found — return with headers
-    if (assetResponse.status !== 404) {
-      return addHeaders(assetResponse, url);
-    }
-
-    // SPA fallback — serve index.html for navigation requests
-    const indexResponse = await env.ASSETS.fetch(new URL('/', request.url));
-    const headers = new Headers(indexResponse.headers);
-    for (const [key, value] of Object.entries(SECURITY_HEADERS)) {
-      headers.set(key, value);
-    }
-
-    return new Response(indexResponse.body, {
-      status: 200,
-      headers,
-    });
   },
 };

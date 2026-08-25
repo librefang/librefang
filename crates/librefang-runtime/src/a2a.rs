@@ -13,9 +13,21 @@ use librefang_types::agent::AgentManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+
+fn lock_a2a_recover<'a, T>(mutex: &'a Mutex<T>, state: &'static str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        warn!(
+            state,
+            "A2A task store lock poisoned; recovering inner state"
+        );
+        // Clear the poison flag so recovery actually recovers: without this, every subsequent `lock()` on this mutex keeps returning `Err` for the lifetime of the process, and this warning fires on every single call site above, forever, instead of once at the actual failure.
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 // ---------------------------------------------------------------------------
 // A2A Agent Card
@@ -244,6 +256,8 @@ const DB_TASK_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 #[derive(Debug)]
 pub struct A2aTaskStore {
     tasks: Mutex<HashMap<String, TrackedTask>>,
+    /// Serializes mutations through their best-effort persistence write.
+    mutation_order: Mutex<()>,
     /// Maximum number of tasks to retain.
     max_tasks: usize,
     /// Time-to-live for any task regardless of state.
@@ -257,6 +271,7 @@ impl A2aTaskStore {
     pub fn new(max_tasks: usize) -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
+            mutation_order: Mutex::new(()),
             max_tasks,
             task_ttl: DEFAULT_TASK_TTL,
             db: None,
@@ -267,6 +282,7 @@ impl A2aTaskStore {
     pub fn with_ttl(max_tasks: usize, task_ttl: Duration) -> Self {
         Self {
             tasks: Mutex::new(HashMap::new()),
+            mutation_order: Mutex::new(()),
             max_tasks,
             task_ttl,
             db: None,
@@ -319,6 +335,7 @@ impl A2aTaskStore {
                 let db = Arc::new(Mutex::new(conn));
                 let mut store = Self {
                     tasks: Mutex::new(HashMap::new()),
+                    mutation_order: Mutex::new(()),
                     max_tasks,
                     task_ttl: DEFAULT_TASK_TTL,
                     db: Some(Arc::clone(&db)),
@@ -349,7 +366,7 @@ impl A2aTaskStore {
             Some(d) => d,
             None => return,
         };
-        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = lock_a2a_recover(db_arc, "database");
         let cutoff = now_unix_secs() - DB_TASK_RETENTION_SECS;
         if let Err(e) = conn.execute(
             "DELETE FROM a2a_tasks_v2 WHERE created_at < ?1",
@@ -376,7 +393,7 @@ impl A2aTaskStore {
             Some(d) => d,
             None => return,
         };
-        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = lock_a2a_recover(db_arc, "database");
         let mut stmt = match conn.prepare(
             "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id
              FROM a2a_tasks_v2
@@ -409,7 +426,7 @@ impl A2aTaskStore {
         };
         drop(stmt);
 
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
         let mut loaded = 0usize;
         for (
             id,
@@ -452,7 +469,7 @@ impl A2aTaskStore {
             Some(d) => d,
             None => return,
         };
-        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = lock_a2a_recover(db_arc, "database");
         let status_json = serde_json::to_string(&task.status).unwrap_or_default();
         let messages_json =
             serde_json::to_string(&task.messages).unwrap_or_else(|_| "[]".to_string());
@@ -498,10 +515,11 @@ impl A2aTaskStore {
     /// Insert a task. Expired tasks are swept first, then capacity eviction
     /// is applied if needed.
     pub fn insert(&self, task: A2aTask) {
+        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
         // Persist first so we never miss a task even if eviction removes it.
         self.db_upsert(&task);
 
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
 
         // Lazy TTL sweep — remove all expired tasks regardless of state.
         Self::evict_expired(&mut tasks, self.task_ttl);
@@ -551,18 +569,13 @@ impl A2aTaskStore {
     /// beyond the in-memory cap).
     pub fn get(&self, task_id: &str) -> Option<A2aTask> {
         // Fast path: in-memory hit.
-        if let Some(tracked) = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(task_id)
-        {
+        if let Some(tracked) = lock_a2a_recover(&self.tasks, "tasks").get(task_id) {
             return Some(tracked.task.clone());
         }
 
         // Slow path: query the DB for tasks that may have been evicted from memory.
         let db_arc = self.db.as_ref()?;
-        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = lock_a2a_recover(db_arc, "database");
         let result = conn.query_row(
             "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2 WHERE id = ?1",
             rusqlite::params![task_id],
@@ -607,37 +620,52 @@ impl A2aTaskStore {
 
     /// Update a task's status and optionally add messages/artifacts.
     pub fn update_status(&self, task_id: &str, status: A2aTaskStatus) -> bool {
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tracked) = tasks.get_mut(task_id) {
+        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
+        let task = {
+            let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
+            let Some(tracked) = tasks.get_mut(task_id) else {
+                return false;
+            };
             tracked.task.status = status.into();
             tracked.updated_at = Instant::now();
-            self.db_upsert(&tracked.task);
-            true
-        } else {
-            false
-        }
+            tracked.task.clone()
+        };
+        self.db_upsert(&task);
+        true
     }
 
     /// Complete a task with a response message and optional artifacts.
     pub fn complete(&self, task_id: &str, response: A2aMessage, artifacts: Vec<A2aArtifact>) {
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tracked) = tasks.get_mut(task_id) {
-            tracked.task.messages.push(response);
-            tracked.task.artifacts.extend(artifacts);
-            tracked.task.status = A2aTaskStatus::Completed.into();
-            tracked.updated_at = Instant::now();
-            self.db_upsert(&tracked.task);
+        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
+        let task = {
+            let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
+            tasks.get_mut(task_id).map(|tracked| {
+                tracked.task.messages.push(response);
+                tracked.task.artifacts.extend(artifacts);
+                tracked.task.status = A2aTaskStatus::Completed.into();
+                tracked.updated_at = Instant::now();
+                tracked.task.clone()
+            })
+        };
+        if let Some(task) = task {
+            self.db_upsert(&task);
         }
     }
 
     /// Fail a task with an error message.
     pub fn fail(&self, task_id: &str, error_message: A2aMessage) {
-        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tracked) = tasks.get_mut(task_id) {
-            tracked.task.messages.push(error_message);
-            tracked.task.status = A2aTaskStatus::Failed.into();
-            tracked.updated_at = Instant::now();
-            self.db_upsert(&tracked.task);
+        let _mutation_order = lock_a2a_recover(&self.mutation_order, "mutation order");
+        let task = {
+            let mut tasks = lock_a2a_recover(&self.tasks, "tasks");
+            tasks.get_mut(task_id).map(|tracked| {
+                tracked.task.messages.push(error_message);
+                tracked.task.status = A2aTaskStatus::Failed.into();
+                tracked.updated_at = Instant::now();
+                tracked.task.clone()
+            })
+        };
+        if let Some(task) = task {
+            self.db_upsert(&task);
         }
     }
 
@@ -648,7 +676,7 @@ impl A2aTaskStore {
 
     /// Count of tracked tasks.
     pub fn len(&self) -> usize {
-        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).len()
+        lock_a2a_recover(&self.tasks, "tasks").len()
     }
 
     /// Whether the store is empty.
@@ -1248,6 +1276,96 @@ mod tests {
 
         let got = store.get("t-1").unwrap();
         assert_eq!(got.status, A2aTaskStatus::Working);
+    }
+
+    #[test]
+    fn test_task_store_recovers_memory_and_database_locks_after_poisoning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = A2aTaskStore::with_persistence(10, &dir.path().join("a2a.db"));
+        let task = A2aTask {
+            id: "poison-recovery".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Working.into(),
+            messages: vec![],
+            artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
+        };
+
+        let tasks_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = store.tasks.lock().unwrap();
+                    panic!("poison A2A task map lock");
+                })
+                .join()
+        });
+        assert!(tasks_poison.is_err());
+        store.insert(task);
+        assert_eq!(store.get("poison-recovery").unwrap().id, "poison-recovery");
+
+        let db = store.db.as_ref().unwrap();
+        let db_poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _guard = db.lock().unwrap();
+                    panic!("poison A2A database lock");
+                })
+                .join()
+        });
+        assert!(db_poison.is_err());
+        assert!(store.cancel("poison-recovery"));
+        assert_eq!(
+            store.get("poison-recovery").unwrap().status,
+            A2aTaskStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn persistence_wait_does_not_hold_task_map_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+        let store = Arc::new(A2aTaskStore::with_persistence(10, &db_path));
+        store.insert(A2aTask {
+            id: "nonblocking-persistence".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Working.into(),
+            messages: vec![],
+            artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
+        });
+
+        let db = Arc::clone(store.db.as_ref().unwrap());
+        let db_guard = lock_a2a_recover(&db, "database test gate");
+        let updater_store = Arc::clone(&store);
+        let updater = std::thread::spawn(move || {
+            updater_store.update_status("nonblocking-persistence", A2aTaskStatus::InputRequired)
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(tasks) = store.tasks.try_lock() {
+                if tasks["nonblocking-persistence"].task.status == A2aTaskStatus::InputRequired {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "task map stayed locked while persistence waited for SQLite"
+            );
+            std::thread::yield_now();
+        }
+
+        drop(db_guard);
+        assert!(updater.join().unwrap());
+        drop(store);
+
+        let reopened = A2aTaskStore::with_persistence(10, &db_path);
+        assert_eq!(
+            reopened.get("nonblocking-persistence").unwrap().status,
+            A2aTaskStatus::InputRequired
+        );
     }
 
     #[test]

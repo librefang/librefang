@@ -8,6 +8,22 @@ import {
 import type { PromptVersion } from "../../api";
 import { agentKeys, promptsKeys } from "../queries/keys";
 
+function invalidatePromptRepo(qc: ReturnType<typeof useQueryClient>, agentId: string) {
+  qc.invalidateQueries({ queryKey: agentKeys.promptVersions(agentId) });
+  qc.invalidateQueries({ queryKey: promptsKeys.list() });
+  qc.invalidateQueries({ queryKey: promptsKeys.details() });
+}
+
+export class PromptBindRollbackError extends Error {
+  constructor(
+    public readonly activationError: unknown,
+    public readonly rollbackError: unknown,
+  ) {
+    super("Prompt activation failed and the previous live prompt could not be restored");
+    this.name = "PromptBindRollbackError";
+  }
+}
+
 // Prompt repository mutations (#6160).
 //
 // These are the repository-page counterparts of the per-agent prompt
@@ -37,17 +53,14 @@ export function useCreatePromptVersionForRepo() {
       version: Parameters<typeof createPromptVersion>[1];
     }) => createPromptVersion(agentId, version),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({
-        queryKey: agentKeys.promptVersions(variables.agentId),
-      });
-      qc.invalidateQueries({ queryKey: promptsKeys.list() });
-      qc.invalidateQueries({ queryKey: promptsKeys.details() });
+      invalidatePromptRepo(qc, variables.agentId);
     },
   });
 }
 
 /**
- * Delete an inactive prompt version (repository surface).
+ * Delete a prompt version (repository surface). The backend rejects deletion
+ * when its prompt-store policy does not permit it.
  */
 export function useDeletePromptVersionForRepo() {
   const qc = useQueryClient();
@@ -61,11 +74,7 @@ export function useDeletePromptVersionForRepo() {
       agentId: string;
     }) => deletePromptVersion(versionId),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({
-        queryKey: agentKeys.promptVersions(variables.agentId),
-      });
-      qc.invalidateQueries({ queryKey: promptsKeys.list() });
-      qc.invalidateQueries({ queryKey: promptsKeys.details() });
+      invalidatePromptRepo(qc, variables.agentId);
     },
   });
 }
@@ -94,23 +103,30 @@ export function useBindPromptVersionToAgent() {
     mutationFn: async ({
       agentId,
       version,
+      previousSystemPrompt,
     }: {
       agentId: string;
       version: PromptVersion;
+      previousSystemPrompt: string;
     }) => {
       // 1. Hot-swap the live system prompt onto the manifest.
       await patchAgent(agentId, { system_prompt: version.system_prompt });
       // 2. Flip the store's active flag to match.
-      return activatePromptVersion(version.id, agentId);
+      try {
+        return await activatePromptVersion(version.id, agentId);
+      } catch (activationError) {
+        try {
+          await patchAgent(agentId, { system_prompt: previousSystemPrompt });
+        } catch (rollbackError) {
+          throw new PromptBindRollbackError(activationError, rollbackError);
+        }
+        throw activationError;
+      }
     },
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({
-        queryKey: agentKeys.promptVersions(variables.agentId),
-      });
+    onSettled: (_data, _error, variables) => {
+      invalidatePromptRepo(qc, variables.agentId);
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
-      qc.invalidateQueries({ queryKey: promptsKeys.list() });
-      qc.invalidateQueries({ queryKey: promptsKeys.details() });
     },
   });
 }
