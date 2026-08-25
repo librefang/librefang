@@ -199,6 +199,27 @@ describe("ChannelsPage", () => {
     expect(screen.getByText("channels.connect_first")).toBeInTheDocument();
   });
 
+  // The gear was gated on `category !== "sidecar"` while every channel reports
+  // `category: "sidecar"`, so the test was never true and the button never
+  // rendered — leaving `POST /api/channels/sidecar/{name}/configure` (#5252)
+  // unreachable from the UI for an already-configured sidecar (#7892).
+  // Assert on the rendered button rather than on the gate, so the same class of
+  // dead condition cannot come back unnoticed.
+  it("renders the configure gear for a sidecar channel", () => {
+    useChannelsMock.mockReturnValue(makeQuery([makeChannel()]));
+    renderPage();
+    expect(screen.getByLabelText("channels.config")).toBeTruthy();
+  });
+
+  it("opens the sidecar configure drawer when the gear is clicked", async () => {
+    useChannelsMock.mockReturnValue(makeQuery([makeChannel()]));
+    renderPage();
+    fireEvent.click(screen.getByLabelText("channels.config"));
+    await waitFor(() => {
+      expect(useDrawerStore.getState().isOpen).toBe(true);
+    });
+  });
+
   it("lists configured channels and hides unconfigured ones by default", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([

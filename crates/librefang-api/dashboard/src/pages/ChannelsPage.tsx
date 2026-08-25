@@ -180,21 +180,23 @@ const ChannelCard = memo(function ChannelCard({ channel: c, isSelected, viewMode
       >
         {statusLabel}
       </Badge>
-      {/* Sidecar channels are config.toml-managed (no /api/channels
-          configure endpoint — it would 404), so suppress the inline
-          Configure affordance; the whole-card click still opens the
-          read-only details drawer. */}
-      {c.category !== "sidecar" && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-          className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
-          aria-label={t("channels.config")}
-          title={t("channels.config")}
-        >
-          <Settings className="w-3.5 h-3.5" />
-        </button>
-      )}
+      {/* The gear used to be gated on `category !== "sidecar"`, from when sidecars
+          were config.toml-only and a configure POST would have 404'd.
+          `POST /api/channels/sidecar/{name}/configure` shipped in #5252 and every
+          channel reports `category: "sidecar"` since the in-process registry was
+          removed — so that test was never true and the gear never rendered, leaving
+          the endpoint unreachable from the UI for an already-configured sidecar (#7892).
+          `onConfigure` opens the schema-driven SidecarForm drawer, which is the one
+          configure path there is now. */}
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+        className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
+        aria-label={t("channels.config")}
+        title={t("channels.config")}
+      >
+        <Settings className="w-3.5 h-3.5" />
+      </button>
       {c.configured && (
         <button
           type="button"
