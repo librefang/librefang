@@ -650,6 +650,77 @@
         }
       }
     },
+    "/api/agents/spawn-ephemeral": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/spawn-ephemeral — run one ephemeral worker turn and return its result.",
+        "operationId": "spawn_ephemeral_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnEphemeralRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The worker ran and returned its result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnEphemeralResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, unknown agent type, or a tool the parent cannot call",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The parent is suspended, or the spawn depth ceiling was reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such parent agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The parent's resource quota or the global budget is exhausted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "tags": [
@@ -15224,6 +15295,119 @@
           }
         },
         "additionalProperties": false
+      },
+      "SpawnEphemeralRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/agents/spawn-ephemeral`.\n\n`provider` and `model` are flat rather than a nested object because that is the shape every other authoring surface already speaks — the agent-type editor, `AgentTypeSpec`, `PATCH /api/agents/{id}/model`.\nThey are assembled into an [`EphemeralModelOverride`] here, which deliberately carries only those two fields: a `base_url` / `api_key_env` reachable from this endpoint would let a caller name any environment variable and any destination host.",
+        "required": [
+          "parent",
+          "message"
+        ],
+        "properties": {
+          "agent_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent type whose template manifest supplies the worker's system prompt, model and declared tools."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short human-meaningful label for the mission, used to name the mission workspace and the worker.\n\nDefaults to `agent_type` when one is given, and to `worker` otherwise, so the common \"run this type on this task\" call needs only two fields."
+          },
+          "max_iterations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Iteration ceiling, clamped down to the operator's configured `agent_max_iterations`.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "The task the worker is being asked to perform."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model id override."
+          },
+          "parent": {
+            "type": "string",
+            "description": "The agent the worker runs on behalf of — UUID or name.\n\nNot optional: it names the ledger the spend is billed to, the `[resources]` quota that is enforced, and the ceiling on the worker's tool set."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Provider id override (`anthropic`, `openai`, …)."
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "System prompt for the worker; overrides the agent type's when both are given."
+          },
+          "tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names the worker may use. Omit for \"everything the effective manifest grants\", which is itself capped by the parent's own set."
+          }
+        }
+      },
+      "SpawnEphemeralResponse": {
+        "type": "object",
+        "description": "What one ephemeral worker turn produced.\n\nMirrors `librefang_types::ephemeral::EphemeralSpawnResult` field for field.\nIt is restated here rather than annotated there because `librefang-types` does not depend on `utoipa`, and adding a web-documentation dependency to the crate every other crate depends on to buy one schema is the wrong trade.",
+        "required": [
+          "name",
+          "response",
+          "iterations",
+          "tools"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Cost billed to the parent, when one could be estimated."
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Loop iterations consumed.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name the worker ran under (`<label>-<8 hex>`), also its mission workspace directory name."
+          },
+          "response": {
+            "type": "string",
+            "description": "The worker's final assistant text."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names the worker was given — which, by construction, is also the set it could execute."
+          }
+        }
       },
       "SpawnRequest": {
         "type": "object",
