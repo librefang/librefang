@@ -3,6 +3,7 @@
 
 const { execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const PLATFORM_MAP = {
@@ -15,6 +16,17 @@ const ARCH_MAP = {
   x64:   "x64",
   arm64: "arm64",
 };
+
+function resolveBinary(pkg, exe, resolver = require.resolve, exists = fs.existsSync) {
+  try {
+    const pkgDir = path.dirname(resolver(`${pkg}/package.json`));
+    const bin = path.join(pkgDir, "bin", exe);
+    return exists(bin) ? bin : null;
+  } catch (err) {
+    if (err && err.code === "MODULE_NOT_FOUND") return null;
+    throw err;
+  }
+}
 
 function getBinaryPath() {
   const platform = PLATFORM_MAP[process.platform];
@@ -34,11 +46,8 @@ function getBinaryPath() {
   const exe = process.platform === "win32" ? "librefang.exe" : "librefang";
 
   for (const pkg of candidates) {
-    try {
-      const pkgDir = path.dirname(require.resolve(`${pkg}/package.json`));
-      const bin = path.join(pkgDir, "bin", exe);
-      if (fs.existsSync(bin)) return bin;
-    } catch {}
+    const bin = resolveBinary(pkg, exe);
+    if (bin) return bin;
   }
 
   console.error(
@@ -48,8 +57,23 @@ function getBinaryPath() {
   process.exit(1);
 }
 
-try {
-  execFileSync(getBinaryPath(), process.argv.slice(2), { stdio: "inherit" });
-} catch (err) {
-  process.exit(err.status ?? 1);
+function childExitCode(err) {
+  if (Number.isInteger(err && err.status)) return err.status;
+  const signalNumber = err && err.signal && os.constants.signals[err.signal];
+  return Number.isInteger(signalNumber) ? 128 + signalNumber : 1;
 }
+
+function main() {
+  const binary = getBinaryPath();
+  try {
+    execFileSync(binary, process.argv.slice(2), { stdio: "inherit" });
+  } catch (err) {
+    process.exit(childExitCode(err));
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { childExitCode, resolveBinary };

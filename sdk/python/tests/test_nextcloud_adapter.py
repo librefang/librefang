@@ -249,21 +249,75 @@ def test_list_joined_rooms_parses_tokens(monkeypatch):
     assert fake.calls[0]["headers"]["ocs-apirequest"] == "true"
 
 
-def test_list_joined_rooms_returns_empty_on_error(monkeypatch):
+def test_list_joined_rooms_raises_on_server_error(monkeypatch):
     a = _adapter()
     fake = _FakeUrlopen([(500, {"error": "boom"})])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
-    assert a._list_joined_rooms() == []
+    with pytest.raises(nc._RoomDiscoveryError, match="status 500"):
+        a._list_joined_rooms()
 
 
-def test_list_joined_rooms_handles_transport_error(monkeypatch):
+def test_list_joined_rooms_raises_on_transport_error(monkeypatch):
     a = _adapter()
 
     def boom(req, timeout=None):
         raise urllib.error.URLError("dns")
 
     monkeypatch.setattr(nc.urllib.request, "urlopen", boom)
-    assert a._list_joined_rooms() == []
+    with pytest.raises(nc._RoomDiscoveryError, match="transport error"):
+        a._list_joined_rooms()
+
+
+def test_discovery_rechecks_after_genuine_empty_room_list(monkeypatch):
+    a = _adapter()
+    results = iter([[], ["room1"]])
+    sleeps: list[float] = []
+    monkeypatch.setattr(a, "_list_joined_rooms", lambda: next(results))
+    monkeypatch.setattr(nc.time, "sleep", sleeps.append)
+
+    assert a._discover_rooms_until_available() == ["room1"]
+    assert sleeps == [nc.MAX_BACKOFF_SECS]
+
+
+def test_discovery_retries_transient_error_with_backoff(monkeypatch):
+    a = _adapter()
+    calls = 0
+    sleeps: list[float] = []
+
+    def discover():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise nc._RoomDiscoveryError("network unavailable")
+        return ["room1"]
+
+    monkeypatch.setattr(a, "_list_joined_rooms", discover)
+    monkeypatch.setattr(nc.time, "sleep", sleeps.append)
+    assert a._discover_rooms_until_available() == ["room1"]
+    assert sleeps == [1.0]
+
+
+def test_producer_uses_recovering_discovery_before_polling(monkeypatch):
+    a = _adapter()
+    polled: list[list[str]] = []
+
+    class _StopProducer(Exception):
+        pass
+
+    monkeypatch.setattr(a, "_verify_credentials", lambda: "bot")
+    monkeypatch.setattr(
+        a, "_discover_rooms_until_available", lambda: ["room1"],
+    )
+    monkeypatch.setattr(
+        a, "_poll_once", lambda _emit, rooms: polled.append(list(rooms)),
+    )
+    monkeypatch.setattr(
+        nc.time, "sleep", lambda _delay: (_ for _ in ()).throw(_StopProducer()),
+    )
+
+    with pytest.raises(_StopProducer):
+        a._producer_blocking(lambda _event: None)
+    assert polled == [["room1"]]
 
 
 # ---- _parse_message ----------------------------------------------
@@ -594,19 +648,34 @@ def test_verify_credentials_429_sleeps_retry_after_then_raises(monkeypatch):
     assert sleeps == [3.0]
 
 
-def test_list_joined_rooms_429_sleeps_then_returns_empty(monkeypatch):
-    """Room discovery is one-shot; the producer just retries on the
-    next pass, so a 429 here only needs to sleep — surfacing it as an
-    empty-list signal (same as transport error) is enough."""
+def test_list_joined_rooms_429_surfaces_retry_after(monkeypatch):
     a = _adapter()
     fake = _FakeUrlopen([
         (429, {"message": "Throttled"}, {"Retry-After": "4"}),
     ])
     monkeypatch.setattr(nc.urllib.request, "urlopen", fake)
-    sleeps: list = []
-    monkeypatch.setattr(nc.time, "sleep", lambda s: sleeps.append(s))
-    out = a._list_joined_rooms()
-    assert out == []
+    with pytest.raises(nc._RoomDiscoveryError) as error:
+        a._list_joined_rooms()
+    assert error.value.retry_after == 4.0
+
+
+def test_discovery_honours_429_retry_after(monkeypatch):
+    a = _adapter()
+    results = iter([
+        nc._RoomDiscoveryError("throttled", retry_after=4.0),
+        ["room1"],
+    ])
+    sleeps: list[float] = []
+
+    def discover():
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(a, "_list_joined_rooms", discover)
+    monkeypatch.setattr(nc.time, "sleep", sleeps.append)
+    assert a._discover_rooms_until_available() == ["room1"]
     assert sleeps == [4.0]
 
 

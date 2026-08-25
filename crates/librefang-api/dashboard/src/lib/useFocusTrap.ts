@@ -9,6 +9,15 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(", ");
 
+export function getVisibleFocusable(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") && element.getClientRects().length > 0,
+  );
+}
+
 /// Traps Tab / Shift+Tab focus movement within the given container while
 /// `isOpen` is true, restores focus to the previously-active element on
 /// close, and autofocuses the first focusable element inside the
@@ -51,9 +60,7 @@ export function useFocusTrap(
     // programmatically without joining the tab order).
     const container = containerRef.current;
     if (container) {
-      const focusable = Array.from(
-        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-      );
+      const focusable = getVisibleFocusable(container);
       if (focusable.length > 0) {
         focusable[0].focus();
       } else if (container.tabIndex >= -1) {
@@ -75,17 +82,22 @@ export function useFocusTrap(
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Tab" || !container) return;
-      const focusable = Array.from(
-        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-      ).filter(
-        (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
-      );
-      if (focusable.length === 0) return;
+      const focusable = getVisibleFocusable(container);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        container.focus();
+        return;
+      }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement as HTMLElement | null;
-      // Shift+Tab on first → cycle to last; Tab on last → cycle to first.
-      if (e.shiftKey && active === first) {
+      const activeIsFocusable = active !== null && focusable.includes(active);
+      // Pull escaped or non-tabbable focus back into the trap, then cycle at
+      // either boundary in the requested direction.
+      if (!container.contains(active) || !activeIsFocusable) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && active === first) {
         e.preventDefault();
         last.focus();
       } else if (!e.shiftKey && active === last) {

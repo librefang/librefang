@@ -404,7 +404,7 @@ pub(crate) enum Commands {
     Configure,
     /// Send a one-shot message to an agent.
     #[command(
-        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito"
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\n--session-id addresses one conversation among many served by the same agent.\nWithout it every caller collapses onto the agent's single canonical session,\nso N unrelated end-users share one message history. Pass the same UUID again\nto continue that conversation; pass a different one to start an isolated one.\n\nAn explicit --session-id overrides the agent's `session_mode` either way: a\n`persistent` agent stops funnelling the turn into its canonical session, and a\n`new` agent stops minting a throwaway session, because the named session is\nreused across calls. The id must belong to this agent; the daemon rejects a\nsession owned by another agent rather than silently reading it.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito\n  librefang message sales \"What are your prices?\" --session-id 550e8400-e29b-41d4-a716-446655440000"
     )]
     Message {
         /// Agent name or ID.
@@ -418,6 +418,10 @@ pub(crate) enum Commands {
         /// suppressed while memory reads remain fully operational.
         #[arg(long)]
         incognito: bool,
+        /// Session UUID to address. Omit for the agent's canonical session
+        /// (today's behavior). Overrides the agent's `session_mode`.
+        #[arg(long, alias = "session")]
+        session_id: Option<String>,
     },
     /// System info and version [*].
     #[command(
@@ -1554,6 +1558,18 @@ pub(crate) enum SecurityCommands {
         long_about = "DESTRUCTIVE: wipe the audit trail and restart the chain from empty.\n\nOnly needed when `librefang security verify` reports a chain break that you can't recover — e.g. after a manual SQL edit, partial DB restore, or a crash that left the anchor file ahead of `audit_entries`.\n\nRefuses to run if the daemon is still holding the database. Requires `--confirm`.\n\nExamples:\n  librefang security audit-reset --confirm"
     )]
     AuditReset {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Repair a broken audit chain by severing the rows past the break, preserving them in an archive.
+    ///
+    /// Use instead of `audit-reset` whenever the pre-break history is worth keeping — which in a compliance or production environment is always.
+    /// Requires `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "Repair the audit trail after `librefang security verify` reports a chain break, without discarding history.\n\nA Merkle chain has one predecessor per row, so a repair has to sever one side of the break. This command archives the severed rows to `<data_dir>/audit-archive/` as JSON Lines before removing them, appends a `ChainReanchored` marker linked to the last row that still verified, and commits the archive's SHA-256 into that marker so the preserved copy is tamper-evident too. Rows below the break keep their original hashes.\n\nWithout `--confirm` it prints the break and what it would do, and exits non-zero. Refuses to run if the daemon is still holding the database.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm"
+    )]
+    AuditReanchor {
         /// Required. Without this flag the command prints what it would do and exits non-zero.
         #[arg(long)]
         confirm: bool,

@@ -13,6 +13,7 @@ export function truncateId(id: string | undefined | null, length = 8): string {
  */
 export function truncate(str: string | undefined | null, maxLength: number): string {
   if (!str) return "-";
+  if (maxLength <= 0) return "";
   if (str.length <= maxLength) return str;
   return `${str.slice(0, maxLength)}…`;
 }
@@ -31,7 +32,7 @@ export function truncate(str: string | undefined | null, maxLength: number): str
  */
 export function prettifyToolName(name: string | null | undefined): string {
   if (!name) return "tool";
-  return name
+  const display = name
     .split(SPLIT_RE)
     .filter(Boolean)
     .map(word => {
@@ -40,4 +41,5 @@ export function prettifyToolName(name: string | null | undefined): string {
       return first.toUpperCase() + rest.join("");
     })
     .join(" ");
+  return display || "tool";
 }

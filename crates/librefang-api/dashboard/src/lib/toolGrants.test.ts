@@ -37,6 +37,13 @@ describe("toolPatternMatches", () => {
     expect(toolPatternMatches("mcp_*_search", "mcp_brave_fetch")).toBe(false);
   });
 
+  it("matches multi-wildcard patterns with the kernel's recursive prefix stripping", () => {
+    expect(toolPatternMatches("a*b*c", "abc")).toBe(true);
+    expect(toolPatternMatches("ab*cd*ef", "abcdef")).toBe(true);
+    expect(toolPatternMatches("a*b*c", "axbxc")).toBe(false);
+    expect(toolPatternMatches("ab*cd*ef", "abxcdyef")).toBe(false);
+  });
+
   it("does not let prefix and suffix overlap the same characters", () => {
     // `a*b` requires at least "ab" worth of distinct characters.
     expect(toolPatternMatches("ab*ab", "abab")).toBe(true);

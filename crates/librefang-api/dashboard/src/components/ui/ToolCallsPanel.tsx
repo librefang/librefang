@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronRight, Wrench, Loader2, AlertCircle } from "lucide-react";
 import type { AgentTool } from "../../api";
@@ -12,19 +12,11 @@ interface ToolCallsPanelProps {
   tools: ReadonlyArray<PanelTool>;
 }
 
-function stableToolKey(tool: PanelTool, i: number): string {
-  if (tool._call_id) return tool._call_id;
-  const raw = `${tool.name ?? ""}:${JSON.stringify(tool.input ?? "")}`;
-  let h = 0;
-  for (let j = 0; j < raw.length; j++) {
-    h = ((h << 5) - h + raw.charCodeAt(j)) | 0;
-  }
-  return `${tool.name ?? "tool"}-${(h >>> 0).toString(36)}-${i}`;
-}
-
 export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: ToolCallsPanelProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const fallbackKeys = useRef(new WeakMap<PanelTool, string>());
+  const nextFallbackKey = useRef(0);
 
   const stats = useMemo(() => {
     let running = 0;
@@ -37,6 +29,15 @@ export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: Tool
   }, [tools]);
 
   if (tools.length === 0) return null;
+
+  const toolKey = (tool: PanelTool): string => {
+    if (tool._call_id) return tool._call_id;
+    const existing = fallbackKeys.current.get(tool);
+    if (existing) return existing;
+    const key = `${tool.name ?? "tool"}-fallback-${nextFallbackKey.current++}`;
+    fallbackKeys.current.set(tool, key);
+    return key;
+  };
 
   const lastTool = tools[tools.length - 1];
   const titleText = t("chat.tool_calls", { count: stats.total, defaultValue: "{{count}} tool calls" });
@@ -81,9 +82,9 @@ export const ToolCallsPanel = React.memo(function ToolCallsPanel({ tools }: Tool
         size="2xl"
       >
         <div className="px-4 py-3">
-          {tools.map((tool, idx) => (
+          {open && tools.map((tool) => (
             <ToolCallCard
-              key={stableToolKey(tool, idx)}
+              key={toolKey(tool)}
               tool={tool}
             />
           ))}

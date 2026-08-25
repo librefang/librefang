@@ -14,6 +14,40 @@ const STRING_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/
 const NUM_RE = /-?\b\d+(?:\.\d+)?\b/
 const BOOL_RE = /\btrue\b|\bfalse\b/
 
+function parseHeader(rest: string): [string, string, string, string] | null {
+  const openBr = rest.startsWith('[[') ? '[[' : rest.startsWith('[') ? '[' : null
+  if (!openBr) return null
+
+  const closeBr = openBr === '[[' ? ']]' : ']'
+  let quote: '"' | "'" | null = null
+  let escaped = false
+
+  for (let i = openBr.length; i < rest.length; i += 1) {
+    const char = rest[i]!
+    if (quote) {
+      if (quote === '"' && escaped) {
+        escaped = false
+      } else if (quote === '"' && char === '\\') {
+        escaped = true
+      } else if (char === quote) {
+        quote = null
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (rest.startsWith(closeBr, i)) {
+      const name = rest.slice(openBr.length, i)
+      if (!name) return null
+      return [openBr, name, closeBr, rest.slice(i + closeBr.length).trimStart()]
+    }
+  }
+
+  return null
+}
+
 function highlightValue(rest: string): Span[] {
   const out: Span[] = []
   let remaining = rest
@@ -42,7 +76,7 @@ function highlightValue(rest: string): Span[] {
     }
     // Punctuation / whitespace / identifiers — pass through up to the next
     // highlightable token.
-    const next = remaining.search(/["'0-9#]|\btrue\b|\bfalse\b/)
+    const next = remaining.search(/[-"'0-9#]|\btrue\b|\bfalse\b/)
     if (next === -1) {
       out.push({ className: 'tk-punct', text: remaining })
       break
@@ -51,8 +85,8 @@ function highlightValue(rest: string): Span[] {
       out.push({ className: 'tk-punct', text: remaining.slice(0, next) })
       remaining = remaining.slice(next)
     } else {
-      // Defensive: the regex class above matched a negative-lookbehind spot;
-      // single-char advance so we don't loop forever on pathological input.
+      // The token-start scan matched at index zero, but none of the typed
+      // token regexes consumed it. Advance once to avoid a pathological loop.
       out.push({ className: 'tk-punct', text: remaining[0]! })
       remaining = remaining.slice(1)
     }
@@ -70,9 +104,9 @@ function highlightLine(line: string): Span[] {
   if (!rest) return prefix
   if (rest.startsWith('#')) return [...prefix, { className: 'tk-comment', text: rest }]
   // Section header: [x.y] or [[x]]
-  const header = rest.match(/^(\[{1,2})([^\]]+)(\]{1,2})\s*(.*)$/)
+  const header = parseHeader(rest)
   if (header) {
-    const [, openBr, name, closeBr, trailing] = header
+    const [openBr, name, closeBr, trailing] = header
     return [
       ...prefix,
       { className: 'tk-punct', text: openBr! },

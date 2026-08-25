@@ -1,4 +1,16 @@
 use super::*;
+use librefang_skills::registry::SkillRegistry;
+use std::sync::{RwLock, RwLockReadGuard};
+
+fn read_skill_catalog_registry(
+    registry: &RwLock<SkillRegistry>,
+) -> RwLockReadGuard<'_, SkillRegistry> {
+    registry.read().unwrap_or_else(|poisoned| {
+        tracing::warn!("Skill catalog registry lock poisoned; recovering installed skills");
+        registry.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// GET /api/skills — List installed skills.
 ///
@@ -21,11 +33,7 @@ pub async fn list_skills(
     // here — as the code did previously — bypassed the operator
     // policy wired in `reload_skills`, making disabled skills show up
     // in the UI and extra_dirs invisible.
-    let registry = state
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let registry = read_skill_catalog_registry(state.kernel.skill_registry_ref());
 
     let category_filter = params.category.as_deref();
 
@@ -908,11 +916,7 @@ pub async fn get_skill_detail(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let registry = state
-        .kernel
-        .skill_registry_ref()
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let registry = read_skill_catalog_registry(state.kernel.skill_registry_ref());
 
     let skill = match registry.get(&name) {
         Some(s) => s,
@@ -1370,7 +1374,27 @@ async fn read_utf8_file_bounded(
 
 #[cfg(test)]
 mod supporting_file_read_tests {
-    use super::read_utf8_file_bounded;
+    use super::{read_skill_catalog_registry, read_utf8_file_bounded};
+    use librefang_skills::registry::SkillRegistry;
+    use std::sync::RwLock;
+
+    #[test]
+    fn skill_catalog_registry_recovers_and_clears_poison() {
+        let registry = RwLock::new(SkillRegistry::new(std::path::PathBuf::from(
+            "/tmp/skill-catalog-registry-test",
+        )));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = registry.write().unwrap();
+            panic!("poison skill catalog registry");
+        });
+        assert!(registry.is_poisoned());
+
+        assert!(read_skill_catalog_registry(&registry).list().is_empty());
+
+        assert!(!registry.is_poisoned());
+        assert!(registry.read().is_ok());
+        assert!(registry.write().is_ok());
+    }
 
     #[tokio::test]
     async fn bounded_read_stops_one_byte_past_limit() {

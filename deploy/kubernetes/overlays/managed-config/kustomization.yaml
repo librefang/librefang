@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Deployment-managed configuration (#6695).
+#
+# Layers three things onto ../../base:
+#   1. config.toml rendered into a ConfigMap and mounted read-only at /etc/librefang/, outside the PVC.
+#   2. LIBREFANG_CONFIG_PATH pointing the daemon at that mount, and LIBREFANG_CONFIG_MODE=managed locking every API route that would persist into it (they answer 423 with code "config_managed").
+#   3. A checksum annotation on the pod template, so editing the config rolls the StatefulSet instead of drifting a running pod.
+#
+# Secrets are still created out of band and referenced by the base StatefulSet — see ../../README.md.
+# Nothing secret belongs in the ConfigMap.
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: librefang-config
+    files:
+      - config.toml
+    options:
+      # Kustomize's default name-suffix hash would also trigger the rollout, and would do it without anyone remembering to.
+      # It is disabled anyway, for two reasons.
+      #
+      # The hash is over the ConfigMap object and is not the checksum the daemon reports: `GET /api/config/status` returns sha256 over the file's raw bytes.
+      # Keeping the annotation as the trigger makes the value that causes the rollout and the value that confirms it landed the same value, so "did my change reach the daemon?" is one string comparison rather than an inference from a restart count.
+      #
+      # And a hashed name leaves an orphaned ConfigMap behind on every edit; kustomize does not prune them, and `kubectl apply -k` will not either.
+      # A stable name has exactly one live object to reason about.
+      disableNameSuffixHash: true
+
+patches:
+  - path: statefulset-managed-config.yaml

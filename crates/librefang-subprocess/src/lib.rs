@@ -29,7 +29,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
@@ -345,6 +345,20 @@ impl SupervisedTransport {
         }
     }
 
+    fn lock_last_attempt(&self) -> MutexGuard<'_, Option<std::time::Instant>> {
+        match self.last_attempt.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    label = %self.cfg.label,
+                    "subprocess respawn cooldown lock poisoned; preserving timestamp and recovering"
+                );
+                self.last_attempt.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
     /// Send a request, (re)spawning the child first if it is absent or dead.
     pub async fn request(&self, request: Value) -> Result<Value, TransportError> {
         let transport = self.ensure_live().await?;
@@ -375,7 +389,7 @@ impl SupervisedTransport {
         // Absent or dead. Respect the cooldown so a broken command can't
         // spawn-storm on every call.
         {
-            let mut last = self.last_attempt.lock().unwrap();
+            let mut last = self.lock_last_attempt();
             if let Some(at) = *last {
                 if at.elapsed() < self.respawn_cooldown {
                     return Err(TransportError::Dead);
@@ -666,6 +680,42 @@ sys.stdout.flush()
         assert_eq!(
             t.request(json!({"method": "x"})).await.unwrap(),
             json!({"n": 1})
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_cooldown_preserves_timestamp_and_clears_lock_poison() {
+        let transport = Arc::new(SupervisedTransport::with_cooldown(
+            TransportConfig::new(
+                "/nonexistent/transport-binary",
+                vec![],
+                Duration::from_secs(5),
+                "test",
+            ),
+            Duration::from_secs(3600),
+        ));
+        let original_attempt = std::time::Instant::now();
+
+        let poisoner = Arc::clone(&transport);
+        assert!(std::thread::spawn(move || {
+            let mut last_attempt = poisoner.last_attempt.lock().unwrap();
+            *last_attempt = Some(original_attempt);
+            panic!("poison respawn cooldown lock");
+        })
+        .join()
+        .is_err());
+
+        let error = transport
+            .request(json!({"method": "must-not-spawn"}))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TransportError::Dead));
+        assert!(transport.current.lock().await.is_none());
+        assert!(!transport.last_attempt.is_poisoned());
+        assert_eq!(
+            *transport.last_attempt.lock().unwrap(),
+            Some(original_attempt)
         );
     }
 

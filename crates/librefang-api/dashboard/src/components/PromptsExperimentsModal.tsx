@@ -36,7 +36,19 @@ import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
 import { EmptyState } from "./ui/EmptyState";
 import { CardSkeleton } from "./ui/Skeleton";
-import { buildEvenTrafficSplit } from "./trafficSplit";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
+import {
+  buildEvenTrafficSplit,
+  MAX_TRAFFIC_VARIANTS,
+} from "./trafficSplit";
+
+function metricBadgeVariant(
+  successRate: number,
+): "success" | "warning" | "default" {
+  if (successRate >= 80) return "success";
+  if (successRate >= 50) return "warning";
+  return "default";
+}
 
 export function PromptsExperimentsModal({
   agentId,
@@ -58,6 +70,9 @@ export function PromptsExperimentsModal({
   const [newExperimentName, setNewExperimentName] = useState("");
   const [selectedMetrics, setSelectedMetrics] = useState<string | null>(null);
   const [selectedVariantIds, setSelectedVariantIds] = useState<string[]>([]);
+  const [versionToDelete, setVersionToDelete] = useState<PromptVersion | null>(
+    null,
+  );
 
   const versionsQuery = usePromptVersions(agentId);
   const experimentsQuery = useExperiments(
@@ -80,7 +95,9 @@ export function PromptsExperimentsModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl"
-      onClick={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
     >
       <div
         role="dialog"
@@ -218,19 +235,16 @@ export function PromptsExperimentsModal({
                                       })
                                     : t("prompts.delete")
                                 }
-                                onClick={() =>
-                                  deleteVersionMutation.mutate({
-                                    versionId: v.id,
-                                    agentId,
-                                  })
-                                }
+                                onClick={() => setVersionToDelete(v)}
                               >
                                 <Trash2 className="w-3 h-3" />
                               </Button>
                             </div>
                           </div>
                           <pre className="text-xs text-text-dim whitespace-pre-wrap max-h-24 overflow-y-auto">
-                            {v.system_prompt.slice(0, 200)}...
+                            {v.system_prompt.length > 200
+                              ? `${v.system_prompt.slice(0, 200)}...`
+                              : v.system_prompt}
                           </pre>
                           <p className="text-[10px] text-text-dim mt-2">
                             {t("agents.prompts_experiments.created_label")} {new Date(v.created_at).toLocaleDateString()}
@@ -470,13 +484,7 @@ export function PromptsExperimentsModal({
                                 {m.variant_name}
                               </span>
                               <Badge
-                                variant={
-                                  m.success_rate >= 80
-                                    ? "success"
-                                    : m.success_rate >= 50
-                                      ? "warning"
-                                      : "default"
-                                }
+                                variant={metricBadgeVariant(m.success_rate)}
                               >
                                 {m.success_rate?.toFixed(1)}%
                               </Badge>
@@ -574,18 +582,28 @@ export function PromptsExperimentsModal({
                                       checked={selectedVariantIds.includes(
                                         v.id,
                                       )}
+                                      disabled={
+                                        !selectedVariantIds.includes(v.id) &&
+                                        selectedVariantIds.length >=
+                                          MAX_TRAFFIC_VARIANTS
+                                      }
                                       onChange={(e) => {
-                                        if (e.target.checked)
-                                          setSelectedVariantIds([
-                                            ...selectedVariantIds,
-                                            v.id,
-                                          ]);
-                                        else
-                                          setSelectedVariantIds(
-                                            selectedVariantIds.filter(
+                                        const checked = e.target.checked;
+                                        setSelectedVariantIds((current) => {
+                                          if (!checked) {
+                                            return current.filter(
                                               (id) => id !== v.id,
-                                            ),
-                                          );
+                                            );
+                                          }
+                                          if (
+                                            current.includes(v.id) ||
+                                            current.length >=
+                                              MAX_TRAFFIC_VARIANTS
+                                          ) {
+                                            return current;
+                                          }
+                                          return [...current, v.id];
+                                        });
                                       }}
                                       className="rounded"
                                     />
@@ -602,6 +620,15 @@ export function PromptsExperimentsModal({
                                   </label>
                                 ))}
                               </div>
+                            )}
+                            {selectedVariantIds.length >=
+                              MAX_TRAFFIC_VARIANTS && (
+                              <p className="mt-2 text-xs text-warning">
+                                {t(
+                                  "agents.prompts_experiments.variant_limit",
+                                  { count: MAX_TRAFFIC_VARIANTS },
+                                )}
+                              </p>
                             )}
                           </div>
                         </div>
@@ -682,6 +709,24 @@ export function PromptsExperimentsModal({
           </AnimatePresence>
         </div>
       </div>
+      <ConfirmDialog
+        isOpen={versionToDelete !== null}
+        title={t("agents.prompts_experiments.delete_version_title")}
+        message={t(
+          "agents.prompts_experiments.delete_version_message",
+          { version: versionToDelete?.version ?? "" },
+        )}
+        confirmLabel={t("common.delete")}
+        tone="destructive"
+        onClose={() => setVersionToDelete(null)}
+        onConfirm={async () => {
+          if (!versionToDelete) return;
+          await deleteVersionMutation.mutateAsync({
+            versionId: versionToDelete.id,
+            agentId,
+          });
+        }}
+      />
     </div>
   );
 }

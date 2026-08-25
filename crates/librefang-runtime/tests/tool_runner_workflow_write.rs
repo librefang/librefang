@@ -1,14 +1,13 @@
-// Integration tests for the workflow_start and workflow_cancel tools (#4844 section E).
+// Integration tests for the workflow_start, workflow_cancel and workflow_create tools (#4844 section E, #6934).
 //
 // Uses the same hand-rolled stub kernel pattern as tool_runner_workflow_readonly.rs.
-// The write-side stub extends WorkflowRunner with start_workflow_async and
-// cancel_workflow_run implementations driven by per-test configuration.
+// The write-side stub extends WorkflowRunner with start_workflow_async, cancel_workflow_run and create_workflow implementations driven by per-test configuration.
 
 use async_trait::async_trait;
 use librefang_kernel_handle::prelude::*;
 use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool_raw, ToolExecContext};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Error sentinel returned by stub cancel_workflow_run
@@ -22,6 +21,19 @@ enum StubCancelResult {
 }
 
 // ---------------------------------------------------------------------------
+// Outcome the stub create_workflow returns
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum StubCreateResult {
+    Ok,
+    /// The spec could not become a workflow — the kernel's `InvalidInput`.
+    Invalid(&'static str),
+    /// The name is already registered — the kernel's `Conflict`.
+    NameTaken(&'static str),
+}
+
+// ---------------------------------------------------------------------------
 // Stub kernel for write-tool tests
 // ---------------------------------------------------------------------------
 
@@ -29,27 +41,46 @@ struct WorkflowWriteStubKernel {
     /// run_id returned by start_workflow_async (None → simulate resolution error)
     start_run_id: Option<String>,
     cancel_result: StubCancelResult,
+    create_result: StubCreateResult,
+    /// The `(spec, caller_agent_id)` pair the last create_workflow call received, so the tests can assert what actually crossed the trait boundary rather than only what came back.
+    create_seen: Mutex<Option<(serde_json::Value, Option<String>)>>,
 }
 
 impl WorkflowWriteStubKernel {
+    fn base() -> Self {
+        Self {
+            start_run_id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
+            cancel_result: StubCancelResult::Ok,
+            create_result: StubCreateResult::Ok,
+            create_seen: Mutex::new(None),
+        }
+    }
+
     fn with_start(run_id: &str) -> Self {
         Self {
             start_run_id: Some(run_id.to_string()),
-            cancel_result: StubCancelResult::Ok,
+            ..Self::base()
         }
     }
 
     fn start_error() -> Self {
         Self {
             start_run_id: None,
-            cancel_result: StubCancelResult::Ok,
+            ..Self::base()
         }
     }
 
     fn with_cancel(cancel_result: StubCancelResult) -> Self {
         Self {
-            start_run_id: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
             cancel_result,
+            ..Self::base()
+        }
+    }
+
+    fn with_create(create_result: StubCreateResult) -> Self {
+        Self {
+            create_result,
+            ..Self::base()
         }
     }
 }
@@ -256,6 +287,30 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
             None => Err(librefang_kernel_handle::KernelOpError::Internal(
                 "workflow `unknown-workflow` not found".to_string(),
             )),
+        }
+    }
+
+    async fn create_workflow(
+        &self,
+        spec: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+    ) -> Result<WorkflowSummary, librefang_kernel_handle::KernelOpError> {
+        *self.create_seen.lock().unwrap() =
+            Some((spec.clone(), caller_agent_id.map(str::to_string)));
+        match &self.create_result {
+            StubCreateResult::Ok => Ok(WorkflowSummary::new(
+                "11111111-1111-1111-1111-111111111111".to_string(),
+                spec["name"].as_str().unwrap_or_default().to_string(),
+                spec["description"].as_str().unwrap_or_default().to_string(),
+                spec["steps"].as_array().map(|a| a.len()).unwrap_or(0),
+                spec.get("input_schema").is_some(),
+            )),
+            StubCreateResult::Invalid(reason) => Err(
+                librefang_kernel_handle::KernelOpError::InvalidInput(reason.to_string()),
+            ),
+            StubCreateResult::NameTaken(reason) => Err(
+                librefang_kernel_handle::KernelOpError::Conflict(reason.to_string()),
+            ),
         }
     }
 
@@ -550,6 +605,176 @@ async fn workflow_cancel_missing_run_id_returns_error() {
     assert!(
         result.content.contains("run_id"),
         "error should mention run_id: {}",
+        result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// workflow_create tests (#6934)
+// ---------------------------------------------------------------------------
+
+/// A well-formed creation payload.
+/// Individual tests mutate one field of it so the thing under test is the only difference from a known-good spec.
+fn create_payload() -> serde_json::Value {
+    json!({
+        "name": "nightly-report",
+        "description": "summarise the day",
+        "steps": [
+            { "name": "gather", "agent": "researcher", "prompt_template": "Collect today's {{topic}} news" },
+            { "name": "write", "agent": "writer", "prompt_template": "Summarise {{input}}", "depends_on": ["gather"] }
+        ],
+        "input_schema": [ { "name": "topic", "param_type": "string" } ]
+    })
+}
+
+#[test]
+fn workflow_create_appears_in_builtin_definitions() {
+    let defs = builtin_tool_definitions();
+    let def = defs
+        .iter()
+        .find(|d| d.name == "workflow_create")
+        .expect("workflow_create missing from builtin_tool_definitions");
+    assert_eq!(def.input_schema["type"], "object");
+    let required: Vec<&str> = def.input_schema["required"]
+        .as_array()
+        .expect("required array")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        required,
+        vec!["name", "steps"],
+        "name and steps are the only fields a workflow cannot be built without"
+    );
+    // A step needs somewhere to run and something to say — the schema must say so, because the kernel rejects a step missing either and the model needs to know before it spends a turn on the call.
+    let step_required: Vec<&str> = def.input_schema["properties"]["steps"]["items"]["required"]
+        .as_array()
+        .expect("step required array")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(step_required, vec!["name", "agent", "prompt_template"]);
+}
+
+#[tokio::test]
+async fn workflow_create_forwards_the_whole_spec_and_the_caller() {
+    let stub = Arc::new(WorkflowWriteStubKernel::with_create(StubCreateResult::Ok));
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let ctx = make_ctx(&kernel);
+
+    let payload = create_payload();
+    let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+
+    let v: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+    assert_eq!(v["id"], "11111111-1111-1111-1111-111111111111");
+    assert_eq!(v["name"], "nightly-report");
+    assert_eq!(v["step_count"], 2);
+    assert_eq!(v["has_input_schema"], true);
+
+    let (seen_spec, seen_caller) = stub
+        .create_seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the kernel handle must have been called");
+    assert_eq!(
+        seen_spec, payload,
+        "the spec must reach the kernel unmodified — the handler is not allowed to rebuild a subset of it"
+    );
+    assert_eq!(
+        seen_caller.as_deref(),
+        Some("test-agent"),
+        "the caller must be forwarded so the registration can be traced back to a turn"
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_missing_name_returns_error() {
+    let kernel: Arc<dyn KernelHandle> =
+        Arc::new(WorkflowWriteStubKernel::with_create(StubCreateResult::Ok));
+    let ctx = make_ctx(&kernel);
+
+    let mut payload = create_payload();
+    payload.as_object_mut().unwrap().remove("name");
+    let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
+    assert!(result.is_error, "expected error for missing name");
+    assert!(
+        result.content.contains("name"),
+        "error should mention name: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn workflow_create_missing_or_malformed_steps_returns_error() {
+    let kernel: Arc<dyn KernelHandle> =
+        Arc::new(WorkflowWriteStubKernel::with_create(StubCreateResult::Ok));
+    let ctx = make_ctx(&kernel);
+
+    let mut payload = create_payload();
+    payload.as_object_mut().unwrap().remove("steps");
+    let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
+    assert!(result.is_error, "expected error for missing steps");
+    assert!(
+        result.content.contains("steps"),
+        "error should mention steps: {}",
+        result.content
+    );
+
+    // A single step object instead of an array is the shape a model most often gets wrong, and it must be named as such rather than reaching the kernel as an opaque deserialization failure.
+    let mut payload = create_payload();
+    payload["steps"] = json!({ "name": "write", "agent": "writer", "prompt_template": "go" });
+    let result = execute_tool_raw("t1", "workflow_create", &payload, &ctx).await;
+    assert!(result.is_error, "expected error for a non-array steps");
+    assert!(
+        result.content.contains("array"),
+        "error should say steps must be an array: {}",
+        result.content
+    );
+}
+
+/// A name collision is something the model can fix on its next turn — by picking another name — so the rejection has to arrive as a readable reason against the `name` field, not as an opaque upstream failure.
+#[tokio::test]
+async fn workflow_create_relays_a_name_collision() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowWriteStubKernel::with_create(
+        StubCreateResult::NameTaken("a workflow named 'nightly-report' already exists (id 42)"),
+    ));
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw("t1", "workflow_create", &create_payload(), &ctx).await;
+    assert!(result.is_error, "expected error for a taken name");
+    assert!(
+        result.content.contains("already exists"),
+        "the collision reason must survive to the model: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("name"),
+        "the collision must be attributed to the name field: {}",
+        result.content
+    );
+}
+
+/// Same for a spec the kernel refused: the reason names the field and the limit, and a model that cannot see which one it broke retries the same payload.
+#[tokio::test]
+async fn workflow_create_relays_a_validation_failure() {
+    let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowWriteStubKernel::with_create(
+        StubCreateResult::Invalid(
+            "step 'write' depends on 'research', which is not a step in this workflow",
+        ),
+    ));
+    let ctx = make_ctx(&kernel);
+
+    let result = execute_tool_raw("t1", "workflow_create", &create_payload(), &ctx).await;
+    assert!(result.is_error, "expected error for an invalid spec");
+    assert!(
+        result.content.contains("not a step in this workflow"),
+        "the validation reason must survive to the model: {}",
         result.content
     );
 }

@@ -169,6 +169,7 @@ pub fn upsert_secret(path: &Path, key: &str, value: &str) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     fn read(path: &Path) -> String {
@@ -257,33 +258,35 @@ mod tests {
 
     #[test]
     fn concurrent_upserts_preserve_every_key() {
+        const WRITERS: usize = 16;
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("secrets.env");
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
-
-        std::thread::scope(|scope| {
-            for index in 0..8 {
-                let path = path.clone();
-                let barrier = std::sync::Arc::clone(&barrier);
-                scope.spawn(move || {
+        let path = Arc::new(dir.path().join("secrets.env"));
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let threads: Vec<_> = (0..WRITERS)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
                     barrier.wait();
                     upsert_secret(&path, &format!("KEY_{index}"), &format!("value-{index}"))
-                        .unwrap();
-                });
-            }
-            barrier.wait();
-        });
+                })
+            })
+            .collect();
 
-        let contents = read(&path);
-        for index in 0..8 {
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+
+        let content = read(&path);
+        for index in 0..WRITERS {
             assert!(
-                contents
+                content
                     .lines()
                     .any(|line| line == format!("KEY_{index}=value-{index}")),
-                "missing concurrent update KEY_{index}: {contents}"
+                "missing KEY_{index} from {content:?}"
             );
         }
-        assert_eq!(contents.lines().count(), 8);
+        assert_eq!(content.lines().count(), WRITERS);
         assert_eq!(
             fs::read_dir(dir.path()).unwrap().count(),
             1,

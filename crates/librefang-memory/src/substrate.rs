@@ -1177,11 +1177,11 @@ impl MemorySubstrate {
             let db = conn.get().map_err(LibreFangError::memory)?;
             // `finished_at` is the unix-epoch column the retention sweep reads (#3466).
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1",
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1 AND status = 'in_progress'",
                 rusqlite::params![task_id, result, now, now_unix],
             ).map_err(LibreFangError::memory)?;
             if rows == 0 {
-                return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
+                return Err(LibreFangError::Internal(format!("Task not active: {task_id}")));
             }
             Ok(())
         })
@@ -1398,7 +1398,8 @@ impl MemorySubstrate {
 
     /// Update a task's status to `pending` (reset) or `cancelled`.
     ///
-    /// Only `in_progress` / `pending` tasks can be reset to `pending`.
+    /// Only `failed` tasks can be reset to `pending`; an `in_progress` task
+    /// remains claimed so a second worker cannot execute it concurrently.
     /// Any non-terminal task can be cancelled.
     /// Returns `false` when the task was not found or the transition is invalid.
     pub async fn task_update_status(
@@ -1422,7 +1423,7 @@ impl MemorySubstrate {
                     "UPDATE task_queue \
                      SET status = 'pending', claimed_at = NULL, assigned_to = '', \
                          finished_at = NULL \
-                     WHERE id = ?1 AND status IN ('in_progress', 'failed')",
+                     WHERE id = ?1 AND status = 'failed'",
                     rusqlite::params![task_id],
                 ),
                 // Cancellation is a terminal transition like complete/fail,
@@ -2393,6 +2394,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_task_complete_cannot_revive_cancelled_claim() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+        substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+        substrate
+            .task_update_status(&task_id, "cancelled")
+            .await
+            .unwrap();
+
+        assert!(substrate
+            .task_complete(&task_id, "late result")
+            .await
+            .is_err());
+        let task = substrate.task_get(&task_id).await.unwrap().unwrap();
+        assert_eq!(task["status"], "cancelled");
+        assert_ne!(task["result"], "late result");
+    }
+
+    #[tokio::test]
     async fn test_task_prune_finished_respects_age_and_status() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let now_unix = chrono::Utc::now().timestamp();
@@ -2522,6 +2548,43 @@ mod tests {
         assert!(
             finished_at.is_none(),
             "reset to pending must clear finished_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_reset_rejects_in_progress_to_prevent_duplicate_execution() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+        {
+            let conn = substrate.pool.get().unwrap();
+            conn.execute(
+                "UPDATE task_queue SET status = 'in_progress', claimed_at = ?2 WHERE id = ?1",
+                rusqlite::params![&task_id, chrono::Utc::now().timestamp()],
+            )
+            .unwrap();
+        }
+
+        let changed = substrate
+            .task_update_status(&task_id, "pending")
+            .await
+            .unwrap();
+
+        assert!(!changed, "an active claim must not be re-queued");
+        let conn = substrate.pool.get().unwrap();
+        let (status, claimed_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, claimed_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
+        assert!(
+            claimed_at.is_some(),
+            "the active claim timestamp must remain"
         );
     }
 
