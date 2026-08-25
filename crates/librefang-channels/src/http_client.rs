@@ -113,30 +113,6 @@ pub fn new_proxied_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Ch
         .map_err(|e| ChannelProxyError::Build(e.to_string()))
 }
 
-/// Emit a one-shot WARN naming the WS-bypass limitation for an adapter
-/// whose REST client honours the per-channel `proxy` setting (#4795) but
-/// whose long-lived WebSocket connection does not. Operators who set
-/// `proxy = "..."` because their corporate egress only allows the
-/// corporate HTTP proxy would otherwise see REST go through the proxy
-/// and WS go direct — silently failing on strict egress. Surfacing the
-/// limitation in startup logs (in addition to the docstring on each
-/// `with_proxy`) gives them a fighting chance to spot the misconfig
-/// before they file a bug.
-///
-/// Called by `MattermostAdapter::start` (WebSocket). Discord and
-/// Slack moved to sidecars in v2026.5 (their `start()` paths called
-/// this too). Telegram is pure REST long-polling and does not call
-/// this. The `#[allow]` keeps it available when the WS-using channel
-/// feature happens to be off (the lib still compiles without forcing
-/// a `cfg(...)` here).
-#[allow(dead_code)]
-pub(crate) fn warn_ws_proxy_bypass(adapter: &str) {
-    tracing::warn!(
-        "{adapter}: proxy is configured but the long-lived WebSocket bypasses it; \
-         REST traffic only goes through the proxy (#4795 follow-up)"
-    );
-}
-
 /// Process-wide HTTP client used by [`fetch_url_bytes`] for safe
 /// outbound media fetches.
 ///
@@ -267,9 +243,12 @@ fn is_private_ipv4(v4: Ipv4Addr) -> bool {
         | (172, 16..=31)
         // 192.168.0.0/16 — RFC 1918 private
         | (192, 168)
-    ) || (
-        // 192.0.0.0/24 — IETF protocol assignments (deliberately /24, NOT /16)
-        o[0] == 192 && o[1] == 0 && o[2] == 0
+        // 198.18.0.0/15 — RFC 2544 benchmarking
+        | (198, 18..=19)
+    ) || matches!(
+        (o[0], o[1], o[2]),
+        // IETF protocol assignments and documentation-only networks.
+        (192, 0, 0) | (192, 0, 2) | (198, 51, 100) | (203, 0, 113)
     )
 }
 
@@ -420,23 +399,14 @@ pub async fn fetch_url_bytes(
     extra_headers: &[(String, String)],
 ) -> Result<(Vec<u8>, Option<String>), FetchError> {
     validate_url_for_fetch(url).map_err(FetchError::Rejected)?;
-    fetch_url_bytes_unchecked(safe_fetch_client(), url, max_bytes, extra_headers).await
+    fetch_url_bytes_after_validation(safe_fetch_client(), url, max_bytes, extra_headers).await
 }
 
-/// Send the GET and apply the size cap. Skips the SSRF guard.
+/// Send a previously validated URL through the supplied client and apply the size cap.
 ///
-/// `extra_headers` is attached to the outgoing request — caller is
-/// responsible for deciding whether the URL belongs to a trusted host
-/// (auth tokens MUST NOT be sent to a model-controlled hostname); see
-/// `ChannelAdapter::fetch_headers_for` for the gating contract that
-/// guards Matrix's MSC3916 Bearer-token path.
-///
-/// **Do NOT call this directly from production code.** The only legitimate
-/// callers are unit tests pointing at a `wiremock` server (which binds
-/// `127.0.0.1`, refused by `validate_url_for_fetch`). Production paths
-/// MUST go through [`fetch_url_bytes`].
-#[allow(dead_code)]
-pub(crate) async fn fetch_url_bytes_unchecked(
+/// This helper is module-private so production callers cannot bypass [`fetch_url_bytes`] and its entry-time plus redirect SSRF checks.
+/// `extra_headers` still requires a trusted-host decision before reaching this boundary; see `ChannelAdapter::fetch_headers_for` for the Matrix MSC3916 Bearer-token contract.
+async fn fetch_url_bytes_after_validation(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
@@ -493,6 +463,17 @@ pub(crate) async fn fetch_url_bytes_unchecked(
         body.extend_from_slice(&chunk);
     }
     Ok((body, content_type))
+}
+
+/// Test-only entry point for loopback fixtures that the production SSRF guard intentionally rejects.
+#[cfg(test)]
+pub(crate) async fn fetch_url_bytes_unchecked(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    extra_headers: &[(String, String)],
+) -> Result<(Vec<u8>, Option<String>), FetchError> {
+    fetch_url_bytes_after_validation(client, url, max_bytes, extra_headers).await
 }
 
 // ---------------------------------------------------------------------------
@@ -589,6 +570,7 @@ mod tests {
             "http://[::ffff:7f00:1]/",
             "http://[::ffff:10.0.0.1]/",
             "http://[::ffff:169.254.169.254]/",
+            "http://[::ffff:198.18.0.1]/",
             "http://[::127.0.0.1]/",
             "http://[::7f00:1]/",
             "http://[64:ff9b::7f00:1]/",
@@ -626,6 +608,22 @@ mod tests {
         // multicast / reserved
         assert!(validate_url_for_fetch("http://224.0.0.1/").is_err());
         assert!(validate_url_for_fetch("http://255.255.255.255/").is_err());
+    }
+
+    #[test]
+    fn rejects_benchmark_and_documentation_ranges() {
+        for url in [
+            "http://198.18.0.0/",
+            "http://198.19.255.255/",
+            "http://192.0.2.1/",
+            "http://198.51.100.1/",
+            "http://203.0.113.1/",
+        ] {
+            assert!(
+                validate_url_for_fetch(url).is_err(),
+                "expected special-use IPv4 rejection for {url}"
+            );
+        }
     }
 
     #[test]
@@ -962,12 +960,6 @@ mod tests {
             other => panic!("expected InvalidUrl, got: {other:?}"),
         }
     }
-
-    // warn_ws_proxy_bypass smoke test removed in the mattermost sidecar
-    // migration — it was the only remaining caller. The helper still
-    // ships for future in-process adapters that may need WS-bypass
-    // warnings; behaviour is exercised by their own tests when they
-    // arrive.
 
     #[test]
     fn channel_proxy_error_display_lists_accepted_schemes() {

@@ -20,8 +20,30 @@ pub fn map_tool_name(openclaw_name: &str) -> Option<&'static str> {
         "WebFetch" | "fetch_url" | "web_fetch" => Some("web_fetch"),
         "browser_navigate" => Some("browser_navigate"),
         "memory_all" | "memory_list" => Some("memory_list"),
-        "memory_search" | "memory_recall" => Some("memory_recall"),
+        // #7808: `memory_search` used to resolve to `memory_recall`, an
+        // exact-key KV lookup. A model calling the most natural name for
+        // "search my memory" got a hashmap miss reported as "not found" — the
+        // alias lied rather than failing. Now that a real semantic search tool
+        // exists, point every search-shaped alias at it.
+        "memory_search" | "memory_semantic_search" | "memory_query" | "recall_search" => {
+            Some("memory_semantic_search")
+        }
+        "memory_recall" => Some("memory_recall"),
         "memory_save" | "memory_store" => Some("memory_store"),
+        "memory_add" | "memory_remember" | "memory_semantic_add" => Some("memory_semantic_add"),
+        "memory_forget" | "memory_delete" | "memory_semantic_forget" => {
+            Some("memory_semantic_forget")
+        }
+        // #7808: the maintenance half of the semantic surface. These are the
+        // names the REST-wrapping MCP bridges in the wild already expose, so a
+        // model carried over from one reaches the in-process tool instead of a
+        // dead name.
+        "memory_consolidate" | "memory_merge_duplicates" | "memory_semantic_consolidate" => {
+            Some("memory_semantic_consolidate")
+        }
+        "memory_duplicates" | "memory_find_duplicates" | "memory_semantic_duplicates" => {
+            Some("memory_semantic_duplicates")
+        }
         "sessions_send" | "agent_message" => Some("agent_send"),
         "sessions_list" | "agents_list" | "agent_list" => Some("agent_list"),
         "sessions_spawn" => Some("agent_send"),
@@ -64,6 +86,12 @@ pub fn is_known_librefang_tool(name: &str) -> bool {
             | "memory_list"
             | "memory_recall"
             | "memory_store"
+            | "memory_semantic_search"
+            | "memory_semantic_add"
+            | "memory_semantic_forget"
+            | "memory_semantic_stats"
+            | "memory_semantic_consolidate"
+            | "memory_semantic_duplicates"
             | "agent_send"
             | "agent_list"
             | "agent_spawn"
@@ -117,8 +145,26 @@ mod tests {
         assert_eq!(map_tool_name("web_fetch"), Some("web_fetch"));
         assert_eq!(map_tool_name("web_search"), Some("web_search"));
         assert_eq!(map_tool_name("browser_navigate"), Some("browser_navigate"));
-        assert_eq!(map_tool_name("memory_search"), Some("memory_recall"));
+        // #7808: `memory_search` must NOT resolve to the exact-key KV tool.
+        assert_eq!(
+            map_tool_name("memory_search"),
+            Some("memory_semantic_search")
+        );
         assert_eq!(map_tool_name("memory_recall"), Some("memory_recall"));
+        assert_eq!(map_tool_name("memory_add"), Some("memory_semantic_add"));
+        assert_eq!(
+            map_tool_name("memory_forget"),
+            Some("memory_semantic_forget")
+        );
+        // #7808: the maintenance names an MCP-bridge-trained model reaches for.
+        assert_eq!(
+            map_tool_name("memory_consolidate"),
+            Some("memory_semantic_consolidate")
+        );
+        assert_eq!(
+            map_tool_name("memory_duplicates"),
+            Some("memory_semantic_duplicates")
+        );
         assert_eq!(map_tool_name("memory_all"), Some("memory_list"));
         assert_eq!(map_tool_name("memory_list"), Some("memory_list"));
         assert_eq!(map_tool_name("memory_save"), Some("memory_store"));

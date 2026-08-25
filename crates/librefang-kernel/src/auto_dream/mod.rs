@@ -32,7 +32,7 @@ use crate::AgentSubsystemApi;
 use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -80,7 +80,15 @@ const MAX_TURNS: usize = 30;
 /// dream wrote N memories" as progress signal. Keep this list aligned with
 /// the tools actually registered in `librefang_runtime::tool_runner` —
 /// listing ghost names here just makes the counter under-report.
-const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
+const MEMORY_WRITE_TOOLS: &[&str] = &[
+    "memory_store",
+    // #7808: the semantic store the dream loop can now reach. A dream that
+    // spends its whole run in `memories` and none in `kv_store` used to report
+    // "0 memories written", which read as a failed dream.
+    "memory_semantic_add",
+    "memory_semantic_forget",
+    "memory_semantic_consolidate",
+];
 
 /// Tools the dream loop is allowed to call. Passed as `allowed_tools` to
 /// `kernel.run_forked_agent_streaming`, which threads them through to
@@ -90,7 +98,53 @@ const MEMORY_WRITE_TOOLS: &[&str] = &["memory_store"];
 /// prompt-injected dream that emits a `tool_use` for bash or any other
 /// non-memory tool will get a synthetic error result back — same
 /// defense-in-depth pattern as libre-code's `createAutoMemCanUseTool`.
-pub const DREAM_ALLOWED_TOOLS: &[&str] = &["memory_store", "memory_recall", "memory_list"];
+///
+/// # What this list lets an unattended loop do (#7808)
+///
+/// Until #7808 this was key/value only, so the Consolidate and Prune phases of
+/// the dream prompt had no tool that could consolidate or prune: the loop could
+/// read and write `kv_store` keys and nothing else, while the store it was
+/// written to tend — the embedding-backed `memories` table — had no
+/// agent-callable surface at all.
+///
+/// Widening it means a background loop with no human in it can now, for the
+/// agent it is dreaming for and no other:
+///
+/// * **`memory_semantic_forget`** — permanently retract one memory by id.
+///   This is the point of the Prune phase. It is per-id and the loop must have
+///   searched for that id first, so the blast radius is bounded by what the
+///   dream actually looked at.
+/// * **`memory_semantic_consolidate`** — merge every near-duplicate group in
+///   the agent's store, soft-deleting all but the newest of each. This is the
+///   one entry here whose reach is the whole store rather than a named row,
+///   and it is the reason the tool carries a second, independent gate: it does
+///   nothing unless that agent's manifest sets
+///   `[proactive_memory] allow_self_consolidation = true`. Listing it here
+///   grants the loop no authority the operator has not separately granted.
+/// * **`memory_semantic_add`** — record new distilled facts, which is what the
+///   Consolidate phase produces.
+///
+/// Three gates therefore stand between a default install and an unattended
+/// deletion: `[auto_dream] enabled`, the agent's own `auto_dream_enabled`, and
+/// — for whole-store consolidation — `allow_self_consolidation`. All three
+/// default to off.
+///
+/// Deliberately absent: anything outside memory. The dream prompt is built from
+/// the agent's own memories, which are themselves derived from conversation
+/// content, so this list is the blast radius of a successful prompt injection
+/// carried in a memory. Keeping it memory-only means the worst such an
+/// injection achieves is corrupting the store it came from.
+pub const DREAM_ALLOWED_TOOLS: &[&str] = &[
+    "memory_store",
+    "memory_recall",
+    "memory_list",
+    "memory_semantic_search",
+    "memory_semantic_stats",
+    "memory_semantic_duplicates",
+    "memory_semantic_add",
+    "memory_semantic_forget",
+    "memory_semantic_consolidate",
+];
 
 /// Minimum spacing between event-driven gate scans for the same agent.
 /// Mirrors libre-code's `SESSION_SCAN_INTERVAL_MS`. Without this, an
@@ -173,6 +227,14 @@ static DREAM_PROGRESS: LazyLock<DashMap<AgentId, DreamProgress>> = LazyLock::new
 /// flight". Wrapped in a `std::sync::Mutex` because DashMap entries are
 /// accessed through shared references and `Sender::send` consumes self.
 type AbortSlot = Mutex<Option<oneshot::Sender<()>>>;
+
+fn lock_abort_slot(slot: &AbortSlot) -> MutexGuard<'_, Option<oneshot::Sender<()>>> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("auto-dream abort slot lock poisoned; recovering sender state");
+        slot.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// Abort channels for in-flight manually-triggered dreams. Sending on the
 /// oneshot notifies `run_dream`'s drain loop to break out and run the
@@ -495,10 +557,16 @@ async fn run_dream(
         .count_agent_sessions_touched_since(target, prior_mtime, Some(dream_sid))
         .unwrap_or(session_ids.len() as u32);
 
+    // One resolution, used twice: the prompt must not name a tool the
+    // allowlist withholds, and the allowlist must not offer one the manifest
+    // never granted (#7808).
+    let may_consolidate = kernel.allows_self_consolidation(target);
+
     let prompt_text = prompt::build_consolidation_prompt(prompt::ConsolidationPromptInput {
         session_ids: &session_ids,
         total_sessions,
         extra: "",
+        may_consolidate,
     });
 
     let timeout_secs = kernel.config_snapshot().auto_dream.timeout_secs;
@@ -516,7 +584,11 @@ async fn run_dream(
     // history stays clean. Tool allowlist enforced at execute time in
     // agent_loop (not in the request schema) to preserve cache key byte-
     // alignment. Matches libre-code's forkedAgent + createAutoMemCanUseTool.
-    let allowed_tools: Vec<String> = DREAM_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect();
+    let allowed_tools: Vec<String> = DREAM_ALLOWED_TOOLS
+        .iter()
+        .filter(|t| may_consolidate || **t != "memory_semantic_consolidate")
+        .map(|s| s.to_string())
+        .collect();
     let (mut rx, join_handle) =
         match kernel.run_forked_agent_streaming(target, &prompt_text, Some(allowed_tools)) {
             Ok(pair) => pair,
@@ -1260,12 +1332,7 @@ pub async fn abort_dream(agent_id: AgentId) -> AbortOutcome {
             reason: "no abort-capable dream in flight for this agent".to_string(),
         };
     };
-    let sender = match slot_ref.lock() {
-        Ok(mut g) => g.take(),
-        // A poisoned mutex would mean a prior panic while the sender was
-        // held; recover the inner data and continue rather than deadlock.
-        Err(poisoned) => poisoned.into_inner().take(),
-    };
+    let sender = lock_abort_slot(&slot_ref).take();
     let Some(tx) = sender else {
         return AbortOutcome {
             aborted: false,
@@ -1304,6 +1371,27 @@ mod hook_tests {
     use super::*;
     use librefang_runtime::hooks::{HookContext, HookHandler};
     use librefang_types::agent::HookEvent;
+
+    #[tokio::test]
+    async fn poisoned_abort_slot_recovers_sender_and_clears_poison() {
+        let (sender, receiver) = oneshot::channel();
+        let slot = Mutex::new(Some(sender));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _sender = slot.lock().unwrap();
+                    panic!("poison auto-dream abort slot");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert!(slot.is_poisoned());
+        lock_abort_slot(&slot).take().unwrap().send(()).unwrap();
+        assert!(!slot.is_poisoned());
+        assert_eq!(receiver.await, Ok(()));
+        assert!(slot.lock().unwrap().is_none());
+    }
 
     /// Hook must handle a dangling `Weak<LibreFangKernel>` (the kernel was
     /// dropped, e.g. shutdown between turn end and hook dispatch) without

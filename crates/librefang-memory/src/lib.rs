@@ -28,7 +28,6 @@ pub mod namespace_acl;
 pub mod passkey_store;
 pub mod proactive;
 pub mod prompt;
-pub mod provider;
 pub mod roster_store;
 pub mod semantic;
 pub mod session;
@@ -61,6 +60,3 @@ pub use prompt::PromptStore;
 // Re-export vector store implementations
 pub use http_vector_store::HttpVectorStore;
 pub use semantic::SqliteVectorStore;
-
-// Re-export memory provider plugin system
-pub use provider::{MemoryError, MemoryManager, MemoryProvider, NullMemoryProvider};

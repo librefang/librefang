@@ -36,11 +36,14 @@
 //! group all see the prior context. Tracked as a follow-up; revisit at
 //! enrichment time.
 
+use futures::FutureExt;
 use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Process-wide singleton, populated lazily on the first
 /// `BridgeManager` construction.
@@ -51,9 +54,9 @@ static GLOBAL_BUFFER: OnceLock<Arc<GroupHistoryBuffer>> = OnceLock::new();
 /// async pass over the buckets every five minutes is cheap).
 const EVICTION_TICK: Duration = Duration::from_secs(5 * 60);
 
-/// Install (or fetch) the process-wide buffer. The closure runs only on
-/// the first call — second-and-later constructions reuse the existing
-/// instance without allocating.
+/// Install (or fetch) the process-wide buffer.
+/// The closure runs only on the first call; later constructions reuse the existing instance without allocating.
+/// The first call must run inside a Tokio runtime with its time driver enabled.
 ///
 /// On first install, a process-lifetime evictor task is spawned that
 /// drives `evict_expired()` every `EVICTION_TICK`. The task lifetime is
@@ -74,15 +77,23 @@ where
     let buffer = GLOBAL_BUFFER.get_or_init(|| {
         let buf = default();
         let evictor_buf = Arc::clone(&buf);
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(EVICTION_TICK);
+        let runtime = tokio::runtime::Handle::try_current()
+            .expect("group history's first install requires a Tokio runtime with time enabled");
+        let mut tick = tokio::time::interval(EVICTION_TICK);
+        runtime.spawn(async move {
             // tokio::interval emits immediately on the first tick; skip
             // it so the first sweep happens after EVICTION_TICK rather
             // than at install time.
             tick.tick().await;
             loop {
                 tick.tick().await;
-                evictor_buf.evict_expired().await;
+                if AssertUnwindSafe(evictor_buf.evict_expired())
+                    .catch_unwind()
+                    .await
+                    .is_err()
+                {
+                    warn!("group history eviction panicked; continuing periodic sweeps");
+                }
             }
         });
         buf
@@ -100,7 +111,11 @@ pub fn global() -> Option<Arc<GroupHistoryBuffer>> {
 /// Build the canonical group key from a `ChannelType` string and the
 /// platform-specific group identifier (chat JID, channel id, etc).
 pub fn group_key(channel_type_str: &str, group_jid: &str) -> String {
-    format!("{channel_type_str}|{group_jid}")
+    format!(
+        "{}:{channel_type_str}{}:{group_jid}",
+        channel_type_str.len(),
+        group_jid.len()
+    )
 }
 
 /// Default retention window for buffered group messages.
@@ -130,8 +145,7 @@ pub struct GroupHistoryBuffer {
 
 #[derive(Debug, Default)]
 struct Inner {
-    /// Keyed by `group_key = format!("{}|{}", channel_type, group_jid)`
-    /// so two channels with overlapping group ids stay isolated.
+    /// Keyed by the length-prefixed output of `group_key`, so arbitrary component contents cannot collide.
     /// `VecDeque` so cap-overflow eviction is O(1) instead of O(n).
     by_group: HashMap<String, VecDeque<HistoryEntry>>,
 }
@@ -163,8 +177,10 @@ impl GroupHistoryBuffer {
     /// Drain all live entries for `group_key`, evicting expired ones in
     /// the process. Returns `None` when there's nothing to render.
     pub async fn drain(&self, group_key: &str) -> Option<Vec<HistoryEntry>> {
-        let mut inner = self.inner.write().await;
-        let bucket = inner.by_group.remove(group_key)?;
+        let bucket = {
+            let mut inner = self.inner.write().await;
+            inner.by_group.remove(group_key)?
+        };
         let cutoff = Instant::now().checked_sub(self.retention);
         let live: Vec<HistoryEntry> = bucket
             .into_iter()
@@ -233,6 +249,16 @@ mod tests {
             text: text.into(),
             captured_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn group_key_length_prefix_prevents_delimiter_collisions() {
+        let first = group_key("a", "b|c");
+        let second = group_key("a|b", "c");
+
+        assert_eq!(first, "1:a3:b|c");
+        assert_eq!(second, "3:a|b1:c");
+        assert_ne!(first, second);
     }
 
     #[tokio::test]

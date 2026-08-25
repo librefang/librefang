@@ -407,3 +407,136 @@ async fn oc10_max_retries_exceeded_generic_500() {
         "generic 500 without tools should not retry"
     );
 }
+
+// ── reasoning_effort strip-and-retry (#7769) ───────────────────────────────
+
+/// A request carrying a thinking budget, which is what makes `build_request` emit `reasoning_effort`.
+/// `ThinkingConfig::default()` is `budget_tokens: 10_000`, mapping to `"medium"` — the same value an agent inherits from an agent type with an empty `[thinking]` section.
+fn request_with_thinking(model: &str) -> librefang_llm_driver::CompletionRequest {
+    librefang_llm_driver::CompletionRequest {
+        thinking: Some(librefang_types::config::ThinkingConfig::default()),
+        ..simple_request(model)
+    }
+}
+
+/// litellm's rejection: the parameter is stripped by the gateway before the model sees it, and the message names the adapter rather than the model.
+fn litellm_400_reasoning_effort_rejected() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        "error": {
+            "message": "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=gpt-test. Received Model Group=default",
+            "type": "invalid_request_error"
+        }
+    }))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn oc11_reasoning_effort_strip() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(litellm_400_reasoning_effort_rejected())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("no-effort")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let result = driver.complete(request_with_thinking("gpt-test")).await;
+    assert!(
+        result.is_ok(),
+        "expected Ok after reasoning_effort strip, got {:?}",
+        result
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected 2 requests (1x400 + 1x200)");
+
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    assert_eq!(
+        first.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("medium"),
+        "first request should carry the budget-derived reasoning_effort: {first}"
+    );
+    assert!(
+        second.get("reasoning_effort").is_none(),
+        "retry request should omit reasoning_effort: {second}"
+    );
+}
+
+/// The rejection is deterministic, so it is learned once.
+/// Without the per-model memory every later turn would re-send the field, eat a 400 and retry — the wasted round trip this test exists to keep out.
+#[tokio::test]
+#[serial_test::serial]
+async fn oc12_reasoning_effort_rejection_is_remembered_for_later_requests() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(BodyContains("reasoning_effort"))
+        .respond_with(litellm_400_reasoning_effort_rejected())
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(BodyNotContains("reasoning_effort"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("no-effort")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    assert!(driver
+        .complete(request_with_thinking("gpt-test"))
+        .await
+        .is_ok());
+    assert!(driver
+        .complete(request_with_thinking("gpt-test"))
+        .await
+        .is_ok());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "expected 3 requests: the learning 400, its retry, and a second turn that never sends the field again"
+    );
+    assert!(
+        request_json(&requests[2]).get("reasoning_effort").is_none(),
+        "the second turn must not re-send a field this endpoint already rejected"
+    );
+
+    // A different model behind the same gateway is a separate question — the
+    // negative cache must not suppress the field for it.
+    assert_eq!(
+        request_json(&requests[0])
+            .get("model")
+            .and_then(|v| v.as_str()),
+        Some("gpt-test"),
+    );
+    assert!(driver
+        .complete(request_with_thinking("other-model"))
+        .await
+        .is_ok());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        request_json(&requests[3])
+            .get("reasoning_effort")
+            .and_then(|v| v.as_str()),
+        Some("medium"),
+        "the rejection was recorded for gpt-test, not for every model on this endpoint"
+    );
+}
