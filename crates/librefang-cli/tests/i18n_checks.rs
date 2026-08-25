@@ -235,6 +235,8 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "Failed to draw",
         "draw failed",
         "failed to spawn librefang-tui-stream thread",
+        "daemon_client() times out at 120 s; a longer wait can never return 202",
+        "spawn_run_workflow builds a 60 s client; a longer wait can never return 202",
         // Technical format strings
         "%Y-%m-%d %H:%M",
         // Hand CLI command names for require_daemon
