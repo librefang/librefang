@@ -29,11 +29,10 @@ pub enum TemplateLoadError {
     /// separator or `..` would otherwise let a workflow definition read an
     /// `agent.toml` from anywhere on the host.
     InvalidName { requested: String, reason: String },
-    /// No `agent.toml` exists under any of the searched template directories.
+    /// No manifest exists at any of the candidate paths for this type.
     ///
-    /// This is the typo case, and the only one where "try a different name"
-    /// is the right advice — hence `searched`, so the operator can see which
-    /// directories were actually consulted.
+    /// This is the typo case, and the only one where "try a different name" is the right advice — hence `searched`, so the operator can see which files were actually consulted.
+    /// The candidates span two different layouts (a flat `agent-types/<type>.toml` and a directory-per-type `<dir>/<type>/agent.toml`), so these are full file paths rather than directories plus an implied file name.
     Missing {
         requested: String,
         searched: Vec<PathBuf>,
@@ -67,15 +66,12 @@ impl std::fmt::Display for TemplateLoadError {
                 requested,
                 searched,
             } => {
-                let dirs = searched
+                let paths = searched
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                write!(
-                    f,
-                    "no template named '{requested}' (searched {dirs} for {MANIFEST_FILE})"
-                )
+                write!(f, "no template named '{requested}' (searched {paths})")
             }
             Self::Unreadable { path, detail } => write!(
                 f,
@@ -129,16 +125,32 @@ impl TemplateLoadError {
     }
 }
 
-/// The directories searched for an agent template, in precedence order.
+/// The manifest files searched for an agent template, in precedence order.
 ///
-/// `workspaces/agents/` is where an operator's own and dashboard-installed
-/// templates live, and it shadows `registry/agents/` — the read-only registry
-/// checkout — so a local edit of an upstream template wins.
-/// This is the same precedence `librefang-kernel-router` uses for hands.
-pub fn agent_template_dirs(home_dir: &Path) -> Vec<PathBuf> {
+/// Three sources, two layouts, one order:
+///
+/// 1. `agent-types/<type>.toml` — the writable operator-authored store that `POST /api/templates` and the `agent_type_create` tool both write (`librefang_types::agent_type_store`).
+///    It comes first for the same reason `GET /api/templates/{name}` serves it first: it is the copy those surfaces can edit, so serving anything else would make an edit appear to have no effect.
+/// 2. `workspaces/agents/<type>/agent.toml` — a live agent's own manifest, which the catalog lists but nothing writes through this path.
+/// 3. `registry/agents/<type>/agent.toml` — the read-only registry checkout, shadowed by both of the above so a local copy of an upstream template wins.
+///    This is the same precedence `librefang-kernel-router` uses for hands.
+///
+/// Before #6699 only the two directory-per-type sources were searched, so an agent type authored through the dashboard or by `agent_type_create` was invisible to every consumer of [`load_agent_template`] — including the ephemeral spawn engine's `agent_type` field, whose whole purpose is to run one of them.
+///
+/// `requested` is joined onto each base, so [`validate_type_name`] must have accepted it first — every caller here goes through [`load_agent_template`], which validates before it calls this.
+pub fn agent_template_candidates(home_dir: &Path, requested: &str) -> Vec<PathBuf> {
     vec![
-        home_dir.join("workspaces").join("agents"),
-        home_dir.join("registry").join("agents"),
+        librefang_types::agent_type_store::agent_type_path_in(home_dir, requested),
+        home_dir
+            .join("workspaces")
+            .join("agents")
+            .join(requested)
+            .join(MANIFEST_FILE),
+        home_dir
+            .join("registry")
+            .join("agents")
+            .join(requested)
+            .join(MANIFEST_FILE),
     ]
 }
 
@@ -184,10 +196,9 @@ pub fn load_agent_template(
 ) -> Result<(AgentManifest, PathBuf), TemplateLoadError> {
     validate_type_name(requested)?;
 
-    let dirs = agent_template_dirs(home_dir);
-    for dir in &dirs {
-        let path = dir.join(requested).join(MANIFEST_FILE);
-        let content = match std::fs::read_to_string(&path) {
+    let candidates = agent_template_candidates(home_dir, requested);
+    for path in &candidates {
+        let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             // Only an absent file continues the search. An existing file we
             // cannot read is a real failure and must not be reported as a
@@ -195,17 +206,17 @@ pub fn load_agent_template(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 return Err(TemplateLoadError::Unreadable {
-                    path,
+                    path: path.clone(),
                     detail: e.to_string(),
                 })
             }
         };
-        return parse_template(&path, requested, &content).map(|m| (m, path));
+        return parse_template(path, requested, &content).map(|m| (m, path.clone()));
     }
 
     Err(TemplateLoadError::Missing {
         requested: requested.to_string(),
-        searched: dirs,
+        searched: candidates,
     })
 }
 
@@ -265,6 +276,48 @@ mod tests {
         manifest
     }
 
+    /// Write into the flat agent-type store the dashboard and `agent_type_create` write.
+    fn write_agent_type(home: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = librefang_types::agent_type_store::agent_types_dir_in(home);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.toml"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// The gap #6699 left open: a type authored through `POST /api/templates` or the `agent_type_create` tool lands in `agent-types/<name>.toml`, and nothing that resolved an agent type ever looked there.
+    #[test]
+    fn loads_a_template_from_the_agent_type_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_agent_type(
+            tmp.path(),
+            "researcher",
+            "name = \"researcher\"\ndescription = \"authored in the dashboard\"\n",
+        );
+        let (manifest, path) = load_agent_template(tmp.path(), "researcher").unwrap();
+        assert_eq!(manifest.description, "authored in the dashboard");
+        assert!(path.ends_with("researcher.toml"), "{}", path.display());
+    }
+
+    /// Same precedence `GET /api/templates/{name}` applies: the copy those surfaces can write wins, so an edit made there is the one that runs.
+    #[test]
+    fn the_agent_type_store_shadows_a_live_agent_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_template(
+            tmp.path(),
+            "workspaces/agents",
+            "researcher",
+            "name = \"researcher\"\ndescription = \"the live agent\"\n",
+        );
+        write_agent_type(
+            tmp.path(),
+            "researcher",
+            "name = \"researcher\"\ndescription = \"the agent type\"\n",
+        );
+        let (manifest, _) = load_agent_template(tmp.path(), "researcher").unwrap();
+        assert_eq!(manifest.description, "the agent type");
+    }
+
     #[test]
     fn loads_a_template_from_workspaces_agents() {
         let tmp = tempfile::tempdir().unwrap();
@@ -313,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_template_names_the_directories_searched() {
+    fn a_missing_template_names_every_path_searched() {
         let tmp = tempfile::tempdir().unwrap();
         let err = load_agent_template(tmp.path(), "nope").unwrap_err();
         assert!(err.is_missing(), "{err}");
@@ -322,10 +375,13 @@ mod tests {
         // The message interpolates real paths, so the separator is the platform's: `workspaces/agents` on Unix and `workspaces\agents` on Windows.
         // Build the expected fragment the same way rather than hard-coding a forward slash, which passed everywhere except the Windows shard (#7889).
         let workspaces_agents: String =
-            ["workspaces", "agents"].join(std::path::MAIN_SEPARATOR_STR);
-        let registry_agents: String = ["registry", "agents"].join(std::path::MAIN_SEPARATOR_STR);
+            ["workspaces", "agents", "nope"].join(std::path::MAIN_SEPARATOR_STR);
+        let registry_agents: String =
+            ["registry", "agents", "nope"].join(std::path::MAIN_SEPARATOR_STR);
+        let agent_types: String = ["agent-types", "nope.toml"].join(std::path::MAIN_SEPARATOR_STR);
         assert!(rendered.contains(&workspaces_agents), "{rendered}");
         assert!(rendered.contains(&registry_agents), "{rendered}");
+        assert!(rendered.contains(&agent_types), "{rendered}");
     }
 
     /// The review finding this module exists for: a corrupt manifest used to

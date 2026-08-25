@@ -35,7 +35,7 @@ pub struct EphemeralSpawnRequest {
 
     /// Agent type whose template manifest supplies the worker's system prompt, model and declared tools.
     ///
-    /// Resolved through the same `workspaces/agents/` → `registry/agents/` search the workflow step-agent types use.
+    /// Resolved through the same search the workflow step-agent types use — the writable `agent-types/` store first, then `workspaces/agents/`, then `registry/agents/` — so a type authored in the dashboard or by `agent_type_create` is runnable here without being copied anywhere.
     /// Mutually complementary with `system_prompt`: an explicit `system_prompt` overrides the template's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
