@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 50;
+const SCHEMA_VERSION: u32 = 51;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -242,6 +242,16 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // provider gets real full-text search instead of a `content LIKE` scan —
     // and so `memory.fts_only` finally has a memories index to fall back to.
     run_step!(50, migrate_v50);
+
+    // v51 (#7752): add the `ephemeral_runs` table so a disposable sub-agent
+    // run leaves a record attributable to the agent that spawned it. Before
+    // this an ephemeral worker vanished completely — its spend reached the
+    // parent's ledger through `usage_events.billed_agent_id` (v49) but the
+    // work that produced the spend was invisible, so an operator could not
+    // answer "what did this agent delegate, and what did each one cost".
+    // Purely additive: no existing table is touched and no existing row
+    // changes meaning.
+    run_step!(51, migrate_v51);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1035,7 +1045,7 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
         [],
     )?;
     Ok(())
@@ -1053,6 +1063,62 @@ fn rebuild_memories_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO memories_fts (memory_id, agent_id, content) \
          SELECT id, agent_id, content FROM memories",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v51 (#7752): ephemeral worker run records.
+///
+/// An ephemeral worker runs one turn under its parent's identity and then
+/// vanishes — no registry entry, no persisted session, and a mission workspace
+/// deleted on the way out. That left an operator with nothing to inspect: v49
+/// gave the parent the *spend* through `usage_events.billed_agent_id`, but the
+/// work behind the spend had no record at all.
+///
+/// This table is that record, and it is deliberately not a session. The
+/// alternative — clearing the worker's `incognito` flag so the agent loop
+/// persists its session under the parent's `AgentId` — also un-gates the
+/// episodic-memory write, the context-engine advance and the proactive
+/// `auto_memorize` pass, all of which key on the same id, and would fold a
+/// delegated sub-run's text into the parent's own recall and conversation
+/// list. See `crate::ephemeral_run_store` for the full argument.
+///
+/// `parent_agent_id` is indexed because every read is scoped to one parent,
+/// and carries no foreign key for the same reason the other agent-scoped
+/// tables do not: the cascade is explicit, in
+/// `MemorySubstrate::remove_agent`, so all agent-scoped deletes stay in one
+/// reviewable list rather than split between SQL and Rust.
+fn migrate_v51(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ephemeral_runs (
+            id              TEXT PRIMARY KEY,
+            parent_agent_id TEXT NOT NULL,
+            label           TEXT NOT NULL,
+            worker_name     TEXT NOT NULL,
+            agent_type      TEXT,
+            task            TEXT NOT NULL DEFAULT '',
+            response        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL CHECK (status IN ('completed','failed')),
+            error           TEXT,
+            provider        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT '',
+            iterations      INTEGER NOT NULL DEFAULT 0,
+            tool_calls      INTEGER NOT NULL DEFAULT 0,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL NOT NULL DEFAULT 0.0,
+            latency_ms      INTEGER NOT NULL DEFAULT 0,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT NOT NULL,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ephemeral_runs_parent
+            ON ephemeral_runs(parent_agent_id, finished_at DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (51, datetime('now'), 'Add ephemeral_runs table so a disposable sub-agent run leaves a record under its parent (#7752)')",
         [],
     )?;
     Ok(())
@@ -2179,6 +2245,28 @@ mod tests {
                 "migration v{v} is applied (user_version={user_version}) but has no audit row"
             );
         }
+
+        // …and each one must have written that row *itself*. The two checks
+        // above run after the #3538 backfill at the end of `run_migrations`,
+        // which inserts a placeholder row for any version that failed to
+        // record itself — so they pass even when a migration writes its audit
+        // row under the wrong version number. `migrate_v50` did exactly that
+        // (it recorded itself as 49, where `INSERT OR IGNORE` silently dropped
+        // it against v49's existing row), and the only visible symptom was a
+        // "drift detected and self-healed" warning on every fresh boot.
+        // A clean ladder must need no backfill at all.
+        let placeholders: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE description = 'audit-row backfill (#3538)'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            placeholders, 0,
+            "a fresh ladder must need no audit-row backfill; some migrate_vN is \
+             recording its audit row under a version other than its own"
+        );
     }
 
     /// Boot-time ladder invariant: a DB whose `migrations` audit table
@@ -2755,6 +2843,50 @@ mod tests {
             "re-running migrate_v49 must not touch data"
         );
         assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
+    }
+
+    /// #7752: the `ephemeral_runs` table must exist after the ladder, accept a
+    /// row, refuse an out-of-domain `status`, and survive a re-run untouched.
+    #[test]
+    fn test_migrate_v51_creates_ephemeral_runs_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO ephemeral_runs (
+                 id, parent_agent_id, label, worker_name, status,
+                 started_at, finished_at, cost_usd
+             ) VALUES ('r1', 'parent-1', 'researcher', 'researcher-00ff', 'completed',
+                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z', 0.25)",
+            [],
+        )
+        .unwrap();
+
+        // The CHECK constraint is the last line of defence behind the store's
+        // own status validation; an unknown value must never round-trip.
+        assert!(
+            conn.execute(
+                "INSERT INTO ephemeral_runs (
+                     id, parent_agent_id, label, worker_name, status,
+                     started_at, finished_at
+                 ) VALUES ('r2', 'parent-1', 'x', 'x-00ff', 'sideways',
+                           '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z')",
+                [],
+            )
+            .is_err(),
+            "status must be constrained to the run outcomes the store writes"
+        );
+
+        migrate_v51(&conn).unwrap();
+        let (n, cost): (i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), IFNULL(SUM(cost_usd), 0.0) FROM ephemeral_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "re-running migrate_v51 must not touch data");
+        assert_eq!(cost, 0.25, "re-running migrate_v51 must not touch data");
     }
 
     #[test]
