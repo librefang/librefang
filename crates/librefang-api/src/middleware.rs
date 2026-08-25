@@ -567,11 +567,13 @@ fn rbac_denied_response(
 
 /// What consulting the OIDC role grant produced at a point where [`auth`] was about to reject the request (#7744).
 enum OidcOutcome {
-    /// No [`OidcRoleGrant`] in extensions — the caller is not an OIDC principal, or holds claims the operator mapped to nothing. The rejection [`auth`] was about to perform stands, unchanged.
+    /// No [`OidcRoleGrant`] in extensions — the caller is not an OIDC principal, or holds claims the operator mapped to nothing.
+    /// The rejection [`auth`] was about to perform stands, unchanged.
     NoGrant,
     /// The grant is good for this route; [`AuthenticatedApiUser`] has been inserted and the request should proceed.
     Admitted,
-    /// The grant is real but its role may not reach this route. Carries the localized 403, already recorded in the audit log.
+    /// The grant is real but its role may not reach this route.
+    /// Carries the localized 403, already recorded in the audit log.
     Denied(Response<Body>),
 }
 
@@ -580,7 +582,8 @@ enum OidcOutcome {
 /// Called only from the two points in [`auth`] that were about to return 401 — the fail-closed branch for a deployment with no local credential configured, and the final fallthrough after every local credential missed.
 /// Placing it there rather than higher up is what makes the whole feature additive: an OIDC bearer cannot displace, outrank, or demote an identity that some other credential already established, because by the time this runs no other credential matched.
 ///
-/// It cannot in practice compete with one either. The grant exists only when the `Authorization: Bearer` value was a JWT this daemon verified against a configured provider's JWKS, and a master `api_key` or a per-user key is an opaque secret rather than a signed token, so one header value cannot satisfy both.
+/// It cannot in practice compete with one either.
+/// The grant exists only when the `Authorization: Bearer` value was a JWT this daemon verified against a configured provider's JWKS, and a master `api_key` or a per-user key is an opaque secret rather than a signed token, so one header value cannot satisfy both.
 fn apply_oidc_grant(
     request: &mut Request<Body>,
     auth_state: &AuthState,
