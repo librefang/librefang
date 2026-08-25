@@ -30,7 +30,7 @@ pub async fn create_workflow(
     // no agent whose manifest could speak for it.
     let owner = api_user
         .as_ref()
-        .map(|u| librefang_types::principal::Principal::user(u.0.user_id))
+        .and_then(|u| u.0.owner_principal())
         .or_else(|| state.kernel.config_ref().default_owner_principal());
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
     let description = req["description"].as_str().unwrap_or("").to_string();

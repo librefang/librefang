@@ -203,6 +203,20 @@ pub struct AuthenticatedApiUser {
     pub user_id: UserId,
 }
 
+impl AuthenticatedApiUser {
+    /// The [`Principal`] this caller acts for, for stamping ownership on what a request creates (#7744).
+    ///
+    /// `None` for the synthetic root credential — the master api key, a trusted loopback caller, or an `allow_no_auth` deployment, all of which are admitted as `name: "root"` with the fixed [`ROOT_API_KEY_USER_ID`] sentinel.
+    /// That sentinel says "authentication is off or the caller holds the daemon's own key", not "a person called root"; it names no `[[users]]` entry, so recording it as an owner would write a principal that resolves to nothing and looks like a real one.
+    /// Returning `None` here lets the caller fall through to `config.toml: default_owner`, which is the key an operator actually reaches for when they want unattributed writes attributed.
+    pub fn owner_principal(&self) -> Option<librefang_types::principal::Principal> {
+        if self.user_id.0 == ROOT_API_KEY_USER_ID {
+            return None;
+        }
+        Some(librefang_types::principal::Principal::user(self.user_id))
+    }
+}
+
 /// A LibreFang identity resolved from a validated OIDC ID token (#7744).
 ///
 /// Produced by [`crate::oauth::oidc_auth_middleware`], which is the only place that holds both the cryptographically validated `IdTokenClaims` and the `[external_auth]` config the grant is derived from, and consumed by [`auth`] at the two points where a request would otherwise be rejected as unauthenticated.

@@ -3599,7 +3599,7 @@ pub struct KernelConfig {
     /// An operator spec string — `user:alice`, `group:platform`, or a bare `alice` meaning `user:alice` — parsed by [`crate::principal::Principal::from_spec`].
     ///
     /// `None` (the default) means unowned artifacts stay unowned rather than being attributed to a synthetic principal nobody chose.
-    /// The kernel emits one `WARN` per daemon start when an artifact is created with no principal resolvable, naming this key, so the gap is visible without being fatal.
+    /// The first artifact created with no principal resolvable logs one `WARN` per daemon naming this key ([`crate::principal::warn_once_unowned`]), so the gap is visible without being fatal or noisy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_owner: Option<String>,
     /// Maps platform-native channel roles (Telegram admin, Discord guild

@@ -679,10 +679,12 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             "Agent created a workflow"
         );
         if owner.is_none() {
-            // Not a warning on the hot path: an unowned workflow is a supported
-            // state (unowned = visible to all), and a fleet that has declared
-            // no principals would otherwise warn on every creation. Debug is
-            // enough to answer "why is this one unowned" after the fact.
+            // An unowned workflow is a supported state (unowned = visible to
+            // all), so this is not an error — but a fleet that meant to
+            // attribute its artifacts and has not configured anything should
+            // find that out from the log rather than from an audit. Loud once,
+            // quiet thereafter.
+            librefang_types::principal::warn_once_unowned("workflow");
             tracing::debug!(
                 workflow_id = %id,
                 "Workflow recorded without an owner — the creating turn had no authenticated caller, the agent manifest declares no `owner`, and `config.toml` declares no `default_owner`"

@@ -93,6 +93,17 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         let id = self.workflows.cron_scheduler.add_job(job, one_shot)?;
 
+        // Same contract as the workflow path: unowned is supported, and worth
+        // saying out loud exactly once so an operator who meant to attribute
+        // their artifacts finds out from the log (#7744).
+        if owner.is_none() {
+            librefang_types::principal::warn_once_unowned("cron job");
+            tracing::debug!(
+                cron_job_id = %id,
+                "Cron job recorded without an owner — the creating turn had no authenticated caller, the agent manifest declares no `owner`, and `config.toml` declares no `default_owner`"
+            );
+        }
+
         // Persist after adding
         if let Err(e) = self.workflows.cron_scheduler.persist() {
             tracing::warn!("Failed to persist cron jobs: {e}");

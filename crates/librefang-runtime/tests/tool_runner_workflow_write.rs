@@ -315,7 +315,10 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
                 spec["description"].as_str().unwrap_or_default().to_string(),
                 spec["steps"].as_array().map(|a| a.len()).unwrap_or(0),
                 spec.get("input_schema").is_some(),
-                None,
+                // Echoed back so the tool's own response can be asserted:
+                // the real kernel stamps the owner it was handed onto the
+                // workflow and reports it in the summary.
+                owner,
             )),
             StubCreateResult::Invalid(reason) => Err(
                 librefang_kernel_handle::KernelOpError::InvalidInput(reason.to_string()),

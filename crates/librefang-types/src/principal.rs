@@ -322,6 +322,20 @@ pub fn resolve_acting_principal(
     config_default
 }
 
+/// Emit one `WARN` per daemon naming the config keys that would have given an artifact an owner, then stay quiet.
+///
+/// Once per process, not once per artifact: a deployment that has declared no principals at all creates unowned artifacts continuously, and a per-artifact warning would be pure noise in exactly the deployment least equipped to act on it.
+/// One line is enough to answer "why is nothing owned here" for an operator reading the boot log, and every subsequent occurrence is recorded at `DEBUG` by the call site with the artifact's id, so a specific case is still traceable when someone goes looking.
+pub fn warn_once_unowned(artifact_kind: &str) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            first_artifact_kind = artifact_kind,
+            "An artifact was created with no owner: the turn had no authenticated caller, the agent's `agent.toml` declares no `owner`, and `config.toml` declares no `default_owner`. Unowned artifacts are visible to everyone and attributable to nobody. Set `default_owner` in config.toml, or `owner` on the agents that run unattended, to attribute them. Logged once per daemon start; subsequent occurrences are at DEBUG."
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

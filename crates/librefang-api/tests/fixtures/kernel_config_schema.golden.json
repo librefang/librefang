@@ -437,6 +437,13 @@
         }
       ]
     },
+    "default_owner": {
+      "description": "Fleet-wide fallback owner for artifacts created by a turn that has neither an authenticated caller nor an `owner` on the agent's manifest (#7744).\n\nAn operator spec string — `user:alice`, `group:platform`, or a bare `alice` meaning `user:alice` — parsed by [`crate::principal::Principal::from_spec`].\n\n`None` (the default) means unowned artifacts stay unowned rather than being attributed to a synthetic principal nobody chose. The first artifact created with no principal resolvable logs one `WARN` per daemon naming this key ([`crate::principal::warn_once_unowned`]), so the gap is visible without being fatal or noisy.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "default_routing": {
       "description": "Kernel-wide Smart Model Router defaults applied to any agent whose `agent.toml` does not set its own `[routing]` block. The `init` wizard writes user-selected tier models here under `[default_routing]` so the chosen routing actually reaches the kernel — see issue #4466. Per-agent `routing` always wins when present.",
       "anyOf": [

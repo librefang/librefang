@@ -100,7 +100,7 @@ pub async fn create_schedule(
     // auth extension, never from `req`.
     let owner = api_user
         .as_ref()
-        .map(|u| librefang_types::principal::Principal::user(u.0.user_id))
+        .and_then(|u| u.0.owner_principal())
         .or_else(|| state.kernel.config_ref().default_owner_principal());
     let name = match req["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),

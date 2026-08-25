@@ -75,7 +75,7 @@ pub async fn create_cron_job(
     // whole, so a body-readable owner would be a caller-chosen owner.
     let owner = api_user
         .as_ref()
-        .map(|u| librefang_types::principal::Principal::user(u.0.user_id))
+        .and_then(|u| u.0.owner_principal())
         .or_else(|| state.kernel.config_ref().default_owner_principal());
     match state
         .kernel
