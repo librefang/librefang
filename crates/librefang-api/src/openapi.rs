@@ -344,6 +344,7 @@ use crate::types;
         // ── Authorization (RBAC checks) ──
         routes::check,
         routes::effective_permissions,
+        routes::authz::whoami,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -544,6 +545,7 @@ use crate::types;
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
         routes::agents::SessionContextResponse,
+        routes::authz::WhoamiView,
         routes::groups::GroupView,
         routes::groups::GroupUpsert,
         routes::groups::UserGroupsView,

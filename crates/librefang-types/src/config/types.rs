@@ -4991,8 +4991,90 @@ pub struct ExternalAuthConfig {
     /// ```
     ///
     /// `BTreeMap` rather than `HashMap` so `GET /api/config` renders the entries in a stable order and a diff of two config snapshots reflects real edits.
+    ///
+    /// The claim values matched against this map are the ones [`ExternalAuthConfig::claim_paths`] resolves, which is `roles` and `groups` by default rather than `roles` alone.
+    /// The key's documented meaning has always been "role/group claim value"; before #7746 only the `roles` array was actually read, so an operator who wrote a group name here got silence.
     #[serde(default)]
     pub role_map: BTreeMap<String, String>,
+
+    /// IdP group (or role, or scope) claim value → the name of a `[[groups]]` entry the caller is treated as a member of for the lifetime of the request (#7746).
+    ///
+    /// # Why a map and not "the claim value *is* the group name"
+    ///
+    /// Matching by name would let the identity provider mint a LibreFang grant by inventing a claim value.
+    /// Anyone who can create a group in the IdP — in most tenants a far larger set of people than "LibreFang operators", and in a self-service Entra or Google Workspace tenant frequently *every employee* — could create one named `oncall` and acquire whatever `oncall` owns and confers here.
+    /// The same argument [`ExternalAuthConfig::role_map`] makes for roles applies unchanged to groups, and for the same reason the answer is the same: a grant is something an operator wrote down in `config.toml`, and the IdP only gets to say which of the operator's written-down grants a given caller matches.
+    ///
+    /// The map is also what makes the two namespaces independent.
+    /// An IdP group is named for the organisation (`platform-oncall-emea`, or a bare GUID in Entra's case, where the `groups` claim carries object ids rather than display names); a LibreFang group is named for what it owns. A GUID cannot be a name-match against anything.
+    ///
+    /// # An unmapped claim value grants nothing
+    ///
+    /// Not "grants a lower group", not "grants viewer" — nothing.
+    /// A claim value absent from this map, or present but naming a `[[groups]]` entry that does not exist, contributes no membership, no group-conferred role string and no [`crate::principal::Principal`], and the caller falls through to exactly the outcome they would have had with no claim at all.
+    /// A typo'd target is skipped rather than creating a phantom group, mirroring how a typo'd target in `role_map` is skipped rather than resolving to `User`: an unrecognised value must never be an escalation, and a group that exists only in this map would be a principal that owns things and that no operator can see in `[[groups]]`.
+    ///
+    /// # Membership is ephemeral
+    ///
+    /// A match here does **not** write the caller's name into `[[groups]] members`.
+    /// The membership is recomputed from the presented token on every request and discarded with the request.
+    /// Persisting it would turn operator-owned `config.toml` into an unmanaged cache of IdP state with no invalidation path — the entry is written when someone logs in, and the one event that should remove it (their removal from the group in the IdP) is precisely the event after which they never log in again, so a revoked membership would persist forever in the file that is supposed to be the operator's own record. It would also make every login a config write, with the reload, the backup rotation and the `git diff` churn that implies.
+    /// Recomputing per request is strictly stronger than what #7746 asked for ("re-evaluate on every login"): a revocation in the IdP takes effect here when the caller's token expires, with no local action at all.
+    ///
+    /// # Precedence against a declared `[[groups]]` member
+    ///
+    /// The two are **unioned**, and no arbitration is needed because there is nothing to arbitrate: group membership is a set, not a ladder, so "both say yes" and "one says yes" have the same answer.
+    /// This is deliberately unlike `role_map`, which picks the highest-privilege match — an ordinal ladder has a defined `max`, a set does not.
+    /// The consequence worth stating: removing someone from the IdP group does not remove them from a `[[groups]] members` list that names them explicitly.
+    /// That is correct rather than a leak. A name in `members` is an independent grant an operator typed, and letting an IdP retract it would make the IdP authoritative over config the operator owns — the mirror image of the drift this feature exists to fix.
+    ///
+    /// # Relationship to `role_map`
+    ///
+    /// The two maps compose over the same claim-value vocabulary and confer different things, so one claim can feed both and neither implies the other.
+    /// `role_map` confers RBAC privilege (`viewer < user < admin < owner`) and decides *what the caller may do*; `group_map` confers membership and decides *which teams the caller is on*, which is what group-conferred role strings ([`KernelConfig::effective_roles_for`]) and group-shaped ownership ([`crate::principal::Principal::group_named`]) key off.
+    /// A group is still not a route of privilege escalation: membership confers no `UserRole` whatsoever, so an operator who wants an IdP group to also carry admin privilege writes that claim value into *both* maps, and writes it deliberately.
+    ///
+    /// ```toml
+    /// [external_auth.group_map]
+    /// "platform-oncall" = "oncall"
+    /// "3f2a9c81-0e4d-4c9a-9a2e-77e2a1b4c5d6" = "compliance"
+    /// ```
+    ///
+    /// `BTreeMap` for the same `GET /api/config` stability reason as `role_map` (#3298).
+    #[serde(default)]
+    pub group_map: BTreeMap<String, String>,
+
+    /// Where in the token to look for the identity attributes [`ExternalAuthConfig::role_map`] and [`ExternalAuthConfig::group_map`] are matched against (#7746).
+    ///
+    /// Every entry is a **dotted path** into the validated ID token (or the userinfo document, when the provider issued no ID token).
+    /// Keycloak — named as a conformance target on #7746 and the common self-hosted case — puts realm roles at `realm_access.roles` and per-client roles at `resource_access.<client>.roles`, neither of which a flat claim *name* can address, so the path form is the minimum that reaches the deployment this feature is for.
+    /// The literal token `<client>` is substituted with the provider's configured `client_id`, so one entry works across providers without restating the id.
+    ///
+    /// Resolution is permissive about shape and strict about nothing else: a path resolving to an array of strings contributes each element, and a path resolving to a single string contributes its whitespace-separated words.
+    /// The second rule is what makes `scope` work — RFC 6749 defines it as a space-delimited list in one string — and it also handles a provider that emits a single-valued `role` claim.
+    /// Its cost is that a claim value containing a space is split; that is documented rather than solved, because the IdPs this targets do not produce them (Entra sends GUIDs, Keycloak forbids spaces in role names) and a quoting convention would be a worse trade than the limitation.
+    /// A path that resolves to nothing, or to a value of any other shape, contributes nothing and is not an error — providers differ in which claims they emit, and a missing claim is the normal case rather than a misconfiguration.
+    ///
+    /// # Why `scope` is not in the default
+    ///
+    /// The default is `["roles", "groups"]`. `scope` is deliberately absent, and adding it is a one-line opt-in.
+    ///
+    /// `roles` and `groups` are assertions the identity provider makes *about the user*. `scope` is an assertion about *what a client application asked for and was granted*, which is a different trust question with a different attacker: a token minted for some other OAuth client in the same tenant carries that client's scopes, and the only thing standing between such a token and this daemon is audience binding.
+    /// Audience binding is enforced — a provider with neither `audience` nor `client_id` set grants nothing at all — so opting in is safe where an operator has bound the audience, and defaulting it off means nobody inherits the weaker assertion by accident.
+    ///
+    /// ```toml
+    /// [external_auth]
+    /// claim_paths = ["realm_access.roles", "resource_access.<client>.roles", "groups"]
+    /// ```
+    #[serde(default = "default_idp_claim_paths")]
+    pub claim_paths: Vec<String>,
+}
+
+/// Default identity-attribute claim paths: the two standard-shaped claims, and
+/// not `scope`. See [`ExternalAuthConfig::claim_paths`] for why `scope` is an
+/// explicit opt-in.
+fn default_idp_claim_paths() -> Vec<String> {
+    vec!["roles".to_string(), "groups".to_string()]
 }
 
 /// Configuration for a single OIDC/OAuth2 provider.
@@ -5083,6 +5165,8 @@ impl Default for ExternalAuthConfig {
             providers: Vec::new(),
             require_email_verified: true,
             role_map: BTreeMap::new(),
+            group_map: BTreeMap::new(),
+            claim_paths: default_idp_claim_paths(),
         }
     }
 }
@@ -6776,6 +6860,80 @@ impl KernelConfig {
     /// Look up a group by exact name.
     pub fn group(&self, name: &str) -> Option<&GroupConfig> {
         self.groups.iter().find(|g| g.name == name)
+    }
+
+    /// Every group `user` effectively belongs to: the `[[groups]]` entries that
+    /// name them in `members`, unioned with `idp_groups` — the local group names
+    /// an identity provider's claims resolved to for *this request* under
+    /// `[external_auth.group_map]` (#7746).
+    ///
+    /// Union rather than a precedence rule, because membership is a set and not
+    /// an ordinal ladder: "declared *and* claimed" and "declared only" denote the
+    /// same membership, so there is no conflict for a precedence rule to settle.
+    /// See [`ExternalAuthConfig::group_map`] for why that means an IdP cannot
+    /// retract a `members` entry an operator typed.
+    ///
+    /// `idp_groups` is passed in rather than read from anywhere, because it does
+    /// not live anywhere: it is derived from the token the caller presented and
+    /// discarded with the request. Passing an empty set makes this exactly
+    /// [`KernelConfig::groups_for_user`] by name, which is the shape every
+    /// non-OIDC credential path calls it with.
+    ///
+    /// Names that resolve to no `[[groups]]` entry are dropped. A declared member
+    /// list cannot produce one, and `translate_oidc_groups` already refuses to
+    /// emit one, so this is a belt-and-braces filter that keeps the return type's
+    /// contract — "names of groups that exist" — true by construction.
+    pub fn effective_groups_for(
+        &self,
+        user: &str,
+        idp_groups: &std::collections::BTreeSet<String>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut out: std::collections::BTreeSet<String> = self
+            .groups
+            .iter()
+            .filter(|g| g.has_member(user))
+            .map(|g| g.name.clone())
+            .collect();
+        out.extend(
+            idp_groups
+                .iter()
+                .filter(|n| self.group(n).is_some())
+                .cloned(),
+        );
+        out
+    }
+
+    /// The role strings `user` holds by virtue of effective group membership —
+    /// [`KernelConfig::roles_for_user`] widened to include IdP-derived
+    /// membership (#7746).
+    ///
+    /// Each effective group contributes its own name plus every entry in its
+    /// `roles` list, identically to `roles_for_user`; with an empty `idp_groups`
+    /// the two return the same set, which
+    /// `effective_roles_for_matches_roles_for_user_when_no_claims_are_present`
+    /// pins.
+    ///
+    /// This still does **not** include [`UserConfig::role`]. Connecting the group
+    /// vocabulary to the RBAC privilege ladder is what #7746 was expected to do,
+    /// and it does — via `[external_auth.role_map]`, a *separate* operator-written
+    /// map over the same claim values, so that an operator says "this claim means
+    /// admin" explicitly rather than a group name acquiring privilege by
+    /// resembling one. Folding the ladder in here would mean an IdP group called
+    /// `owner` silently confers owner, which is the exact forgeability the two-map
+    /// design exists to prevent.
+    pub fn effective_roles_for(
+        &self,
+        user: &str,
+        idp_groups: &std::collections::BTreeSet<String>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for name in self.effective_groups_for(user, idp_groups) {
+            if let Some(group) = self.group(&name) {
+                out.insert(group.name.clone());
+                out.extend(group.roles.iter().cloned());
+            }
+        }
+        out
     }
 
     /// The display name of a recorded [`Principal`], or `None` when nothing declared here matches it.

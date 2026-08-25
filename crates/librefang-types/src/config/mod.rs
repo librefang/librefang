@@ -251,22 +251,222 @@ admin_role = "admin"
         // `UserConfig.role` is a different ladder. A group named `owner` must
         // not silently confer owner privilege, and the RBAC role must not show
         // up in the group-derived set either.
+        //
+        // #7746 UPDATE — kept, and widened rather than relaxed.
+        //
+        // #7745 wrote this test to pin a separation it described as temporary:
+        // "connecting the two ladders is #7746's job, under an operator-defined
+        // mapping". #7746 has landed and the separation still holds, because the
+        // connection it built is not a promotion path from group membership to
+        // privilege. `[external_auth.role_map]` and `[external_auth.group_map]`
+        // are two independent operator-written maps over the same IdP claim
+        // values: the first confers a `UserRole`, the second confers membership,
+        // and an operator who wants one claim to do both writes it into both
+        // maps deliberately. Nothing derives privilege from a group name.
+        //
+        // So the assertion is unchanged and the coverage is extended to the arm
+        // that did not exist when it was written — `effective_roles_for` with an
+        // IdP-derived membership must leak the ladder no more than
+        // `roles_for_user` does, which is the property that would silently
+        // invert if a later change decided a group could carry a `UserRole`.
         let cfg = KernelConfig {
             users: vec![UserConfig {
                 name: "alice".to_string(),
                 role: "admin".to_string(),
                 ..Default::default()
             }],
-            groups: vec![crate::config::GroupConfig {
-                name: "oncall".to_string(),
-                members: vec!["alice".to_string()],
-                ..Default::default()
-            }],
+            groups: vec![
+                crate::config::GroupConfig {
+                    name: "oncall".to_string(),
+                    members: vec!["alice".to_string()],
+                    ..Default::default()
+                },
+                // Named for a privilege level on purpose: the worst-case group
+                // name an identity provider could hand us.
+                crate::config::GroupConfig {
+                    name: "owner".to_string(),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
         let roles = cfg.roles_for_user("alice");
         assert!(roles.contains("oncall"));
         assert!(!roles.contains("admin"));
+
+        let idp = std::collections::BTreeSet::from(["owner".to_string()]);
+        let effective = cfg.effective_roles_for("alice", &idp);
+        // The IdP-conferred group is present as a *role string* …
+        assert!(effective.contains("owner"));
+        // … and the caller's RBAC level is still nowhere in the set. The
+        // `owner` here is the name of a team, and the only thing that reads it
+        // is channel-binding resolution; `UserRole` is resolved by
+        // `AuthManager` from `UserConfig.role` and `role_map`, neither of which
+        // this function touches.
+        assert!(!effective.contains("admin"));
+        assert_eq!(cfg.users[0].role, "admin");
+    }
+
+    #[test]
+    fn effective_roles_for_matches_roles_for_user_when_no_claims_are_present() {
+        // Every non-OIDC credential path calls the effective resolvers with an
+        // empty claim set, so the two must agree exactly there — otherwise
+        // #7746 would have quietly changed what a plain API-key caller resolves
+        // to.
+        let cfg = KernelConfig {
+            groups: vec![
+                crate::config::GroupConfig {
+                    name: "oncall".to_string(),
+                    members: vec!["alice".to_string()],
+                    roles: vec!["approver".to_string()],
+                    ..Default::default()
+                },
+                crate::config::GroupConfig {
+                    name: "billing".to_string(),
+                    members: vec!["bob".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let none = std::collections::BTreeSet::new();
+        for user in ["alice", "bob", "nobody"] {
+            assert_eq!(
+                cfg.effective_roles_for(user, &none),
+                cfg.roles_for_user(user),
+                "effective_roles_for({user}) must reduce to roles_for_user with no claims"
+            );
+            let declared: std::collections::BTreeSet<String> = cfg
+                .groups_for_user(user)
+                .into_iter()
+                .map(|g| g.name.clone())
+                .collect();
+            assert_eq!(cfg.effective_groups_for(user, &none), declared);
+        }
+    }
+
+    #[test]
+    fn effective_groups_union_declared_membership_with_idp_claims() {
+        // The precedence decision, pinned: a set has no ladder, so both grants
+        // survive and neither can retract the other. In particular the IdP
+        // dropping `oncall` does not remove alice from a `members` list an
+        // operator typed — see `ExternalAuthConfig::group_map`.
+        let cfg = KernelConfig {
+            groups: vec![
+                crate::config::GroupConfig {
+                    name: "oncall".to_string(),
+                    members: vec!["alice".to_string()],
+                    roles: vec!["approver".to_string()],
+                    ..Default::default()
+                },
+                crate::config::GroupConfig {
+                    name: "compliance".to_string(),
+                    roles: vec!["auditor".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Declared only.
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            cfg.effective_groups_for("alice", &none),
+            std::collections::BTreeSet::from(["oncall".to_string()]),
+        );
+
+        // Declared ∪ claimed, with the claimed half overlapping the declared
+        // half — the union collapses the duplicate rather than double-counting.
+        let claimed =
+            std::collections::BTreeSet::from(["oncall".to_string(), "compliance".to_string()]);
+        assert_eq!(
+            cfg.effective_groups_for("alice", &claimed),
+            std::collections::BTreeSet::from(["compliance".to_string(), "oncall".to_string()]),
+        );
+        assert_eq!(
+            cfg.effective_roles_for("alice", &claimed),
+            std::collections::BTreeSet::from([
+                "approver".to_string(),
+                "auditor".to_string(),
+                "compliance".to_string(),
+                "oncall".to_string(),
+            ]),
+        );
+
+        // Claimed only, for a user with no `[[groups]]` entry at all — the
+        // deployment where every membership comes from the IdP.
+        assert_eq!(
+            cfg.effective_groups_for("carol", &claimed),
+            std::collections::BTreeSet::from(["compliance".to_string(), "oncall".to_string()]),
+        );
+    }
+
+    #[test]
+    fn effective_groups_drop_names_that_match_no_declared_group() {
+        // Belt and braces behind `translate_oidc_groups`: the returned set
+        // promises "names of groups that exist", and a phantom name here would
+        // become a `Principal::group_named` that owns things and that no
+        // operator can see in `[[groups]]`.
+        let cfg = KernelConfig {
+            groups: vec![crate::config::GroupConfig {
+                name: "oncall".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let claimed = std::collections::BTreeSet::from(["oncall".to_string(), "ghost".to_string()]);
+        assert_eq!(
+            cfg.effective_groups_for("alice", &claimed),
+            std::collections::BTreeSet::from(["oncall".to_string()]),
+        );
+        assert!(!cfg.effective_roles_for("alice", &claimed).contains("ghost"));
+    }
+
+    #[test]
+    fn external_auth_group_mapping_defaults_are_off_and_scope_is_not_read() {
+        let cfg = KernelConfig::default();
+        assert!(
+            cfg.external_auth.group_map.is_empty(),
+            "group mapping must be opt-in: an IdP claim grants no membership until an operator writes the map"
+        );
+        assert_eq!(
+            cfg.external_auth.claim_paths,
+            vec!["roles".to_string(), "groups".to_string()],
+            "the default claim paths are the two identity assertions; `scope` describes what a client app was granted and is an explicit opt-in"
+        );
+    }
+
+    #[test]
+    fn external_auth_group_mapping_round_trips_through_toml() {
+        let toml_str = r#"
+            [external_auth]
+            enabled = true
+            claim_paths = ["realm_access.roles", "resource_access.<client>.roles", "groups"]
+
+            [external_auth.group_map]
+            "platform-oncall" = "oncall"
+
+            [external_auth.role_map]
+            "librefang-owners" = "owner"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.external_auth.group_map.get("platform-oncall"),
+            Some(&"oncall".to_string())
+        );
+        assert_eq!(
+            cfg.external_auth.claim_paths,
+            vec![
+                "realm_access.roles".to_string(),
+                "resource_access.<client>.roles".to_string(),
+                "groups".to_string(),
+            ]
+        );
+        // The two maps are independent: declaring one must not disturb the other.
+        assert_eq!(
+            cfg.external_auth.role_map.get("librefang-owners"),
+            Some(&"owner".to_string())
+        );
     }
 
     #[test]

@@ -233,6 +233,24 @@ pub struct OidcRoleGrant {
     pub user_id: UserId,
 }
 
+/// The local `[[groups]]` an identity provider's claims placed this caller in, for the lifetime of one request (#7746).
+///
+/// Produced by [`crate::oauth::oidc_auth_middleware`] from `[external_auth.group_map]`, and read by handlers that need the caller's effective teams rather than their privilege level — `GET /api/authz/whoami` today, and any future check of `Principal::Group` ownership against the live caller.
+///
+/// **Ephemeral by design.** This never reaches `config.toml`. Membership is recomputed from the presented token on every request and dropped with it, so a revocation in the identity provider propagates when the caller's token expires, with no local cleanup and no stale row in operator-owned config. `ExternalAuthConfig::group_map` carries the full argument.
+///
+/// It is a separate extension from [`OidcRoleGrant`] rather than a field on it, because the two are independently configurable: an operator may declare `group_map` and no `role_map` — SSO identity for ownership and channel-binding roles, API privilege still on local keys — and folding membership into the role grant would silently disable it for exactly that deployment.
+///
+/// Presence carries no privilege. Membership confers group role strings and group-shaped ownership; it never contributes a [`UserRole`]. An IdP group called `owner` is a group called `owner`, nothing more.
+#[derive(Clone, Debug)]
+pub struct IdpGroupMembership {
+    /// Names of declared `[[groups]]` entries the caller matched. Always a
+    /// subset of the configured groups — `translate_oidc_groups` drops a map
+    /// target that names no declared group — and a `BTreeSet` so the order is
+    /// the same on every node and in every serialization (#3298).
+    pub groups: std::collections::BTreeSet<String>,
+}
+
 /// Marks requests admitted solely by the explicitly trusted loopback/no-auth deployment mode.
 /// Most routes treat these as Owner-equivalent for local single-user compatibility, while especially sensitive handlers (notably the audit ledger) can still require an actual credential.
 #[derive(Clone, Copy, Debug)]
