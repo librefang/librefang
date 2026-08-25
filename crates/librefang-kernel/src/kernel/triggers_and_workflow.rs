@@ -1236,6 +1236,22 @@ impl LibreFangKernel {
         workflow_id: WorkflowId,
         input: String,
     ) -> KernelResult<(WorkflowRunId, String)> {
+        self.run_workflow_owned(workflow_id, input, None).await
+    }
+
+    /// [`Self::run_workflow`], recording `owner` as the run's owning agent (#7714).
+    ///
+    /// `owner` is the agent that invoked the `workflow_run` tool. It is
+    /// stamped on the run at creation and never reassigned, so the resume and
+    /// operator-action paths carry it forward rather than re-deriving it from
+    /// whoever resumed. `None` produces an ownerless run, which is what an
+    /// operator-initiated run is.
+    pub async fn run_workflow_owned(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+    ) -> KernelResult<(WorkflowRunId, String)> {
         let cfg = self.config.load_full();
 
         // Bound nested workflow runs (refs #6659).
@@ -1264,7 +1280,7 @@ impl LibreFangKernel {
         let run_id = self
             .workflows
             .engine
-            .create_run(workflow_id, input)
+            .create_run_owned(workflow_id, input, owner)
             .await
             .ok_or_else(|| {
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))

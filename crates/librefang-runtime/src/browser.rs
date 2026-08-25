@@ -1951,11 +1951,17 @@ mod tests {
             }
         };
         config.chromium_path = Some(chromium.to_string_lossy().into_owned());
-        Some(
-            BrowserSession::launch(&config)
-                .await
-                .expect("discovered Chromium must launch for extraction fixtures"),
-        )
+        // A launch failure is the same class of environmental unavailability as a missing binary, so it skips rather than panics.
+        // A CI runner routinely has Chromium installed but cannot start it — no sandbox, a missing shared library, or too little memory — and panicking there turns an environment limitation into a red `main` that every open PR then inherits (#7861).
+        match BrowserSession::launch(&config).await {
+            Ok(session) => Some(session),
+            Err(error) => {
+                eprintln!(
+                    "skipping live extraction fixture because Chromium failed to launch: {error}"
+                );
+                None
+            }
+        }
     }
 
     async fn load_html_fixture(session: &BrowserSession, html: &str) {

@@ -473,8 +473,34 @@ where
     handle.await
 }
 
-fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
+/// The channel name a plain HTTP `POST /api/agents/{id}/message` runs under.
+///
+/// Also the identity namespace an under-privileged caller is pinned into by [`request_sender_context`], so the default and the pin cannot drift apart.
+const API_SENDER_CHANNEL: &str = "api";
+
+/// Build the [`SenderContext`] for an inbound message request, letting the authenticated caller's identity override a sender identity the body asserts but cannot prove.
+///
+/// SECURITY (#7744): `SenderContext.{channel, user_id}` is not decoration — it is the `(channel_type, platform_id)` tuple `AuthManager::identify` keys on (`kernel/messaging.rs`, `kernel/agent_execution.rs`), the tuple `AuthManager::resolve_user` keys the memory ACL on (`kernel/handles/memory_access.rs: memory_acl_for_sender`), and the value stamped into `manifest.metadata["sender_user_id"]` for per-sender tool authorization and `peer:{user_id}:KEY` memory scoping.
+/// `user_role_allows_request` in `middleware.rs` admits any `User`-role bearer to this route, so copying that tuple out of the body let a `User` name themselves as any user the operator had bound in `[[users]] channel_bindings` and inherit that user's role, policy and peer memory — the same binding `authorize_channel_user` (`channel_bridge.rs`) exists to establish for inbound channel traffic, reached over HTTP without passing through it.
+///
+/// The precedence rule:
+///
+/// - No authenticated caller (loopback, `allow_no_auth`) — there is no identity to prefer, so the body's assertion stands and behaviour is unchanged.
+/// - `Admin` or above — may assert any sender identity, because an operator impersonating a user for support, or a channel gateway relaying real platform users, is legitimate.
+/// - Below `Admin`, asserting an identity that `identify` resolves back to the *caller themselves* — the body is stating its own true binding, which is not an attack.
+///   It stands, so the documented `[[users]] channel_bindings` recipe for a REST operator keeps working.
+/// - Anything else — the authenticated identity wins, silently and without erroring.
+///   A rejection would leak the role check back to the caller and break clients that assert a harmless id.
+///
+/// The channel and the user id are pinned together, never one without the other.
+/// `identify` keys on the pair, so pinning only the id still lets the caller choose the namespace their own name is looked up in: with `[[users]] name = "alice", channel_bindings = { slack = "bob" }` alongside a separate `[[users]] name = "bob"`, a `User`-role bob asserting `channel_type = "slack"` would resolve through `slack:bob` to alice.
+fn request_sender_context(
+    req: &MessageRequest,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+    auth: &librefang_kernel::auth::AuthManager,
+) -> Option<SenderContext> {
     let sender_id = req.sender_id.as_ref()?;
+
     // Audit: cron-channel-name-not-reserved. An HTTP caller supplying
     // `channel_type = "cron"` (or case variant) used to derive the
     // SAME SessionId as the kernel's internal cron-fire path and
@@ -484,11 +510,32 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
     let raw_channel = req
         .channel_type
         .clone()
-        .unwrap_or_else(|| "api".to_string());
+        .unwrap_or_else(|| API_SENDER_CHANNEL.to_string());
+    let asserted_channel = librefang_channels::types::sanitize_channel_name(&raw_channel);
+
+    // `Some` exactly when an authenticated caller may not speak as the identity they asserted.
+    let pinned_to = api_user.filter(|caller| {
+        caller.role < crate::middleware::UserRole::Admin
+            && auth.identify(&asserted_channel, sender_id) != Some(caller.user_id)
+    });
+
+    let (channel, user_id, display_name) = match pinned_to {
+        Some(caller) => (
+            API_SENDER_CHANNEL.to_string(),
+            caller.name.clone(),
+            caller.name.clone(),
+        ),
+        None => (
+            asserted_channel,
+            sender_id.clone(),
+            req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
+        ),
+    };
+
     Some(SenderContext {
-        channel: librefang_channels::types::sanitize_channel_name(&raw_channel),
-        user_id: sender_id.clone(),
-        display_name: req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
+        channel,
+        user_id,
+        display_name,
         is_group: req.is_group,
         was_mentioned: req.was_mentioned,
         thread_id: None,
@@ -511,8 +558,12 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
 /// drops one of the three fields on its way to the kernel call breaks the
 /// test, not just a sibling unit that happens to call `request_sender_context`
 /// the same way.
+///
+/// `api_user` is forwarded so the streaming route applies the same sender-identity precedence as its non-streaming sibling; see [`request_sender_context`].
 fn build_streaming_kernel_args(
     req: &MessageRequest,
+    api_user: Option<&crate::middleware::AuthenticatedApiUser>,
+    auth: &librefang_kernel::auth::AuthManager,
     session_id_override: Option<librefang_types::agent::SessionId>,
 ) -> (
     Option<SenderContext>,
@@ -520,7 +571,7 @@ fn build_streaming_kernel_args(
     Option<librefang_types::agent::SessionId>,
 ) {
     (
-        request_sender_context(req),
+        request_sender_context(req, api_user, auth),
         req.incognito,
         session_id_override,
     )
@@ -1174,7 +1225,189 @@ mod tests {
             session_id: None,
             incognito: false,
         };
-        assert!(request_sender_context(&req).is_none());
+        assert!(request_sender_context(&req, None, &no_users()).is_none());
+    }
+
+    /// An `AuthManager` with no `[[users]]`, so `identify` never resolves anything.
+    /// The default for tests that are not about a declared channel binding.
+    fn no_users() -> librefang_kernel::auth::AuthManager {
+        librefang_kernel::auth::AuthManager::new(&[])
+    }
+
+    /// Build a `MessageRequest` that asserts a sender identity the caller may not own.
+    fn impersonating_request() -> MessageRequest {
+        MessageRequest {
+            message: "hello".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("victim-9999".to_string()),
+            sender_name: Some("Victim".to_string()),
+            channel_type: Some("telegram".to_string()),
+            is_group: false,
+            was_mentioned: false,
+            ephemeral: false,
+            thinking: None,
+            show_thinking: None,
+            group_participants: None,
+            session_id: None,
+            incognito: false,
+        }
+    }
+
+    fn caller(
+        name: &str,
+        role: crate::middleware::UserRole,
+    ) -> crate::middleware::AuthenticatedApiUser {
+        crate::middleware::AuthenticatedApiUser {
+            name: name.to_string(),
+            role,
+            user_id: librefang_types::agent::UserId::from_name(name),
+        }
+    }
+
+    /// #7744: a caller below `Admin` gets their own identity, never the one the body names.
+    ///
+    /// Both halves of the tuple are pinned.
+    /// `AuthManager::identify` keys on `(channel, user_id)`, so leaving the channel caller-chosen would still let the caller pick which `[[users]] channel_bindings` namespace their own name is looked up in.
+    #[test]
+    fn request_sender_context_pins_sub_admin_caller_to_their_own_identity() {
+        let req = impersonating_request();
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        let sender = request_sender_context(&req, Some(&bob), &no_users()).expect("sender context");
+
+        assert_eq!(
+            sender.user_id, "bob",
+            "a User-role caller must not be able to assert another user's platform id"
+        );
+        assert_eq!(sender.display_name, "bob");
+        assert_eq!(
+            sender.channel, "api",
+            "the identity namespace is pinned alongside the id — `identify` keys on the pair"
+        );
+    }
+
+    /// A `Viewer` is below `User` and must be pinned too — the check is an ordering, not equality.
+    #[test]
+    fn request_sender_context_pins_viewer_caller_to_their_own_identity() {
+        let req = impersonating_request();
+        let vic = caller("vic", crate::middleware::UserRole::Viewer);
+
+        let sender = request_sender_context(&req, Some(&vic), &no_users()).expect("sender context");
+
+        assert_eq!(sender.user_id, "vic");
+        assert_eq!(sender.channel, "api");
+    }
+
+    /// #7744: `Admin` and above may assert a sender identity — an operator impersonating a user for support, or a channel gateway relaying real platform users, is legitimate.
+    #[test]
+    fn request_sender_context_lets_admin_and_owner_assert_a_sender_identity() {
+        let req = impersonating_request();
+
+        for role in [
+            crate::middleware::UserRole::Admin,
+            crate::middleware::UserRole::Owner,
+        ] {
+            let operator = caller("ops", role);
+            let sender =
+                request_sender_context(&req, Some(&operator), &no_users()).expect("sender context");
+            assert_eq!(
+                sender.user_id, "victim-9999",
+                "role {role} must be able to assert"
+            );
+            assert_eq!(sender.display_name, "Victim");
+            assert_eq!(sender.channel, "telegram");
+        }
+    }
+
+    /// #7744: loopback / `allow_no_auth` deployments carry no authenticated identity to prefer, so the body's assertion stands and behaviour is unchanged.
+    #[test]
+    fn request_sender_context_is_unchanged_without_an_authenticated_caller() {
+        let req = impersonating_request();
+
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
+
+        assert_eq!(sender.user_id, "victim-9999");
+        assert_eq!(sender.display_name, "Victim");
+        assert_eq!(sender.channel, "telegram");
+    }
+
+    /// #7744: a sub-Admin caller asserting an id that resolves back to *themselves* is stating a true fact about their own binding, not attacking.
+    /// It stands.
+    ///
+    /// This is what keeps the documented REST-operator recipe working — `[[users]]` with `channel_bindings.api = "<some sender id>"`, described in `docs/src/app/security/approvals/page.mdx` — rather than silently demoting that operator to the guest gate.
+    #[test]
+    fn request_sender_context_lets_a_caller_assert_their_own_declared_binding() {
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert("api".to_string(), "ops-bot-sender-id".to_string());
+        let auth =
+            librefang_kernel::auth::AuthManager::new(&[librefang_types::config::UserConfig {
+                name: "ops-bot".to_string(),
+                role: "user".to_string(),
+                channel_bindings: bindings,
+                ..Default::default()
+            }]);
+
+        let mut req = impersonating_request();
+        req.sender_id = Some("ops-bot-sender-id".to_string());
+        req.sender_name = Some("Ops Bot".to_string());
+        req.channel_type = Some("api".to_string());
+        let ops = caller("ops-bot", crate::middleware::UserRole::User);
+
+        let sender = request_sender_context(&req, Some(&ops), &auth).expect("sender context");
+
+        assert_eq!(sender.user_id, "ops-bot-sender-id");
+        assert_eq!(sender.display_name, "Ops Bot");
+        assert_eq!(sender.channel, "api");
+    }
+
+    /// The self-assertion escape hatch is scoped to the caller: a binding that resolves to somebody *else* is still pinned away, even though `identify` succeeds.
+    #[test]
+    fn request_sender_context_pins_a_binding_that_resolves_to_another_user() {
+        let mut bindings = std::collections::HashMap::new();
+        bindings.insert("telegram".to_string(), "victim-9999".to_string());
+        let auth =
+            librefang_kernel::auth::AuthManager::new(&[librefang_types::config::UserConfig {
+                name: "victim".to_string(),
+                role: "owner".to_string(),
+                channel_bindings: bindings,
+                ..Default::default()
+            }]);
+
+        let req = impersonating_request();
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        let sender = request_sender_context(&req, Some(&bob), &auth).expect("sender context");
+
+        assert_eq!(
+            sender.user_id, "bob",
+            "a resolvable binding belonging to another user is exactly the escalation, not an \
+             exemption from the pin"
+        );
+        assert_eq!(sender.channel, "api");
+    }
+
+    /// The pin never *creates* a sender context: a caller who asserts nothing still gets `None`, so the kernel's canonical-session path is untouched for the dashboard and plain `curl`.
+    #[test]
+    fn request_sender_context_stays_none_when_the_body_asserts_nothing() {
+        let mut req = impersonating_request();
+        req.sender_id = None;
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        assert!(request_sender_context(&req, Some(&bob), &no_users()).is_none());
+    }
+
+    /// The streaming route must apply the same precedence as its non-streaming sibling.
+    /// Before #7744 the two handlers read the authenticated identity and the asserted one without ever joining them, and the streaming path is the one with no `owner` consumer at all.
+    #[test]
+    fn build_streaming_kernel_args_applies_the_same_sender_identity_precedence() {
+        let req = impersonating_request();
+        let bob = caller("bob", crate::middleware::UserRole::User);
+
+        let (ctx, _, _) = build_streaming_kernel_args(&req, Some(&bob), &no_users(), None);
+        let ctx = ctx.expect("sender context");
+
+        assert_eq!(ctx.user_id, "bob");
+        assert_eq!(ctx.channel, "api");
     }
 
     #[test]
@@ -1194,7 +1427,7 @@ mod tests {
             session_id: None,
             incognito: false,
         };
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
         assert_eq!(sender.user_id, "u-123");
         assert_eq!(sender.display_name, "u-123");
         assert_eq!(sender.channel, "api");
@@ -1218,7 +1451,7 @@ mod tests {
             session_id: None,
             incognito: false,
         };
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
         assert!(sender.is_group);
         assert!(sender.was_mentioned);
     }
@@ -1250,7 +1483,7 @@ mod tests {
             session_id: None,
             incognito: false,
         };
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
         assert_eq!(sender.group_participants, roster);
     }
 
@@ -1267,7 +1500,7 @@ mod tests {
         let req: MessageRequest =
             serde_json::from_value(json).expect("deserialize without group_participants");
         assert!(req.group_participants.is_none());
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
         assert!(sender.group_participants.is_empty());
     }
 
@@ -1286,7 +1519,7 @@ mod tests {
         });
         let req: MessageRequest =
             serde_json::from_value(json).expect("deserialize with group_participants");
-        let sender = request_sender_context(&req).expect("sender context");
+        let sender = request_sender_context(&req, None, &no_users()).expect("sender context");
         assert_eq!(sender.group_participants.len(), 2);
         assert_eq!(sender.group_participants[1].display_name, "Bob");
     }
@@ -1347,10 +1580,10 @@ mod tests {
             incognito: false,
         };
 
-        let group_ctx =
-            request_sender_context(&group_req).expect("group request must produce sender context");
-        let dm_ctx =
-            request_sender_context(&dm_req).expect("dm request must produce sender context");
+        let group_ctx = request_sender_context(&group_req, None, &no_users())
+            .expect("group request must produce sender context");
+        let dm_ctx = request_sender_context(&dm_req, None, &no_users())
+            .expect("dm request must produce sender context");
 
         // Sanity: the gateway-side channel values match the live
         // incident exactly (no normalization between transport and
@@ -1424,7 +1657,8 @@ mod tests {
         };
         let session_override = Some(SessionId::new());
 
-        let (sender_ctx, incognito, sid) = build_streaming_kernel_args(&req, session_override);
+        let (sender_ctx, incognito, sid) =
+            build_streaming_kernel_args(&req, None, &no_users(), session_override);
 
         // sender_context: every field that influences resolver behaviour
         // must flow through.
@@ -1462,7 +1696,7 @@ mod tests {
             session_id: None,
             incognito: false,
         };
-        let (ctx, _, _) = build_streaming_kernel_args(&bare, None);
+        let (ctx, _, _) = build_streaming_kernel_args(&bare, None, &no_users(), None);
         assert!(
             ctx.is_none(),
             "missing sender_id must produce None — kernel then uses its own fallback"

@@ -407,7 +407,18 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 
     /// Run a workflow by name with the given input text.
-    async fn run_workflow_text(&self, _name: &str, _input: &str) -> String {
+    ///
+    /// `owner` is the agent currently bound to the channel and chat the
+    /// command arrived on, when one is bound. The kernel records it as the
+    /// run's owner (#7714), which is what keeps two channels driving the same
+    /// workflow — and therefore the same shared step-agent type — attributable
+    /// to different agents. `None` when no agent is selected for the channel.
+    async fn run_workflow_text(
+        &self,
+        _name: &str,
+        _input: &str,
+        _owner: Option<AgentId>,
+    ) -> String {
         "Workflows not available.".to_string()
     }
 
@@ -7113,7 +7124,12 @@ async fn handle_command(
                 } else {
                     String::new()
                 };
-                handle.run_workflow_text(wf_name, &input).await
+                // #7714: a channel `/workflow run` is owned by the agent bound
+                // to that channel, the same binding every other command in
+                // this dispatcher resolves through.
+                handle
+                    .run_workflow_text(wf_name, &input, resolve_for_command())
+                    .await
             } else {
                 "Usage: /workflow run <name> [input]".to_string()
             }

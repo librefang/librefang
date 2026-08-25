@@ -127,6 +127,7 @@ pub(super) fn build_workflow_run_result(
 pub(super) async fn tool_workflow_run(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
@@ -146,8 +147,11 @@ pub(super) async fn tool_workflow_run(
     // A nesting-depth refusal arrives as `CapabilityDenied` (refs #6659) and must stay a policy error rather than becoming `Upstream`.
     // Two reasons, the same ones spelled out in `tool_agent_send`: `Upstream` lifts to a 5xx-class `ToolExecution` that reads as a downstream crash to retry logic, and `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so a capped agent that keeps trying does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the turn to an abort.
     // Every other kernel failure stays `Upstream`.
+    // #7714: `run_workflow_owned` records the caller as the run's owner so
+    // the run carries attribution even though the step agent it resolves may
+    // be a canonical instance shared with every other owner of that type.
     let (run_id, output) = kh
-        .run_workflow(workflow_id, &input_str)
+        .run_workflow_owned(workflow_id, &input_str, caller_agent_id)
         .await
         .map_err(|e| match e {
             librefang_types::error::LibreFangError::CapabilityDenied(msg) => {

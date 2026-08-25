@@ -768,6 +768,11 @@ pub async fn get_workflow_run(
                 "error": run.error,
                 "started_at": run.started_at.to_rfc3339(),
                 "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                // #7714: the agent that asked for this run, `null` when an
+                // operator started it. Recording ownership is only useful if
+                // something can read it back, and this is the one endpoint
+                // that renders a single run in full.
+                "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
                 "step_results": run.step_results.iter().map(|s| serde_json::json!({
                     "step_name": s.step_name,
                     "agent_id": s.agent_id,
@@ -814,8 +819,11 @@ pub async fn rerun_workflow_run(
 
     let engine = state.kernel.workflow_engine();
     // Read the workflow + input off the stored run rather than trusting the caller, so a re-run is always a faithful repeat of what executed.
-    let (workflow_id, input) = match engine.get_run(run_id).await {
-        Some(run) => (run.workflow_id, run.input),
+    // #7714: the owner is copied off the original run rather than re-derived.
+    // A re-run is a repeat of the same work on the same owner's behalf, and
+    // the operator who pressed re-run is not that owner.
+    let (workflow_id, input, owner) = match engine.get_run(run_id).await {
+        Some(run) => (run.workflow_id, run.input, run.owner_agent_id),
         None => {
             return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
                 .into_json_tuple();
@@ -823,7 +831,7 @@ pub async fn rerun_workflow_run(
     };
 
     // `create_run` returns None when the workflow definition is gone (e.g. it was deleted after the original run); surface that as a 404.
-    let new_run_id = match engine.create_run(workflow_id, input).await {
+    let new_run_id = match engine.create_run_owned(workflow_id, input, owner).await {
         Some(rid) => rid,
         None => {
             return ApiErrorResponse::not_found(format!(
