@@ -541,7 +541,8 @@ pub fn build_reload_plan_with_caps(
     // when a config key changed would not be an audit answer.
     if field_changed(&old.default_owner, &new.default_owner) {
         plan.noop_changes.push(
-            "default_owner changed (effective immediately for newly created artifacts —              already-recorded owners are not rewritten)"
+            "default_owner changed (effective immediately for newly created artifacts — \
+             already-recorded owners are not rewritten)"
                 .to_string(),
         );
     }
