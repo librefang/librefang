@@ -17,7 +17,7 @@ spec:
         # the rendered ConfigMap and fails when the two disagree.
         #
         # Regenerate with:
-        #   printf 'sha256:%s\n' "$(shasum -a 256 config.toml | cut -d' ' -f1)"
+        #   printf 'sha256:%s\n' "$(openssl dgst -sha256 -r config.toml | awk '{print $1}')"
         #
         # `checksum/config` rather than a librefang-specific key: it is the
         # convention Helm charts use for exactly this, so an operator reading
