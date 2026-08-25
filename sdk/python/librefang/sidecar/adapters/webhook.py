@@ -680,9 +680,12 @@ class WebhookAdapter(SidecarAdapter):
         signature: Optional[str],
         ts_header: Optional[str],
         emit: Callable[[dict], None],
+        *,
+        now_secs: Optional[int] = None,
     ) -> int:
         """Verify + parse + emit. Returns the HTTP status to send."""
-        now_secs = int(time.time())
+        if now_secs is None:
+            now_secs = int(time.time())
         ok, reason, status = self._verify_request(
             body, signature, ts_header, now_secs,
         )

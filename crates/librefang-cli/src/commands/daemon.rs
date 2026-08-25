@@ -296,8 +296,7 @@ pub(crate) fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeG
 pub(crate) fn ensure_initialized(config: &Option<PathBuf>) {
     match config {
         None => {
-            let home = cli_librefang_home();
-            if !home.join("config.toml").exists() {
+            if !cli_config_path().exists() {
                 ui::hint(&i18n::t("daemon-first-run-setup"));
                 cmd_init(true);
             }

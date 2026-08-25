@@ -77,19 +77,26 @@ async def test_ready_reannounce_is_bounded_without_ack():
     # stdout forever, while the run keeps serving until shutdown.
     adapter = RecordingAdapter()
     emitted = []
+    ready_cap_reached = asyncio.Event()
     delivered = False
+
+    def emit(event):
+        emitted.append(event)
+        if event["method"] == "ready":
+            readies = sum(item["method"] == "ready" for item in emitted)
+            if readies == 3:
+                ready_cap_reached.set()
 
     async def line_source():
         nonlocal delivered
         if not delivered:
             delivered = True
-            # > 3 * ready_interval, so the capped loop has finished.
-            await asyncio.sleep(0.2)
+            await ready_cap_reached.wait()
             return '{"method":"shutdown"}'
         return None
 
     await asyncio.wait_for(
-        run(adapter, line_source=line_source, emit=emitted.append,
+        run(adapter, line_source=line_source, emit=emit,
             ready_interval=0.01, ready_max_attempts=3),
         timeout=2.0,
     )
@@ -100,23 +107,30 @@ async def test_ready_reannounce_is_bounded_without_ack():
     # ready_max_attempts=0 keeps the legacy unbounded behaviour.
     adapter2 = RecordingAdapter()
     emitted2 = []
+    fourth_ready_emitted = asyncio.Event()
     delivered2 = False
+
+    def emit2(event):
+        emitted2.append(event)
+        if event["method"] == "ready":
+            readies = sum(item["method"] == "ready" for item in emitted2)
+            if readies == 4:
+                fourth_ready_emitted.set()
 
     async def line_source2():
         nonlocal delivered2
         if not delivered2:
             delivered2 = True
-            await asyncio.sleep(0.1)
+            await fourth_ready_emitted.wait()
             return '{"method":"shutdown"}'
         return None
 
     await asyncio.wait_for(
-        run(adapter2, line_source=line_source2, emit=emitted2.append,
+        run(adapter2, line_source=line_source2, emit=emit2,
             ready_interval=0.01, ready_max_attempts=0),
         timeout=2.0,
     )
-    # ~0.1s / 0.01s interval ≫ 3: proves it did not self-cap.
-    assert sum(1 for e in emitted2 if e["method"] == "ready") > 3
+    assert sum(1 for e in emitted2 if e["method"] == "ready") >= 4
 
 
 async def test_send_command_dispatched():
@@ -341,31 +355,19 @@ async def test_stdio_reader_thread_failure_reaches_async_reader(monkeypatch):
     assert adapter.shutdown_called
 
 
-def test_run_stdio_translates_producer_crash_to_nonzero_exit():
+def test_run_stdio_translates_producer_crash_to_nonzero_exit(monkeypatch):
     # run_stdio is the process entry point: a ProducerCrashed from run()
     # must become SystemExit(1) so the daemon supervisor sees a nonzero
     # exit, distinguishable from a clean shutdown/EOF. Exercised
     # synchronously because run_stdio owns its own event loop.
     from librefang.sidecar import run_stdio
 
-    class Crashing(SidecarAdapter):
-        async def on_send(self, cmd):
-            pass
+    async def crash(*_args, **_kwargs):
+        raise ProducerCrashed("producer failed")
 
-        async def produce(self, emit):
-            raise RuntimeError("transport died unrecoverably")
+    monkeypatch.setattr("librefang.sidecar.runtime._run_stdio", crash)
 
-    # Closed stdin -> reader thread hits EOF immediately; the producer
-    # crash still wins the race because `stop` is set before EOF reaches
-    # the loop. ready_max_attempts=1 caps the ready-loop quickly.
-    import io
-    import sys
-    saved_stdin, saved_stdout = sys.stdin, sys.stdout
-    sys.stdin = io.StringIO("")
-    sys.stdout = io.StringIO()
-    try:
-        with pytest.raises(SystemExit) as ei:
-            run_stdio(Crashing(), ready_interval=0.01, ready_max_attempts=1)
-        assert ei.value.code == 1
-    finally:
-        sys.stdin, sys.stdout = saved_stdin, saved_stdout
+    with pytest.raises(SystemExit) as error:
+        run_stdio(RecordingAdapter(), ready_interval=0.01, ready_max_attempts=1)
+
+    assert error.value.code == 1

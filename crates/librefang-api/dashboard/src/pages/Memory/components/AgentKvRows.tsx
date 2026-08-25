@@ -10,6 +10,10 @@ interface Props {
   kvQuery: UseQueryResult<AgentKvPair[]>;
 }
 
+function truncateWithEllipsis(value: string, limit: number): string {
+  return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
 // Receives the per-agent KV query result from the surrounding tab — a single
 // `useQueries` observer batches every agent's lookup so this row component
 // stays presentational (no per-row hook subscription, no N+1 churn).
@@ -29,7 +33,7 @@ export function AgentKvRows({ kvQuery }: Props) {
     return (
       <tr>
         <td colSpan={4} className="px-3 py-2 text-xs text-error">
-          {kvQuery.error instanceof Error ? kvQuery.error.message : t("common.error")}
+          {t("common.error")}
         </td>
       </tr>
     );
@@ -50,14 +54,8 @@ export function AgentKvRows({ kvQuery }: Props) {
     <>
       {pairs.map((pair: AgentKvPair) => {
         const formatted = formatKvValue(pair.value);
-        const truncated =
-          formatted.length > KV_VALUE_TRUNCATE
-            ? formatted.slice(0, KV_VALUE_TRUNCATE) + "…"
-            : formatted;
-        const titlePreview =
-          formatted.length > KV_TITLE_TRUNCATE
-            ? formatted.slice(0, KV_TITLE_TRUNCATE) + "…"
-            : formatted;
+        const truncated = truncateWithEllipsis(formatted, KV_VALUE_TRUNCATE);
+        const titlePreview = truncateWithEllipsis(formatted, KV_TITLE_TRUNCATE);
         return (
           <tr key={pair.key} className="border-t border-border-subtle/40">
             <td className="px-3 py-2 text-xs font-mono break-all">{pair.key}</td>

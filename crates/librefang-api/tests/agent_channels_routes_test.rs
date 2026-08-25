@@ -260,3 +260,95 @@ async fn channels_unknown_agent_returns_error() {
         "PUT must be 400 (kernel error)"
     );
 }
+
+/// A body this route cannot understand must be refused, not read as "clear the allowlist" (#7742).
+///
+/// The old handler pulled `body["channels"]` out of an untyped `Value` and fell back to
+/// `Vec::new()`, so the bare array its own OpenAPI annotation advertised — and any typo in the key —
+/// returned 200 and silently reopened the agent to every configured channel.
+/// Widening an allowlist is the one interpretation a malformed request must never get.
+#[tokio::test(flavor = "multi_thread")]
+async fn put_channels_rejects_malformed_bodies_instead_of_clearing() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "chan-malformed");
+
+    let (seed_status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/channels"),
+            serde_json::json!({"channels": ["slack"]}),
+        ),
+    )
+    .await;
+    assert_eq!(seed_status, StatusCode::OK);
+
+    // Each of these used to be a 200 that emptied the allowlist.
+    let malformed = [
+        // The shape the OpenAPI annotation used to document.
+        serde_json::json!(["telegram"]),
+        // A misspelled key.
+        serde_json::json!({"channel": ["telegram"]}),
+        // Right key, wrong element type.
+        serde_json::json!({"channels": [42]}),
+        // Right key, not a list.
+        serde_json::json!({"channels": "telegram"}),
+    ];
+
+    for body in malformed {
+        let (status, resp) = send(
+            h.app.clone(),
+            put_json(&format!("/api/agents/{id}/channels"), body.clone()),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "PUT {body} must be refused, got {status} {resp:?}"
+        );
+
+        let (_, get_body) = send(h.app.clone(), get(&format!("/api/agents/{id}/channels"))).await;
+        assert_eq!(
+            get_body["assigned"],
+            serde_json::json!(["slack"]),
+            "the allowlist must survive the refused body {body}"
+        );
+        assert_eq!(get_body["mode"], "allowlist");
+    }
+}
+
+/// The channel allowlist must survive the write and the reload, not just the write (#7742).
+///
+/// `set_agent_channels` writes SQLite *and* `agent.toml`, and boot reconciliation prefers the file
+/// when the two disagree — so a channel assignment that only reached the database would come back
+/// empty on the next restart. `reload_agent_from_disk` is the in-process stand-in for that restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_survive_a_reload_from_disk() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "chan-durable");
+
+    let (put_status, _) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/channels"),
+            serde_json::json!({"channels": ["telegram", "slack"]}),
+        ),
+    )
+    .await;
+    assert_eq!(put_status, StatusCode::OK);
+
+    h.state
+        .kernel
+        .reload_agent_from_disk(id)
+        .expect("reload the manifest the PUT persisted");
+
+    let (get_status, get_body) =
+        send(h.app.clone(), get(&format!("/api/agents/{id}/channels"))).await;
+    assert_eq!(get_status, StatusCode::OK, "GET body={get_body:?}");
+    let assigned = get_body["assigned"].as_array().expect("assigned array");
+    let mut names: Vec<&str> = assigned.iter().filter_map(|v| v.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["slack", "telegram"],
+        "the allowlist must come back off disk, not only out of memory"
+    );
+}

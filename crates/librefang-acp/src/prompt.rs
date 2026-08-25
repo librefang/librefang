@@ -96,7 +96,6 @@ pub(crate) async fn handle<K: AcpKernel>(
             biased;
 
             _ = cancel.cancelled() => {
-                last_stop_reason = Some(LfStopReason::EndTurn);
                 // Drop the receiver so the kernel-side sender notices
                 // and tears down the agent loop. The actual stop_reason
                 // we *return* is `Cancelled` — see the mapping below.

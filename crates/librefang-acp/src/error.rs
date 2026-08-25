@@ -63,14 +63,59 @@ impl AcpError {
         use agent_client_protocol::util::internal_error;
         match self {
             Self::Transport(e) => e,
-            Self::UnknownSession(_) | Self::AgentNotFound(_) => {
-                let msg = self.to_string();
+            error @ (Self::UnknownSession(_) | Self::AgentNotFound(_)) => {
+                let msg = error.to_string();
                 agent_client_protocol::Error::invalid_params()
                     .data(serde_json::json!({ "reason": msg }))
             }
-            other => internal_error(other.to_string()),
+            Self::PromptInFlight(session_id) => agent_client_protocol::Error::invalid_params()
+                .data(serde_json::json!({
+                    "reason": format!("session {session_id} already has an in-flight prompt")
+                })),
+            error => {
+                tracing::error!(error = %error, "ACP request failed");
+                internal_error("internal acp error")
+            }
         }
     }
 }
 
 pub type AcpResult<T> = Result<T, AcpError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::ErrorCode;
+
+    #[test]
+    fn prompt_in_flight_is_an_invalid_params_error() {
+        let error = AcpError::PromptInFlight("session-7".to_string()).into_acp_error();
+
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({
+                "reason": "session session-7 already has an in-flight prompt"
+            }))
+        );
+    }
+
+    #[test]
+    fn internal_error_details_are_not_exposed_to_clients() {
+        let error = AcpError::internal("channel dropped at /private/agent.sock").into_acp_error();
+
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert_eq!(error.data, Some(serde_json::json!("internal acp error")));
+    }
+
+    #[test]
+    fn kernel_error_details_are_not_exposed_to_clients() {
+        let error = AcpError::Kernel(librefang_types::error::LibreFangError::Config(
+            "secret config path: /private/config.toml".to_string(),
+        ))
+        .into_acp_error();
+
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert_eq!(error.data, Some(serde_json::json!("internal acp error")));
+    }
+}

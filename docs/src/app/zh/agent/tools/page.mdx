@@ -42,6 +42,10 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 | `agent_find` | `query` | 按名字、ID 或 tag 搜 agent。 |
 | `agent_kill` | `agent_id` | 终止运行中的 agent。子 agent 上下文里默认禁。 |
 | `goal_update` | `goal` | 中途更新**当前** agent 的目标。新目标写进 agent 的 manifest,后续 prompt 看得到。 |
+| `agent_type_create` | `name`,可选 `description`、`system_prompt`、`provider`、`model`、`tools`、`skills` | 创建一个新的**智能体类型**(agent type)—— 一份存在 daemon 上的可复用 manifest,之后 `agent_spawn`、仪表盘和 TUI 都能从它生成 agent。这里只能设置这七个字段,manifest 的其余部分先取默认值,之后再改。名字若已被某个智能体类型或某个运行中的 agent 占用,会被拒绝而不是覆盖。 |
+
+`agent_type_create` 走的是和 `POST /api/templates` 完全相同的 `AgentTypeSpec` 校验与同一个存储实现,所以 agent 自己写出来的类型和运维在仪表盘里写出来的没有任何区别。
+工具、仪表盘和 TUI 统一用"智能体类型"这个说法;HTTP 路径仍旧只有 `/api/templates` 一个,不再为同一个资源加第二个别名。
 
 `[kernel]` 里的 `max_agent_call_depth`(默认 `5`)封顶 `agent_send` 链能递归多深 —— 让 A→B→A 循环根本到不了生产。
 下面的 `workflow_run` 若发生嵌套(某一步的目标 agent 又跑了一次 workflow)也计入同一份预算,因为每一步都会嵌套一整个 agent turn,效果跟 `agent_send` 跳一层一样。
@@ -50,13 +54,28 @@ Lazy loading 在 manifest 用 `lazy_tools = true` 按 agent 开启。关掉则�
 
 ## Memory 工具(per-agent)
 
-从循环里直接访问 agent 的主动记忆存储。和自动召回机制不同 —— 这些是 agent 显式调的工具。
+一共有**两套记忆存储**、两套工具族,名字相近,值得仔细区分。
+
+`memory_store` / `memory_recall` / `memory_list` 是**键值存储**。`memory_recall` 只接受精确的 key,不做任何匹配 —— 它不是搜索。
 
 | 工具 | 参数 | 用途 |
 |---|---|---|
-| `memory_store` | `content`、可选 `category`、`scope` | 持久化一条自定义记忆。`scope` ∈ `user_memory` / `session_memory` / `agent_memory`。 |
-| `memory_recall` | `query`、可选 `limit`、`scope` | 在该 agent 的记忆上做语义搜索。 |
-| `memory_list` | 可选 `category`、`scope`、`limit` | 不带搜索条件枚举记忆。 |
+| `memory_store` | `key`、`value` | 以精确 key 持久化一个值,只能用同一个 key 取回。 |
+| `memory_recall` | `key` | 按精确 key 查一个值。key 不是逐字符相同就返回“未找到”。 |
+| `memory_list` | 可选 `limit`、`offset` | 枚举键值存储里的 key 名(不含值)。 |
+
+`memory_semantic_*` 是**语义存储** —— 也就是自动召回机制每轮之前读取的那套向量存储。有了这些工具,agent 才能主动查询它,而不是只能被动接收注入的内容。
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `memory_semantic_search` | `query`、可选 `limit`、`min_confidence` | 按语义搜索记忆片段,每条结果都带可用于撤回的 id。`min_confidence` 会过滤置信度已衰减的片段,让调用方可以选择“宁可什么都不要,也不要噪声”。 |
+| `memory_semantic_add` | `content` | 主动记录一条持久事实。内容会经过记忆抽取器,可能被提炼、被合并进已有记忆,或因冗余而被拒绝 —— 返回结果会如实说明实际写入了什么,包括“什么都没写”。 |
+| `memory_semantic_forget` | `memory_id` | 撤回一条记忆,使其不再被召回。这是修正“陈旧记忆持续与 agent 直接观测到的事实相矛盾”的手段。 |
+| `memory_semantic_stats` | — | 按层级与类别的计数,以及 auto-memorize、自动召回、LLM 抽取是否开启。用于区分“存储是空的”和“存储被关掉了”。 |
+
+只有 `memory_semantic_search` 每轮都会带上 schema;其余三个通过 `tool_search` / `tool_load` 获取。
+
+语义工具需要同时满足两个条件:`capabilities.tools` 允许它们(`memory_*` 这样的 glob 即可),**并且**记忆 scope 覆盖 agent 自己的记忆 —— `search` / `stats` 看 `capabilities.memory_read`,`add` / `forget` 看 `capabilities.memory_write`。未声明 scope 时保持开放;若声明的 scope 只覆盖键值存储(`memory_read = ["kv:*"]`),语义工具会被收回,键值工具不受影响。`[proactive_memory] enabled = false` 时它们也会被完全收回,因为此时存储根本没有构建。
 
 条目 schema、scope、衰减公式、整合触发器见[内存系统](/zh/agent/memory#主动记忆proactive-memory)。
 
@@ -83,8 +102,30 @@ claim TTL 用来从 worker 崩溃中恢复 —— 认领者没在 TTL 内 `task_
 | 工具 | 参数 | 用途 |
 |---|---|---|
 | `channel_send` | `channel`、`target`、`content`(文本 / 图 / 文件 / poll) | 给某 channel 用户发消息、图片、文件或 poll —— **不走 agent 循环**。适合推告警、异步结果、带外通知。 |
+| `channel_dm` | `user_id`、`message` | 把消息私下发给当前这轮所在群会话中的某一位成员,而不是发到所有人都能看到的群里。 |
+| `channel_members` | 可选 `channel`、`chat_id` | 列出群会话中已知的成员 —— 守护进程见过发言的每个人的 `user_id`、`display_name`、`username`。只读。 |
 
 `channel_send` 是 `[deliver_only]` webhook 模式内部用的工具;agent 也能直接调。Capability:`channel.*`。
+
+`channel_members` 读取 channel bridge 在观察群消息时建立的花名册,因此它列出的是在该会话中发过言的人,而不是平台的完整成员列表。
+两个参数都默认取当前消息所在的会话,所以在处理消息时可以完全不带参数调用;私聊没有花名册。
+指定当前轮次所在 channel 上的另一个会话会被拒绝,理由与 `channel_send` 拒绝跨会话投递相同 —— 一个群不能枚举另一个群的成员。
+用它把请求归属到提出请求的人,并拿到外部系统通知此人所需的平台 `user_id`。
+
+### 在群里只找一个人
+
+在群会话里,`channel_send` 只能发给群本身 —— 把它改指向某个人会被跨会话派发守卫拒绝,因为一个能任意指定收件人的 agent,也就能被诱导指错人。
+`channel_dm` 是那个收窄过的例外:它只接受 `user_id` 和 `message`,别的都不接受。
+channel、会话和机器人账号全部来自正在处理的这一轮,而收件人必须已经出现在该会话的名册里 —— 也就是 daemon 见过其发言、并且 `channel_members` 会列出的人。
+因此 agent 无法给一个素未谋面的平台 id 发消息,也无法借一个会话伸进另一个会话。
+
+带外场景(cron、trigger、API 触发的运行)没有会话,也就没有名册可以授权任何人;`channel_dm` 在那里按设计不可用,该用带显式 recipient 的 `channel_send`。
+
+"私下"在各平台上的含义并不相同,这个工具也不假装相同。
+Slack 允许机器人与工作区内任意成员开启 DM,所以 `U…` id 总能送达。
+Telegram 和 Discord 的机器人无法主动联系从未给它发过消息的人,这种发送会失败 —— 它绝不会悄悄退回到发群里,因为一条本该私密、却无声变成公开的通知,比报错更糟。
+
+`notify_owner` 不是它的替代品:那产生的是面向运维者的通知,通过运维者自己的界面带外送达,没有任何 channel adapter 会把它转给会话参与者。
 
 ---
 
@@ -234,6 +275,10 @@ media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meet
 如果调用超时,就调小 `max_secs`。
 一次请求能容纳多少媒体取决于 provider 的速度,自托管端点可能比托管服务慢一个数量级。
 
+如果调用因超出提取后的音频预算而被拒绝,同样应调小 `max_secs`。
+这里有两个大小限制,衡量的是不同的对象:输入容器在读取之前按 50 MB 的视频上限检查,而从中提取出的音轨在发送给 provider 之前按 20 MB 的音频上限检查。
+长录音真正会碰到的是后者,因为离开进程的正是这条提取出的音轨——拒绝信息会同时给出实测大小和上限,因此窗口可以据此缩小,而不必靠猜。
+
 ---
 
 ## Owner 通知
@@ -284,10 +329,10 @@ media_transcribe(path="meeting.mp4", start_sec=600, max_secs=600, out_path="meet
 
 ## 在源码里去哪看
 
-- **Tool registry** — `crates/librefang-runtime/src/tools/` —— 所有 `register_tool!` 调用。
-- **Schema 序列化** — `librefang-runtime::tools::schema` —— LLM 看到的 JSON schema。
-- **Capability 把关** — `librefang-runtime::capability` —— 哪些 agent 能调哪些工具。
-- **浏览器池** — `crates/librefang-runtime/src/tools/browser/`。
-- **Schedule / cron 运行时工具** — `crates/librefang-runtime/src/tools/scheduler/`。
+- **工具注册与 schema** — `crates/librefang-runtime/src/tool_runner/definitions.rs` —— `builtin_tool_definitions()` 给出每个内置工具的名字、描述和 LLM 看到的 JSON schema。
+- **分发** — `crates/librefang-runtime/src/tool_runner/dispatch.rs` —— 把工具名路由到处理函数的那个 match;处理函数本身按域拆在同目录的 `agent.rs`、`workflow.rs`、`memory.rs` 等文件里。
+- **Capability 把关** — `crates/librefang-types/src/capability.rs`,加上 `execute_tool` 里的 `allowed_tools` 检查 —— 哪些 agent 能调哪些工具。
+- **浏览器池** — `crates/librefang-runtime/src/browser.rs` 和 `browser_tools.rs`。
+- **Schedule / cron 运行时工具** — `crates/librefang-runtime/src/tool_runner/schedule.rs` 和 `cron.rs`。
 
 不确定的时候,工具结构体上的 rustdoc 是权威规约。Dashboard 的 "Tools" inspector 也会按当前 capability 授权渲染实际可用的工具集。

@@ -958,14 +958,45 @@ pub(crate) fn cmd_sessions(agent: Option<&str>, json: bool, active_only: bool) {
     }
 }
 
-pub(crate) fn cmd_message(agent: &str, text: &str, json: bool, incognito: bool) {
+/// One-shot `POST /api/agents/{id}/message`.
+///
+/// `session_id` addresses one conversation among the many a single agent may
+/// serve. Omitted, the daemon resolves the agent's canonical session exactly as
+/// it always has — the shared history that made every caller of a public agent
+/// read each other's turns (issue #7605). Supplied, it is forwarded as
+/// `MessageRequest.session_id`, which sits at the top of the kernel's session
+/// resolution ladder and therefore wins over the manifest's `session_mode`:
+/// a `persistent` agent no longer funnels the turn into its canonical session,
+/// and a `new` agent no longer mints a throwaway one.
+pub(crate) fn cmd_message(
+    agent: &str,
+    text: &str,
+    json: bool,
+    incognito: bool,
+    session_id: Option<&str>,
+) {
+    // Validate locally so a typo costs a clear message instead of a round trip
+    // that comes back as an opaque HTTP 400 from the daemon.
+    if let Some(sid) = session_id {
+        if sid.parse::<uuid::Uuid>().is_err() {
+            ui::error_with_fix(
+                &i18n::t_args("message-invalid-session-id", &[("value", sid)]),
+                &i18n::t("message-invalid-session-id-fix"),
+            );
+            std::process::exit(1);
+        }
+    }
     let base = require_daemon("message");
     let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
+    let mut payload = serde_json::json!({"message": text, "incognito": incognito});
+    if let Some(sid) = session_id {
+        payload["session_id"] = serde_json::Value::String(sid.to_string());
+    }
     let body = daemon_json(
         client
             .post(format!("{base}/api/agents/{agent_id}/message"))
-            .json(&serde_json::json!({"message": text, "incognito": incognito}))
+            .json(&payload)
             .send(),
     );
     if json {

@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import socketserver
@@ -104,10 +105,10 @@ WEBHOOK_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 HTTP_TIMEOUT_SECS = 30
 
-# Default webhook bind address. `0.0.0.0` matches the established
-# sidecar convention (teams / webhook); operators behind a reverse
-# proxy override via `GOOGLE_CHAT_BIND_HOST = "127.0.0.1"`.
-DEFAULT_BIND_HOST = "0.0.0.0"
+# Default to a local reverse-proxy boundary as defense in depth. Requests are
+# authenticated independently because a public reverse proxy still reaches
+# this listener through a loopback connection.
+DEFAULT_BIND_HOST = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
@@ -420,10 +421,17 @@ SCHEMA = Schema(
         ),
         Field(
             "GOOGLE_CHAT_BIND_HOST",
-            "Bind address (default 0.0.0.0; set 127.0.0.1 behind a reverse proxy)",
+            "Bind address (default 127.0.0.1 behind a reverse proxy)",
             "text",
             advanced=True,
             placeholder=DEFAULT_BIND_HOST,
+        ),
+        Field(
+            "GOOGLE_CHAT_VERIFICATION_TOKEN",
+            "Inbound event verification token",
+            "secret",
+            required=True,
+            advanced=True,
         ),
         Field(
             "GOOGLE_CHAT_ACCOUNT_ID",
@@ -472,6 +480,14 @@ class GoogleChatAdapter(SidecarAdapter):
         self._bind_host = (
             os.environ.get("GOOGLE_CHAT_BIND_HOST", "").strip() or DEFAULT_BIND_HOST
         )
+        self._verification_token = os.environ.get(
+            "GOOGLE_CHAT_VERIFICATION_TOKEN", "",
+        ).strip()
+        if not self._verification_token:
+            raise RuntimeError(
+                "GOOGLE_CHAT_VERIFICATION_TOKEN is required for inbound "
+                "webhook authentication"
+            )
         self.account_id = os.environ.get("GOOGLE_CHAT_ACCOUNT_ID") or None
 
         # Pre-parse the RSA key once so a bad PEM fails at startup
@@ -493,12 +509,6 @@ class GoogleChatAdapter(SidecarAdapter):
             )
 
         self._token_cache = _TokenCache()
-        # Seed the cache with the pre-supplied access_token if that's
-        # the only auth source — keeps the JWT-less path simple.
-        if self._sa.access_token and self._rsa_key is None:
-            self._token_cache.set(
-                self._sa.access_token, DEFAULT_TOKEN_LIFETIME_SECS
-            )
 
         # Server handle for clean shutdown.
         self._httpd: Optional[socketserver.ThreadingTCPServer] = None
@@ -515,17 +525,16 @@ class GoogleChatAdapter(SidecarAdapter):
     # ---- Token resolution ------------------------------------------
 
     def _get_access_token(self) -> str:
+        # Operator-supplied tokens have no expiry metadata or refresh
+        # credentials. Trust the configured value until the operator rotates
+        # it instead of inventing the JWT token lifetime for this path.
+        if self._rsa_key is None and self._sa.access_token:
+            return self._sa.access_token
         cached = self._token_cache.get()
         if cached:
             return cached
         if self._rsa_key is None:
-            # No JWT auth configured AND the pre-supplied token expired
-            # (only happens after DEFAULT_TOKEN_LIFETIME_SECS). The
-            # pre-supplied path doesn't refresh — surface clearly.
-            raise RuntimeError(
-                "pre-supplied access_token expired and no JWT auth "
-                "configured to refresh it"
-            )
+            raise RuntimeError("Google Chat has no usable authentication")
         n, d = self._rsa_key
         now = int(time.time())
         claims = {
@@ -589,8 +598,8 @@ class GoogleChatAdapter(SidecarAdapter):
                 self._send_chunk(url, token, chunk, retry_429=False)
                 return
             text_body = (e.read() or b"").decode("utf-8", errors="replace")
-            # 401 likely means the cached token went stale early —
-            # clear and let the next send retry from JWT auth.
+            # A JWT token may have gone stale early. Static tokens bypass the
+            # cache and remain operator-managed, so this is harmless there.
             if e.code == 401:
                 self._token_cache.clear()
             raise RuntimeError(
@@ -785,6 +794,20 @@ def _make_webhook_handler(
                 self.send_response(400)
                 self.end_headers()
                 return
+            expected_token = adapter._verification_token
+            if expected_token:
+                supplied_token = payload.get("token")
+                if (
+                    not isinstance(supplied_token, str)
+                    or not hmac.compare_digest(
+                        supplied_token.encode("utf-8"),
+                        expected_token.encode("utf-8"),
+                    )
+                ):
+                    log.warn("google_chat rejected unauthenticated webhook")
+                    self.send_response(401)
+                    self.end_headers()
+                    return
 
             event = _parse_webhook_event(payload, adapter._space_ids)
             if event is not None:

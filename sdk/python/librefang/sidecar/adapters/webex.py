@@ -115,9 +115,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Optional
@@ -127,21 +125,13 @@ from librefang.sidecar import logging as log
 from librefang.sidecar.common import (
     http_request as _http_request,
     MAX_BACKOFF_SECS,
-    parse_retry_after as _parse_retry_after_impl,
+    parse_retry_after as _parse_retry_after,
     RETRY_AFTER_DEFAULT_SECS,
     SeenSet as _SeenSet,
     split_csv as _split_csv,
     split_message as _split_message,
 )
-from librefang.sidecar.ws import (
-    MAX_FRAME_PAYLOAD,
-    OP_CLOSE as _OP_CLOSE,
-    OP_CONT as _OP_CONT,
-    OP_PING as _OP_PING,
-    OP_PONG as _OP_PONG,
-    OP_TEXT as _OP_TEXT,
-    WebSocketClient as _WebSocketClient,
-)
+from librefang.sidecar.ws import WebSocketClient as _WebSocketClient
 
 # Webex constants — mirror crate::webex defaults.
 DEFAULT_API_BASE = "https://webexapis.com/v1"
@@ -168,21 +158,6 @@ SEEN_MESSAGES_MAX = 10_000
 SEEN_MESSAGES_EVICT = 5_000
 
 READ_TICK_SECS = 30.0
-def _parse_retry_after(resp_hdrs: dict, *, default_secs: float) -> float:
-    """Webex's 429 response includes ``Retry-After`` (seconds).
-    Fall back to ``default_secs`` when missing/garbled. Floor 1 s,
-    capped at ``MAX_BACKOFF_SECS`` so a server bug can't pin the
-    loop for hours."""
-    raw = resp_hdrs.get("retry-after")
-    if not raw:
-        return default_secs
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return default_secs
-    return min(max(v, 1.0), MAX_BACKOFF_SECS)
-
-
 def parse_webex_message(
     full_msg: dict,
     activity: dict,
@@ -667,29 +642,23 @@ class WebexAdapter(SidecarAdapter):
 
         content = cmd.content
         text = cmd.text or ""
-        loop = asyncio.get_event_loop()
         if isinstance(content, dict) and "Text" in content:
-            await loop.run_in_executor(
-                None,
-                lambda: self._post_message(
-                    room_id, text, parent_id=parent_id,
-                ),
-            )
-        elif content and not (isinstance(content, dict) and "Text" in content):
-            await loop.run_in_executor(
-                None,
-                lambda: self._post_message(
-                    room_id, "(Unsupported content type)",
-                    parent_id=parent_id,
-                ),
-            )
-        else:
-            await loop.run_in_executor(
-                None,
-                lambda: self._post_message(
-                    room_id, text, parent_id=parent_id,
-                ),
-            )
+            content_text = content.get("Text")
+            if isinstance(content_text, str):
+                text = content_text
+        elif content:
+            text = "(Unsupported content type)"
+        if not text:
+            log.debug("webex on_send: empty text, dropping", room_id=room_id)
+            return
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self._post_message(
+                room_id, text, parent_id=parent_id,
+            ),
+        )
 
 
 if __name__ == "__main__":

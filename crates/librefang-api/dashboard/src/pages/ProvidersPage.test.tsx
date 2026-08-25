@@ -13,7 +13,8 @@ import type { ProviderItem } from "../api";
 import { ProvidersPage } from "./ProvidersPage";
 import { useDrawerStore } from "../lib/drawerStore";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
-import { useModels } from "../lib/queries/models";
+import { useModels, useModelOverrides } from "../lib/queries/models";
+import { useUpdateModelOverrides } from "../lib/mutations/models";
 import {
   useTestProvider,
   useSetProviderKey,
@@ -42,9 +43,13 @@ vi.mock("../lib/queries/providers", () => ({
 
 vi.mock("../lib/queries/models", () => ({
   useModels: vi.fn(),
-  // ProviderMaxTokensSection (#6209) calls this; default to no override so the
-  // existing tests don't have to care about the max-tokens section.
+  // ProviderModelLimitsSection (#6209, #7774) calls this; default to no
+  // override so the existing tests don't have to care about the limit editors.
   useModelOverrides: vi.fn(() => ({ data: undefined, isLoading: false })),
+}));
+
+vi.mock("../lib/mutations/models", () => ({
+  useUpdateModelOverrides: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/providers", () => ({
@@ -91,6 +96,11 @@ const useProviderStatusMock = useProviderStatus as unknown as ReturnType<
   typeof vi.fn
 >;
 const useModelsMock = useModels as unknown as ReturnType<typeof vi.fn>;
+const useModelOverridesMock = useModelOverrides as unknown as ReturnType<
+  typeof vi.fn
+>;
+const useUpdateModelOverridesMock =
+  useUpdateModelOverrides as unknown as ReturnType<typeof vi.fn>;
 const useTestProviderMock = useTestProvider as unknown as ReturnType<
   typeof vi.fn
 >;
@@ -174,6 +184,7 @@ describe("ProvidersPage", () => {
   let testMutateAsync: ReturnType<typeof vi.fn>;
   let connectEveryApiMutateAsync: ReturnType<typeof vi.fn>;
   let setDiscoveryMutateAsync: ReturnType<typeof vi.fn>;
+  let updateOverridesMutateAsync: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -183,12 +194,18 @@ describe("ProvidersPage", () => {
     testMutateAsync = vi.fn().mockResolvedValue({ status: "ok" });
     connectEveryApiMutateAsync = vi.fn().mockResolvedValue(undefined);
     setDiscoveryMutateAsync = vi.fn().mockResolvedValue(undefined);
+    updateOverridesMutateAsync = vi.fn().mockResolvedValue({});
 
     useProviderStatusMock.mockReturnValue({
       data: { default_provider: "openai" },
       isFetching: false,
     });
     useModelsMock.mockReturnValue({ data: { models: [] }, isLoading: false });
+    useModelOverridesMock.mockReturnValue({ data: undefined, isLoading: false });
+    useUpdateModelOverridesMock.mockReturnValue({
+      mutateAsync: updateOverridesMutateAsync,
+      isPending: false,
+    });
 
     const stubMutation = (mutateAsync: ReturnType<typeof vi.fn>) => ({
       mutateAsync,
@@ -658,5 +675,132 @@ describe("ProvidersPage", () => {
       id: "acme-vllm",
       discoverModels: true,
     });
+  });
+  // ── Model capacity limits (#7774) ──
+  //
+  // The context window used to be settable only in the creation wizard and was
+  // overwritten by the next registry sync. It is now an entry in
+  // `model_overrides.json`, so it must be editable here, seeded from the value
+  // in force, and reverted against `limits_catalog` rather than against the
+  // row's own (already effective) `context_window`.
+
+  const LITELLM: ProviderItem = {
+    id: "litellm",
+    display_name: "LiteLLM",
+    auth_status: "configured",
+    model_count: 1,
+    key_required: true,
+    base_url: "http://gateway:4000/v1",
+    api_key_env: "LITELLM_API_KEY",
+  };
+
+  /** One gateway model whose window discovery guessed at 131072. */
+  function seedDiscoveredModel(overrides?: {
+    context_window?: number;
+    limitsCatalogWindow?: number;
+  }): void {
+    useModelsMock.mockReturnValue({
+      data: {
+        models: [
+          {
+            id: "sensor-model-generic-high",
+            display_name: "sensor-model-generic-high",
+            provider: "litellm",
+            context_window: overrides?.context_window ?? 131072,
+            max_output_tokens: 16384,
+            limits_catalog: {
+              context_window: overrides?.limitsCatalogWindow ?? 131072,
+              max_output_tokens: 16384,
+            },
+          },
+        ],
+      },
+      isLoading: false,
+    });
+  }
+
+  it("saves a corrected context window as a model override (#7774)", async () => {
+    seedDiscoveredModel();
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const field = within(drawer).getByLabelText("providers.context_window");
+    // Seeded from the value currently in force, so the operator edits the real
+    // number rather than an empty box.
+    expect(field).toHaveValue(131072);
+
+    fireEvent.change(field, { target: { value: "16384" } });
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.context_window/,
+      }),
+    );
+
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: { context_window: 16384 },
+    });
+  });
+
+  it("keeps an active context-window override from deleting itself (#7774)", async () => {
+    // The row's `context_window` is the *effective* value, so it equals the
+    // override. Reverting against it instead of `limits_catalog` would make the
+    // seeded field look identical to the catalog default and clear the override
+    // on the next save.
+    seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
+    useModelOverridesMock.mockReturnValue({
+      data: { context_window: 16384 },
+      isLoading: false,
+    });
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    const field = within(drawer).getByLabelText("providers.context_window");
+    expect(field).toHaveValue(16384);
+    // Untouched field → nothing to save.
+    expect(
+      within(drawer).getByRole("button", { name: /providers\.context_window/ }),
+    ).toBeDisabled();
+    // The hint names the catalog value as the revert target, not the override.
+    expect(
+      within(drawer).getByText("providers.context_window_hint_override"),
+    ).toBeInTheDocument();
+  });
+
+  it("clearing the field drops the context_window override (#7774)", async () => {
+    seedDiscoveredModel({ context_window: 16384, limitsCatalogWindow: 131072 });
+    useModelOverridesMock.mockReturnValue({
+      data: { context_window: 16384, temperature: 0.3 },
+      isLoading: false,
+    });
+    const drawer = await openConfigureDrawer(LITELLM);
+
+    fireEvent.change(
+      within(drawer).getByLabelText("providers.context_window"),
+      { target: { value: "" } },
+    );
+    fireEvent.click(
+      within(drawer).getByRole("button", {
+        name: /providers\.context_window/,
+      }),
+    );
+
+    // Only the limit is dropped — the unrelated inference parameter survives,
+    // because PUT replaces the whole document.
+    expect(updateOverridesMutateAsync).toHaveBeenCalledWith({
+      modelKey: "litellm:sensor-model-generic-high",
+      overrides: { temperature: 0.3 },
+    });
+  });
+
+  it("says so in the interface when no context window is known (#7774)", async () => {
+    // The runtime already logs "falling back to a conservative context window";
+    // the operator has to be able to see it next to the model.
+    seedDiscoveredModel({ context_window: 0, limitsCatalogWindow: 0 });
+    const drawer = await openConfigureDrawer(LITELLM);
+    expect(
+      within(drawer).getByText("providers.context_window_unknown"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByLabelText("providers.context_window"),
+    ).toHaveValue(null);
   });
 });

@@ -1010,6 +1010,13 @@ pub async fn get_agent(
             .into_response();
     }
 
+    // `ErrorTranslator` holds a `!Send` FluentBundle, so it must not be alive across the await below (#7713 added the first await to this handler).
+    drop(t);
+    let pending = state
+        .kernel
+        .pending_skill_and_mcp_declarations(agent_id)
+        .await;
+
     let dm = {
         let dm_override = state
             .kernel
@@ -1066,6 +1073,10 @@ pub async fn get_agent(
             },
             "skills": entry.manifest.skills,
             "skills_mode": skill_assignment_mode(&entry.manifest),
+            // Declared-but-unusable halves of the two allowlists (#7713). Always present, `[]` when everything resolves.
+            // A skill is pending until it is installed and the registry reloaded; an MCP server until a connection is live, so a configured-and-unreachable server stays listed here.
+            "pending_skills": pending.skills,
+            "pending_mcp_servers": pending.mcp_servers,
             "schedule": format_schedule_mode(&entry.manifest.schedule),
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,
