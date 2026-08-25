@@ -2223,11 +2223,8 @@ fn classify_streaming_error(err: &dyn std::fmt::Display) -> ClassifiedStreamingE
     // exact thiserror Display prefix so provider strings fall through to the
     // classifier below (RateLimit / Billing), not this branch.
     if let Some(detail_start) = inner.find("Resource quota exceeded:") {
-        // The kernel already computed which cap was breached and by how much —
-        // "Agent <id> exceeded hourly cost quota: $0.0123 + $0.0045 / $0.0100",
-        // i.e. spent + this call / limit. Dropping that left the operator with
-        // advice to "raise the matching limit" and no way to learn which one or
-        // what it is currently set to (#7352).
+        // The kernel already computed which cap was breached and by how much — "Agent <id> exceeded hourly cost quota: $0.0123 + $0.0045 / $0.0100", i.e. spent + this call / limit.
+        // Dropping that left the operator with advice to "raise the matching limit" and no way to learn which one or what it is currently set to (#7352).
         let detail = inner[detail_start + "Resource quota exceeded:".len()..].trim();
         let guidance = "Usage budget reached for this window. This is a token, cost, or tool-call cap, not a full context window \u{2014} /compact will NOT help. Wait for the relevant window to reset, or raise the matching agent resource limit in its manifest or the matching [budget] limit in config.toml.";
         let message = if detail.is_empty() {
@@ -2495,9 +2492,7 @@ mod tests {
     }
 
     /// The kernel names the cap and its value; the surface must not drop that.
-    /// Without it the message tells an operator to raise "the matching limit"
-    /// while withholding which limit and what it is set to, which is what left
-    /// #7352 unanswerable from the error alone.
+    /// Without it the message tells an operator to raise "the matching limit" while withholding which limit and what it is set to, which is what left #7352 unanswerable from the error alone.
     #[test]
     fn test_classify_streaming_error_budget_names_the_cap_that_was_hit() {
         let error = classify_streaming_error(
@@ -2514,8 +2509,7 @@ mod tests {
         assert!(error.message.contains("scout"), "{}", error.message);
     }
 
-    /// A bare prefix with no detail must still produce the guidance alone,
-    /// never a dangling empty parenthetical.
+    /// A bare prefix with no detail must still produce the guidance alone, never a dangling empty parenthetical.
     #[test]
     fn test_classify_streaming_error_budget_without_detail_is_unchanged() {
         let error = classify_streaming_error(&"Resource quota exceeded:");
