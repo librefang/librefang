@@ -22,6 +22,11 @@ interface DrawerState {
   close: (owner?: object) => void;
 }
 
+// A previous DrawerPanel can relinquish ownership in the same React commit
+// that a new panel claims the global slot. Record that owner-scoped close so
+// the deferred replacement notification does not double-fire its onClose.
+const silentlyClosedOwners = new WeakSet<object>();
+
 // Single global push-drawer slot. The `<DrawerPanel>` adapter is the primary
 // caller — it pushes its `children` here on every render so the slot stays
 // in sync with parent state. The `<PushDrawer>` host in App.tsx is a flex
@@ -33,9 +38,21 @@ interface DrawerState {
 export const useDrawerStore = create<DrawerState>((set) => ({
   isOpen: false,
   content: null,
-  open: (content) => set({ isOpen: true, content }),
+  open: (content) => set((state) => {
+    const previous = state.content;
+    if (previous && previous.owner !== content.owner) {
+      queueMicrotask(() => {
+        if (previous.owner && silentlyClosedOwners.delete(previous.owner)) return;
+        previous.onClose?.();
+      });
+    }
+    return { isOpen: true, content };
+  }),
   close: (owner) => set((state) => {
-    if (owner !== undefined && state.content?.owner !== owner) return state;
+    if (owner !== undefined && state.content?.owner !== owner) {
+      silentlyClosedOwners.add(owner);
+      return state;
+    }
     return { isOpen: false, content: null };
   }),
 }));

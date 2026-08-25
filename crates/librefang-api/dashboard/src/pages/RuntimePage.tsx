@@ -47,9 +47,27 @@ import { StaggerList } from "../components/ui/StaggerList";
 
 const OK_STATUSES = new Set(["ok", "pass", "healthy"]);
 
+// Mirrors `BACKUP_LAYOUT` in `routes/backup.rs`. The list has to be restated
+// here because nothing publishes it to the browser, but it is no longer a
+// silent-failure risk: `POST /api/restore` validates every name against its own
+// table and answers `400` with the valid set, so a stale entry here surfaces as
+// an error the operator can read rather than a restore of nothing.
+const BACKUP_COMPONENTS = [
+  "config",
+  "cron_jobs",
+  "hand_state",
+  "custom_models",
+  "agents",
+  "skills",
+  "workflows",
+  "data",
+];
+
 type BackupConfirmState = {
   type: "restore" | "delete";
   filename: string;
+  keepConfig: boolean;
+  components: string[];
 };
 
 export function laneUtilizationColor(percent: number): string {
@@ -130,6 +148,12 @@ export function RuntimePage() {
   const addToast = useUIStore((s) => s.addToast);
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
+
+  // Which components a restore is allowed to touch. Nothing ticked means
+  // "restore everything": `restoreBackup` omits the field rather than sending
+  // an empty list, which the API rejects.
+  const [restoreKeepConfig, setRestoreKeepConfig] = useState(false);
+  const [restoreComponents, setRestoreComponents] = useState<string[]>([]);
   const [reloadResult, setReloadResult] = useState<ReloadConfigResult | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -807,7 +831,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setBackupConfirm({ type: "restore", filename: b.filename });
+                            setBackupConfirm({ type: "restore", filename: b.filename, keepConfig: restoreKeepConfig, components: restoreComponents });
                           }
                         }}
                         className="text-brand hover:text-brand/80 text-[10px] font-bold shrink-0"
@@ -818,7 +842,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setBackupConfirm({ type: "delete", filename: b.filename });
+                            setBackupConfirm({ type: "delete", filename: b.filename, keepConfig: false, components: [] });
                           }
                         }}
                         className="text-error hover:text-error/80 shrink-0"
@@ -918,6 +942,35 @@ export function RuntimePage() {
         onClose={() => setShowShutdownConfirm(false)}
       />
 
+      {/* Restore options: keep the target's own config, and/or limit the
+           restore to chosen components. */}
+      <div className="flex flex-wrap items-center gap-3 text-xs mt-2">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={restoreKeepConfig}
+            onChange={(e) => setRestoreKeepConfig(e.target.checked)}
+          />
+          {t("runtime.restore_keep_config", { defaultValue: "Keep my config (clone mode)" })}
+        </label>
+        {BACKUP_COMPONENTS.map((c) => (
+          <label key={c} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={restoreComponents.includes(c)}
+              onChange={(e) =>
+                setRestoreComponents(
+                  e.target.checked
+                    ? [...restoreComponents, c]
+                    : restoreComponents.filter((x) => x !== c),
+                )
+              }
+            />
+            <span className="text-text-dim">{c}</span>
+          </label>
+        ))}
+      </div>
+
       {/* Restore Confirm Dialog */}
       <ConfirmDialog
         isOpen={backupConfirm?.type === "restore"}
@@ -927,7 +980,11 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "restore") {
-            await restoreMutation.mutateAsync(backupConfirm.filename);
+            await restoreMutation.mutateAsync({
+              filename: backupConfirm.filename,
+              keepConfig: backupConfirm.keepConfig,
+              components: backupConfirm.components,
+            });
             addToast(t("runtime.restore_success"), "success");
           }
         }}

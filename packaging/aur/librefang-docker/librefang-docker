@@ -8,22 +8,54 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
 fi
 
-IMAGE="${LIBREFANG_DOCKER_IMAGE:-ghcr.io/librefang/librefang:2026.6.24-beta.23}"
+IMAGE="${LIBREFANG_DOCKER_IMAGE:-ghcr.io/librefang/librefang:2026.7.31}"
 CONTAINER_NAME="${LIBREFANG_DOCKER_NAME:-librefang}"
 DATA_VOLUME="${LIBREFANG_DOCKER_DATA_VOLUME:-librefang-data}"
 PORT="${LIBREFANG_DOCKER_PORT:-4545}"
+MANAGED_LABEL="ai.librefang.managed"
 
 docker_args=(
   --name "$CONTAINER_NAME"
   --publish "127.0.0.1:${PORT}:4545"
   --volume "${DATA_VOLUME}:/data"
   --env "LIBREFANG_LISTEN=0.0.0.0:4545"
+  --label "${MANAGED_LABEL}=true"
 )
 
 append_env_if_set() {
   local name="$1"
   if [[ -n "${!name:-}" ]]; then
-    docker_args+=(--env "${name}=${!name}")
+    export "$name"
+    docker_args+=(--env "$name")
+  fi
+}
+
+container_exists() {
+  docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
+require_managed_container() {
+  local managed
+  managed=$(docker container inspect \
+    --format "{{ index .Config.Labels \"${MANAGED_LABEL}\" }}" \
+    "$CONTAINER_NAME") || return 1
+  if [[ "$managed" != "true" ]]; then
+    echo "Refusing to modify container '$CONTAINER_NAME': it is not managed by librefang-docker." >&2
+    return 1
+  fi
+}
+
+remove_managed_container_if_present() {
+  if container_exists; then
+    require_managed_container
+    docker rm -f "$CONTAINER_NAME"
+  fi
+}
+
+require_existing_container() {
+  if ! container_exists; then
+    echo "LibreFang container '$CONTAINER_NAME' does not exist." >&2
+    return 1
   fi
 }
 
@@ -66,28 +98,35 @@ case "$cmd" in
   run)
     append_known_provider_env
     docker pull "$IMAGE"
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    remove_managed_container_if_present
     exec docker run --rm "${docker_args[@]}" "$IMAGE"
     ;;
   start)
     append_known_provider_env
     docker pull "$IMAGE"
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    remove_managed_container_if_present
     docker run --detach --restart unless-stopped "${docker_args[@]}" "$IMAGE"
     ;;
   stop)
+    if ! container_exists; then
+      echo "LibreFang container '$CONTAINER_NAME' is already stopped."
+      exit 0
+    fi
+    require_managed_container
     docker rm -f "$CONTAINER_NAME"
     ;;
   pull)
     docker pull "$IMAGE"
     ;;
   logs)
+    require_existing_container
     docker logs --follow "$CONTAINER_NAME"
     ;;
   status)
     docker ps --all --filter "name=^/${CONTAINER_NAME}$"
     ;;
   shell)
+    require_existing_container
     exec docker exec -it "$CONTAINER_NAME" /bin/sh
     ;;
   -h|--help|help)

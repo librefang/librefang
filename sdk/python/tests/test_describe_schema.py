@@ -43,3 +43,26 @@ def test_field_rejects_unknown_type():
     import pytest
     with pytest.raises(ValueError, match="unknown field type"):
         Field("X", "X", "magic")
+
+
+def test_schema_reports_the_sdk_version():
+    """`--describe` is the only path an adapter's SDK version has to the daemon.
+
+    #7140 was a deployment running a four-month-old SDK against a current
+    daemon; `librefang.__version__` existed the whole time and was on no wire.
+    `--describe` resolves the same interpreter and PYTHONPATH as the eventual
+    spawn, so the version it reports is the version that will serve traffic.
+    """
+    from librefang import __version__
+
+    s = Schema(
+        name="telegram",
+        display_name="Telegram",
+        description="Telegram Bot API adapter",
+        fields=[],
+    )
+    out = s.to_dict()
+    assert out["sdk_version"] == __version__
+    # Emitted for every adapter, not declared per adapter — a version that has
+    # to be opted into is a version that stays unset (the shape of #7140).
+    assert out["sdk_version"]

@@ -660,6 +660,7 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                 tracing::info!(
                     adapter = entry.name,
                     fields = schema.fields.len(),
+                    sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
                     "sidecar schema cached"
                 );
                 write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
@@ -684,6 +685,9 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                                 options: None,
                             })
                             .collect(),
+                        // The fallback exists precisely because `--describe`
+                        // failed, so no adapter reported a version here.
+                        sdk_version: None,
                     };
                     tracing::warn!(
                         adapter = entry.name,
@@ -699,7 +703,8 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
                     // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    write_cache_recover(schema_error_cache(), "schema error").insert(entry.name, e);
+                    write_cache_recover(schema_error_cache(), "schema error")
+                        .insert(entry.name, e.to_string());
                 }
             }
         }
@@ -802,6 +807,17 @@ fn sidecar_discovery_rows(
                  (secrets) and ~/.librefang/config.toml (non-secrets)",
             ],
         });
+        // The SDK version the adapter reported on `--describe`, so an operator
+        // can see which `librefang-sdk` is actually winning without shelling
+        // into the box (#7140: a March SDK served a August daemon for months).
+        // Omitted rather than nulled when the adapter did not report one — an
+        // SDK too old to carry the field, or a failed describe.
+        if let Some(version) = cache_guard
+            .get(entry.name)
+            .and_then(|s| s.sdk_version.as_deref())
+        {
+            row["sdk_version"] = serde_json::json!(version);
+        }
         // When `--describe` failed at boot and there is no static fallback, `fields` is empty and the configure form would be a blank drawer.
         // Surface the cached failure reason (typically the `pip install librefang-sdk` install hint) so the dashboard can explain why instead of showing nothing.
         if let Some(reason) = err_guard.get(entry.name) {
@@ -1157,6 +1173,7 @@ fn write_sidecar_configuration(
         (status = 400, description = "Missing required field or invalid value", body = crate::types::JsonObject),
         (status = 404, description = "Unknown catalog name", body = crate::types::JsonObject),
         (status = 409, description = "config.toml uses `include` and an existing `[[sidecar_channels]]` entry lives in an included file — would silently shadow.", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; declare the sidecar in the manifest instead.", body = crate::types::JsonObject),
         (status = 503, description = "Schema not cached — SDK module may be missing", body = crate::types::JsonObject),
     )
 )]
@@ -1165,6 +1182,13 @@ pub async fn configure_sidecar_channel(
     Path(name): Path<String>,
     Json(body): Json<ConfigureSidecarBody>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // 0. Managed mode (#6695) — refused in full, before the catalog lookup and before either file is opened.
+    //    The scope matches `set_provider_key` rather than the narrow config-only guards: this handler writes `secrets.env` and `config.toml` inside one `spawn_blocking` call (`write_sidecar_configuration`), so a guard placed at the config write would already have persisted the secrets half and mutated the process environment before refusing.
+    //    Refusing up front keeps the request atomic and states the contract plainly: in a managed deployment a sidecar channel is declared as `[[sidecar_channels]]` in the manifest, with its secrets supplied from the pod environment.
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+        return Err(locked);
+    }
+
     // 1. Catalog lookup — only first-party adapters listed in
     //    SIDECAR_CATALOG can be configured through this endpoint.
     let entry = SIDECAR_CATALOG
@@ -1212,7 +1236,7 @@ pub async fn configure_sidecar_channel(
     //     the config_write_lock in step 4a below.)
     let home = state.kernel.home_dir().to_path_buf();
     let secrets_path = home.join("secrets.env");
-    let config_path = home.join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // 4. Split payload: secrets go to secrets.env, everything else goes into the [sidecar_channels.env] table.
     //
@@ -1305,14 +1329,21 @@ pub async fn configure_sidecar_channel(
     ),
     responses(
         (status = 200, description = "Removed; reload plan returned. Body fields: `status` (\"removed\"), `hot_actions_applied` ([String]), `restart_required` (bool).", body = crate::types::JsonObject),
-        (status = 404, description = "No configured sidecar channel with that name", body = crate::types::JsonObject)
+        (status = 404, description = "No configured sidecar channel with that name", body = crate::types::JsonObject),
+        (status = 423, description = "Configuration is managed by the deployment; remove the entry from the manifest instead.", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_sidecar_channel(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
-    let config_path = state.kernel.home_dir().join("config.toml");
+    // Managed mode (#6695) — refused before the rewrite, so the `[[sidecar_channels]]` block a manifest declared cannot be deleted out from under it.
+    // The guard precedes the 404 branch on purpose: whether the entry exists is a fact about the managed file, and answering `404` first would tell a caller which manifest entries are present through a route that is not allowed to act on any of them.
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
+        return Err(locked);
+    }
+
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Rewrite config.toml under the same lock that gates configure and POST /api/config/set.
     let removed = {
@@ -1787,12 +1818,17 @@ mod schema_error_discovery_tests {
             wechat["schema_error"], HINT,
             "the cached failure reason must ride along as schema_error"
         );
+        assert!(
+            wechat.get("sdk_version").is_none(),
+            "a failed describe reported no SDK version, so the key must be absent rather than null"
+        );
 
         // --- schema cached: no schema_error, fields populated ---
         let schema = SidecarSchema {
             name: "wechat".to_string(),
             display_name: "WeChat".to_string(),
             description: "test".to_string(),
+            sdk_version: Some("2026.8.19".to_string()),
             fields: vec![SidecarSchemaField {
                 key: "WECHAT_BOT_TOKEN".to_string(),
                 label: "Bot token".to_string(),
@@ -1818,6 +1854,10 @@ mod schema_error_discovery_tests {
         assert!(
             wechat.get("schema_error").is_none(),
             "a usable schema must not carry a schema_error"
+        );
+        assert_eq!(
+            wechat["sdk_version"], "2026.8.19",
+            "the adapter's reported SDK version must reach the discovery row"
         );
 
         // Reset shared caches so we don't leak state into other tests.
@@ -1884,6 +1924,7 @@ mod sidecar_configuration_write_tests {
             name: TEST_ENTRY.name.to_string(),
             display_name: TEST_ENTRY.display_name.to_string(),
             description: TEST_ENTRY.description.to_string(),
+            sdk_version: Some("2026.8.19".to_string()),
             fields: vec![
                 SidecarSchemaField {
                     key: "TEST_TOKEN".to_string(),

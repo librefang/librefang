@@ -26,7 +26,7 @@ pub async fn probe_and_update_local_provider(
             .get_provider(provider_id)
             .map(|p| p.api_key_env.clone())
             .filter(|env| !env.trim().is_empty())
-            .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_uppercase().replace('-', "_")));
+            .unwrap_or_else(|| librefang_types::model_catalog::default_api_key_env(provider_id));
         std::env::var(env_var).ok().filter(|v| !v.trim().is_empty())
     };
     let result = librefang_runtime::provider_health::probe_provider(
@@ -53,17 +53,7 @@ pub async fn probe_and_update_local_provider(
                     result
                         .discovered_models
                         .iter()
-                        .map(
-                            |name| librefang_runtime::provider_health::DiscoveredModelInfo {
-                                name: name.clone(),
-                                parameter_size: None,
-                                quantization_level: None,
-                                family: None,
-                                families: None,
-                                size: None,
-                                capabilities: vec![],
-                            },
-                        )
+                        .map(librefang_runtime::provider_health::DiscoveredModelInfo::bare)
                         .collect(),
                 )
             } else {

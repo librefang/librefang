@@ -4,8 +4,45 @@ use librefang_types::model_catalog::AuthStatus;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-static REFRESH_ATTEMPTS: LazyLock<DashMap<String, Instant>> = LazyLock::new(DashMap::new);
+#[derive(Clone, Copy)]
+enum RefreshAttempt {
+    InProgress,
+    Completed(Instant),
+}
+
+static REFRESH_ATTEMPTS: LazyLock<DashMap<String, RefreshAttempt>> = LazyLock::new(DashMap::new);
 const REFRESH_RETRY_WINDOW: Duration = Duration::from_secs(60);
+
+fn begin_refresh(base_url: &str) -> Result<(), String> {
+    match REFRESH_ATTEMPTS.entry(base_url.to_string()) {
+        dashmap::mapref::entry::Entry::Occupied(mut attempt) => match *attempt.get() {
+            RefreshAttempt::InProgress => {
+                Err("OpenRouter catalog refresh is already in progress".to_string())
+            }
+            RefreshAttempt::Completed(completed_at)
+                if completed_at.elapsed() < REFRESH_RETRY_WINDOW =>
+            {
+                Err("OpenRouter catalog refresh is in the 60-second retry window".to_string())
+            }
+            RefreshAttempt::Completed(_) => {
+                attempt.insert(RefreshAttempt::InProgress);
+                Ok(())
+            }
+        },
+        dashmap::mapref::entry::Entry::Vacant(attempt) => {
+            attempt.insert(RefreshAttempt::InProgress);
+            Ok(())
+        }
+    }
+}
+
+fn finish_refresh_failure(base_url: &str) {
+    REFRESH_ATTEMPTS.remove(base_url);
+}
+
+fn finish_refresh_success(base_url: String) {
+    REFRESH_ATTEMPTS.insert(base_url, RefreshAttempt::Completed(Instant::now()));
+}
 
 fn provider_is_configured(kernel: &Arc<dyn KernelApi>) -> bool {
     let catalog = kernel.model_catalog_ref().load();
@@ -75,22 +112,16 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
             .filter(|url| !url.is_empty())
             .ok_or_else(|| "OpenRouter base URL is not configured".to_string())?
     };
-    match REFRESH_ATTEMPTS.entry(base_url.clone()) {
-        dashmap::mapref::entry::Entry::Occupied(mut attempt) => {
-            if attempt.get().elapsed() < REFRESH_RETRY_WINDOW {
-                return Err(
-                    "OpenRouter catalog refresh is in the 60-second retry window".to_string(),
-                );
-            }
-            attempt.insert(Instant::now());
-        }
-        dashmap::mapref::entry::Entry::Vacant(attempt) => {
-            attempt.insert(Instant::now());
-        }
-    }
+    begin_refresh(&base_url)?;
 
     let snapshot =
-        librefang_kernel::model_catalog::fetch_openrouter_model_snapshot(&base_url).await?;
+        match librefang_kernel::model_catalog::fetch_openrouter_model_snapshot(&base_url).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                finish_refresh_failure(&base_url);
+                return Err(error);
+            }
+        };
     let model_count = snapshot.live_models.len();
     kernel.model_catalog_update(&mut move |catalog| {
         catalog.reconcile_live_provider_models(
@@ -99,6 +130,7 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
             snapshot.live_models.clone(),
         );
     });
+    finish_refresh_success(base_url);
     Ok(model_count)
 }
 
@@ -107,4 +139,31 @@ async fn refresh_now(kernel: &Arc<dyn KernelApi>) -> Result<usize, String> {
 #[cfg(feature = "test-util")]
 pub fn clear_refresh_attempts(base_url: &str) {
     REFRESH_ATTEMPTS.remove(base_url);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_refresh_releases_claim_but_success_starts_retry_window() {
+        let base_url = "https://openrouter-refresh-state.test";
+        REFRESH_ATTEMPTS.remove(base_url);
+
+        assert!(begin_refresh(base_url).is_ok());
+        assert_eq!(
+            begin_refresh(base_url).unwrap_err(),
+            "OpenRouter catalog refresh is already in progress"
+        );
+
+        finish_refresh_failure(base_url);
+        assert!(begin_refresh(base_url).is_ok());
+        finish_refresh_success(base_url.to_string());
+        assert_eq!(
+            begin_refresh(base_url).unwrap_err(),
+            "OpenRouter catalog refresh is in the 60-second retry window"
+        );
+
+        REFRESH_ATTEMPTS.remove(base_url);
+    }
 }

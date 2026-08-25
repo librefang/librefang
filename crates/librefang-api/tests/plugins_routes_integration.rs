@@ -47,6 +47,8 @@ struct Harness {
     _test: TestAppState,
 }
 
+const MAX_RESPONSE_BODY_BYTES: usize = 4 << 20;
+
 fn boot() -> Harness {
     // No `default_model` override needed — the plugins routes never reach
     // the LLM driver. We do, however, want a deterministic `[context_engine]`
@@ -81,9 +83,9 @@ async fn json_request(
     let req = builder.body(Body::from(body_bytes)).unwrap();
     let resp = h.app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_RESPONSE_BODY_BYTES)
         .await
-        .unwrap();
+        .expect("JSON response body must fit within the 4 MiB test limit");
     let value: serde_json::Value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -109,9 +111,9 @@ async fn raw_request(
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+    let bytes = axum::body::to_bytes(resp.into_body(), MAX_RESPONSE_BODY_BYTES)
         .await
-        .unwrap();
+        .expect("raw response body must fit within the 4 MiB test limit");
     let body = String::from_utf8_lossy(&bytes).to_string();
     (status, body, content_type)
 }
@@ -348,6 +350,10 @@ async fn plugin_health_unknown_returns_404() {
 /// `/api/plugins/{name}/status` rejects unknown names with 400 (the handler
 /// treats lookup failure as a bad-request because the same endpoint also
 /// surfaces `validate_plugin_name` errors via the same path).
+///
+/// TODO: After #7083 releases `routes/plugins.rs`, align an unknown plugin
+/// with the sibling read endpoints by returning 404 while preserving 400 for
+/// an invalid plugin name.
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_status_unknown_returns_400() {
     let h = boot();
