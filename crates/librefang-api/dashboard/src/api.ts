@@ -1788,6 +1788,19 @@ export async function loadAgentSession(
 export interface SessionContextResponse {
   used_tokens: number;
   max_context_tokens: number;
+  /**
+   * Which layer of the precedence chain produced `max_context_tokens` (refs #7774):
+   * `agent_override`, `model_override`, `catalog`, `session_hint` or `fallback`.
+   */
+  max_context_tokens_source: string;
+  /**
+   * True when `max_context_tokens` is the runtime's own guess rather than a fact
+   * about the model, i.e. the source is `fallback`.
+   *
+   * Render the warning off this flag rather than comparing the source string —
+   * the set of source names can grow, the meaning of "assumed" cannot.
+   */
+  max_context_tokens_assumed: boolean;
   pct: number;
   model: string;
   pressure: string;

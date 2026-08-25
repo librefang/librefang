@@ -6438,21 +6438,31 @@ use std::collections::HashSet;
 impl WorkflowEngine {
     /// Convert an existing workflow into a reusable [`WorkflowTemplate`].
     ///
-    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. The method
-    /// auto-detects parameters by scanning `prompt_template` fields for
-    /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
-    /// unique variable found.
+    /// Thin forwarder to [`Workflow::to_template`], which honours an authored `input_schema` and falls back to scanning `prompt_template` fields for `{{var}}` placeholders.
     pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
         workflow.to_template()
+    }
+}
+
+/// Map a [`WorkflowInputParam::param_type`] string onto the template's typed enum.
+///
+/// [`ParameterType`] has no `file` / `image` variant, so those authored types degrade to `String` — which is the shape the caller actually passes, an artifact-handle string.
+/// An unrecognised type degrades the same way rather than dropping the parameter, because losing a declared parameter is worse than widening its type.
+fn template_parameter_type(param_type: &str) -> ParameterType {
+    match param_type {
+        "number" => ParameterType::Number,
+        "boolean" => ParameterType::Boolean,
+        "agent_id" => ParameterType::AgentId,
+        _ => ParameterType::String,
     }
 }
 
 impl Workflow {
     /// Convert this workflow into a reusable [`WorkflowTemplate`].
     ///
-    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. Parameters
-    /// are auto-detected by scanning `prompt_template` fields for `{{var}}`
-    /// placeholders, with one [`TemplateParameter`] created per unique name.
+    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`.
+    /// Parameters come from the authored [`Workflow::input_schema`] first, in the order the author declared them, and only then from a scan of the `prompt_template` fields for `{{var}}` placeholders.
+    /// The scan can say no more than "this name appears in a prompt", so running it over a parameter the author already described used to overwrite the declared type, optionality and description with `string` / `required` / a generated sentence — see the `to_template_keeps_the_authored_input_schema` regression test.
     ///
     /// Exposed as an inherent method so callers outside the kernel (e.g. the
     /// API crate) can perform the conversion without importing
@@ -6467,11 +6477,27 @@ impl Workflow {
             .trim_matches('-')
             .to_string();
 
-        // Collect all {{var}} placeholders across all steps
         let re = Regex::new(r"\{\{(\w+)\}\}").expect("valid regex");
         let mut seen_params = HashSet::new();
         let mut parameters = Vec::new();
 
+        // An authored `input_schema` wins over the placeholder scan below.
+        // Seeding `seen_params` with the declared names is what stops the scan from re-deriving a parameter the author already described and flattening it back to string / required / a generated description.
+        // Names the schema does not declare are still collected by the scan, so a partial schema never loses a variable the steps actually substitute.
+        for declared in workflow.input_schema.iter().flatten() {
+            if !seen_params.insert(declared.name.clone()) {
+                continue;
+            }
+            parameters.push(TemplateParameter {
+                name: declared.name.clone(),
+                description: declared.description.clone(),
+                param_type: template_parameter_type(&declared.param_type),
+                default: None,
+                required: declared.required,
+            });
+        }
+
+        // Collect the remaining {{var}} placeholders across all steps
         let steps: Vec<WorkflowTemplateStep> = workflow
             .steps
             .iter()
@@ -10280,6 +10306,77 @@ prompt_template = "do {{x}}"
         let result = WorkflowEngine::topological_sort(&steps);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cycle detected"));
+    }
+
+    /// `save-as-template` used to re-derive every parameter from a `{{var}}` scan over the prompts.
+    /// A scan cannot see a type, an optionality or a description, so an authored `input_schema` came back out as string / required / a generated sentence and the saved template was wrong for every future instantiation.
+    #[test]
+    fn to_template_keeps_the_authored_input_schema() {
+        let mut workflow = test_workflow();
+        workflow.steps[0].prompt_template = "brief {{city}} about {{topic}}".to_string();
+        workflow.steps[1].prompt_template = "wrap up {{city}}".to_string();
+        workflow.input_schema = Some(vec![
+            WorkflowInputParam {
+                name: "city".to_string(),
+                param_type: "number".to_string(),
+                required: false,
+                description: Some("The target city".to_string()),
+            },
+            WorkflowInputParam {
+                name: "cover".to_string(),
+                param_type: "file".to_string(),
+                required: true,
+                description: None,
+            },
+        ]);
+
+        let template = workflow.to_template();
+
+        let city = template
+            .parameters
+            .iter()
+            .find(|p| p.name == "city")
+            .expect("the declared parameter must survive");
+        assert!(
+            matches!(city.param_type, ParameterType::Number),
+            "the authored type must not be flattened back to String: {:?}",
+            city.param_type
+        );
+        assert!(
+            !city.required,
+            "the authored `required: false` must survive; forcing it back to required makes the template unusable without a value the author said was optional"
+        );
+        assert_eq!(city.description.as_deref(), Some("The target city"));
+
+        let cover = template
+            .parameters
+            .iter()
+            .find(|p| p.name == "cover")
+            .expect("a declared parameter that no prompt substitutes must still be exported");
+        assert!(
+            matches!(cover.param_type, ParameterType::String),
+            "`file` has no template variant, so it must widen to String rather than drop the parameter"
+        );
+
+        assert!(
+            template.parameters.iter().any(|p| p.name == "topic"),
+            "a placeholder the schema does not declare must still be collected: {:?}",
+            template
+                .parameters
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            template
+                .parameters
+                .iter()
+                .filter(|p| p.name == "city")
+                .count(),
+            1,
+            "the scan must not append a second, flattened copy of a declared parameter"
+        );
     }
 
     #[test]

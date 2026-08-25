@@ -461,6 +461,23 @@ pub struct SessionContextResponse {
     /// `UNKNOWN_MODEL_CONTEXT_WINDOW` (8192) for an unknown model, so this is
     /// always positive.
     pub max_context_tokens: usize,
+    /// Which layer of the precedence chain produced `max_context_tokens`
+    /// (refs #7774): `agent_override`, `model_override`, `catalog`,
+    /// `session_hint` or `fallback`.
+    ///
+    /// Without this the number is unreadable: a window an operator set, one the
+    /// registry declared and one the runtime invented are all the same integer.
+    pub max_context_tokens_source: String,
+    /// True when `max_context_tokens` is a guess rather than a fact about the
+    /// model — i.e. the source is `fallback` (refs #7774).
+    ///
+    /// The condition behind the report that opened the issue: a gateway-served
+    /// model reports no window, the runtime assumes 8192, and a conversation
+    /// well inside the model's real window is refused for an overflow that
+    /// exists only in that assumption.
+    /// Clients render the warning off this flag rather than string-matching the
+    /// source.
+    pub max_context_tokens_assumed: bool,
     /// Usage percentage, clamped to 100 with one decimal of precision.
     pub pct: f64,
     /// The agent's model id.
@@ -578,6 +595,8 @@ pub async fn get_agent_session_context(
             Json(SessionContextResponse {
                 used_tokens: report.estimated_tokens,
                 max_context_tokens: report.context_window,
+                max_context_tokens_source: report.context_window_source.as_str().to_string(),
+                max_context_tokens_assumed: report.context_window_source.is_assumed(),
                 pct: report.usage_percent,
                 model,
                 pressure: format!("{:?}", report.pressure).to_lowercase(),
