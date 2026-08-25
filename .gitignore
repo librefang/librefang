@@ -40,11 +40,8 @@ secrets.env.*
 
 # User config (may contain API keys)
 config.toml
-# The managed-config overlay's config.toml is a committed manifest, not a user
-# config: it is rendered into a ConfigMap, so a credential must never appear in
-# it and scripts/check-k8s-manifests.py fails the build if one does. Without
-# this negation the bare pattern above silently drops it, and the overlay fails
-# to render on any fresh clone (#6695).
+# The managed-config overlay's config.toml is a committed manifest, not a user config: it is rendered into a ConfigMap, so a credential must never appear in it and scripts/check-k8s-manifests.py fails the build if one does.
+# Without this negation the bare pattern above silently drops it, and the overlay fails to render on any fresh clone (#6695).
 !deploy/kubernetes/overlays/managed-config/config.toml
 
 # Certificates & keys

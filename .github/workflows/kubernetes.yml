@@ -52,7 +52,7 @@ jobs:
 
       # `kubectl kustomize` rather than a standalone kustomize binary: it is
       # preinstalled on the runner and is what the README tells operators to
-      # use (`kubectl apply -k`), so CI validates the same renderer they run.
+      # use (`kubectl apply -k`), so CI validates the same renderer they use.
       - name: Render base kustomization
         run: |
           set -euo pipefail
@@ -60,13 +60,8 @@ jobs:
           echo "--- rendered ---"
           cat rendered-base.yaml
 
-      # The managed-config overlay (#6695) is checked by the same script and
-      # against the same assertions as the base — it is an increment on the
-      # deployment baseline, not a parallel one with its own rules. The script
-      # additionally recomputes sha256 over the rendered ConfigMap and compares
-      # it to the pod template's checksum annotation, so a config edit that
-      # forgets the annotation — and would therefore apply cleanly while
-      # rolling nothing — fails here.
+      # The managed-config overlay (#6695) is checked by the same script and against the same assertions as the base — it is an increment on the deployment baseline, not a parallel one with its own rules.
+      # The script additionally recomputes sha256 over the rendered ConfigMap and compares it to the pod template's checksum annotation, so a config edit that forgets the annotation — and would therefore apply cleanly while rolling nothing — fails here.
       - name: Render managed-config overlay
         run: |
           set -euo pipefail
@@ -123,10 +118,8 @@ jobs:
     env:
       CLUSTER: librefang-ci
       NS: librefang
-      # The managed-config scenario (#6695) gets its own namespace and its own
-      # PVC rather than reusing the one above. It asserts that /data/config.toml
-      # was never created, which is only meaningful on a volume that has not
-      # already had `librefang init` run against it.
+      # The managed-config scenario (#6695) gets its own namespace and its own PVC rather than reusing the one above.
+      # It asserts that /data/config.toml was never created, which is only meaningful on a volume that has not already had `librefang init` run against it.
       MNS: librefang-managed
       IMAGE: librefang:ci
     steps:
@@ -299,10 +292,8 @@ jobs:
 
       # ── Managed configuration (#6695) ──────────────────────────────────
       #
-      # The acceptance criterion is that a new installation mounts config.toml
-      # read-only from a ConfigMap, outside /data, and boots with no
-      # init-container copy step. Everything below either establishes that or
-      # establishes that the lock it implies is actually in force.
+      # The acceptance criterion is that a new installation mounts config.toml read-only from a ConfigMap, outside /data, and boots with no init-container copy step.
+      # Everything below either establishes that or establishes that the lock it implies is actually in force.
       - name: Managed mode — namespace, credentials, and rollout
         run: |
           set -euo pipefail
@@ -316,8 +307,7 @@ jobs:
             --from-literal=dashboard-user=ci \
             --from-literal=dashboard-pass="$(openssl rand -hex 24)"
 
-          # Same composition path as the base scenario: a CI-only overlay on
-          # top of the committed one, retargeting the image and nothing else.
+          # Same composition path as the base scenario: a CI-only overlay on top of the committed one, retargeting the image and nothing else.
           mkdir -p deploy/kubernetes/ci-overlay-managed
           cat > deploy/kubernetes/ci-overlay-managed/kustomization.yaml <<EOF
           apiVersion: kustomize.config.k8s.io/v1beta1
@@ -332,28 +322,22 @@ jobs:
           EOF
           kubectl apply -k deploy/kubernetes/ci-overlay-managed
 
-          # No `librefang init` runs here — the config already exists at the
-          # mount — so this is a shorter first boot than the base scenario's,
-          # not a longer one. 300s is the same budget regardless.
+          # No `librefang init` runs here — the config already exists at the mount — so this is a shorter first boot than the base scenario's, not a longer one.
+          # 300s is the same budget regardless.
           kubectl -n "$MNS" rollout status statefulset/librefang --timeout=300s
 
       - name: Managed mode — booted off the read-only mount, with no copy into /data
         run: |
           set -euo pipefail
-          # The whole point of the criterion: nothing copied the config onto
-          # the PVC, and nothing generated one there either. If `librefang init`
-          # had run, or an init container had staged a writable duplicate, this
-          # file would exist and the deployment would have a second source of
-          # truth the manifest does not control.
+          # The whole point of the criterion: nothing copied the config onto the PVC, and nothing generated one there either.
+          # If `librefang init` had run, or an init container had staged a writable duplicate, this file would exist and the deployment would have a second source of truth the manifest does not control.
           if kubectl -n "$MNS" exec statefulset/librefang -- test -e /data/config.toml; then
             echo "::error::/data/config.toml exists — the daemon did not boot off the ConfigMap mount"
             kubectl -n "$MNS" exec statefulset/librefang -- ls -la /data || true
             exit 1
           fi
           kubectl -n "$MNS" exec statefulset/librefang -- test -f /etc/librefang/config.toml
-          # Read-only is defence in depth, not the enforcement mechanism, but a
-          # mount that turned out writable would mean the manifest and the
-          # cluster disagree about who owns the file.
+          # Read-only is defence in depth, not the enforcement mechanism, but a mount that turned out writable would mean the manifest and the cluster disagree about who owns the file.
           if kubectl -n "$MNS" exec statefulset/librefang -- test -w /etc/librefang/config.toml; then
             echo "::error::/etc/librefang/config.toml is writable — the ConfigMap mount is not read-only"
             exit 1
@@ -383,10 +367,8 @@ jobs:
           echo "$status" | jq -e '.source == "/etc/librefang/config.toml"' >/dev/null \
             || { echo "::error::source does not name the mount"; exit 1; }
 
-          # The annotation that triggers the rollout and the checksum the daemon
-          # reports must be the same string, or "did my config change land?"
-          # has no single answer. The render job asserts the annotation matches
-          # the manifest; this asserts the running daemon agrees with both.
+          # The annotation that triggers the rollout and the checksum the daemon reports must be the same string, or "did my config change land?" has no single answer.
+          # The render job asserts the annotation matches the manifest; this asserts the running daemon agrees with both.
           want="$(kubectl -n "$MNS" get statefulset librefang -o json \
             | jq -r '.spec.template.metadata.annotations["checksum/config"]')"
           got="$(echo "$status" | jq -r '.checksum')"
@@ -394,9 +376,7 @@ jobs:
           [ "$want" = "$got" ] || {
             echo "::error::checksum annotation and GET /api/config/status disagree"; exit 1; }
 
-          # `log_level` is on WRITABLE_EXACT_PATHS, so a 403 here would mean the
-          # allowlist rejected the path before the managed guard ever ran and
-          # this would be testing the wrong refusal.
+          # `log_level` is on WRITABLE_EXACT_PATHS, so a 403 here would mean the allowlist rejected the path before the managed guard ever ran and this would be testing the wrong refusal.
           code="$(curl -s -o /tmp/set.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $api_key" \
             -H 'Content-Type: application/json' \
@@ -410,8 +390,7 @@ jobs:
           jq -e '.source == "/etc/librefang/config.toml"' /tmp/set.json >/dev/null \
             || { echo "::error::423 body does not name the managed file"; exit 1; }
 
-          # The guard runs before the handler opens the file, so the refusal
-          # must not have truncated or rewritten anything.
+          # The guard runs before the handler opens the file, so the refusal must not have truncated or rewritten anything.
           after="$(curl -fsS -H "Authorization: Bearer $api_key" \
             http://127.0.0.1:4546/api/config/status | jq -r '.checksum')"
           [ "$after" = "$got" ] || {

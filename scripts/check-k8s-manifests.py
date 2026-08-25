@@ -60,23 +60,19 @@ EXPECTED_PROBE_PATHS = {
     "readinessProbe": "/api/ready",
 }
 
-# Managed configuration (#6695). `LIBREFANG_CONFIG_PATH` relocates the file and
-# `LIBREFANG_CONFIG_MODE=managed` locks it; the two are independent, so the
-# checks below only fire once the manifest has actually opted into the mode.
+# Managed configuration (#6695).
+# `LIBREFANG_CONFIG_PATH` relocates the file and `LIBREFANG_CONFIG_MODE=managed` locks it; the two are independent, so the checks below only fire once the manifest has actually opted into the mode.
 CONFIG_MODE_ENV = "LIBREFANG_CONFIG_MODE"
 CONFIG_PATH_ENV = "LIBREFANG_CONFIG_PATH"
 MANAGED_MODE = "managed"
 
-# The pod-template annotation whose change is what rolls the StatefulSet when
-# the config changes. `checksum/config` is the Helm convention for exactly
-# this, so an operator reading the template already knows what it is for.
+# The pod-template annotation whose change is what rolls the StatefulSet when the config changes.
+# `checksum/config` is the Helm convention for exactly this, so an operator reading the template already knows what it is for.
 CHECKSUM_ANNOTATION = "checksum/config"
 
 # Config keys that carry a credential *value* rather than a reference to one.
-# A ConfigMap is stored unencrypted in etcd and this copy is in git besides, so
-# a hit here is a leaked secret, not a style problem. Keys ending `_env` name an
-# environment variable and are deliberately absent: that is the supported way
-# to point at a Secret from the config file.
+# A ConfigMap is stored unencrypted in etcd and this copy is in git besides, so a hit here is a leaked secret, not a style problem.
+# Keys ending `_env` name an environment variable and are deliberately absent: that is the supported way to point at a Secret from the config file.
 SECRET_VALUE_KEYS = (
     "api_key",
     "dashboard_pass",
@@ -89,16 +85,11 @@ SECRET_ASSIGNMENT = re.compile(
     r"^\s*(" + "|".join(SECRET_VALUE_KEYS) + r")\s*=\s*(\"[^\"]*\"|'[^']*')",
     re.MULTILINE,
 )
-# `vault:` and `env:` values are indirections, which is the pattern this check
-# exists to steer people towards rather than away from.
+# `vault:` and `env:` values are indirections, which is the pattern this check exists to steer people towards rather than away from.
 SECRET_INDIRECTIONS = ("vault:", "env:")
 
-# `include = [...]` pulls further TOML files into the effective configuration,
-# but the checksum on `GET /api/config/status` is computed over the primary
-# file's raw bytes alone. Editing an included file would therefore leave the
-# checksum unchanged, and an operator using it to confirm a rollout landed gets
-# a false negative — so the annotation this overlay is built around would stop
-# meaning what it says.
+# `include = [...]` pulls further TOML files into the effective configuration, but the checksum on `GET /api/config/status` is computed over the primary file's raw bytes alone.
+# Editing an included file would therefore leave the checksum unchanged, and an operator using it to confirm a rollout landed gets a false negative — so the annotation this overlay is built around would stop meaning what it says.
 INCLUDE_DIRECTIVE = re.compile(r"^\s*include\s*=", re.MULTILINE)
 
 
@@ -380,8 +371,7 @@ def check_managed_config(
 ) -> None:
     """Assert the managed-configuration contract (#6695), when opted into.
 
-    Silent unless the manifest sets `LIBREFANG_CONFIG_MODE`, so the base
-    kustomization — which is deliberately mutable — passes unchanged.
+    Silent unless the manifest sets `LIBREFANG_CONFIG_MODE`, so the base kustomization — which is deliberately mutable — passes unchanged.
     """
     template = sts.get("spec", {}).get("template", {})
     pod_spec = template.get("spec", {})
@@ -510,9 +500,8 @@ def _find_config_mount(
 ) -> dict[str, Any] | None:
     """The volumeMount that puts `config_path` in the container's filesystem.
 
-    Either the whole directory is mounted, or the single file is mounted with a
-    subPath. Both are valid; a subPath mount additionally never picks up a
-    ConfigMap update in place, which is consistent with rollout-only updates.
+    Either the whole directory is mounted, or the single file is mounted with a subPath.
+    Both are valid; a subPath mount additionally never picks up a ConfigMap update in place, which is consistent with rollout-only updates.
     """
     for mount in container.get("volumeMounts", []):
         if mount.get("subPath") and mount.get("mountPath") == config_path:
@@ -545,13 +534,8 @@ def check_no_include(
 ) -> None:
     """A managed config must be one file, because its checksum only covers one.
 
-    Of the three ways to reconcile `include` with the checksum — hash the
-    transitive closure, refuse `include`, or document primary-file-only and
-    tell operators not to key rollouts on it — this overlay takes the second,
-    and only within its own scope. It is the option that keeps the annotation
-    honest without changing what the daemon computes, and a managed deployment
-    loses nothing by it: the file is generated from a manifest, so composing it
-    is the manifest's job rather than the config loader's.
+    Of the three ways to reconcile `include` with the checksum — hash the transitive closure, refuse `include`, or document primary-file-only and tell operators not to key rollouts on it — this overlay takes the second, and only within its own scope.
+    It is the option that keeps the annotation honest without changing what the daemon computes, and a managed deployment loses nothing by it: the file is generated from a manifest, so composing it is the manifest's job rather than the config loader's.
     """
     if INCLUDE_DIRECTIVE.search(contents):
         failures.fail(
@@ -570,12 +554,8 @@ def check_checksum_annotation(
 ) -> None:
     """The rollout trigger and the rollout *proof* must be the same string.
 
-    `GET /api/config/status` reports `sha256:<hex>` over the config file's raw
-    bytes, and the ConfigMap's data value is those bytes. Pinning the
-    annotation to the same digest means one comparison answers both "will
-    editing the config roll the pod?" and "is the running daemon on the file I
-    edited?" — and a stale annotation, which would silently skip the rollout,
-    fails here instead of in production.
+    `GET /api/config/status` reports `sha256:<hex>` over the config file's raw bytes, and the ConfigMap's data value is those bytes.
+    Pinning the annotation to the same digest means one comparison answers both "will editing the config roll the pod?" and "is the running daemon on the file I edited?" — and a stale annotation, which would silently skip the rollout, fails here instead of in production.
     """
     annotations = template.get("metadata", {}).get("annotations", {})
     actual = annotations.get(CHECKSUM_ANNOTATION)

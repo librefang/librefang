@@ -189,8 +189,12 @@ What may appear in the ConfigMap is the *name* of a variable a provider reads (`
 
 Two consequences of the lock worth knowing before you enable it:
 
-- **Provider keys cannot be added through the dashboard.** `POST /api/providers/{name}/key` is refused in full, because it writes `secrets.env` before it reaches `config.toml` and a guard at the config write would already have persisted the credential half. Set the provider's `*_API_KEY` in the `librefang-providers` Secret and roll.
-- **Rotating the dashboard password needs a rollout.** `POST /api/auth/change-password` is refused, so `dashboard_user` / `dashboard_pass` change in the Secret and nowhere else. A password changed through the API would be reverted by the next rollout, which is worse than being told no.
+- **Provider keys cannot be added through the dashboard.**
+  `POST /api/providers/{name}/key` is refused in full, because it writes `secrets.env` before it reaches `config.toml` and a guard at the config write would already have persisted the credential half.
+  Set the provider's `*_API_KEY` in the `librefang-providers` Secret and roll.
+- **Rotating the dashboard password needs a rollout.**
+  `POST /api/auth/change-password` is refused, so `dashboard_user` / `dashboard_pass` change in the Secret and nowhere else.
+  A password changed through the API would be reverted by the next rollout, which is worse than being told no.
 
 The overlay also sets `mcp_runtime_store = "db"`, which keeps the dashboard's MCP install surface working by persisting those writes to SQLite on the PVC instead of to the managed file (#6021).
 Leaving it at the default `file` is supported; it just means `POST /api/mcp/servers` answers `423` too.
@@ -229,7 +233,8 @@ The config in the ConfigMap must not use `include = [...]`.
 `GET /api/config/status` computes its checksum over the primary file's raw bytes, so an edit to an included file leaves the checksum unchanged — and the whole rollout story here rests on that checksum meaning what it says.
 `scripts/check-k8s-manifests.py` fails the build on an `include` directive in a managed ConfigMap rather than leaving the annotation quietly untrustworthy.
 
-This is a constraint on the overlay, not on the daemon: `include` works normally in a mutable deployment. A managed config is generated from a manifest anyway, so composing it is kustomize's job rather than the config loader's.
+This is a constraint on the overlay, not on the daemon: `include` works normally in a mutable deployment.
+A managed config is generated from a manifest anyway, so composing it is kustomize's job rather than the config loader's.
 
 ### Updating a managed configuration
 
@@ -238,10 +243,9 @@ This is a constraint on the overlay, not on the daemon: `include` works normally
 ```bash
 cd deploy/kubernetes/overlays/managed-config
 $EDITOR config.toml
-# The annotation IS the rollout trigger. Without this line the pod template is
-# unchanged, `kubectl apply -k` reports no change, and the daemon keeps the old
-# file — so CI recomputes the hash and fails when the two disagree.
-printf 'sha256:%s\n' "$(openssl dgst -sha256 -r config.toml | awk '{print $1}')"
+# The annotation IS the rollout trigger.
+# Without this line the pod template is unchanged, `kubectl apply -k` reports no change, and the daemon keeps the old file — so CI recomputes the hash and fails when the two disagree.
+printf 'sha256:%s\n' "$(sha256sum config.toml | awk '{print $1}')"
 $EDITOR statefulset-managed-config.yaml   # paste it into checksum/config
 
 kubectl -n librefang apply -k deploy/kubernetes/overlays/managed-config
@@ -259,7 +263,9 @@ The overlay pins `[reload] mode = "off"` for this reason.
 The kubelet syncs an edited ConfigMap into the mount within about a minute whether or not anyone bumped the annotation; under the default `hybrid` the change watcher would notice that swap and hot-apply part of it, leaving a pod running configuration that matches neither the annotation on its own template nor any rollout anyone performed.
 `POST /api/config/reload` still answers in this mode — it re-reads and validates the file and reports the plan — it just does not swap the live config.
 
-In-place reload is deliberately not supported. It would have to handle Kubernetes' atomic symlink swap without ever reading a half-written file, and then guarantee that an invalid new file never partially replaces the last valid effective configuration. A rollout covers restart-required fields too, which is the superset.
+In-place reload is deliberately not supported.
+It would have to handle Kubernetes' atomic symlink swap without ever reading a half-written file, and then guarantee that an invalid new file never partially replaces the last valid effective configuration.
+A rollout covers restart-required fields too, which is the superset.
 
 ### Rolling back
 
@@ -284,7 +290,8 @@ This is a genuine partial rollback and the caveat matters: it does **not** rever
 The pod comes back on a template whose annotation names the old checksum while the mount serves the new file, so `GET /api/config/status` reports a checksum that disagrees with the annotation — which is the drift the annotation exists to make visible.
 Use it to stop the bleeding, then revert the source and re-apply so the two agree again.
 
-If the bad config stops the daemon from booting at all, the pod will not become ready and the rollout will not complete; the previous pod is already gone, because a StatefulSet terminates before it re-creates. Read the reason before undoing:
+If the bad config stops the daemon from booting at all, the pod will not become ready and the rollout will not complete; the previous pod is already gone, because a StatefulSet terminates before it re-creates.
+Read the reason before undoing:
 
 ```bash
 kubectl -n librefang logs statefulset/librefang --tail=100
