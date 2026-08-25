@@ -470,6 +470,13 @@ pub struct CronJob {
     ///   history from previous fires cannot influence the current run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<SessionMode>,
+    /// The principal this job belongs to — the identity the turn that created it was acting for (#7744).
+    ///
+    /// Recorded, not enforced. Nothing in this increment consults it to decide who may read, run, edit or delete; it exists so the question "who is accountable for this, and who should be throttled or notified when it misbehaves" has an answer that outlives the log line that used to be the only trace.
+    ///
+    /// `None` means **unowned, visible to all** — the stated meaning, not an accident of `#[serde(default)]`. Every job that pre-dates this field deserializes to it, and so does one created by a turn with no authenticated caller, no manifest `owner` and no `default_owner`. Because ownership restricts nothing yet, an unowned job behaves exactly as it did before, which is what makes the field safe to add without a migration or a backfill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::principal::Principal>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).

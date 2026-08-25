@@ -13,6 +13,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         use librefang_types::scheduler::{
@@ -78,6 +79,11 @@ impl kernel_handle::CronControl for LibreFangKernel {
             delivery,
             delivery_targets,
             peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
+            // #7744: the principal the creating turn acted for. Note it is
+            // read from the typed parameter and never from `job_json`, which
+            // is the model's own input — the same reason `peer_id` above is
+            // overwritten by the caller rather than trusted.
+            owner,
             session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
@@ -94,7 +100,10 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         Ok(serde_json::json!({
             "job_id": id.to_string(),
-            "status": "created"
+            "status": "created",
+            // Canonical `kind:uuid`, so the model can report who the job was
+            // recorded for instead of guessing. Absent when unowned.
+            "owner": owner.map(|p| p.to_string()),
         })
         .to_string())
     }

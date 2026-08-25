@@ -93,8 +93,15 @@ pub async fn get_schedule(
 )]
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // #7744: the schedule belongs to the authenticated caller. Read from the
+    // auth extension, never from `req`.
+    let owner = api_user
+        .as_ref()
+        .map(|u| librefang_types::principal::Principal::user(u.0.user_id))
+        .or_else(|| state.kernel.config_ref().default_owner_principal());
     let name = match req["name"].as_str() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -288,6 +295,7 @@ pub async fn create_schedule(
         delivery_targets,
         peer_id,
         session_mode,
+        owner,
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,

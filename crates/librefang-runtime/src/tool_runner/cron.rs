@@ -12,11 +12,14 @@ use crate::kernel_handle::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// `acting_principal` is the identity the turn is acting for, and it is passed as a typed argument rather than injected into `input` next to `peer_id`.
+/// `peer_id` is a platform sender id the model is allowed to *see* in the tool schema and the kernel overwrites for safety; the owner is neither — it never appears in the tool schema, so the model cannot name it, and it never travels as an untyped JSON field, so nothing downstream can mistake a spec string for a resolved principal (#7744).
 pub(super) async fn tool_cron_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
     sender_id: Option<&str>,
+    acting_principal: Option<librefang_types::principal::Principal>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
     let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("cron_create"))?;
@@ -36,7 +39,7 @@ pub(super) async fn tool_cron_create(
             }
         }
     }
-    kh.cron_create(agent_id, job)
+    kh.cron_create(agent_id, job, acting_principal)
         .await
         .map_err(ToolError::upstream)
 }

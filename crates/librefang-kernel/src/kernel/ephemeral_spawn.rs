@@ -399,6 +399,11 @@ impl LibreFangKernel {
 
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: false,
+            // #7744: an ephemeral spawn writes nothing durable — `incognito`
+            // below suppresses the session, and its tool surface is the
+            // parent's — so there is nothing to stamp and no principal is
+            // resolved for it.
+            acting_principal: None,
             // The run must not reach the session-persistence boundary. Without
             // this the worker's whole session — system prompt, messages, tool
             // calls — is written to the substrate under a session nothing will
