@@ -79,6 +79,26 @@ mod provenance_tests {
     }
 }
 
+/// Fetch the first source file a ClawHub-family hub actually has for `slug`.
+///
+/// Returns `Err` only when the hub is not serving marketplace data at all.
+/// Every candidate name is fetched from the same host, so once that host answers with its webpage instead of a file, walking to the next name just re-reads the same page — and the old `if let Ok` chain then reported the result as "no source code found", a `404` about the skill for a fault in the hub (#7387).
+/// Any other per-file failure keeps the original try-the-next-name behaviour and still ends as that `404` when none of the three exist.
+async fn fetch_skill_source(
+    client: &librefang_skills::clawhub::ClawHubClient,
+    slug: &str,
+) -> Result<Option<(String, String)>, librefang_skills::SkillError> {
+    for filename in ["SKILL.md", "package.json", "skill.toml"] {
+        match client.get_file(slug, filename).await {
+            Ok(content) if !content.is_empty() => return Ok(Some((filename.to_string(), content))),
+            Ok(_) => continue,
+            Err(error) if is_marketplace_unavailable(&error) => return Err(error),
+            Err(_) => continue,
+        }
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------------------------
 // ClawHub (OpenClaw ecosystem) endpoints
 // ---------------------------------------------------------------------------
@@ -154,11 +174,7 @@ pub async fn clawhub_search(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("ClawHub search failed: {msg}");
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            let status = marketplace_error_status(&e, StatusCode::BAD_GATEWAY);
             (
                 status,
                 Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
@@ -233,11 +249,7 @@ pub async fn clawhub_browse(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("ClawHub browse failed: {msg}");
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            let status = marketplace_error_status(&e, StatusCode::BAD_GATEWAY);
             (
                 status,
                 Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
@@ -312,11 +324,9 @@ pub async fn clawhub_skill_detail(
             )
         }
         Err(e) => {
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::NOT_FOUND
-            };
+            // `404` is only honest for a slug the hub says it does not have.
+            // When the hub itself is not answering as a marketplace, saying "not found" invents a fact about the skill (#7387).
+            let status = marketplace_error_status(&e, StatusCode::NOT_FOUND);
             (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
     }
@@ -342,24 +352,20 @@ pub async fn clawhub_skill_code(
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
     // Try to fetch SKILL.md first, then fallback to package.json
-    let mut code = String::new();
-    let mut filename = String::new();
-
-    if let Ok(content) = client.get_file(&slug, "SKILL.md").await {
-        code = content;
-        filename = "SKILL.md".to_string();
-    } else if let Ok(content) = client.get_file(&slug, "package.json").await {
-        code = content;
-        filename = "package.json".to_string();
-    } else if let Ok(content) = client.get_file(&slug, "skill.toml").await {
-        code = content;
-        filename = "skill.toml".to_string();
-    }
-
-    if code.is_empty() {
-        return ApiErrorResponse::not_found("No source code found for this skill")
-            .into_json_tuple();
-    }
+    let (filename, code) = match fetch_skill_source(&client, &slug).await {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            return ApiErrorResponse::not_found("No source code found for this skill")
+                .into_json_tuple()
+        }
+        Err(error) => {
+            tracing::warn!("ClawHub skill code fetch failed: {error}");
+            return (
+                marketplace_error_status(&error, StatusCode::BAD_GATEWAY),
+                Json(serde_json::json!({"error": format!("{error}")})),
+            );
+        }
+    };
 
     (
         StatusCode::OK,
@@ -489,12 +495,16 @@ pub async fn clawhub_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                // A dead marketplace used to fall through to the `500`, whose body is then scrubbed to "Internal server error" — the one case where the operator most needs the text (#7387).
+                marketplace_error_status(
+                    &e,
+                    if matches!(e, librefang_skills::SkillError::Network(_)) {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                )
             };
             tracing::warn!("ClawHub install failed: {msg}");
             // 4xx / 502 echo the actionable SkillError (security
@@ -537,7 +547,8 @@ pub async fn clawhub_cn_search(
     }
 
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
-    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+    let client =
+        librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
     match client.search(&query, limit).await {
         Ok(results) => {
@@ -564,11 +575,7 @@ pub async fn clawhub_cn_search(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("ClawHub CN search failed: {msg}");
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            let status = marketplace_error_status(&e, StatusCode::BAD_GATEWAY);
             (
                 status,
                 Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
@@ -605,7 +612,8 @@ pub async fn clawhub_cn_browse(
     }
 
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
-    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+    let client =
+        librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
     match client.browse(sort, limit, cursor).await {
         Ok(results) => {
@@ -626,11 +634,7 @@ pub async fn clawhub_cn_browse(
         Err(e) => {
             let msg = format!("{e}");
             tracing::warn!("ClawHub CN browse failed: {msg}");
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
+            let status = marketplace_error_status(&e, StatusCode::BAD_GATEWAY);
             (
                 status,
                 Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
@@ -645,7 +649,8 @@ pub async fn clawhub_cn_skill_detail(
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
-    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+    let client =
+        librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
     let skills_dir = state.kernel.home_dir().join("skills");
     let is_installed = client.is_installed(&slug, &skills_dir);
@@ -693,11 +698,9 @@ pub async fn clawhub_cn_skill_detail(
             )
         }
         Err(e) => {
-            let status = if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else {
-                StatusCode::NOT_FOUND
-            };
+            // `404` is only honest for a slug the hub says it does not have.
+            // When the hub itself is not answering as a marketplace, saying "not found" invents a fact about the skill (#7387).
+            let status = marketplace_error_status(&e, StatusCode::NOT_FOUND);
             (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
     }
@@ -709,26 +712,23 @@ pub async fn clawhub_cn_skill_code(
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
-    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+    let client =
+        librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
-    let mut code = String::new();
-    let mut filename = String::new();
-
-    if let Ok(content) = client.get_file(&slug, "SKILL.md").await {
-        code = content;
-        filename = "SKILL.md".to_string();
-    } else if let Ok(content) = client.get_file(&slug, "package.json").await {
-        code = content;
-        filename = "package.json".to_string();
-    } else if let Ok(content) = client.get_file(&slug, "skill.toml").await {
-        code = content;
-        filename = "skill.toml".to_string();
-    }
-
-    if code.is_empty() {
-        return ApiErrorResponse::not_found("No source code found for this skill")
-            .into_json_tuple();
-    }
+    let (filename, code) = match fetch_skill_source(&client, &slug).await {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            return ApiErrorResponse::not_found("No source code found for this skill")
+                .into_json_tuple()
+        }
+        Err(error) => {
+            tracing::warn!("ClawHub skill code fetch failed: {error}");
+            return (
+                marketplace_error_status(&error, StatusCode::BAD_GATEWAY),
+                Json(serde_json::json!({"error": format!("{error}")})),
+            );
+        }
+    };
 
     (
         StatusCode::OK,
@@ -774,7 +774,8 @@ pub async fn clawhub_cn_install(
     };
 
     let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub-cn");
-    let client = librefang_skills::clawhub::ClawHubClient::with_url(CLAWHUB_CN_BASE_URL, cache_dir);
+    let client =
+        librefang_skills::clawhub::ClawHubClient::with_url(&clawhub_cn_base_url(), cache_dir);
 
     if client.is_installed(&req.slug, &skills_dir) {
         return (
@@ -837,12 +838,16 @@ pub async fn clawhub_cn_install(
             let msg = format!("{e}");
             let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
                 StatusCode::FORBIDDEN
-            } else if is_clawhub_rate_limit(&e) {
-                StatusCode::TOO_MANY_REQUESTS
-            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
-                StatusCode::BAD_GATEWAY
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                // A dead marketplace used to fall through to the `500`, whose body is then scrubbed to "Internal server error" — the one case where the operator most needs the text (#7387).
+                marketplace_error_status(
+                    &e,
+                    if matches!(e, librefang_skills::SkillError::Network(_)) {
+                        StatusCode::BAD_GATEWAY
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                )
             };
             tracing::warn!("ClawHub CN install failed: {msg}");
             // See ClawHub install above: 500 catch-all scrubbed

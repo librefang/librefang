@@ -1,31 +1,36 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useMemo, useSyncExternalStore } from 'react'
 
 const KEY = 'librefang-favorites'
 
 type FavSet = Set<string> // "category/id" tokens
+
+const EMPTY_FAVORITES: FavSet = new Set()
 
 function read(): FavSet {
   if (typeof window === 'undefined') return new Set()
   try {
     const raw = window.localStorage.getItem(KEY)
     if (!raw) return new Set()
-    const arr = JSON.parse(raw) as string[]
-    return new Set(Array.isArray(arr) ? arr : [])
+    const parsed: unknown = JSON.parse(raw)
+    return new Set(Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') : [])
   } catch {
     return new Set()
   }
 }
 
-function write(set: FavSet) {
-  if (typeof window === 'undefined') return
+function write(set: FavSet): boolean {
+  if (typeof window === 'undefined') return false
   try {
     window.localStorage.setItem(KEY, JSON.stringify([...set]))
-  } catch { /* quota / privacy mode — silent */ }
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Shared subscriber list so multiple hook instances stay in sync within
-// the same tab (e.g., star toggled on a card re-renders the count in the
-// header). Cross-tab sync is handled by the 'storage' event below.
+// the same tab. One storage listener handles cross-tab updates regardless
+// of how many components subscribe.
 const listeners = new Set<() => void>()
 let current: FavSet | null = null
 
@@ -34,43 +39,57 @@ function getCurrent(): FavSet {
   return current
 }
 
+function getServerSnapshot(): FavSet {
+  return EMPTY_FAVORITES
+}
+
 function notify() {
-  for (const l of listeners) l()
+  for (const listener of listeners) listener()
+}
+
+function handleStorage(event: StorageEvent) {
+  if (event.key !== KEY && event.key !== null) return
+  current = read()
+  notify()
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  if (listeners.size === 1 && typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage)
+  }
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0 && typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage)
+    }
+  }
+}
+
+function favoriteKey(category: string, id: string): string {
+  return `${category}/${id}`
 }
 
 export function useFavorites() {
-  const [tick, setTick] = useState(0)
+  const favs = useSyncExternalStore(subscribe, getCurrent, getServerSnapshot)
+  const isFavorite = useCallback(
+    (category: string, id: string) => favs.has(favoriteKey(category, id)),
+    [favs],
+  )
 
-  useEffect(() => {
-    const bump = () => setTick(t => t + 1)
-    listeners.add(bump)
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === KEY) { current = read(); bump() }
-    }
-    window.addEventListener('storage', onStorage)
-    return () => {
-      listeners.delete(bump)
-      window.removeEventListener('storage', onStorage)
-    }
-  }, [])
-
-  const favs = getCurrent()
-  const key = useCallback((category: string, id: string) => `${category}/${id}`, [])
-  const isFavorite = useCallback((category: string, id: string) => favs.has(key(category, id)), [favs, key])
-
-  const toggle = useCallback((category: string, id: string) => {
-    const k = key(category, id)
+  const toggle = useCallback((category: string, id: string): boolean => {
+    const token = favoriteKey(category, id)
     const next = new Set(getCurrent())
-    if (next.has(k)) next.delete(k)
-    else next.add(k)
+    if (next.has(token)) next.delete(token)
+    else next.add(token)
+    if (!write(next)) return false
     current = next
-    write(next)
     notify()
-  }, [key])
+    return true
+  }, [])
 
   // For future use: a page listing all starred items. Returns an ordered
   // array of tokens; callers resolve them against registry data.
-  const list = [...favs]
-  void tick
+  const list = useMemo(() => [...favs], [favs])
   return { isFavorite, toggle, list, count: favs.size }
 }

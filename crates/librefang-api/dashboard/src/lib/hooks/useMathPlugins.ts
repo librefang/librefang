@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentProps } from "react";
+import { useEffect, useMemo, useState, type ComponentProps } from "react";
 import type Markdown from "react-markdown";
 
 // react-markdown's plugin lists alias to `PluggableList` from `unified`,
@@ -42,7 +42,10 @@ async function loadMathPlugins(): Promise<MathPlugins> {
       remarkPlugins: [remarkMath],
       rehypePlugins: [rehypeKatex],
     } satisfies MathPlugins;
-  })();
+  })().catch((error: unknown) => {
+    cachedPromise = null;
+    throw error;
+  });
   return cachedPromise;
 }
 
@@ -58,17 +61,23 @@ async function loadMathPlugins(): Promise<MathPlugins> {
  */
 export function useMathPlugins(content: string): MathPlugins {
   const [plugins, setPlugins] = useState<MathPlugins>(EMPTY);
+  const hasMath = useMemo(() => containsMathDelimiters(content), [content]);
 
   useEffect(() => {
-    if (!containsMathDelimiters(content)) return;
+    if (!hasMath) return;
     let cancelled = false;
-    loadMathPlugins().then((p) => {
-      if (!cancelled) setPlugins(p);
-    });
+    loadMathPlugins()
+      .then((p) => {
+        if (!cancelled) setPlugins(p);
+      })
+      .catch(() => {
+        // Markdown remains readable without math plugins. Clearing the loader
+        // cache above lets a later mount retry a transient chunk failure.
+      });
     return () => {
       cancelled = true;
     };
-  }, [content]);
+  }, [hasMath]);
 
   return plugins;
 }

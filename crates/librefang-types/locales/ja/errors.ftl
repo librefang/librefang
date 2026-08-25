@@ -32,6 +32,9 @@ api-error-template-parse-failed = テンプレートの解析に失敗しまし�
 api-error-template-required = 'manifest_toml' または 'template' が必要です
 api-error-template-invalid-manifest = 無効なテンプレートマニフェスト
 api-error-template-read-failed = テンプレートの読み込みに失敗しました
+api-error-agent-type-exists = エージェントタイプ '{ $name }' はすでに存在します
+api-error-agent-type-name-taken = '{ $name }' は稼働中のエージェントの名前です。別の名前を指定してください
+api-error-agent-type-not-editable = エージェントタイプ '{ $name }' は稼働中のエージェントのワークスペース由来で、/api/agents で管理されます
 
 # マニフェストエラー
 api-error-manifest-too-large = マニフェストが大きすぎます（最大 1MB）
@@ -237,6 +240,10 @@ api-error-backup-finalize-failed = バックアップの完了に失敗しまし
 api-error-backup-open-failed = バックアップの開封に失敗しました: { $error }
 api-error-backup-invalid-archive = 無効なバックアップアーカイブ: { $error }
 api-error-backup-delete-failed = バックアップの削除に失敗しました: { $error }
+api-error-backup-invalid-keep-config = 'keep_config' が不正です — 真偽値である必要があります
+api-error-backup-invalid-components = 'components' が不正です — コンポーネント名の文字列配列である必要があります
+api-error-backup-empty-components = 'components' を空にはできません — すべてのコンポーネントを復元する場合はフィールドを省略してください
+api-error-backup-unknown-component = 不明なバックアップコンポーネント '{ $component }' です。有効なコンポーネント: { $valid }
 
 # スケジュールエラー
 api-error-schedule-not-found = スケジュールが見つかりません

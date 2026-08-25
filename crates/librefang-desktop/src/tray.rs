@@ -48,7 +48,7 @@ fn open_browser(app: &tauri::AppHandle) {
 fn change_server(app: &tauri::AppHandle) {
     // Shut down existing local server if running.
     if let Some(holder) = app.try_state::<crate::ServerHandleHolder>() {
-        let mut guard = holder.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = crate::lock_server_handle(&holder.0);
         if let Some(handle) = guard.take() {
             std::thread::spawn(move || handle.shutdown());
         }
@@ -345,7 +345,7 @@ mod platform_tray {
     }
 
     pub(super) fn rgba_to_argb(mut rgba: Vec<u8>) -> Vec<u8> {
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.rotate_right(1); // convert RGBA to ARGB
         }
         rgba

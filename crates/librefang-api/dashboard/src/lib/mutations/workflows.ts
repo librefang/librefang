@@ -66,11 +66,21 @@ export function useRerunWorkflowRun() {
   return useMutation({
     mutationFn: ({ runId }: { runId: string; workflowId: string }) =>
       rerunWorkflowRun(runId),
-    onSuccess: (_data, variables) =>
-      Promise.all([
+    onSuccess: (data, variables) => {
+      const invalidations: Array<Promise<unknown>> = [
         invalidateWorkflowLists(qc),
         qc.invalidateQueries({ queryKey: workflowKeys.runs(variables.workflowId) }),
-      ]),
+      ];
+      const runId = typeof data.run_id === "string" ? data.run_id : undefined;
+
+      if (runId) {
+        invalidations.push(
+          qc.invalidateQueries({ queryKey: workflowKeys.runDetail(runId) }),
+        );
+      }
+
+      return Promise.all(invalidations);
+    },
   });
 }
 
@@ -119,7 +129,12 @@ export function useUpdateWorkflow() {
       // shared fields (name, description, last_run, success_rate); we still
       // invalidate the lists for safety since they may include aggregates.
       const hasEntity =
-        data && typeof data === "object" && "id" in data && (data as WorkflowItem).id;
+        data &&
+        typeof data === "object" &&
+        "id" in data &&
+        "name" in data &&
+        typeof data.id === "string" &&
+        typeof data.name === "string";
       if (hasEntity) {
         qc.setQueryData<WorkflowItem>(
           workflowKeys.detail(variables.workflowId),
@@ -155,8 +170,9 @@ export function useSaveWorkflowAsTemplate() {
  *  to `POST /api/workflows/runs/:run_id/operator`. The endpoint replies
  *  200 immediately and the run resumes asynchronously, so on success we
  *  invalidate the operator-pause inspector + the worklist + the run
- *  detail + the workflow's run list so every surface re-fetches the new
- *  state. */
+ *  detail so every surface identified by the run id re-fetches the new
+ *  state. The endpoint does not return the workflow id needed to target
+ *  that workflow's run list. */
 export function useResolveOperatorStep() {
   const qc = useQueryClient();
   return useMutation({

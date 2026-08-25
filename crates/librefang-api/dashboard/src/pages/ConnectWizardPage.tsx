@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
@@ -43,7 +43,7 @@ interface PairingPayload {
   expires_at: string;
 }
 
-function decodeQrPayload(raw: string): PairingPayload {
+export function decodeQrPayload(raw: string): PairingPayload {
   let uri: URL;
   try {
     uri = new URL(raw);
@@ -56,11 +56,17 @@ function decodeQrPayload(raw: string): PairingPayload {
   // base64url (no-pad) → standard base64 → JSON. atob tolerates missing
   // padding in modern engines; explicit padEnd is not needed.
   const stdB64 = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
-  const payload = JSON.parse(atob(stdB64)) as PairingPayload;
+  let payload: PairingPayload;
+  try {
+    payload = JSON.parse(atob(stdB64)) as PairingPayload;
+  } catch {
+    throw new Error("Invalid QR code: could not decode payload");
+  }
 
   if (payload.v !== 1) throw new Error("Unsupported QR format version");
-  if (new Date(payload.expires_at).getTime() < Date.now()) {
-    throw new Error("QR code has expired — refresh it on the desktop");
+  const expiryMs = new Date(payload.expires_at).getTime();
+  if (!Number.isFinite(expiryMs) || expiryMs < Date.now()) {
+    throw new Error("QR code has expired or has an invalid expiry — refresh it on the desktop");
   }
   if (
     !payload.base_url.startsWith("http://") &&
@@ -80,9 +86,24 @@ export function ConnectWizardPage() {
   const [apiKey, setApiKey] = useState("");
   const [displayName, setDisplayName] = useState(() => uaDisplayName(fallbackName));
   const [errorMsg, setErrorMsg] = useState("");
+  const userInteractedRef = useRef(false);
+  const navigationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const connectManual = useConnectManual();
   const connectQr = useConnectViaQr();
+
+  function markUserInteraction() {
+    userInteractedRef.current = true;
+  }
+
+  function scheduleNavigation(url: string) {
+    if (navigationTimerRef.current) clearTimeout(navigationTimerRef.current);
+    navigationTimerRef.current = setTimeout(() => navigateToDashboard(url), 1200);
+  }
+
+  useEffect(() => () => {
+    if (navigationTimerRef.current) clearTimeout(navigationTimerRef.current);
+  }, []);
 
   // Already connected → verify creds still work, then skip wizard.
   // Stale creds (e.g. master key rotated) are cleared so the user lands
@@ -90,26 +111,35 @@ export function ConnectWizardPage() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const creds = await getCredentials();
-      if (!creds || cancelled) return;
       try {
-        // lint-disable-next-line dashboard/no-inline-fetch -- one-shot probe at user-supplied URL, must not be cached
-        const resp = await fetch(`${creds.base_url}/api/health`, {
-          headers: { Authorization: `Bearer ${creds.api_key}` },
-          signal: AbortSignal.timeout(5_000),
-        });
+        const creds = await getCredentials();
+        if (!creds || cancelled) return;
+        let resp: Response;
+        try {
+          // lint-disable-next-line dashboard/no-inline-fetch -- one-shot probe at user-supplied URL, must not be cached
+          resp = await fetch(`${creds.base_url}/api/health`, {
+            headers: { Authorization: `Bearer ${creds.api_key}` },
+            signal: AbortSignal.timeout(5_000),
+          });
+        } catch {
+          if (!cancelled) await clearCredentials();
+          return;
+        }
         if (cancelled) return;
-        if (resp.ok) {
+        if (resp.ok && !userInteractedRef.current) {
           navigateToDashboard(creds.base_url);
         } else {
           await clearCredentials();
         }
-      } catch {
-        if (!cancelled) await clearCredentials();
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setStep("error");
+          setErrorMsg(err instanceof Error ? err.message : t("connect_wizard.error_default_connect"));
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [t]);
 
   function handleManualSubmit() {
     const url = baseUrl.trim().replace(/\/$/, "");
@@ -127,7 +157,7 @@ export function ConnectWizardPage() {
       {
         onSuccess: () => {
           setStep("done");
-          setTimeout(() => navigateToDashboard(url), 1200);
+          scheduleNavigation(url);
         },
         onError: (err: unknown) => {
           setStep("error");
@@ -141,11 +171,13 @@ export function ConnectWizardPage() {
     setStep("scanning");
     setErrorMsg("");
     try {
-      const raw = await scanQrCode();
-      if (!raw) {
+      const scan = await scanQrCode();
+      if (scan.status === "cancelled" || scan.status === "unsupported") {
         setStep("idle");
         return;
       }
+      if (scan.status === "error") throw scan.error;
+      const raw = scan.content;
       const payload = decodeQrPayload(raw);
       const pairingUrl = payload.base_url.replace(/\/$/, "");
 
@@ -160,7 +192,7 @@ export function ConnectWizardPage() {
         {
           onSuccess: (result) => {
             setStep("done");
-            setTimeout(() => navigateToDashboard(result.baseUrl), 1200);
+            scheduleNavigation(result.baseUrl);
           },
           onError: (err: unknown) => {
             setStep("error");
@@ -211,7 +243,7 @@ export function ConnectWizardPage() {
             aria-selected={tab === "manual"}
             aria-controls="connect-panel-manual"
             tabIndex={tab === "manual" ? 0 : -1}
-            onClick={() => { setTab("manual"); reset(); }}
+            onClick={() => { markUserInteraction(); setTab("manual"); reset(); }}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
               tab === "manual"
@@ -227,7 +259,7 @@ export function ConnectWizardPage() {
             aria-selected={tab === "qr"}
             aria-controls="connect-panel-qr"
             tabIndex={tab === "qr" ? 0 : -1}
-            onClick={() => { setTab("qr"); reset(); }}
+            onClick={() => { markUserInteraction(); setTab("qr"); reset(); }}
             disabled={busy}
             className={`rounded-lg py-2 text-sm font-semibold transition-colors ${
               tab === "qr"
@@ -255,7 +287,7 @@ export function ConnectWizardPage() {
                 spellCheck={false}
                 placeholder={t("connect_wizard.url_placeholder", { defaultValue: `${window.location.protocol}//${window.location.hostname}:4545` })}
                 value={baseUrl}
-                onChange={(e) => { setBaseUrl(e.target.value); reset(); }}
+                onChange={(e) => { markUserInteraction(); setBaseUrl(e.target.value); reset(); }}
                 disabled={busy}
                 className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40 disabled:opacity-50"
               />
@@ -269,7 +301,7 @@ export function ConnectWizardPage() {
                 type="password"
                 placeholder="••••••••••••••••"
                 value={apiKey}
-                onChange={(e) => { setApiKey(e.target.value); reset(); }}
+                onChange={(e) => { markUserInteraction(); setApiKey(e.target.value); reset(); }}
                 disabled={busy}
                 className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40 disabled:opacity-50"
               />
@@ -303,7 +335,7 @@ export function ConnectWizardPage() {
                 type="text"
                 placeholder={t("connect_wizard.device_name_placeholder")}
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => { markUserInteraction(); setDisplayName(e.target.value); }}
                 disabled={busy}
                 className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40 disabled:opacity-50"
               />
