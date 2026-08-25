@@ -396,16 +396,14 @@ impl LibreFangKernel {
         // not touch — a renamed manifest without those updates would
         // silently break `find_by_name` lookups. Use the rename API.
         disk_manifest.name = entry.manifest.name.clone();
-        // Always preserve tags for the same reason: there is no runtime
-        // API to update `entry.tags` or the registry's `tag_index`, both
-        // of which are a snapshot taken at spawn time. Letting reload
-        // change `manifest.tags` would desync manifest tags from the
-        // tag index used by `find_by_tag()`.
-        disk_manifest.tags = entry.manifest.tags.clone();
+        // Tags used to be pinned here too, on the grounds that nothing could re-project them onto `entry.tags` and the registry's `tag_index`.
+        // `replace_manifest_and_retag` now does exactly that, so an operator editing `tags` in agent.toml and reloading gets what they wrote (#7742).
+        // The system-owned `hand:*` tags stay pinned to the live entry, because they route the workspace and gate approvals.
+        disk_manifest.tags = merge_agent_tags(&entry.tags, &disk_manifest.tags);
 
         self.agents
             .registry
-            .replace_manifest(agent_id, disk_manifest)
+            .replace_manifest_and_retag(agent_id, disk_manifest)
             .map_err(KernelError::LibreFang)?;
 
         if let Some(refreshed) = self.agents.registry.get(agent_id) {
@@ -482,8 +480,10 @@ impl LibreFangKernel {
     /// `agent.toml` so the change survives a restart.
     ///
     /// The same invariants as `reload_agent_from_disk` are enforced:
-    /// - `name` and `tags` are locked to the current values (use the rename /
-    ///   tag APIs to change them)
+    /// - `name` is locked to the current value (use the rename API to change it)
+    /// - `tags` are merged by [`merge_agent_tags`]: the operator half is taken
+    ///   from the incoming manifest, the system-owned `hand:*` half stays
+    ///   pinned to the running agent (#7742)
     /// - `workspace` is preserved when the incoming manifest leaves it unset
     pub fn update_manifest(
         &self,
@@ -507,11 +507,14 @@ impl LibreFangKernel {
             new_manifest.workspace = entry.manifest.workspace.clone();
         }
         new_manifest.name = entry.manifest.name.clone();
-        new_manifest.tags = entry.manifest.tags.clone();
+        // Before #7742 this was an unconditional `= entry.manifest.tags`, which made `tags` the one manifest field no API route could reach.
+        // The dashboard, `PATCH /api/agents/{id}` with `manifest_toml` and the CLI all funnel here, so every one of them reported a successful save and changed nothing.
+        // System-owned `hand:*` tags stay pinned.
+        new_manifest.tags = merge_agent_tags(&entry.tags, &new_manifest.tags);
 
         self.agents
             .registry
-            .replace_manifest(agent_id, new_manifest)
+            .replace_manifest_and_retag(agent_id, new_manifest)
             .map_err(KernelError::LibreFang)?;
 
         if let Some(refreshed) = self.agents.registry.get(agent_id) {
@@ -801,15 +804,23 @@ impl LibreFangKernel {
         Ok(())
     }
 
-    /// Update an agent's tool allowlist and/or blocklist.
+    /// Update an agent's declared tools, allowlist / blocklist and/or the `tools_disabled` master switch.
+    ///
+    /// Every argument is a tri-state: `None` leaves the stored value alone, `Some(_)` writes exactly what it carries.
+    /// `disabled` joins the other three in that contract as of #7742 — it was previously forced to `false` on every write, which made it readable through `GET /api/agents/{id}/tools` but unsettable, and let a blocklist edit silently re-enable every tool on an agent whose operator had switched them off.
     pub fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
         capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
+        disabled: Option<bool>,
     ) -> KernelResult<()> {
-        if capabilities_tools.is_none() && allowlist.is_none() && blocklist.is_none() {
+        if capabilities_tools.is_none()
+            && allowlist.is_none()
+            && blocklist.is_none()
+            && disabled.is_none()
+        {
             return Ok(());
         }
 
@@ -818,14 +829,12 @@ impl LibreFangKernel {
             capabilities_tools = ?capabilities_tools,
             allowlist = ?allowlist,
             blocklist = ?blocklist,
+            disabled = ?disabled,
             "Agent tool filters updated"
         );
 
-        // Snapshot previous tool config + tools_disabled flag for rollback on
-        // DB persist failure (#3499). Capture all four fields because
-        // `update_tool_config` always sets `tools_disabled = false`, so a
-        // rollback that only restored the lists would silently leave the
-        // disabled flag flipped on persist failure.
+        // Snapshot previous tool config + tools_disabled flag for rollback on DB persist failure (#3499).
+        // Capture all four fields because a request may carry `disabled`, so a rollback that only restored the lists would silently leave the flag flipped on persist failure.
         let prev_tool_state = self.agents.registry.get(agent_id).map(|e| {
             (
                 e.manifest.capabilities.tools.clone(),
@@ -837,7 +846,7 @@ impl LibreFangKernel {
 
         self.agents
             .registry
-            .update_tool_config(agent_id, capabilities_tools, allowlist, blocklist)
+            .update_tool_config(agent_id, capabilities_tools, allowlist, blocklist, disabled)
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.agents.registry.get(agent_id) {

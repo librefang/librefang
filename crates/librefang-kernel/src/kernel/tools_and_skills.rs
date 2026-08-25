@@ -1259,6 +1259,19 @@ impl LibreFangKernel {
                 user_id: None,
                 channel: Some("system".to_string()),
                 session_id: None,
+                // #7714: the review is charged to the triggering agent, so it
+                // rolls up to that agent's spawner for the same reason its own
+                // turns do. Resolved through the registry because this site
+                // holds an id rather than the entry; an agent that has since
+                // been killed bills to itself.
+                billed_agent_id: Some(
+                    kernel
+                        .agents
+                        .registry
+                        .get(triggering_agent_id)
+                        .and_then(|e| e.parent)
+                        .unwrap_or(triggering_agent_id),
+                ),
             };
             if let Err(e) = kernel.metering.engine.record(&usage_record) {
                 tracing::debug!(error = %e, "Failed to record background review usage");

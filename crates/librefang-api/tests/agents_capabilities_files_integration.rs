@@ -113,6 +113,21 @@ fn spawn_named(state: &Arc<AppState>, name: &str) -> AgentId {
         .expect("spawn_agent")
 }
 
+/// Serialize a whole-manifest fixture for `PATCH /api/agents/{id}` with
+/// `manifest_toml`.
+///
+/// Built from a real `AgentManifest` rather than hand-written TOML, so a field
+/// rename cannot leave these tests asserting against a document the production
+/// parser no longer produces.
+fn manifest_toml(name: &str, tags: &[&str]) -> String {
+    let manifest = AgentManifest {
+        name: name.to_string(),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        ..AgentManifest::default()
+    };
+    toml::to_string_pretty(&manifest).expect("serialize manifest fixture")
+}
+
 /// Drop a minimal `skill.toml` into `<home>/skills/<name>/` so the kernel's
 /// registry picks it up on the next `reload_skills()`. Mirrors the helper in
 /// `skills_routes_test.rs` / `librefang_skills::registry::tests::create_test_skill`
@@ -1140,5 +1155,291 @@ async fn test_tools_put_warns_when_narrowing_capabilities_makes_a_stored_entry_i
     assert!(
         body.get("warnings").is_none(),
         "an unbounded grant admits everything, so nothing is provably inert: {body:?}"
+    );
+}
+
+// ===========================================================================
+// `tools_disabled` read/write parity, and `tags` reachability (#7742).
+// ===========================================================================
+
+/// `GET /api/agents/{id}/tools` has always returned `disabled`, but no request
+/// could write it: `update_tool_config` forced it to `false` on every
+/// successful write, so `PUT {"disabled": true}` was accepted and undone in the
+/// same call. Assert both directions now round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tools_disabled_round_trips_in_both_directions() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-switch");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "disabled": true }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a body carrying only `disabled` is a real change, not an empty request: {body:?}"
+    );
+    assert_eq!(
+        body["disabled"],
+        serde_json::json!(true),
+        "the PUT response must echo the stored flag: {body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/tools"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["disabled"],
+        serde_json::json!(true),
+        "GET must reflect the persisted flag: {body:?}"
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "disabled": false }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["disabled"],
+        serde_json::json!(false),
+        "clearing the flag must be just as reachable as setting it: {body:?}"
+    );
+
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/tools"))).await;
+    assert_eq!(body["disabled"], serde_json::json!(false), "{body:?}");
+}
+
+/// Regression for the destructive half of the same defect: an omitted field
+/// means "leave it alone", for all four fields.
+///
+/// Editing a blocklist used to re-enable every tool on an agent whose operator
+/// had deliberately switched them off, because the forced clear ran on every
+/// successful write regardless of what the request contained.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_omitted_tool_fields_are_left_unchanged() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-partial");
+
+    // Seed all four fields in one request.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_read", "file_write"],
+                "tool_allowlist": ["file_read"],
+                "tool_blocklist": ["file_write"],
+                "disabled": true,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    // Touch exactly one of them.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "tool_blocklist": ["web_search"] }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}/tools"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["tool_blocklist"],
+        serde_json::json!(["web_search"]),
+        "the submitted field must be written: {body:?}"
+    );
+    assert_eq!(
+        body["disabled"],
+        serde_json::json!(true),
+        "a blocklist edit must not silently re-enable every tool (#7742): {body:?}"
+    );
+    assert_eq!(
+        body["tool_allowlist"],
+        serde_json::json!(["file_read"]),
+        "an omitted allowlist must not be cleared: {body:?}"
+    );
+    assert_eq!(
+        body["capabilities_tools"],
+        serde_json::json!(["file_read", "file_write"]),
+        "an omitted grant surface must not be cleared: {body:?}"
+    );
+}
+
+/// While every tool is switched off, the #6609 inert-allowlist-entry
+/// diagnostic has nothing useful to say: the master switch already admits
+/// nothing, so naming a "silenced" entry would be advice about the second
+/// stage of a pipeline whose first stage is closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_inert_entry_warnings_suppressed_while_tools_disabled() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tools-quiet");
+
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({
+                "capabilities_tools": ["file_read"],
+                "tool_allowlist": ["web_search"],
+                "disabled": true,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(
+        body.get("warnings").is_none(),
+        "no allowlist entry can admit anything while tools_disabled is set: {body:?}"
+    );
+
+    // Re-enable and the same stored allowlist entry is worth reporting again.
+    let (status, body) = send(
+        h.app.clone(),
+        put_json(
+            &format!("/api/agents/{id}/tools"),
+            serde_json::json!({ "capabilities_tools": ["file_read"], "disabled": false }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let warnings = warnings_of(&body);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "warnings should be back once tools are on again: {body:?}"
+    );
+    assert!(warnings[0].contains("web_search"), "{body:?}");
+}
+
+/// `tags` used to be the one manifest field no route could reach: every write
+/// path funnels into `update_manifest`, which pinned the incoming tags back to
+/// the stored ones. The operator got a 200 and no change.
+///
+/// Assert the write lands, survives a hot-reload from the `agent.toml` that
+/// `update_manifest` persisted, and that an operator can drop a tag as well as
+/// add one.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_manifest_toml_tags_are_writable_and_survive_reload() {
+    let h = boot().await;
+    let id = spawn_named(&h.state, "tags-rw");
+
+    let manifest_with_tags = manifest_toml("tags-rw", &["research", "beta"]);
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "manifest_toml": manifest_with_tags }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "manifest update should succeed: {body:?}"
+    );
+
+    let (status, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["research", "beta"]),
+        "tags submitted through manifest_toml must actually be stored (#7742): {body:?}"
+    );
+
+    // `update_manifest` persisted the manifest to agent.toml; reading it back
+    // through the hot-reload path must not resurrect the old tags.
+    h.state
+        .kernel
+        .reload_agent_from_disk(id)
+        .expect("reload should succeed");
+
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["research", "beta"]),
+        "tags must survive a reload from the manifest they were persisted into: {body:?}"
+    );
+
+    // Dropping a tag is as much a change as adding one.
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "manifest_toml": manifest_toml("tags-rw", &["beta"]) }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["beta"]),
+        "an operator must be able to remove a tag, not only add one: {body:?}"
+    );
+}
+
+/// The system-owned half of `tags` stays out of operator reach in both
+/// directions.
+///
+/// `hand:` / `hand_role:` route an agent's workspace under `hands/<hand>/<role>`
+/// and decide whether its tool calls need an approval gate, so letting a
+/// manifest edit drop them would relocate a workspace and re-decide a security
+/// boundary through a field that reads like free-form metadata — and letting
+/// one add them would forge hand membership.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_manifest_toml_cannot_forge_or_drop_system_tags() {
+    let h = boot().await;
+    let manifest = AgentManifest {
+        name: "hand-tagged".to_string(),
+        tags: vec![
+            "hand:clipper".to_string(),
+            "hand_role:editor".to_string(),
+            "research".to_string(),
+        ],
+        ..AgentManifest::default()
+    };
+    let id = h
+        .state
+        .kernel
+        .spawn_agent_typed(manifest)
+        .expect("spawn_agent");
+
+    let edited = manifest_toml("hand-tagged", &["hand:forged", "hand_role:admin", "prod"]);
+
+    let (status, body) = send(
+        h.app.clone(),
+        patch_json(
+            &format!("/api/agents/{id}"),
+            serde_json::json!({ "manifest_toml": edited }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a submitted system tag is dropped, not rejected — the dashboard round-trips the tags it was shown: {body:?}"
+    );
+
+    let (_, body) = send(h.app.clone(), get(&format!("/api/agents/{id}"))).await;
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["hand:clipper", "hand_role:editor", "prod"]),
+        "live hand membership must survive, the forged one must not land, and the operator half must be replaced wholesale: {body:?}"
     );
 }

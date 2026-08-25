@@ -355,34 +355,50 @@ use instead of web_fetch + file_write (which round-trips the entire body through
             },
             ToolDefinition {
                 name: tool_name::AGENT_SPAWN.to_string(),
-                description: "Spawn a new agent from settings. Returns the new agent's ID and name.".to_string(),
+                description: "Create an agent. Two shapes: the default creates a PERMANENT agent (workspace, database record, its own lifetime) and returns its ID and name — use it when the agent should still exist tomorrow. Set ephemeral to true instead to run a WORKER: it performs one task with the tools you give it, hands back the answer in this same tool result, and then vanishes leaving no agent, no workspace and no record. Prefer the worker for anything task-shaped — research a question, process a file, draft something — and reach for a permanent agent only when you need a durable collaborator.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "name": {
                             "type": "string",
-                            "description": "Unique name for the new agent. Ensure it does not conflict with existing agents."
+                            "description": "Permanent: unique name for the new agent — ensure it does not conflict with existing agents. Ephemeral: a short label for the mission (e.g. \"research\"); it does not have to be unique and a uid suffix is appended for you."
                         },
                         "system_prompt": {
                             "type": "string",
-                            "description": "The system prompt for the new agent"
+                            "description": "The system prompt. Required for a permanent agent. Optional for a worker: omit it to inherit your own persona, or to take the prompt from agent_type."
+                        },
+                        "ephemeral": {
+                            "type": "boolean",
+                            "description": "Run a throwaway worker instead of creating a permanent agent. Requires message. Returns the worker's answer directly, not an agent ID."
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Ephemeral only, and required for it: the task the worker should perform."
+                        },
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Ephemeral only: name of an existing agent type whose template supplies the worker's prompt, model and tools."
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Ephemeral only: cap the worker's reasoning turns. Values above the operator's configured ceiling are clamped down to it."
                         },
                         "tools": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Select from all available tools, including MCP tools. Use the full tool names only"
+                            "description": "Select from all available tools, including MCP tools. Use the full tool names only. A worker can only be given tools you can call yourself, and naming one you cannot is an error rather than a silent omission."
                         },
                         "network": {
                             "type": "boolean",
-                            "description": "Whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
+                            "description": "Permanent only: whether to enable network access for the new agent (required to be true when web_fetch is in tools)"
                         },
                         "shell": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                            "description": "Permanent only: preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
                         }
                     },
-                    "required": ["name", "system_prompt"]
+                    "required": ["name"]
                 }),
             },
             ToolDefinition {
