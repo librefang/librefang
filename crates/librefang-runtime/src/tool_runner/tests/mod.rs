@@ -1577,7 +1577,7 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
     let kernel: Arc<dyn KernelHandle> = denying;
     let input = serde_json::json!({ "workflow_id": "some-workflow" });
 
-    let err = super::workflow::tool_workflow_run(&input, Some(&kernel))
+    let err = super::workflow::tool_workflow_run(&input, Some(&kernel), None)
         .await
         .expect_err("a CapabilityDenied from the kernel must surface as an error");
     match &err {
@@ -1599,7 +1599,7 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
     // Any other kernel failure still goes through `upstream` — the mapping is a narrow special case, not a blanket reclassification.
     let plain = Arc::new(DispatchCapture::default());
     let kernel: Arc<dyn KernelHandle> = plain;
-    let err = super::workflow::tool_workflow_run(&input, Some(&kernel))
+    let err = super::workflow::tool_workflow_run(&input, Some(&kernel), None)
         .await
         .expect_err("the default stub reports the engine unavailable");
     assert!(

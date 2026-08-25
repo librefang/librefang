@@ -36,6 +36,13 @@ pub struct WorkflowRunRow {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub created_at: String,
+    /// #7714: the agent that asked for this run, when there was one.
+    ///
+    /// A property of the run rather than of whichever agent executes a step,
+    /// so two owners driving the same shared step-agent type keep their
+    /// attribution apart. `None` for operator-initiated runs with no calling
+    /// agent, and for every row written before schema v49.
+    pub owner_agent_id: Option<String>,
 }
 
 /// Persistent workflow run store backed by SQLite.
@@ -81,12 +88,12 @@ impl WorkflowStore {
                 id, workflow_id, workflow_name, state, input, output, error,
                 resume_token, pause_reason, paused_at, paused_step_index,
                 paused_variables, paused_current_input,
-                step_results, started_at, completed_at
+                step_results, started_at, completed_at, owner_agent_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                 ?8, ?9, ?10, ?11,
                 ?12, ?13,
-                ?14, ?15, ?16
+                ?14, ?15, ?16, ?17
             ) ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 input = excluded.input,
@@ -117,6 +124,7 @@ impl WorkflowStore {
                 row.step_results,
                 row.started_at,
                 row.completed_at,
+                row.owner_agent_id,
             ],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("workflow upsert failed: {e}")))?;
@@ -131,7 +139,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at,
+                        owner_agent_id
                  FROM workflow_runs WHERE id = ?1",
             )
             .map_err(|e| {
@@ -159,7 +168,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at,
+                        owner_agent_id
                  FROM workflow_runs WHERE state = ?1 ORDER BY started_at DESC"
                     .to_string(),
                 vec![Box::new(state.to_string()) as Box<dyn rusqlite::types::ToSql>],
@@ -168,7 +178,8 @@ impl WorkflowStore {
                 "SELECT id, workflow_id, workflow_name, state, input, output, error,
                         resume_token, pause_reason, paused_at, paused_step_index,
                         paused_variables, paused_current_input,
-                        step_results, started_at, completed_at, created_at
+                        step_results, started_at, completed_at, created_at,
+                        owner_agent_id
                  FROM workflow_runs ORDER BY started_at DESC"
                     .to_string(),
                 vec![],
@@ -235,12 +246,13 @@ impl WorkflowStore {
                     id, workflow_id, workflow_name, state, input, output, error,
                     resume_token, pause_reason, paused_at, paused_step_index,
                     paused_variables, paused_current_input,
-                    step_results, started_at, completed_at, created_at
+                    step_results, started_at, completed_at, created_at,
+                    owner_agent_id
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7,
                     ?8, ?9, ?10, ?11,
                     ?12, ?13,
-                    ?14, ?15, ?16, ?17
+                    ?14, ?15, ?16, ?17, ?18
                 ) ON CONFLICT(id) DO UPDATE SET
                     state = excluded.state,
                     output = excluded.output,
@@ -265,6 +277,7 @@ impl WorkflowStore {
                     row.started_at,
                     row.completed_at,
                     row.created_at,
+                    row.owner_agent_id,
                 ],
             )
             .map_err(|e| {
@@ -314,6 +327,7 @@ fn row_from_sqlite(row: &rusqlite::Row<'_>) -> Result<WorkflowRunRow, rusqlite::
         started_at: row.get(14)?,
         completed_at: row.get(15)?,
         created_at: row.get(16)?,
+        owner_agent_id: row.get(17)?,
     })
 }
 
@@ -349,7 +363,58 @@ mod tests {
             started_at: "2026-05-06T00:00:00Z".to_string(),
             completed_at: None,
             created_at: "2026-05-06T00:00:00Z".to_string(),
+            owner_agent_id: None,
         }
+    }
+
+    #[test]
+    fn owner_agent_id_round_trips_and_survives_updates() {
+        // #7714: the owner is stamped once when the run is created and must
+        // still be there after the state transitions that follow, because
+        // every later write goes through the same `upsert_run` ON CONFLICT
+        // path and that clause deliberately does not reassign the owner.
+        let store = in_memory_store();
+        let mut row = sample_row("run-owned", "pending");
+        row.owner_agent_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+        store.upsert_run(&row).unwrap();
+
+        let loaded = store.get_run("run-owned").unwrap().expect("row must exist");
+        assert_eq!(
+            loaded.owner_agent_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111"),
+            "the owner must round-trip through the store"
+        );
+
+        // A later state transition writes the row again. Real callers rebuild
+        // the row from the live run, but a caller that lost the owner must not
+        // be able to blank it out.
+        let mut finished = sample_row("run-owned", "completed");
+        finished.owner_agent_id = None;
+        store.upsert_run(&finished).unwrap();
+
+        let reloaded = store.get_run("run-owned").unwrap().expect("row must exist");
+        assert_eq!(
+            reloaded.state, "completed",
+            "the state transition must land"
+        );
+        assert_eq!(
+            reloaded.owner_agent_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111"),
+            "an update must not clear the owner recorded at creation"
+        );
+    }
+
+    #[test]
+    fn ownerless_run_round_trips_as_none() {
+        // An operator-initiated run has no calling agent. That must read back
+        // as "no owner" rather than as a synthetic or empty-string owner,
+        // because downstream billing distinguishes the two.
+        let store = in_memory_store();
+        store
+            .upsert_run(&sample_row("run-plain", "running"))
+            .unwrap();
+        let loaded = store.get_run("run-plain").unwrap().expect("row must exist");
+        assert_eq!(loaded.owner_agent_id, None);
     }
 
     #[test]

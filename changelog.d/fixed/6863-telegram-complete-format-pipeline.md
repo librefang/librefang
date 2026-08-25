@@ -1,1 +1,0 @@
-- Added a complete Markdown-to-sanitized-and-chunked Telegram formatting helper and routed text sends through it. (@houko)

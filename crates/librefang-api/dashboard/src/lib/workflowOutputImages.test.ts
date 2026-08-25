@@ -17,6 +17,11 @@ describe("classifyImageRef", () => {
     expect(ref?.src).toBe("data:image/png;base64,iVBORw0KGgo=");
   });
 
+  it("rejects empty or malformed data:image payloads", () => {
+    expect(classifyImageRef("data:image/png;base64,")).toBeNull();
+    expect(classifyImageRef("data:image/png;base64,%%%%")).toBeNull();
+  });
+
   it("accepts /api/media/artifacts/<id> paths", () => {
     const ref = classifyImageRef("/api/media/artifacts/abc123");
     expect(ref?.kind).toBe("artifact");
@@ -233,5 +238,35 @@ describe("extractImageRefs", () => {
     const out = extractImageRefs({ url: "https://example.com/parsed.png" });
     expect(out).toHaveLength(1);
     expect(out[0].src).toBe("https://example.com/parsed.png");
+  });
+
+  it("handles cyclic parsed objects once", () => {
+    const root: Record<string, unknown> = { url: "https://example.com/cycle.png" };
+    root.self = root;
+
+    expect(extractImageRefs(root)).toEqual([
+      { kind: "url", src: "https://example.com/cycle.png", alt: undefined },
+    ]);
+  });
+
+  it("bounds traversal across wide parsed values", () => {
+    const values: unknown[] = Array.from({ length: 10_001 }, () => ({ ignored: true }));
+    values.push({ url: "https://example.com/after-cap.png", ignored: true });
+
+    expect(extractImageRefs(values)).toEqual([]);
+  });
+
+  it("falls back to image/png for malformed MIME values", () => {
+    const out = extractImageRefs({ data_base64: "AAAA", mime: "image/png;charset=utf-8" });
+
+    expect(out[0]?.src).toBe("data:image/png;base64,AAAA");
+  });
+
+  it("does not repeatedly scan unbalanced JSON prefixes", () => {
+    const text = "[".repeat(20_000) + " https://example.com/fallback.png";
+
+    expect(extractImageRefs(text).map((ref) => ref.src)).toEqual([
+      "https://example.com/fallback.png",
+    ]);
   });
 });

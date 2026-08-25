@@ -5,6 +5,12 @@ category = "communication"
 icon = "lucide:message-circle"
 tags = ["chat", "messaging", "team", "channels", "collaboration"]
 
+setup_instructions = """
+1. Go to https://api.slack.com/apps and create a new Slack app (or use an existing one). Add the 'channels:read', 'chat:write', and 'users:read' bot token scopes.
+2. Install the app to your workspace and copy the Bot User OAuth Token (starts with xoxb-).
+3. Paste the bot token and your workspace Team ID into the fields above, or use the OAuth flow to authorize directly.
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -33,13 +39,6 @@ token_url = "https://slack.com/api/oauth.v2.access"
 [health_check]
 interval_secs = 60
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://api.slack.com/apps and create a new Slack app (or use an existing one). Add the 'channels:read', 'chat:write', and 'users:read' bot token scopes.
-2. Install the app to your workspace and copy the Bot User OAuth Token (starts with xoxb-).
-3. Paste the bot token and your workspace Team ID into the fields above, or use the OAuth flow to authorize directly.
-"""
-
 
 [i18n.zh]
 name = "Slack"

@@ -58,6 +58,25 @@ impl Default for ContextBudget {
 /// Truncation marker inserted between head and tail portions.
 const TRUNCATION_MARKER: &str = "\n\n[...truncated middle...]\n\n";
 
+fn byte_index_at_char(content: &str, char_index: usize) -> usize {
+    content
+        .char_indices()
+        .nth(char_index)
+        .map_or(content.len(), |(index, _)| index)
+}
+
+fn hard_char_prefix(content: &str, max_chars: usize) -> String {
+    content[..byte_index_at_char(content, max_chars)].to_string()
+}
+
+fn enforce_char_cap(candidate: String, content: &str, max_chars: usize) -> String {
+    if candidate.chars().count() <= max_chars {
+        candidate
+    } else {
+        hard_char_prefix(content, max_chars)
+    }
+}
+
 /// Layer 1: Truncate a single tool result dynamically based on context budget.
 ///
 /// Uses a head+tail strategy: keeps the first 60% and last 40% of the budget,
@@ -70,54 +89,45 @@ pub fn truncate_tool_result_dynamic(content: &str, budget: &ContextBudget) -> St
         return content.to_string();
     }
 
-    // Compute average bytes-per-char ratio so we can convert char budgets
-    // to byte positions for slicing. This correctly handles CJK (≈3 bytes/char)
-    // and ASCII (≈1 byte/char) without over-truncating.
-    let bytes_per_char = if char_count > 0 {
-        content.len() as f64 / char_count as f64
-    } else {
-        1.0
-    };
-
     let marker_len = TRUNCATION_MARKER.chars().count();
-    // Reserve space for the marker and the summary line
-    let summary_reserve = 100; // chars for the "[TRUNCATED: ...]" suffix
-    let usable = cap.saturating_sub(marker_len + summary_reserve);
+    let summary = format!(
+        "\n\n[TRUNCATED: result was {char_count} chars (budget: 30% of {}K context window)]",
+        budget.context_window_tokens / 1000
+    );
+    let summary_len = summary.chars().count();
+    if cap <= marker_len + summary_len {
+        return hard_char_prefix(content, cap);
+    }
+    let usable = cap - marker_len - summary_len;
     let head_chars = (usable as f64 * 0.6) as usize;
     let tail_chars = usable.saturating_sub(head_chars);
 
-    // Convert char budgets to byte positions for slicing
-    let head_byte_budget = (head_chars as f64 * bytes_per_char) as usize;
-    let tail_byte_budget = (tail_chars as f64 * bytes_per_char) as usize;
-
-    let head_end = find_safe_break_before(content, head_byte_budget);
-    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_byte_budget));
+    let head_end = find_safe_break_before(content, byte_index_at_char(content, head_chars));
+    let tail_start = find_safe_break_after(
+        content,
+        byte_index_at_char(content, char_count.saturating_sub(tail_chars)),
+    );
 
     // Only use head+tail if there's actually a gap to skip
     if tail_start <= head_end {
         // Not enough content to skip; just keep the head
-        let cap_bytes = (cap.saturating_sub(summary_reserve) as f64 * bytes_per_char) as usize;
-        let break_point = find_safe_break_before(content, cap_bytes);
-        return format!(
-            "{}\n\n[TRUNCATED: result was {} chars, showing first {} (budget: {}% of {}K context window)]",
-            &content[..break_point],
-            char_count,
-            content[..break_point].chars().count(),
-            30,
-            budget.context_window_tokens / 1000
+        let break_point = find_safe_break_before(
+            content,
+            byte_index_at_char(content, cap.saturating_sub(summary_len)),
         );
+        let truncated = format!("{}{summary}", &content[..break_point]);
+        return enforce_char_cap(truncated, content, cap);
     }
 
-    format!(
-        "{}{}{}\n\n[TRUNCATED: result was {} chars, showing first {} + last {} (budget: {}% of {}K context window)]",
-        &content[..head_end],
-        TRUNCATION_MARKER,
-        &content[tail_start..],
-        char_count,
-        content[..head_end].chars().count(),
-        content[tail_start..].chars().count(),
-        30,
-        budget.context_window_tokens / 1000
+    enforce_char_cap(
+        format!(
+            "{}{}{}{summary}",
+            &content[..head_end],
+            TRUNCATION_MARKER,
+            &content[tail_start..]
+        ),
+        content,
+        cap,
     )
 }
 
@@ -139,6 +149,7 @@ pub fn apply_context_guard(
         block_idx: usize,
         char_len: usize,
         is_delegation: bool,
+        compacted: bool,
     }
 
     let mut locations: Vec<ToolResultLoc> = Vec::new();
@@ -158,6 +169,7 @@ pub fn apply_context_guard(
                         block_idx,
                         char_len: len,
                         is_delegation: tool_name == "agent_send",
+                        compacted: false,
                     });
                 }
             }
@@ -176,7 +188,6 @@ pub fn apply_context_guard(
     );
 
     // First pass: cap any single result that exceeds 50% of context
-    let mut compacted = 0;
     for loc in &mut locations {
         if loc.char_len > single_max {
             // Bounds check: indices may be stale if messages were modified concurrently
@@ -193,7 +204,7 @@ pub fn apply_context_guard(
                     let new_char_len = content.chars().count();
                     total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
                     loc.char_len = new_char_len; // update so second pass uses correct value
-                    compacted += 1;
+                    loc.compacted = true;
                 }
             }
         }
@@ -203,7 +214,7 @@ pub fn apply_context_guard(
     // (locations are already in chronological order)
     const COMPACT_DEFAULT: usize = 2_000;
     const COMPACT_DELEGATION: usize = 8_000; // agent_send results need more context (#4135)
-    for loc in &locations {
+    for loc in &mut locations {
         if total_chars <= headroom {
             break;
         }
@@ -228,13 +239,47 @@ pub fn apply_context_guard(
                     *content = truncate_to(content, compact_target);
                     let new_char_len = content.chars().count();
                     total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
-                    compacted += 1;
+                    loc.char_len = new_char_len;
+                    loc.compacted = true;
                 }
             }
         }
     }
 
-    compacted
+    // Retention floors are preferences, not permission to exceed the model's
+    // total tool-result budget. If they were insufficient, remove exactly the
+    // remaining excess from the oldest results.
+    for loc in &mut locations {
+        if total_chars <= headroom {
+            break;
+        }
+        if loc.msg_idx >= messages.len() {
+            continue;
+        }
+        if let MessageContent::Blocks(blocks) = &mut messages[loc.msg_idx].content {
+            if loc.block_idx >= blocks.len() {
+                continue;
+            }
+            if let ContentBlock::ToolResult { content, .. } = &mut blocks[loc.block_idx] {
+                let old_char_len = content.chars().count();
+                let excess = total_chars.saturating_sub(headroom);
+                let target = old_char_len.saturating_sub(excess);
+                if target < old_char_len {
+                    *content = truncate_to(content, target);
+                    let new_char_len = content.chars().count();
+                    total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
+                    loc.char_len = new_char_len;
+                    loc.compacted = true;
+                }
+            }
+        }
+    }
+
+    debug_assert!(total_chars <= headroom);
+    locations
+        .iter()
+        .filter(|location| location.compacted)
+        .count()
 }
 
 /// Find a char-boundary-safe break point at or before `pos`, preferring newlines.
@@ -283,47 +328,45 @@ fn truncate_to(content: &str, max_chars: usize) -> String {
         return content.to_string();
     }
 
-    // Compute average bytes-per-char ratio so we can convert char budgets
-    // to byte positions for slicing (same approach as truncate_tool_result_dynamic).
-    let bytes_per_char = if char_count > 0 {
-        content.len() as f64 / char_count as f64
-    } else {
-        1.0
-    };
-
     let marker = TRUNCATION_MARKER;
     let marker_chars = marker.chars().count();
-    let suffix_reserve = 80; // for "[COMPACTED: ...]" line
-    let usable = max_chars.saturating_sub(marker_chars + suffix_reserve);
+    let summary = format!("\n\n[COMPACTED: {char_count} chars by context guard]");
+    let summary_chars = summary.chars().count();
+    if max_chars <= marker_chars + summary_chars {
+        return hard_char_prefix(content, max_chars);
+    }
+    let usable = max_chars - marker_chars - summary_chars;
     let head_chars = (usable as f64 * 0.6) as usize;
     let tail_chars = usable.saturating_sub(head_chars);
 
-    // Convert char budgets to byte positions for slicing
-    let head_byte_budget = (head_chars as f64 * bytes_per_char) as usize;
-    let tail_byte_budget = (tail_chars as f64 * bytes_per_char) as usize;
-
-    let head_end = find_safe_break_before(content, head_byte_budget);
-    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_byte_budget));
+    let head_end = find_safe_break_before(content, byte_index_at_char(content, head_chars));
+    let tail_start = find_safe_break_after(
+        content,
+        byte_index_at_char(content, char_count.saturating_sub(tail_chars)),
+    );
 
     // Only use head+tail if there's a meaningful gap to skip
     if tail_start <= head_end {
-        let cap_bytes = (max_chars.saturating_sub(suffix_reserve) as f64 * bytes_per_char) as usize;
-        let break_point = find_safe_break_before(content, cap_bytes);
-        return format!(
-            "{}\n\n[COMPACTED: {} -> {} chars by context guard]",
-            &content[..break_point],
-            char_count,
-            content[..break_point].chars().count()
+        let break_point = find_safe_break_before(
+            content,
+            byte_index_at_char(content, max_chars.saturating_sub(summary_chars)),
+        );
+        return enforce_char_cap(
+            format!("{}{summary}", &content[..break_point]),
+            content,
+            max_chars,
         );
     }
 
-    format!(
-        "{}{}{}\n\n[COMPACTED: {} -> {} chars by context guard (head+tail)]",
-        &content[..head_end],
-        marker,
-        &content[tail_start..],
-        char_count,
-        content[..head_end].chars().count() + content[tail_start..].chars().count()
+    enforce_char_cap(
+        format!(
+            "{}{}{}{summary}",
+            &content[..head_end],
+            marker,
+            &content[tail_start..]
+        ),
+        content,
+        max_chars,
     )
 }
 
@@ -354,16 +397,25 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_breaks_at_newline() {
+    fn tiny_caps_never_expand_truncated_content() {
+        let budget = ContextBudget::new(10);
+        let content = "abcdefghij";
+        let result = truncate_tool_result_dynamic(content, &budget);
+        assert_eq!(result.chars().count(), budget.per_result_cap());
+        assert_eq!(result, "abcdef");
+
+        let compacted = truncate_to(content, 3);
+        assert_eq!(compacted, "abc");
+    }
+
+    #[test]
+    fn test_tiny_truncate_respects_character_cap() {
         let budget = ContextBudget::new(100); // very small: cap = 60 chars
         let content =
             "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12";
         let result = truncate_tool_result_dynamic(content, &budget);
-        assert!(result.contains("[TRUNCATED:"));
-        // Should not split in the middle of a line
-        assert!(
-            result.starts_with("line1\n") || result.is_empty() || result.contains("[TRUNCATED:")
-        );
+        assert_eq!(result.chars().count(), budget.per_result_cap());
+        assert!(content.starts_with(&result));
     }
 
     #[test]
@@ -420,15 +472,50 @@ mod tests {
     }
 
     #[test]
+    fn context_guard_compacts_below_floors_to_meet_headroom() {
+        let budget = ContextBudget::new(100);
+        let mut messages: Vec<Message> = (0..3)
+            .map(|index| Message {
+                role: librefang_types::message::Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: format!("t{index}"),
+                    tool_name: "shell_exec".to_string(),
+                    content: "x".repeat(100),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            })
+            .collect();
+
+        let compacted = apply_context_guard(&mut messages, &budget, &[]);
+        let remaining: usize = messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                MessageContent::Blocks(blocks) => match &blocks[0] {
+                    ContentBlock::ToolResult { content, .. } => Some(content.chars().count()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .sum();
+
+        assert_eq!(compacted, 2);
+        assert!(remaining <= budget.total_tool_headroom_chars());
+    }
+
+    #[test]
     fn test_truncate_tool_result_multibyte_chinese() {
-        // Tiny budget: cap = 30% of 100 * 2.0 = 60 bytes
+        // Tiny budget: cap = 30% of 100 * 2.0 = 60 characters
         let budget = ContextBudget::new(100);
         // Each Chinese char is 3 bytes in UTF-8; 100 chars = 300 bytes
         let content: String = "\u{4f60}\u{597d}\u{4e16}\u{754c}".repeat(25);
         assert_eq!(content.len(), 300);
         // Must not panic on multi-byte content
         let result = truncate_tool_result_dynamic(&content, &budget);
-        assert!(result.contains("[TRUNCATED:"));
+        assert_eq!(result.chars().count(), budget.per_result_cap());
         // The visible portion must be valid UTF-8 (implicit: no panic)
         assert!(result.is_char_boundary(0));
     }
@@ -438,7 +525,7 @@ mod tests {
         // Each emoji is 4 bytes; 200 emojis = 800 bytes
         let content: String = "\u{1f600}".repeat(200);
         let result = truncate_to(&content, 100);
-        assert!(result.contains("[COMPACTED:"));
+        assert_eq!(result.chars().count(), 100);
         // Must not panic and must produce valid UTF-8
         assert!(result.is_char_boundary(0));
     }
@@ -516,9 +603,8 @@ mod tests {
         // When content is only slightly over budget, may not use head+tail
         let content = "x".repeat(150);
         let result = truncate_to(&content, 100);
+        assert_eq!(result.chars().count(), 100);
         assert!(result.contains("[COMPACTED:"));
-        // Result should be valid UTF-8 and shorter than original
-        assert!(result.len() < content.len() + 100); // original + marker overhead
     }
 
     #[test]

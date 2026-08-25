@@ -1,0 +1,1 @@
+- Version and sanitize persisted dashboard UI state, synchronize language changes, and prune stale navigation keys. (@xiaomo)

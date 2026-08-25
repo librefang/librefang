@@ -1,0 +1,1 @@
+Restrict AUR service environment files, keep Docker secrets out of command-line arguments, refuse to replace unrelated containers, and update the packaged Docker image to the current stable release. (@xiaomo)

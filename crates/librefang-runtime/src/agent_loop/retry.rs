@@ -131,6 +131,27 @@ async fn handle_retryable_llm_error(
     Ok(last_error_label.to_string())
 }
 
+/// Whether an LLM failure should count against the provider circuit breaker.
+///
+/// The breaker exists to stop every agent hammering a provider that is failing, so it may only count failures that say something about that provider's health.
+/// A 400 rejecting a request *parameter* says the opposite: the request is malformed in a way we constructed, the answer is deterministic, and backing off changes nothing, because the request issued after the cooldown carries the same field and fails identically (#7769).
+/// The OpenAI-compatible driver already strips such a field and retries in place, so this is the fallback for the case where the driver's own retry budget was spent on the same rejection.
+///
+/// The gate is structural on purpose.
+/// `LlmError`'s `Display` embeds raw provider text for every variant, so testing the flattened `to_string()` would let a 500, a transport error or a parse failure whose body merely quotes an unsupported-parameter phrase skip failure accounting — and the breaker would never open during a real outage.
+/// Only `Api { status: 400 }` is eligible; every other variant and every other status counts.
+/// Matching on `message` also keeps the `"API error (400): "` prefix out of the haystack and drops the `to_string()` allocation.
+fn should_count_against_circuit_breaker(error: &LlmError) -> bool {
+    match error {
+        LlmError::Api {
+            status: 400,
+            message,
+            ..
+        } => !llm_errors::is_unsupported_parameter_error(message),
+        _ => true,
+    }
+}
+
 fn build_user_facing_llm_error(
     error: &LlmError,
     classification_log_message: &str,
@@ -228,7 +249,9 @@ pub(super) async fn call_with_retry(
             }
             Err(e) => {
                 let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
-                record_retry_failure(provider, cooldown, is_billing);
+                if should_count_against_circuit_breaker(&e) {
+                    record_retry_failure(provider, cooldown, is_billing);
+                }
                 return Err(err);
             }
         }
@@ -485,7 +508,9 @@ pub(super) async fn stream_with_retry(
                 }
                 let (is_billing, err) =
                     build_user_facing_llm_error(&e, "LLM stream error classified");
-                record_retry_failure(provider, cooldown, is_billing);
+                if should_count_against_circuit_breaker(&e) {
+                    record_retry_failure(provider, cooldown, is_billing);
+                }
                 return Err(err);
             }
         }
@@ -499,6 +524,7 @@ pub(super) async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth_cooldown::CircuitState;
     use crate::llm_driver::CompletionResponse;
 
     /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
@@ -545,6 +571,85 @@ mod tests {
         assert_eq!(
             deltas, 1,
             "the partial content must reach the caller exactly once — a retry would duplicate it"
+        );
+    }
+
+    // ── Circuit-breaker accounting (#7769) ─────────────────────────────────
+
+    /// A non-streaming driver that fails every call with one fixed `LlmError::Api`.
+    /// `status` is the field that separates the cases below — the message is held constant so a test can prove the status is what decides, not the text.
+    struct FixedApiError {
+        status: u16,
+        message: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for FixedApiError {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::Api {
+                status: self.status,
+                message: self.message.to_string(),
+                code: None,
+            })
+        }
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            _tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("this mock is only exercised through complete()")
+        }
+    }
+
+    /// litellm's rendering of the rejection from #7769, reused verbatim by all three cases.
+    const UNSUPPORTED_PARAM_BODY: &str = "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=gpt-4o. Received Model Group=default";
+
+    async fn circuit_state_after_one_failure(status: u16, message: &'static str) -> CircuitState {
+        let cooldown = ProviderCooldown::new(CooldownConfig::default());
+        let driver = FixedApiError { status, message };
+        let result = call_with_retry(
+            &driver,
+            CompletionRequest::default(),
+            Some("litellm"),
+            Some(&cooldown),
+        )
+        .await;
+        assert!(result.is_err(), "the mock always fails");
+        cooldown.get_state("litellm")
+    }
+
+    /// The 400 this issue is about must not consume the provider's failure budget: it is deterministic and self-inflicted, and the request issued after the cooldown would carry the same field.
+    #[tokio::test]
+    async fn unsupported_parameter_400_does_not_open_circuit_breaker() {
+        assert_eq!(
+            circuit_state_after_one_failure(400, UNSUPPORTED_PARAM_BODY).await,
+            CircuitState::Closed,
+            "a parameter rejection says nothing about whether the provider is reachable"
+        );
+    }
+
+    /// Every other 400 — credentials, malformed payload, nonexistent model, context overflow — still opens the circuit.
+    #[tokio::test]
+    async fn other_400_still_opens_circuit_breaker() {
+        assert_eq!(
+            circuit_state_after_one_failure(
+                400,
+                r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#,
+            )
+            .await,
+            CircuitState::Open,
+        );
+    }
+
+    /// Regression for the review on #7770: the exemption is keyed on the response status, not on the text.
+    /// A real outage whose body happens to quote the same unsupported-parameter phrase — a gateway echoing the upstream rejection inside its own 500, for instance — must still open the circuit.
+    /// Testing the flattened `error.to_string()` passes both of the tests above and fails only this one.
+    #[tokio::test]
+    async fn unsupported_parameter_text_at_status_500_still_opens_circuit_breaker() {
+        assert_eq!(
+            circuit_state_after_one_failure(500, UNSUPPORTED_PARAM_BODY).await,
+            CircuitState::Open,
+            "only a 400 is a parameter rejection; a 500 carrying the same words is an outage"
         );
     }
 }

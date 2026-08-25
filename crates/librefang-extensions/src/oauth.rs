@@ -282,7 +282,8 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     debug!("Received authorization code, exchanging for tokens...");
 
     // Exchange code for tokens
-    let client = crate::http_client::new_client();
+    let client = crate::http_client::new_client()
+        .map_err(|e| ExtensionError::OAuth(format!("Failed to build HTTP client: {e}")))?;
     let mut params = HashMap::new();
     params.insert("grant_type", "authorization_code");
     params.insert("code", &code);

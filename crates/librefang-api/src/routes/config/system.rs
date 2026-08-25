@@ -17,6 +17,42 @@ fn status_default_model_snapshot(
     (effective.provider.clone(), effective.model.clone())
 }
 
+#[derive(serde::Serialize)]
+struct QuickInitConfig<'a> {
+    log_level: &'a str,
+    api_listen: &'a str,
+    default_model: QuickInitDefaultModel<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct QuickInitDefaultModel<'a> {
+    provider: &'a str,
+    model: &'a str,
+    api_key_env: &'a str,
+}
+
+fn quick_init_config_content(
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<String, toml::ser::Error> {
+    let config = QuickInitConfig {
+        log_level: "info",
+        api_listen: "127.0.0.1:4545",
+        default_model: QuickInitDefaultModel {
+            provider,
+            model,
+            api_key_env,
+        },
+    };
+    let serialized = toml::to_string_pretty(&config)?;
+    Ok(format!(
+        "# LibreFang configuration (auto-generated)\n\
+         # Run `librefang init --upgrade` for full annotated config.\n\n\
+         {serialized}"
+    ))
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -89,7 +125,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "hostname": hostname,
         "network_enabled": cfg.network_enabled,
         "terminal_enabled": cfg.terminal.enabled,
-        "config_exists": state.kernel.home_dir().join("config.toml").exists(),
+        "config_exists": state.kernel.config_path().exists(),
         "agents": agents,
     }))
 }
@@ -106,7 +142,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
     if tokio::fs::try_exists(&config_path).await.unwrap_or(false) {
         return Json(serde_json::json!({
             "status": "already_initialized",
@@ -135,28 +171,29 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
         .automatic_default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
-    // Write minimal config.toml
-    let config_content = format!(
-        r#"# LibreFang configuration (auto-generated)
-# Run `librefang init --upgrade` for full annotated config.
+    // Use the TOML serializer so catalog-provided identifiers cannot escape their string values.
+    let config_content = match quick_init_config_content(&provider, &model, &api_key_env) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize quick init config");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Internal server error"
+                })),
+            )
+                .into_response();
+        }
+    };
 
-log_level = "info"
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-"#
-    );
-
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked.into_response();
     }
     let _config_guard = state.config_write_lock.lock().await;
     let home = state.kernel.home_dir().to_path_buf();
     let write_result = tokio::task::spawn_blocking(move || {
-        write_quick_init_config(&home, config_content.as_bytes())
+        write_quick_init_config(&home, &config_path, config_content.as_bytes())
     })
     .await;
     match write_result {
@@ -223,20 +260,32 @@ api_key_env = "{api_key_env}"
     .into_response()
 }
 
-fn write_quick_init_config(home: &std::path::Path, contents: &[u8]) -> std::io::Result<bool> {
-    let config_path = home.join("config.toml");
+/// Write the quick-init `config.toml`, refusing to overwrite one that already exists.
+///
+/// `config_path` is the kernel's resolved path rather than `home/config.toml`, so an init through a relocated (`LIBREFANG_CONFIG_PATH`) config writes the file the daemon will actually reload (#6695).
+/// `home` still governs the directory layout — `data/` belongs to the home directory whether or not the config file lives inside it.
+fn write_quick_init_config(
+    home: &std::path::Path,
+    config_path: &std::path::Path,
+    contents: &[u8],
+) -> std::io::Result<bool> {
     if config_path.exists() {
         return Ok(false);
     }
     std::fs::create_dir_all(home)?;
     std::fs::create_dir_all(home.join("data"))?;
-    crate::atomic_write(&config_path, contents)?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::atomic_write(config_path, contents)?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{status_default_model_snapshot, write_quick_init_config};
+    use super::{
+        quick_init_config_content, status_default_model_snapshot, write_quick_init_config,
+    };
     use librefang_types::config::DefaultModelConfig;
     use std::sync::RwLock;
 
@@ -294,13 +343,41 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
 
-        assert!(write_quick_init_config(&home, b"first = true\n").unwrap());
+        assert!(
+            write_quick_init_config(&home, &home.join("config.toml"), b"first = true\n").unwrap()
+        );
         assert!(home.join("data").is_dir());
-        assert!(!write_quick_init_config(&home, b"second = true\n").unwrap());
+        assert!(
+            !write_quick_init_config(&home, &home.join("config.toml"), b"second = true\n").unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(home.join("config.toml")).unwrap(),
             "first = true\n"
         );
+    }
+
+    #[test]
+    fn quick_init_config_serializes_untrusted_model_fields_as_toml_strings() {
+        let provider = "provider\"\n[network]\nenabled = true\n#";
+        let model = "vendor\\model\"\n[default_model]";
+        let api_key_env = "KEY\\NAME\nVALUE";
+
+        let contents = quick_init_config_content(provider, model, api_key_env).unwrap();
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+
+        assert_eq!(parsed["default_model"]["provider"].as_str(), Some(provider));
+        assert_eq!(parsed["default_model"]["model"].as_str(), Some(model));
+        assert_eq!(
+            parsed["default_model"]["api_key_env"].as_str(),
+            Some(api_key_env)
+        );
+        assert!(parsed.get("network").is_none());
+        assert_eq!(parsed.as_table().unwrap().len(), 3);
+
+        let config: librefang_types::config::KernelConfig = toml::from_str(&contents).unwrap();
+        assert_eq!(config.default_model.provider, provider);
+        assert_eq!(config.default_model.model, model);
+        assert_eq!(config.default_model.api_key_env, api_key_env);
     }
 }
 
@@ -607,6 +684,19 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 // Prometheus metrics endpoint
 // ---------------------------------------------------------------------------
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' | '\r' => escaped.push_str("\\n"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 /// GET /api/metrics — Prometheus text-format metrics.
 ///
 /// Returns counters and gauges for monitoring LibreFang in production:
@@ -665,10 +755,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
     out.push_str("# TYPE librefang_llm_calls gauge\n");
     for agent in &agents {
-        let name = &agent.name;
-        let provider = &agent.manifest.model.provider;
-        let model = &agent.manifest.model.model;
         if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
+            let name = escape_prometheus_label_value(&agent.name);
+            let provider = escape_prometheus_label_value(&agent.manifest.model.provider);
+            let model = escape_prometheus_label_value(&agent.manifest.model.model);
             let labels = format!("agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"");
             out.push_str(&format!(
                 "librefang_tokens{{{labels}}} {}\n",
