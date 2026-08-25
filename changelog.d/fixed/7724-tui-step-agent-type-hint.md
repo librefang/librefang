@@ -1,0 +1,3 @@
+The TUI's workflow creator now names the three agent bindings a step may carry.
+It authors steps as one raw JSON blob, so nothing on the screen told an operator that `agent_type` — bind the step to a template and let the daemon spawn one when nothing of that type is running — is accepted at all; the placeholder can only show one binding at a time, and it shows `agent_name`.
+A hint under the steps field now names all three as mutually exclusive and mentions the per-step `session_mode`, so the binding the Canvas editor exposes as a selector is at least discoverable where the TUI authors the same steps (#7869) (@houko)

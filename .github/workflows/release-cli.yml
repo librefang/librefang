@@ -44,6 +44,7 @@ jobs:
   validate_release_tag:
     name: Validate release tag
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -71,6 +72,7 @@ jobs:
     name: Build Dashboard
     needs: [validate_release_tag]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: release-cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -99,6 +101,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     needs: [build_dashboard]
     runs-on: macos-latest
+    timeout-minutes: 240
     environment: release-cli
     strategy:
       fail-fast: false
@@ -162,6 +165,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     needs: [build_dashboard]
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     environment: release-cli
     strategy:
       fail-fast: false
@@ -235,6 +239,7 @@ jobs:
     name: CLI / aarch64-linux-android
     needs: [build_dashboard]
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     environment: release-cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -282,6 +287,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     needs: [build_dashboard]
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     environment: release-cli
     strategy:
       fail-fast: false
@@ -331,6 +337,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (static)
     needs: [build_dashboard]
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     environment: release-cli
     strategy:
       fail-fast: false
@@ -403,6 +410,7 @@ jobs:
     name: CLI / ${{ matrix.target }}
     needs: [build_dashboard]
     runs-on: windows-latest
+    timeout-minutes: 240
     environment: release-cli
     strategy:
       fail-fast: false
@@ -459,6 +467,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     needs: [build_dashboard]
     runs-on: macos-latest
+    timeout-minutes: 240
     environment: release-cli
     strategy:
       fail-fast: false
@@ -510,6 +519,7 @@ jobs:
     name: CLI / ${{ matrix.target }} (mini)
     needs: [build_dashboard]
     runs-on: windows-latest
+    timeout-minutes: 240
     environment: release-cli
     strategy:
       fail-fast: false
@@ -566,6 +576,7 @@ jobs:
       - cli_mac_mini
       - cli_windows_mini
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: release-cli
     permissions:
       contents: write
@@ -643,6 +654,7 @@ jobs:
     if: ${{ inputs.include_pypi && (!contains(inputs.tag, '-') || endsWith(inputs.tag, '-lts')) }}
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: release-pypi
     permissions:
       id-token: write   # OIDC trusted publishing to PyPI

@@ -32,6 +32,9 @@ api-error-template-parse-failed = Nie udało się przeanalizować szablonu: { $e
 api-error-template-required = Wymagane jest 'manifest_toml' lub 'template'
 api-error-template-invalid-manifest = Nieprawidłowy manifest szablonu
 api-error-template-read-failed = Nie udało się odczytać szablonu
+api-error-agent-type-exists = Typ agenta '{ $name }' już istnieje
+api-error-agent-type-name-taken = '{ $name }' to nazwa działającego agenta; wybierz inną nazwę dla typu agenta
+api-error-agent-type-not-editable = Typ agenta '{ $name }' pochodzi z obszaru roboczego działającego agenta i jest zarządzany przez /api/agents
 
 # Manifest errors
 api-error-manifest-too-large = Manifest jest za duży (maks. 1 MB)
@@ -237,6 +240,10 @@ api-error-backup-finalize-failed = Nie udało się sfinalizować kopii zapasowej
 api-error-backup-open-failed = Nie udało się otworzyć kopii zapasowej: { $error }
 api-error-backup-invalid-archive = Nieprawidłowe archiwum kopii zapasowej: { $error }
 api-error-backup-delete-failed = Nie udało się usunąć kopii zapasowej: { $error }
+api-error-backup-invalid-keep-config = Nieprawidłowe 'keep_config' — musi być wartością logiczną
+api-error-backup-invalid-components = Nieprawidłowe 'components' — musi być tablicą nazw komponentów
+api-error-backup-empty-components = 'components' nie może być puste — pomiń to pole, aby przywrócić wszystkie komponenty
+api-error-backup-unknown-component = Nieznany komponent kopii zapasowej '{ $component }'. Prawidłowe komponenty: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = Nie znaleziono harmonogramu

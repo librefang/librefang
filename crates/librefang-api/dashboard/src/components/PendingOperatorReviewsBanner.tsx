@@ -23,6 +23,8 @@ interface Props {
   onSelectRun?: (runId: string, workflowId: string) => void;
 }
 
+const MAX_VISIBLE_PENDING_RUNS = 5;
+
 export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
   const { t } = useTranslation();
   const query = usePendingOperatorRuns();
@@ -32,11 +34,33 @@ export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
   if (query.isLoading) {
     return null;
   }
-  if (query.isError || !query.data || query.data.length === 0) {
+  if (query.isError) {
+    return (
+      <div
+        role="alert"
+        className="flex items-center justify-between gap-3 rounded-xl border border-error/30 bg-error/5 p-3"
+      >
+        <span className="text-xs font-semibold text-error">
+          {t("workflows.operator.load_failed")}
+        </span>
+        <button
+          type="button"
+          onClick={() => void query.refetch()}
+          disabled={query.isFetching}
+          className="shrink-0 rounded-md border border-error/30 px-2 py-1 text-[10px] font-bold text-error hover:bg-error/10 disabled:opacity-50"
+        >
+          {t("common.retry")}
+        </button>
+      </div>
+    );
+  }
+  if (!query.data || query.data.length === 0) {
     return null;
   }
 
   const rows = query.data;
+  const visibleRows = rows.slice(0, MAX_VISIBLE_PENDING_RUNS);
+  const hiddenCount = rows.length - visibleRows.length;
   return (
     <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-2">
       <div className="flex items-center gap-2">
@@ -50,14 +74,18 @@ export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
         {query.isFetching && <Loader2 className="h-3 w-3 animate-spin text-warning/60" />}
       </div>
       <ul className="space-y-1">
-        {rows.map((row) => {
-          const allowedCount = row.actions.length;
+        {visibleRows.map((row) => {
+          const allowedCount = row.actions?.length ?? 0;
           return (
             <li key={row.run_id}>
               <button
                 type="button"
                 className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg bg-main border border-border-subtle hover:bg-surface text-left transition-colors"
                 onClick={() => onSelectRun?.(row.run_id, row.workflow_id)}
+                aria-label={t("workflows.operator.review_run", {
+                  workflow: row.workflow_name,
+                  step: row.step_name,
+                })}
               >
                 <div className="flex-1 min-w-0">
                   <p className="text-[11px] font-semibold truncate">
@@ -82,6 +110,11 @@ export function PendingOperatorReviewsBanner({ onSelectRun }: Props) {
           );
         })}
       </ul>
+      {hiddenCount > 0 && (
+        <p className="text-[10px] font-medium text-warning/80">
+          {t("workflows.operator.more_pending", { count: hiddenCount })}
+        </p>
+      )}
     </div>
   );
 }

@@ -111,4 +111,86 @@ describe("TomlViewer editing (#6478)", () => {
       "not valid toml <<>>",
     );
   });
+
+  it("keeps the TOML tab selected while editing", () => {
+    render(
+      <TomlViewer
+        isOpen
+        onClose={() => {}}
+        title="HAND.toml"
+        toml={'id = "x"'}
+        markdown="# Hand"
+        onSave={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("common.edit"));
+    const markdownTab = screen.getByRole("tab", { name: "toml_viewer.tab_markdown" });
+    expect(markdownTab).toBeDisabled();
+    fireEvent.click(markdownTab);
+    expect(screen.getByRole("tab", { name: "toml_viewer.tab_toml" }))
+      .toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("textbox")).toHaveValue('id = "x"');
+  });
+
+  it("preserves the draft but blocks save after an external TOML update", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <TomlViewer
+        isOpen
+        onClose={() => {}}
+        title="HAND.toml"
+        toml={'id = "x"'}
+        onSave={onSave}
+      />,
+    );
+    fireEvent.click(screen.getByText("common.edit"));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: 'id = "local"' },
+    });
+
+    rerender(
+      <TomlViewer
+        isOpen
+        onClose={() => {}}
+        title="HAND.toml"
+        toml={'id = "external"'}
+        onSave={onSave}
+      />,
+    );
+
+    expect(screen.getByText("toml_viewer.source_changed")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue('id = "local"');
+    expect(screen.getByText("common.save")).toBeDisabled();
+  });
+
+  it("revokes every pending download URL on unmount", () => {
+    vi.useFakeTimers();
+    const createObjectURL = vi.spyOn(URL, "createObjectURL")
+      .mockReturnValueOnce("blob:first")
+      .mockReturnValueOnce("blob:second");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    const { unmount } = render(
+      <TomlViewer
+        isOpen
+        onClose={() => {}}
+        title="Config"
+        toml={'id = "x"'}
+      />,
+    );
+    const download = screen.getByRole("button", { name: "toml_viewer.download" });
+    fireEvent.click(download);
+    fireEvent.click(download);
+    unmount();
+
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:first");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:second");
+    click.mockRestore();
+    revokeObjectURL.mockRestore();
+    createObjectURL.mockRestore();
+    vi.useRealTimers();
+  });
 });

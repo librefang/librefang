@@ -42,6 +42,7 @@ jobs:
   lint:
     name: Dashboard Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # ESLint guards security-sensitive JSX (jsx-no-target-blank,
     # no-danger-with-children) and acts as a fast pre-build gate so the
     # heavier typecheck + build jobs don't waste a runner on a PR that
@@ -63,6 +64,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:

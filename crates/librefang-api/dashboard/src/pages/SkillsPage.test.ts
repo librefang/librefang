@@ -38,16 +38,33 @@ describe("SkillsPage marketplace state helpers", () => {
   it("keeps health from both SkillHub query modes", () => {
     expect(
       combinedQueryHealth(
-        { isFetching: false, isError: true },
-        { isFetching: false, isError: false },
+        { isFetching: false, isError: true, isFetched: true },
+        { isFetching: false, isError: false, isFetched: false },
       ),
     ).toBe("down");
     expect(
       combinedQueryHealth(
-        { isFetching: false, isError: false },
-        { isFetching: true, isError: false },
+        { isFetching: false, isError: false, isFetched: false },
+        { isFetching: true, isError: false, isFetched: false },
       ),
     ).toBe("checking");
+    expect(
+      combinedQueryHealth(
+        { isFetching: false, isError: false, isFetched: true },
+        { isFetching: false, isError: false, isFetched: false },
+      ),
+    ).toBe("live");
+  });
+
+  it("reports a hub nobody has contacted as unknown, not live", () => {
+    // Both SkillHub queries disabled: no error, no fetch in flight, never resolved (#7387).
+    expect(
+      combinedQueryHealth(
+        { isFetching: false, isError: false, isFetched: false },
+        { isFetching: false, isError: false, isFetched: false },
+      ),
+    ).toBe("unknown");
+    expect(combinedQueryHealth()).toBe("unknown");
   });
 
   it("requires a post-create mutation before rollback", () => {

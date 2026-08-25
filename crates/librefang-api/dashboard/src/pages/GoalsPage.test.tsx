@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { GoalsPage } from "./GoalsPage";
+import {
+  GoalsPage,
+  buildGoalRows,
+  goalStatusBadgeVariant,
+  progressForGoalStatus,
+  runIndependentBatch,
+} from "./GoalsPage";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -211,7 +217,7 @@ describe("GoalsPage", () => {
 
     fireEvent.click(screen.getByText("goals.use_template"));
 
-    // runBatch awaits sequentially; flush microtasks.
+    // Flush the allSettled batch.
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
@@ -357,19 +363,17 @@ describe("GoalsPage", () => {
     expect(screen.queryByText("goals.delete_confirm")).not.toBeInTheDocument();
   });
 
-  it("renders both parent and child goals in the tree", () => {
+  it("hides collapsed descendants and reveals them when expanded", () => {
     useGoalsMock.mockReturnValue(makeQuery([PARENT_GOAL, CHILD_GOAL]));
     useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
     renderPage();
 
     expect(screen.getByText("Parent goal")).toBeInTheDocument();
-    expect(screen.getByText("Child goal")).toBeInTheDocument();
-    // Parent has an expandable chevron because a child references it.
-    // Clicking it must not throw — exercises the expand toggle.
-    const headerRoot = screen.getByText("goals.goal_tree").closest("div")!;
-    const buttons = within(headerRoot.parentElement!).getAllByRole("button");
-    expect(buttons.length).toBeGreaterThan(0);
-    fireEvent.click(buttons[0]);
+    expect(screen.queryByText("Child goal")).not.toBeInTheDocument();
+
+    const parentRow = screen.getByText("Parent goal").closest("div.rounded-xl");
+    expect(parentRow).toBeTruthy();
+    fireEvent.click(within(parentRow as HTMLElement).getAllByRole("button")[0]);
     expect(screen.getByText("Child goal")).toBeInTheDocument();
   });
 
@@ -393,5 +397,51 @@ describe("GoalsPage", () => {
       id: "g-parent",
       data: expect.objectContaining({ title: "Renamed parent" }),
     });
+  });
+});
+
+describe("GoalsPage helpers", () => {
+  it("builds only visible tree rows with child depth", () => {
+    expect(buildGoalRows([PARENT_GOAL, CHILD_GOAL], {})).toEqual([
+      { goal: PARENT_GOAL, depth: 0, hasChildren: true },
+    ]);
+    expect(
+      buildGoalRows([PARENT_GOAL, CHILD_GOAL], { "g-parent": true }),
+    ).toEqual([
+      { goal: PARENT_GOAL, depth: 0, hasChildren: true },
+      { goal: CHILD_GOAL, depth: 1, hasChildren: false },
+    ]);
+  });
+
+  it("starts independent batch actions before waiting for settlement", async () => {
+    let releaseFirst: () => void = () => undefined;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const failure = new Error("second failed");
+    const action = vi.fn((item: number) =>
+      item === 1 ? first : Promise.reject(failure),
+    );
+
+    const pending = runIndependentBatch([1, 2], action);
+    expect(action).toHaveBeenCalledTimes(2);
+    releaseFirst();
+
+    await expect(pending).resolves.toEqual({
+      total: 2,
+      succeeded: 1,
+      failed: 1,
+      errors: [failure],
+    });
+  });
+
+  it("derives progress and badge variants without nested status branches", () => {
+    expect(progressForGoalStatus("completed", 12)).toBe(100);
+    expect(progressForGoalStatus("in_progress", 12)).toBe(50);
+    expect(progressForGoalStatus("in_progress", 80)).toBe(80);
+    expect(progressForGoalStatus("pending", 80)).toBe(0);
+    expect(goalStatusBadgeVariant("completed")).toBe("success");
+    expect(goalStatusBadgeVariant("in_progress")).toBe("warning");
+    expect(goalStatusBadgeVariant("pending")).toBe("default");
   });
 });

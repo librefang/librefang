@@ -223,6 +223,7 @@ class LibreFang:
 
         try:
             buffer = b""
+            data_lines = []
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
@@ -230,27 +231,40 @@ class LibreFang:
                 buffer += chunk
                 lines = buffer.split(b"\\n")
                 buffer = lines.pop()
-                for line in lines:
-                    line = line.decode().strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
+                for raw_line in lines:
+                    line = raw_line.decode().removesuffix("\\r")
+                    if not line:
+                        if not data_lines:
+                            continue
+                        data_str = "\\n".join(data_lines)
+                        data_lines.clear()
                         if data_str == "[DONE]":
                             return
                         try:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+                    elif line.startswith("data:"):
+                        value = line[5:]
+                        if value.startswith(" "):
+                            value = value[1:]
+                        data_lines.append(value)
             # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
             # Parse it here rather than dropping it; the loop above only fires on a newline.
             if buffer:
-                line = buffer.decode().strip()
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str != "[DONE]":
-                        try:
-                            yield json.loads(data_str)
-                        except json.JSONDecodeError:
-                            yield {"raw": data_str}
+                line = buffer.decode().removesuffix("\\r")
+                if line.startswith("data:"):
+                    value = line[5:]
+                    if value.startswith(" "):
+                        value = value[1:]
+                    data_lines.append(value)
+            if data_lines:
+                data_str = "\\n".join(data_lines)
+                if data_str != "[DONE]":
+                    try:
+                        yield json.loads(data_str)
+                    except json.JSONDecodeError:
+                        yield {"raw": data_str}
         except socket.timeout as e:
             raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:

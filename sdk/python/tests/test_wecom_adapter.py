@@ -499,6 +499,41 @@ async def test_on_send_recovers_req_id_from_user_librefang_user_when_cache_cold(
 
 
 @pytest.mark.asyncio
+async def test_on_send_consumes_restart_req_id_hint_once():
+    a = _adapter()
+    cmd = _FakeSend(
+        channel_id="alice",
+        text="hi",
+        user={
+            "platform_id": "alice",
+            "librefang_user": "req-id-from-inbound-42",
+        },
+    )
+
+    await a.on_send(cmd)
+    await a.on_send(cmd)
+
+    first = json.loads(a._send_queue.get_nowait())
+    second = json.loads(a._send_queue.get_nowait())
+    assert first["cmd"] == "aibot_respond_msg"
+    assert second["cmd"] == "aibot_send_msg"
+
+
+def test_cached_req_id_cannot_be_reused_later_as_hint():
+    a = _adapter()
+    with a._pending_lock:
+        a._pending_req_ids["alice"] = "req-99"
+
+    a._enqueue_text("alice", "first")
+    a._enqueue_text("alice", "second", req_id_hint="req-99")
+
+    first = json.loads(a._send_queue.get_nowait())
+    second = json.loads(a._send_queue.get_nowait())
+    assert first["cmd"] == "aibot_respond_msg"
+    assert second["cmd"] == "aibot_send_msg"
+
+
+@pytest.mark.asyncio
 async def test_on_send_in_memory_cache_wins_over_librefang_user():
     """The in-memory cache holds the FRESHEST req_id (the latest
     inbound's id) — it should take precedence over librefang_user

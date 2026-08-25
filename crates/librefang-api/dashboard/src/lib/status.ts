@@ -1,13 +1,15 @@
 import type { BadgeVariant } from "../components/ui/Badge";
 import type { ProviderItem } from "../api";
 
-const AVAILABLE_PROVIDERS = new Set([
+export const AVAILABLE_PROVIDER_STATUSES = [
   "configured",
   "validated_key",
   "not_required",
   "configured_cli",
   "auto_detected",
-]);
+] as const;
+
+const AVAILABLE_PROVIDERS = new Set<string>(AVAILABLE_PROVIDER_STATUSES);
 
 const STATUS_VARIANT_MAP = new Map<string, BadgeVariant>([
   ["running", "success"],
@@ -26,9 +28,12 @@ export function getStatusVariant(status?: string): BadgeVariant {
 }
 
 /** Check if a provider auth_status indicates the provider is usable.
- *  Mirrors the Rust AuthStatus::is_available() variants. */
+ *  Keep `AVAILABLE_PROVIDER_STATUSES` synchronized with
+ *  `AuthStatus::is_available()` in
+ *  `crates/librefang-types/src/model_catalog.rs`; the source-contract test
+ *  fails when the Rust variant set changes. */
 export function isProviderAvailable(status?: string): boolean {
-  return !!status && AVAILABLE_PROVIDERS.has(status);
+  return !!status && AVAILABLE_PROVIDERS.has(status.toLowerCase());
 }
 
 /** Check whether a provider is a coding-agent CLI passthrough (claude-code,
