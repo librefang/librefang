@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -592,6 +592,25 @@ fn draw_create(f: &mut Frame, area: Rect, state: &WorkflowState) {
                 ]),
             ]),
             chunks[6],
+        );
+    }
+
+    // The steps field is authored as one raw JSON blob, so the routing keys a
+    // step may carry are not discoverable from any control (#7724).
+    // `agent_type` in particular has no other mention on this screen: the
+    // placeholder can only show one binding at a time, and it shows
+    // `agent_name`.
+    if state.create_step == 2 {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    crate::i18n::t("tui-workflows-hint-steps"),
+                    Style::default().fg(theme::TEXT_TERTIARY),
+                ),
+            ]))
+            .wrap(Wrap { trim: true }),
+            chunks[7],
         );
     }
 

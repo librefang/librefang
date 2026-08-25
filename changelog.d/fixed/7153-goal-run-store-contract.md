@@ -1,1 +1,0 @@
-- Preserve goal run start times and validate deterministic persistence metadata. (#7153) (@houko)

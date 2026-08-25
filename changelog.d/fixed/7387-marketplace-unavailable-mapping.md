@@ -1,0 +1,6 @@
+A skill marketplace whose API host is retired while its CDN keeps serving answers `200 OK` with the site's single-page-app shell for every path, and the daemon used to pass that HTML to `serde_json` and surface the parser's `expected value at line 1 column 1` as the whole explanation.
+  Every ClawHub, ClawHub China mirror and Skillhub read now recognises a leading `<` — through a UTF-8 BOM, which CDN-fronted origins prepend often enough to matter — as "this hub is serving a webpage" and reports `503 Service Unavailable` with the operation and URL named.
+  The uniformity is the fix: skill detail previously answered `404`, asserting a skill does not exist when the hub never answered as a marketplace at all, and install answered `500`, whose body is scrubbed before it leaves the process, discarding the one message an operator could act on.
+  A truncated or corrupted body stays a network error, because that one is worth a retry and this one is not.
+  Each hub's endpoints are also overridable now, so a mirror can be adopted without recompiling; Skillhub takes three variables because it is three hosts, and setting only the API base would leave browse and install still aimed at the dead one.
+  (#7856) (@houko)

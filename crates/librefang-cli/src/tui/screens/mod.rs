@@ -13,6 +13,7 @@ pub mod hands;
 pub mod init_wizard;
 pub mod logs;
 pub mod memory;
+pub mod models;
 pub mod peers;
 pub mod security;
 pub mod sessions;

@@ -1,0 +1,1 @@
+- Scope dashboard passkey registration and revocation cache invalidation to passkey lists. (@xiaomo)

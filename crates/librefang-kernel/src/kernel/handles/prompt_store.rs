@@ -111,6 +111,24 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         Ok(())
     }
 
+    fn create_next_prompt_version(
+        &self,
+        version: &librefang_types::agent::PromptVersion,
+    ) -> Result<librefang_types::agent::PromptVersion, kernel_handle::KernelOpError> {
+        let cfg = self.config.load();
+        let store = self
+            .memory
+            .prompt_store
+            .get()
+            .ok_or(kernel_handle::KernelOpError::unavailable("Prompt store"))?;
+        let created = store.create_next_version(version.clone()).map_err(|e| {
+            kernel_handle::KernelOpError::Internal(format!("Failed to create version: {e}"))
+        })?;
+        let max = cfg.prompt_intelligence.max_versions_per_agent;
+        let _ = store.prune_old_versions(created.agent_id, max);
+        Ok(created)
+    }
+
     fn delete_prompt_version(&self, version_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         let id: uuid::Uuid = version_id.parse().map_err(|e| {
             kernel_handle::KernelOpError::Internal(format!("Invalid version ID: {e}"))

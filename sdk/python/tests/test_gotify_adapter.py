@@ -6,6 +6,7 @@ gotify adapter preserves the behaviour of the removed in-process
 Rust `librefang-channels::gotify` adapter.
 """
 
+import asyncio
 import io
 import json
 import os
@@ -112,6 +113,14 @@ def test_parse_frame_minimal_fields_defaulted():
     assert title == ""
     assert priority == 0
     assert app_id == 0
+
+
+def test_parse_frame_invalid_priority_defaults_without_dropping_message():
+    a = _adapter()
+    parsed = a._parse_frame(json.dumps({
+        "id": 1, "message": "hi", "priority": "not-a-number",
+    }))
+    assert parsed == (1, "hi", "", 0, 0)
 
 
 def test_parse_frame_bad_json_is_skipped():
@@ -371,6 +380,7 @@ def test_websocket_reader_handshake_and_text_frames():
     url = f"ws://{host}:{port}/stream?token=Cclient"
     out: list[str] = []
     with ga._WebSocketReader(url, handshake_timeout=5.0) as ws:
+        assert ws._sock.gettimeout() == ga.STREAM_READ_TIMEOUT_SECS
         for text in ws:
             out.append(text)
             if len(out) >= 2:
@@ -565,6 +575,75 @@ def test_websocket_reader_rejects_oversized_frame():
             for _ in ws:
                 pass
     t.join(timeout=3.0)
+
+
+class _BytesSocket:
+    def __init__(self, payload: bytes):
+        self.payload = bytearray(payload)
+        self.sent: list[bytes] = []
+
+    def recv(self, count):
+        out = bytes(self.payload[:count])
+        del self.payload[:count]
+        return out
+
+    def sendall(self, payload):
+        self.sent.append(payload)
+
+
+def test_websocket_reader_caps_reassembled_message(monkeypatch):
+    monkeypatch.setattr(ga, "MAX_FRAME_PAYLOAD", 5)
+    # Fragmented text: "abc" + "def". Each frame is under the cap,
+    # but the complete six-byte message is not.
+    wire = bytes([0x01, 3]) + b"abc" + bytes([0x80, 3]) + b"def"
+    reader = ga._WebSocketReader("ws://example.test")
+    reader._sock = _BytesSocket(wire)
+    with pytest.raises(RuntimeError, match="reassembled message exceeds cap"):
+        list(reader)
+
+
+def test_websocket_reader_rejects_fragmented_control_frame():
+    reader = ga._WebSocketReader("ws://example.test")
+    reader._sock = _BytesSocket(bytes([0x09, 0]))  # FIN=0, ping
+    with pytest.raises(RuntimeError, match="control frame"):
+        list(reader)
+
+
+@pytest.mark.asyncio
+async def test_produce_cancellation_closes_active_reader(monkeypatch):
+    entered = threading.Event()
+    closed = threading.Event()
+    worker_exited = threading.Event()
+
+    class _BlockingReader:
+        def __init__(self, _url):
+            pass
+
+        def __enter__(self):
+            entered.set()
+            return self
+
+        def __exit__(self, *_exc):
+            self.close()
+
+        def __iter__(self):
+            closed.wait(timeout=2.0)
+            worker_exited.set()
+            return
+            yield  # pragma: no cover — makes this a generator
+
+        def close(self):
+            closed.set()
+
+    monkeypatch.setattr(ga, "_WebSocketReader", _BlockingReader)
+    adapter = _adapter()
+    task = asyncio.create_task(adapter.produce(lambda _event: None))
+    assert await asyncio.to_thread(entered.wait, 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
+    assert await asyncio.to_thread(worker_exited.wait, 1.0)
 
 
 # ---- account_id surfaced via ready_event --------------------------

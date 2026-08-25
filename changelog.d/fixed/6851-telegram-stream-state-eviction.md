@@ -1,1 +1,0 @@
-- Bounded Telegram streaming state with stale-entry eviction, concurrent-stream and per-stream buffer caps, and graceful-shutdown cleanup. (@houko)

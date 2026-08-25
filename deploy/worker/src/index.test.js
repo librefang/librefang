@@ -5,6 +5,11 @@ import worker, { createWorker } from './index.js';
 
 function successfulFlyFetches(onMachineRequest = () => {}) {
   return async (url, options = {}) => {
+    if (String(url) === 'https://api.fly.io/graphql') {
+      return Response.json({
+        data: { allocateIPAddress: { ipAddress: { address: '203.0.113.1' } } },
+      });
+    }
     if (String(url).endsWith('/machines')) {
       onMachineRequest(JSON.parse(options.body));
       return new Response(JSON.stringify({ id: 'machine-1' }), { status: 200 });
@@ -71,6 +76,11 @@ test('deploy rejects a missing caller OpenRouter key before contacting Fly', asy
 test('machine creation errors never reflect the caller OpenRouter key', async () => {
   const callerKey = 'user-openrouter-key-must-not-return';
   const testWorker = createWorker(async (url) => {
+    if (String(url) === 'https://api.fly.io/graphql') {
+      return Response.json({
+        data: { allocateIPAddress: { ipAddress: { address: '203.0.113.1' } } },
+      });
+    }
     if (String(url).endsWith('/machines')) {
       return new Response(`invalid env OPENROUTER_API_KEY=${callerKey}`, {
         status: 400,
@@ -91,3 +101,53 @@ test('machine creation errors never reflect the caller OpenRouter key', async ()
   assert.ok(!responseText.includes(callerKey));
   assert.ok(!responseText.includes('OPENROUTER_API_KEY='));
 });
+
+test('GraphQL allocation errors delete the partially created app', async () => {
+  const requests = [];
+  const testWorker = createWorker(async (url, options = {}) => {
+    requests.push([String(url), options.method || 'GET', options]);
+    if (String(url) === 'https://api.fly.io/graphql') {
+      return Response.json({ errors: [{ message: 'allocation failed' }] });
+    }
+    return new Response('{}', { status: 200 });
+  });
+
+  const response = await deploy(testWorker);
+  const appCreate = requests.find(([url, method]) => url.endsWith('/apps') && method === 'POST');
+  const appName = JSON.parse(appCreate[2].body).app_name;
+
+  assert.equal(response.status, 500);
+  assert.ok(requests.some(([url, method]) => url.endsWith(`/apps/${appName}`) && method === 'DELETE'));
+  assert.ok(!requests.some(([url]) => url.endsWith('/volumes')));
+});
+
+test('machine creation failure deletes the partially created app', async () => {
+  const requests = [];
+  const testWorker = createWorker(async (url, options = {}) => {
+    requests.push([String(url), options.method || 'GET', options]);
+    if (String(url) === 'https://api.fly.io/graphql') {
+      return Response.json({
+        data: { allocateIPAddress: { ipAddress: { address: '203.0.113.1' } } },
+      });
+    }
+    if (String(url).endsWith('/machines')) {
+      return new Response('machine failed', { status: 500 });
+    }
+    return new Response('{}', { status: 200 });
+  });
+
+  const response = await deploy(testWorker);
+  const appRequest = requests.find(([url, method]) => url.endsWith('/apps') && method === 'POST');
+  const appName = JSON.parse(appRequest[2].body).app_name;
+
+  assert.equal(response.status, 500);
+  assert.ok(requests.some(([url, method]) => url.endsWith(`/apps/${appName}`) && method === 'DELETE'));
+});
+
+function deploy(testWorker) {
+  return testWorker.fetch(new Request('https://deploy.librefang.ai/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: 'fly-user-token', openrouterApiKey: 'openrouter-key' }),
+  }));
+}

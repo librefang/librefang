@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatDate, formatDateTime, formatRelativeTime, formatTime, formatUptime } from "./datetime";
 
 describe("date formatting", () => {
@@ -27,6 +27,14 @@ describe("date formatting", () => {
     const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
     expect(formatRelativeTime(2 * 60 * 60 * 1_000, "en", 0)).toBe(rtf.format(2, "hour"));
     expect(formatRelativeTime(2 * 24 * 60 * 60 * 1_000, "en", 0)).toBe(rtf.format(2, "day"));
+  });
+
+  it("uses the browser locale when no locale is supplied", () => {
+    vi.stubGlobal("navigator", { language: "fr" });
+    const expected = new Intl.RelativeTimeFormat("fr", { numeric: "auto" })
+      .format(-2, "minute");
+    expect(formatRelativeTime(0, undefined, 120_000)).toBe(expected);
+    vi.unstubAllGlobals();
   });
 });
 

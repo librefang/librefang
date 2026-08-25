@@ -35,7 +35,7 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
     // existing [[mcp_servers]] entry (including edited transport/env/oauth)
     // because upsert_mcp_server_local replaces by name. Users should remove
     // first if they want to re-install.
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
     if config_path.is_file() {
         let content = match std::fs::read_to_string(&config_path) {
             Ok(c) => c,
@@ -119,7 +119,7 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
     };
 
     // Persist the new [[mcp_servers]] entry directly into config.toml.
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
     if let Err(e) = upsert_mcp_server_local(&config_path, &result.server) {
         ui::error(&i18n::t_args(
             "mcp-failed-write-config",
@@ -159,8 +159,7 @@ pub(crate) fn cmd_mcp_add(name: &str, key: Option<&str>) {
 }
 
 pub(crate) fn cmd_mcp_remove(name: &str) {
-    let home = librefang_home();
-    let config_path = home.join("config.toml");
+    let config_path = cli_config_path();
 
     // Resolve by template_id first, fall back to server name.
     let target_name: Option<String> = {
@@ -219,7 +218,7 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
 
     // Installed state comes from config.mcp_servers' template_id field.
     let installed_template_ids: std::collections::HashSet<String> = {
-        let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+        let raw = std::fs::read_to_string(cli_config_path()).unwrap_or_default();
         toml::from_str::<toml::Value>(&raw)
             .ok()
             .and_then(|v| v.as_table().cloned())
@@ -304,8 +303,7 @@ pub(crate) fn cmd_mcp_catalog(query: Option<&str>) {
 }
 
 pub(crate) fn cmd_mcp_list() {
-    let home = librefang_home();
-    let raw = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let raw = std::fs::read_to_string(cli_config_path()).unwrap_or_default();
     let doc: toml::Value = toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
     let servers = doc
         .as_table()

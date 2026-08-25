@@ -5,7 +5,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   RefreshCw, Save, Zap, Settings, Search, RotateCcw,
-  AlertTriangle, X, Copy, Check, FileText,
+  AlertTriangle, X, Copy, Check, FileText, Lock,
 } from "lucide-react";
 import {
   type ConfigSchemaRoot,
@@ -16,6 +16,7 @@ import {
 } from "../api";
 import {
   useConfigSchema,
+  useConfigStatus,
   useFullConfig,
   useRawConfigToml,
 } from "../lib/queries/config";
@@ -661,11 +662,15 @@ export function ConfigPage({ category }: { category: string }) {
 
   const schemaQuery = useConfigSchema();
   const configQuery = useFullConfig();
+  const statusQuery = useConfigStatus();
 
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [saveStatus, setSaveStatus] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [searchQuery, setSearchQuery] = useState("");
-  const [reloadStatus, setReloadStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [reloadStatus, setReloadStatus] = useState<{
+    kind: "success" | "warning" | "error";
+    msg: string;
+  } | null>(null);
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [showRawToml, setShowRawToml] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -691,6 +696,14 @@ export function ConfigPage({ category }: { category: string }) {
     () => new Set(schemaRoot?.["x-non-writable"] ?? []),
     [schemaRoot],
   );
+
+  // Managed mode (#6695): the deployment owns config.toml and every write endpoint answers `423 config_managed`.
+  // This is the whole-file counterpart of `nonWritablePaths` above — same remedy, wider scope — and it is derived the same way, from server-reported state rather than from a failed save.
+  //
+  // Default to **writable** while the status query is in flight or has failed.
+  // The lock is enforced server-side, so an optimistic UI costs at worst one honest `423` on save; a pessimistic one would grey out every control on an older daemon whose `/api/config/status` 404s, which is a far worse failure and one the operator cannot diagnose.
+  const isManaged = statusQuery.data?.writable === false;
+  const managedSource = statusQuery.data?.source ?? "";
 
   const resolvedFields = useMemo<Record<string, Array<[string, FieldRender]>>>(() => {
     const out: Record<string, Array<[string, FieldRender]>> = {};
@@ -725,6 +738,15 @@ export function ConfigPage({ category }: { category: string }) {
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [hasPendingChanges]);
+
+  // Drop pending edits once the daemon reports managed mode (#6695).
+  //
+  // Fields render editable until `/api/config/status` answers, so an operator who starts typing immediately can accumulate changes that turn out to be unsavable.
+  // Leaving them would strand a navigation blocker and a `beforeunload` prompt behind a "Save All" bar that is no longer on screen — a dialog with no visible way to satisfy it.
+  // Discarding is the honest resolution: nothing here can be persisted, and the banner that appears in the same commit says why.
+  useEffect(() => {
+    if (isManaged) setPendingChanges({});
+  }, [isManaged]);
 
   const blocker = useBlocker({
     shouldBlockFn: () => hasPendingChanges,
@@ -924,11 +946,25 @@ export function ConfigPage({ category }: { category: string }) {
   );
 
   const reloadMutation = useReloadConfig({
-    onSuccess: () => {
-      setReloadStatus({ ok: true, msg: t("config.reload_success", "Config reloaded") });
+    onSuccess: (data) => {
+      const details = [
+        ...(data.warnings ?? []),
+        ...(data.restart_required ? (data.restart_reasons ?? []) : []),
+      ].filter(Boolean);
+      const isPartial = data.status === "partial"
+        || data.restart_required === true
+        || details.length > 0;
+      setReloadStatus({
+        kind: isPartial ? "warning" : "success",
+        msg: details.length > 0
+          ? `${t("runtime.reload_success", { status: data.status })} — ${details.join(" ")}`
+          : isPartial
+            ? t("runtime.reload_success", { status: data.status })
+            : t("config.reload_success", "Config reloaded"),
+      });
     },
     onError: (err: Error) => {
-      setReloadStatus({ ok: false, msg: err.message });
+      setReloadStatus({ kind: "error", msg: err.message });
     },
   });
 
@@ -1036,7 +1072,13 @@ export function ConfigPage({ category }: { category: string }) {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {reloadStatus && (
-            <span className={`text-xs font-semibold ${reloadStatus.ok ? "text-success" : "text-danger"}`}>
+            <span className={`text-xs font-semibold ${
+              reloadStatus.kind === "success"
+                ? "text-success"
+                : reloadStatus.kind === "warning"
+                  ? "text-warning"
+                  : "text-danger"
+            }`}>
               {reloadStatus.msg}
             </span>
           )}
@@ -1044,12 +1086,47 @@ export function ConfigPage({ category }: { category: string }) {
             <FileText className="w-3 h-3 mr-1.5" />
             {t("config.view_raw_toml", "View Raw TOML")}
           </Button>
+          {/* Reload survives managed mode — it re-reads the file, which is a read. */}
           <Button variant="secondary" size="sm" onClick={() => reloadMutation.mutate()} isLoading={reloadMutation.isPending}>
             <RefreshCw className="w-3 h-3 mr-1.5" />
             {t("config.reload", "Reload")}
           </Button>
         </div>
       </div>
+
+      {/* Managed-mode banner (#6695).
+          Every field below is rendered inert, so without this the page would look like a UI that had simply stopped responding.
+          The banner names the file the deployment owns and the checksum over its bytes, which is what an operator needs to confirm a rollout actually replaced it. */}
+      {isManaged && (
+        <div
+          role="status"
+          data-testid="managed-config-banner"
+          className="flex items-start gap-2.5 rounded-2xl border border-warning/30 bg-warning/5 px-4 py-3"
+        >
+          <Lock className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-warning leading-tight">
+              {t("config.managed_title", "Configuration is managed by the deployment")}
+            </p>
+            <p className="text-[11px] text-text-dim leading-relaxed mt-1">
+              {t(
+                "config.managed_body",
+                "Settings are shown read-only. Change them at the source — the ConfigMap, bind mount, or configuration-management system that owns this file — and roll the daemon.",
+              )}
+            </p>
+            {managedSource && (
+              <p className="text-[10px] text-text-dim font-mono leading-tight mt-1.5 break-all">
+                {managedSource}
+              </p>
+            )}
+            {statusQuery.data?.checksum && (
+              <p className="text-[10px] text-text-dim font-mono leading-tight mt-0.5 break-all">
+                {statusQuery.data.checksum}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Row 1.5: category tabs — all 7 categories reachable from any /config
           page. Closes #4678: previously the sidebar only had a single Config
@@ -1224,7 +1301,9 @@ export function ConfigPage({ category }: { category: string }) {
                   // Section-qualified key first, bare leaf name as fallback.
                   // Keying on the leaf alone made every `mode` field in the config — exec_policy, reload, docker, privacy, sanitize — render the root-level `mode` description ("Kernel operating mode"), which is wrong for all five.
                   // Most leaf names are genuinely section-neutral (`enabled`, `timeout_secs`, `model`), so the fallback keeps them on one string and only the ambiguous ones need a qualified entry.
-                  const readOnly = nonWritablePaths.has(path);
+                  // Two independent reasons a control is not offered as editable, folded into one flag for the render but kept distinct for the explanation below it: this path is never dashboard-writable, or this whole file is owned by the deployment.
+                  const pathNotWritable = nonWritablePaths.has(path);
+                  const readOnly = isManaged || pathNotWritable;
                   const fieldDesc =
                     t(`config.desc_${sKey}_${fieldKey}`, "") || t(`config.desc_${fieldKey}`, "");
                   const fieldLabel =
@@ -1293,11 +1372,20 @@ export function ConfigPage({ category }: { category: string }) {
                           />
                         </div>
                         {readOnly && (
-                          <p className="text-[10px] text-warning leading-relaxed">
-                            {t(
-                              "config.read_only_field",
-                              "Not editable from the dashboard — change it in config.toml and reload.",
-                            )}
+                          <p
+                            className="text-[10px] text-warning leading-relaxed"
+                            data-testid={`locked-reason-${path}`}
+                          >
+                            {/* Managed mode wins the message when both apply: "change it in config.toml" is actively wrong advice for a file the deployment owns and the next rollout overwrites. */}
+                            {isManaged
+                              ? t(
+                                  "config.managed_field",
+                                  "Locked — this daemon's configuration is owned by the deployment.",
+                                )
+                              : t(
+                                  "config.read_only_field",
+                                  "Not editable from the dashboard — change it in config.toml and reload.",
+                                )}
                           </p>
                         )}
                         {fieldDesc && (
@@ -1344,8 +1432,9 @@ export function ConfigPage({ category }: { category: string }) {
         })}
       </div>
 
-      {/* Sticky unsaved changes bar */}
-      {hasPendingChanges && (
+      {/* Sticky unsaved changes bar.
+          Suppressed in managed mode: every field is inert so nothing can become pending through the UI, and offering "Save All" for a batch that can only answer `423` is the exact failure this page is being changed to remove. */}
+      {hasPendingChanges && !isManaged && (
         <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none pb-safe">
           <div className="mb-5 flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-warning/30 bg-surface shadow-lg pointer-events-auto">
             <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />

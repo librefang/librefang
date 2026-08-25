@@ -154,6 +154,16 @@ Two dispatch details matter for a multi-step display:
   The two indicators have independent switches: `SLACK_REACTIONS` for the receipt and `SLACK_PROGRESS_CARD` for the card (#6730).
   The card's default follows `SLACK_REACTIONS`, so an operator who set `SLACK_REACTIONS=false` for silence keeps it, but either can now be turned off without the other.
 
+### Inbound attachments and `header_rules`
+
+An adapter whose platform serves media behind an authenticated URL forwards the URL, not the bytes, and declares `header_rules` in its `ready` event so the daemon can fetch it.
+The daemon's `fetch_headers_for` (`crates/librefang-channels/src/sidecar.rs`) exact-matches the request host against those rules and attaches nothing for a host that is not in them, which is what makes it safe to hand it a credential: a URL chosen by a platform user cannot pull the token along with it.
+Matrix uses this for MSC3916 media; the Slack sidecar uses it for `url_private_download` (#7087), pinning the rules — and its own acceptance check on every inbound file URL — to Slack's file hosts.
+
+Forwarding the URL rather than inlining bytes is not a size optimization.
+`download_media_blocks` in `bridge.rs` is what turns an inbound `Image` / `File` / `Voice` / `Audio` / `Video` URL into a vision image block, a saved document path, or an audio transcription; its match has no `FileData` arm, so an inbound `FileData` is rendered as a `[User sent a local file: …]` placeholder and its payload discarded.
+An adapter that inlines inbound bytes therefore delivers nothing the agent can act on.
+
 ## Supervision
 
 The supervisor owns the (re)spawn loop. State machine:

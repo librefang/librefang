@@ -7,7 +7,7 @@
 // without inline fetch handling.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getEffectivePermissions } from "../http/client";
+import { ApiError, getEffectivePermissions } from "../http/client";
 import { authzKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -22,7 +22,12 @@ export const authzQueries = {
       staleTime: STALE_MS,
       // Don't retry 404s (unknown user) or 403s (caller not admin) — they
       // are deterministic and a refetch storm just hides the message.
-      retry: false,
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+          return false;
+        }
+        return failureCount < 3;
+      },
     }),
 };
 
@@ -30,5 +35,8 @@ export function useEffectivePermissions(
   name: string,
   options: QueryOverrides = {},
 ) {
-  return useQuery(withOverrides(authzQueries.effective(name), options));
+  return useQuery(withOverrides(authzQueries.effective(name), {
+    ...options,
+    enabled: Boolean(name) && options.enabled !== false,
+  }));
 }
