@@ -51,7 +51,8 @@ impl TraceStore {
                 success         INTEGER NOT NULL,
                 error           TEXT,
                 input_preview   TEXT,
-                output_preview  TEXT
+                output_preview  TEXT,
+                annotations     TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_started_at      ON hook_traces(started_at);
             CREATE INDEX IF NOT EXISTS idx_plugin_hook     ON hook_traces(plugin, hook);
@@ -59,6 +60,21 @@ impl TraceStore {
             CREATE INDEX IF NOT EXISTS idx_correlation_id  ON hook_traces(correlation_id);
             ",
         )?;
+        let has_annotations = {
+            let mut stmt = conn.prepare("PRAGMA table_info(hook_traces)")?;
+            let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut found = false;
+            for column in columns {
+                if column? == "annotations" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_annotations {
+            conn.execute("ALTER TABLE hook_traces ADD COLUMN annotations TEXT", [])?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS circuit_breaker_states (
                 key        TEXT PRIMARY KEY,
@@ -107,12 +123,16 @@ impl TraceStore {
             .output_preview
             .as_ref()
             .and_then(|v| serde_json::to_string(v).ok());
+        let annotations = trace
+            .annotations
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
 
         let inserted = conn
             .execute(
                 "INSERT INTO hook_traces \
-                 (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, input_preview, output_preview, annotations) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     trace.trace_id,
                     trace.correlation_id,
@@ -124,6 +144,7 @@ impl TraceStore {
                     trace.error,
                     input_preview,
                     output_preview,
+                    annotations,
                 ],
             )
             .is_ok();
@@ -180,7 +201,7 @@ impl TraceStore {
 
         let sql = format!(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
-             input_preview, output_preview \
+             input_preview, output_preview, annotations \
              FROM hook_traces {where_clause} ORDER BY id DESC LIMIT {limit}"
         );
 
@@ -190,6 +211,7 @@ impl TraceStore {
             params.iter().map(|p| p.as_ref()).collect();
 
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let annotations = optional_json_column(row, 10)?;
             Ok(serde_json::json!({
                 "trace_id":        row.get::<_, String>(0)?,
                 "correlation_id":  row.get::<_, String>(1)?,
@@ -201,6 +223,7 @@ impl TraceStore {
                 "error":           row.get::<_, Option<String>>(7)?,
                 "input_preview":   row.get::<_, Option<String>>(8)?,
                 "output_preview":  row.get::<_, Option<String>>(9)?,
+                "annotations":     annotations,
             }))
         })?;
         rows.collect()
@@ -213,9 +236,10 @@ impl TraceStore {
         let conn = self.lock_connection();
         conn.query_row(
             "SELECT trace_id, correlation_id, plugin, hook, started_at, elapsed_ms, success, error, \
-             input_preview, output_preview FROM hook_traces WHERE trace_id = ?1",
+             input_preview, output_preview, annotations FROM hook_traces WHERE trace_id = ?1",
             [trace_id],
             |row| {
+                let annotations = optional_json_column(row, 10)?;
                 Ok(serde_json::json!({
                     "trace_id":       row.get::<_, String>(0)?,
                     "correlation_id": row.get::<_, String>(1)?,
@@ -227,6 +251,7 @@ impl TraceStore {
                     "error":          row.get::<_, Option<String>>(7)?,
                     "input_preview":  row.get::<_, Option<String>>(8)?,
                     "output_preview": row.get::<_, Option<String>>(9)?,
+                    "annotations":    annotations,
                 }))
             },
         )
@@ -318,6 +343,23 @@ impl TraceStore {
     }
 }
 
+fn optional_json_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<serde_json::Value>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +400,66 @@ mod tests {
         assert_eq!(store.count(None, true).unwrap(), 1);
         assert_eq!(store.count(Some("my-plugin"), false).unwrap(), 2);
         assert_eq!(store.count(Some("other-plugin"), false).unwrap(), 0);
+    }
+
+    #[test]
+    fn annotations_survive_legacy_schema_migration_and_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("traces.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE hook_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id TEXT NOT NULL DEFAULT '',
+                    correlation_id TEXT NOT NULL DEFAULT '',
+                    plugin TEXT NOT NULL,
+                    hook TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    elapsed_ms INTEGER NOT NULL,
+                    success INTEGER NOT NULL,
+                    error TEXT,
+                    input_preview TEXT,
+                    output_preview TEXT
+                );
+                INSERT INTO hook_traces (
+                    trace_id, correlation_id, plugin, hook, started_at,
+                    elapsed_ms, success
+                ) VALUES (
+                    'legacy0000000000', '', 'legacy-plugin', 'legacy-hook',
+                    '2026-04-06T00:00:00Z', 7, 1
+                );",
+            )
+            .unwrap();
+        }
+
+        let annotations = serde_json::json!({
+            "decision": "keep",
+            "scores": [0.25, 0.75],
+            "nested": {"source": "hook"}
+        });
+        {
+            let store = TraceStore::open(&db_path).unwrap();
+            let legacy = store
+                .query_by_trace_id("legacy0000000000")
+                .unwrap()
+                .expect("legacy trace should survive migration");
+            assert!(legacy["annotations"].is_null());
+
+            let mut trace = make_trace("annotated", true);
+            trace.annotations = Some(annotations.clone());
+            store.insert_blocking("plugin-a", &trace);
+
+            let queried = store.query(None, None, 10, false).unwrap();
+            assert_eq!(queried[0]["annotations"], annotations);
+        }
+
+        let reopened = TraceStore::open(&db_path).unwrap();
+        let trace = reopened
+            .query_by_trace_id("test000000000000")
+            .unwrap()
+            .expect("trace should survive reopen");
+        assert_eq!(trace["annotations"], annotations);
     }
 
     #[test]

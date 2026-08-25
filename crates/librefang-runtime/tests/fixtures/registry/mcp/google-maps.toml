@@ -5,6 +5,15 @@ category = "data"
 icon = "🗺️"
 tags = ["maps", "geocoding", "directions", "places", "google", "location"]
 
+setup_instructions = """
+1. Go to https://console.cloud.google.com
+2. Enable: Geocoding API, Directions API, Places API, Distance Matrix API
+3. Create credentials → API Key
+4. Paste the key into the field above
+
+Free tier includes $200/month credit (~40,000 geocoding requests).
+"""
+
 [transport]
 type = "stdio"
 command = "npx"
@@ -20,16 +29,6 @@ get_url = "https://console.cloud.google.com/apis/credentials"
 [health_check]
 interval_secs = 120
 unhealthy_threshold = 3
-
-setup_instructions = """
-1. Go to https://console.cloud.google.com
-2. Enable: Geocoding API, Directions API, Places API, Distance Matrix API
-3. Create credentials → API Key
-4. Paste the key into the field above
-
-Free tier includes $200/month credit (~40,000 geocoding requests).
-"""
-
 
 [i18n.zh]
 name = "Google Maps"

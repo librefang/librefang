@@ -108,38 +108,113 @@ pub(crate) fn cmd_workflow_create(file: PathBuf) {
     }
 }
 
+/// How long the daemon may hold `POST /api/workflows/{id}/run` open before it hands the run back as a background task.
+///
+/// `?wait=true` on its own selects the fully synchronous branch of `run_workflow`, whose own comment records that the run is owned by the request: the CLI's client gives up after 120 s (`daemon_client`) and a step defaults to a 120 s timeout of its own, so any multi-step workflow would disconnect mid-run and take the run with it.
+/// Passing `timeout_ms` selects the branch that spawns the run as its own task, so a workflow that outlives the wait keeps going and we report its id instead.
+/// 90 s leaves 30 s of the client budget for the response itself.
+const WORKFLOW_RUN_WAIT_MS: u64 = 90_000;
+
+/// The wait we ask the daemon for has to expire before our own client gives up, or the 202-with-`run_id` path is unreachable and a slow run comes back as a disconnect that the operator reads as a failure.
+const _: () = assert!(
+    WORKFLOW_RUN_WAIT_MS < 120_000,
+    "daemon_client() times out at 120 s; a longer wait can never return 202"
+);
+
+/// What `librefang workflow run` should report for one response from `POST /api/workflows/{id}/run`.
+///
+/// Split out of [`cmd_workflow_run`] so the mapping from response shape to exit code is unit-testable — the command itself ends in `std::process::exit`, which is why the original inversion (every launch reported as a failure) had no test that could have caught it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WorkflowRunOutcome<'a> {
+    /// The run finished inside the wait window; carries its output.
+    Completed { run_id: &'a str, output: &'a str },
+    /// The daemon accepted the run and it is still going.
+    /// A launch is not a failure, so this exits 0 and prints the id the operator can poll.
+    Accepted { run_id: &'a str },
+    /// The run, or the request, failed.
+    /// Carries the most specific message the body offers, or an empty string when it offers none.
+    Failed { error: &'a str },
+}
+
+/// Pick the most specific failure message a workflow-run body carries.
+///
+/// Three shapes reach here and only one of them puts the sentence in `error`.
+/// The timed-wait branch answers 422 with `{"error":"workflow_failed","detail":"<why>"}`, where `error` is a machine code and `detail` is what an operator needs.
+/// `ApiErrorResponse` (404, 400) serializes `error` as a nested `{code, message}` envelope and mirrors the sentence in a flat `message`.
+/// Older hand-rolled bodies put it in a plain `error` string.
+fn workflow_run_failure_detail(body: &serde_json::Value) -> &str {
+    [
+        &body["detail"],
+        &body["message"],
+        &body["error"]["message"],
+        &body["error"],
+    ]
+    .into_iter()
+    .filter_map(|value| value.as_str())
+    .map(str::trim)
+    .find(|s| !s.is_empty())
+    .unwrap_or_default()
+}
+
+/// Classify a workflow-run response by its HTTP status first, and only then by the fields in its body.
+///
+/// Gating on `body["output"]` alone is what made every successful launch print "Unknown error" and exit 1: a 202 carries no `output` by design, because the run has not finished.
+pub(crate) fn classify_workflow_run(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+) -> WorkflowRunOutcome<'_> {
+    if !status.is_success() {
+        return WorkflowRunOutcome::Failed {
+            error: workflow_run_failure_detail(body),
+        };
+    }
+    let run_id = body["run_id"].as_str().unwrap_or("?");
+    match body["output"].as_str() {
+        Some(output) => WorkflowRunOutcome::Completed { run_id, output },
+        None => WorkflowRunOutcome::Accepted { run_id },
+    }
+}
+
 pub(crate) fn cmd_workflow_run(workflow_id: &str, input: &str) {
     let base = require_daemon("workflow run");
     let client = daemon_client();
-    let body = daemon_json(
+    let (status, body) = daemon_json_checked(
         client
-            .post(format!("{base}/api/workflows/{workflow_id}/run"))
+            .post(format!(
+                "{base}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
+            ))
             .json(&serde_json::json!({"input": input}))
             .send(),
     );
 
-    if let Some(output) = body["output"].as_str() {
-        println!("{}", i18n::t("automation-workflow-completed"));
-        println!(
-            "{}",
-            i18n::t_args(
-                "automation-workflow-run-id",
-                &[("id", body["run_id"].as_str().unwrap_or("?"))]
-            )
-        );
-        println!("  Output:\n{output}");
-    } else {
-        let err_msg = body["error"].as_str().unwrap_or("Unknown error");
-        let err_localized = if err_msg == "Unknown error" {
-            i18n::t("error-unknown")
-        } else {
-            err_msg.to_string()
-        };
-        eprintln!(
-            "{}",
-            i18n::t_args("automation-workflow-failed", &[("error", &err_localized)])
-        );
-        std::process::exit(1);
+    match classify_workflow_run(status, &body) {
+        WorkflowRunOutcome::Completed { run_id, output } => {
+            println!("{}", i18n::t("automation-workflow-completed"));
+            println!(
+                "{}",
+                i18n::t_args("automation-workflow-run-id", &[("id", run_id)])
+            );
+            println!("  Output:\n{output}");
+        }
+        WorkflowRunOutcome::Accepted { run_id } => {
+            println!("{}", i18n::t("automation-workflow-still-running"));
+            println!(
+                "{}",
+                i18n::t_args("automation-workflow-run-id", &[("id", run_id)])
+            );
+        }
+        WorkflowRunOutcome::Failed { error } => {
+            let err_localized = if error.is_empty() {
+                i18n::t("error-unknown")
+            } else {
+                error.to_string()
+            };
+            eprintln!(
+                "{}",
+                i18n::t_args("automation-workflow-failed", &[("error", &err_localized)])
+            );
+            std::process::exit(1);
+        }
     }
 }
 
@@ -721,5 +796,93 @@ pub(crate) fn cmd_cron_toggle(id: &str, enable: bool) {
             "cron-toggled",
             &[("id", id), ("action", endpoint)],
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    /// The bug in #7825: the default arm of `run_workflow` answers 202 with a body carrying only `run_id`, and the command read `output` from it.
+    /// Every successful launch printed "Unknown error" and exited 1, so any script gating on the exit code saw a failure on every run.
+    #[test]
+    fn an_accepted_run_is_not_a_failure() {
+        let body = serde_json::json!({"run_id": "3f1c-run"});
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::ACCEPTED, &body),
+            WorkflowRunOutcome::Accepted { run_id: "3f1c-run" },
+            "a 202 must exit 0 and name the run, not report a failure"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_reports_its_output() {
+        let body =
+            serde_json::json!({"run_id": "3f1c-run", "output": "hello", "status": "completed"});
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::OK, &body),
+            WorkflowRunOutcome::Completed {
+                run_id: "3f1c-run",
+                output: "hello",
+            }
+        );
+    }
+
+    /// The mirror-image half: a run that really failed must exit non-zero, and must show the reason rather than the `workflow_failed` machine code the route puts in `error`.
+    #[test]
+    fn a_failed_run_surfaces_its_detail_not_the_machine_code() {
+        let body = serde_json::json!({
+            "error": "workflow_failed",
+            "detail": "step 'draft': agent 'writer' not found",
+        });
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::UNPROCESSABLE_ENTITY, &body),
+            WorkflowRunOutcome::Failed {
+                error: "step 'draft': agent 'writer' not found",
+            }
+        );
+    }
+
+    #[test]
+    fn a_generic_client_error_falls_back_to_the_error_field() {
+        let body = serde_json::json!({"error": "Workflow 'nope' not found"});
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::NOT_FOUND, &body),
+            WorkflowRunOutcome::Failed {
+                error: "Workflow 'nope' not found",
+            }
+        );
+    }
+
+    /// `ApiErrorResponse` (a 404 for an unknown workflow, a 400 for a bad id) serializes `error` as a `{code, message}` envelope, so reading `error` as a string finds nothing and the operator would be told "Unknown error" about a workflow the daemon named precisely.
+    #[test]
+    fn a_nested_error_envelope_still_yields_its_message() {
+        let body = serde_json::json!({
+            "error": {"code": "not_found", "message": "Workflow 'nope' not found"},
+            "message": "Workflow 'nope' not found",
+        });
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::NOT_FOUND, &body),
+            WorkflowRunOutcome::Failed {
+                error: "Workflow 'nope' not found",
+            }
+        );
+    }
+
+    /// A 5xx with an unparseable body still has to exit non-zero; the empty message is what `cmd_workflow_run` replaces with the localized `error-unknown`.
+    #[test]
+    fn a_bodyless_server_error_is_still_a_failure() {
+        let body = serde_json::Value::Null;
+
+        assert_eq!(
+            classify_workflow_run(StatusCode::INTERNAL_SERVER_ERROR, &body),
+            WorkflowRunOutcome::Failed { error: "" }
+        );
     }
 }

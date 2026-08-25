@@ -89,6 +89,11 @@ allowed_tools = ["memory_*"]
 
 With this in place the RBAC gate returns `Allow` for `memory_*`, so approval is no longer forced and the `trusted_senders` bypass applies on top exactly as designed.
 
+The binding is now **enforced**, not merely consulted (#7744).
+An authenticated caller below `Admin` may only assert a `sender_id` that resolves back to themselves through their own `channel_bindings`; anything else is silently replaced with their authenticated identity on the `api` channel, and the request still succeeds.
+So the `ops-bot` recipe above keeps working, while a `User`-role bearer can no longer put another user's platform id in the request body and inherit that user's role, tool policy and peer memory.
+`Admin` and above are exempt, because an operator impersonating a user for support, or a gateway relaying real platform users, is a legitimate use of the field.
+
 If no `[[users]]` are configured at all, RBAC is inactive — the per-user gate returns `Allow` for every sender — and `trusted_senders` works standalone with no extra setup.
 
 ---

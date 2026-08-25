@@ -12,7 +12,7 @@ export function EveryApiPartnerLink({ collapsed }: { collapsed: boolean }) {
       target="_blank"
       rel="noopener noreferrer"
       title={collapsed ? t("partner.everyapi_label") : undefined}
-      aria-label={t("partner.everyapi_label")}
+      aria-label={collapsed ? t("partner.everyapi_label") : undefined}
       className={`mx-2 mb-2 flex min-h-10 items-center rounded-lg border border-brand/20 bg-brand/5 text-text-dim transition-colors hover:border-brand/40 hover:bg-brand/10 hover:text-brand ${
         collapsed ? "justify-center px-0" : "gap-2.5 px-3"
       }`}
@@ -25,6 +25,7 @@ export function EveryApiPartnerLink({ collapsed }: { collapsed: boolean }) {
           <span className="block text-[10px] font-semibold uppercase tracking-[0.1em] text-brand">
             {t("partner.official")}
           </span>
+          {" "}
           <span className="block truncate text-xs font-medium text-text">{t("partner.librefang_everyapi")}</span>
         </span>
       )}

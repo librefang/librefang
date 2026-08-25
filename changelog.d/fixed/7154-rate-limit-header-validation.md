@@ -1,1 +1,0 @@
-- Reject malformed rate-limit counts and timestamps without panicking on provider headers. (#7154) (@houko)

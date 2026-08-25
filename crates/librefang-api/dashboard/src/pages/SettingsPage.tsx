@@ -20,12 +20,26 @@ import {
   useRegisterPasskey,
   useRevokePasskey,
 } from "../lib/mutations/passkeys";
-import { isPasskeySupported } from "../api";
+import { getRawConfigToml, isPasskeySupported } from "../api";
+import { ApiError } from "../lib/http/client";
 
 interface SegmentOption<T extends string> {
   value: T;
   icon: React.ElementType;
   label: string;
+}
+
+export type TotpActionState = "setup" | "reset" | "revoke" | "default";
+
+export function getTotpActionState(
+  hasSetupData: boolean,
+  showResetPrompt: boolean,
+  showRevokePrompt: boolean,
+): TotpActionState {
+  if (hasSetupData) return "setup";
+  if (showResetPrompt) return "reset";
+  if (showRevokePrompt) return "revoke";
+  return "default";
 }
 
 function SegmentControl<T extends string>({
@@ -203,8 +217,9 @@ function PasskeysSection() {
   // panel as informational rather than broken.
   const disabledServerSide =
     passkeysQuery.isError &&
-    passkeysQuery.error instanceof Error &&
-    passkeysQuery.error.message.toLowerCase().includes("not enabled");
+    passkeysQuery.error instanceof ApiError &&
+    (passkeysQuery.error.code === "passkey_disabled" ||
+      passkeysQuery.error.status === 503);
   const busy = registerPasskey.isPending || revokePasskey.isPending;
 
   const dateFmt = (secs: number) =>
@@ -411,6 +426,7 @@ function TotpSection() {
   const [showResetCode, setShowResetCode] = useState(false);
   const [showRevokeCode, setShowRevokeCode] = useState(false);
   const [showConfirmCode, setShowConfirmCode] = useState(false);
+  const [showSecret, setShowSecret] = useState(false);
   const [revealRecovery, setRevealRecovery] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -423,6 +439,11 @@ function TotpSection() {
   const status = statusQuery.data;
   const loading =
     setupTotp.isPending || confirmTotp.isPending || revokeTotp.isPending;
+  const actionState = getTotpActionState(
+    setupData !== null,
+    showResetPrompt,
+    showRevokePrompt,
+  );
 
   async function handleSetup(currentCode?: string) {
     if (loading) return;
@@ -433,6 +454,7 @@ function TotpSection() {
       setSetupData({ otpauth_uri: data.otpauth_uri, secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
       setShowResetPrompt(false);
       setResetCode("");
+      setShowSecret(false);
       setRevealRecovery(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : t("settings.totp_setup_failed", "Setup failed"));
@@ -527,7 +549,7 @@ function TotpSection() {
         )}
 
         <div className="py-4">
-          {showResetPrompt && !setupData ? (
+          {actionState === "reset" && (
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="relative w-full sm:w-48">
                 <input
@@ -557,7 +579,8 @@ function TotpSection() {
                 {t("common.cancel", "Cancel")}
               </Button>
             </div>
-          ) : showRevokePrompt && !setupData ? (
+          )}
+          {actionState === "revoke" && (
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="relative w-full sm:w-48">
                 <input
@@ -587,7 +610,8 @@ function TotpSection() {
                 {t("common.cancel", "Cancel")}
               </Button>
             </div>
-          ) : !setupData ? (
+          )}
+          {actionState === "default" && (
             <div className="flex gap-2">
               <Button variant="secondary" size="sm" onClick={initiateSetup} isLoading={loading}>
                 {status?.confirmed
@@ -604,7 +628,8 @@ function TotpSection() {
                 </Button>
               )}
             </div>
-          ) : (
+          )}
+          {actionState === "setup" && setupData && (
             <div className="flex flex-col gap-3">
               <p className="text-sm text-text-dim">
                 {t("settings.totp_scan", "Scan the QR code or enter the secret in your authenticator app:")}
@@ -614,9 +639,28 @@ function TotpSection() {
                   <img src={setupData.qr_code} alt={t("settings.totp_qr_alt", "TOTP QR Code")} className="w-40 h-40 sm:w-48 sm:h-48" />
                 </div>
               )}
-              <code className="block text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all select-all">
-                {setupData.secret}
-              </code>
+              <div className="flex items-center gap-2">
+                <code
+                  aria-hidden={!showSecret}
+                  className={`block flex-1 text-sm font-mono bg-main border border-border-subtle rounded-lg px-3 py-2 break-all transition-[filter] duration-150 ${
+                    showSecret ? "select-all" : "blur-sm select-none"
+                  }`}
+                >
+                  {setupData.secret}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-pressed={showSecret}
+                  onClick={() => setShowSecret((visible) => !visible)}
+                >
+                  {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showSecret
+                    ? t("settings.totp_secret_hide", "Hide secret")
+                    : t("settings.totp_secret_reveal", "Reveal secret")}
+                </Button>
+              </div>
               {setupData.recovery_codes.length > 0 && (
                 <div className="mt-2">
                   <div className="flex items-center justify-between mb-1">
@@ -653,9 +697,9 @@ function TotpSection() {
                     }`}
                     aria-hidden={!revealRecovery}
                   >
-                    {setupData.recovery_codes.map((code) => (
+                    {setupData.recovery_codes.map((code, index) => (
                       <code
-                        key={code}
+                        key={`${index}-${code}`}
                         className={`text-sm font-mono text-center ${revealRecovery ? "select-all" : "select-none"}`}
                       >
                         {code}
@@ -712,6 +756,33 @@ function TotpSection() {
 
 function ConfigBackupSection() {
   const { t } = useTranslation();
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    setError(null);
+    try {
+      const toml = await getRawConfigToml();
+      const objectUrl = URL.createObjectURL(
+        new Blob([toml], { type: "application/toml" }),
+      );
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = "librefang-config.toml";
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+    } catch (exportError) {
+      setError(
+        exportError instanceof Error
+          ? exportError.message
+          : t("settings.export_config_failed", "Could not export config."),
+      );
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div className="rounded-2xl border border-border-subtle bg-surface">
@@ -730,15 +801,20 @@ function ConfigBackupSection() {
             "Download a backup of your current config.toml settings file"
           )}
         >
-          <a
-            href="/api/config/export"
-            download="librefang-config.toml"
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            isLoading={exporting}
+            disabled={exporting}
+            onClick={handleExport}
             className="inline-flex items-center justify-center gap-2 rounded-xl font-bold transition-all duration-[400ms] ease-[cubic-bezier(0.22,1,0.36,1)] active:scale-[0.96] active:duration-100 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1 border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-brand/20 shadow-sm px-3 py-1.5 text-xs"
           >
             <Download className="w-3.5 h-3.5 mr-1.5" />
             {t("settings.export_config_btn", "Download")}
-          </a>
+          </Button>
         </SettingRow>
+        {error && <p className="pb-3 text-sm text-danger">{error}</p>}
       </div>
     </div>
   );

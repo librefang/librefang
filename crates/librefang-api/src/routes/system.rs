@@ -27,7 +27,6 @@
 use super::AppState;
 use axum::response::IntoResponse;
 use axum::Json;
-use std::path::PathBuf;
 
 /// Build the system router by composing every extracted sub-router and
 /// exposing the workspace-level `/api/versions` metadata endpoint.
@@ -43,23 +42,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .merge(crate::routes::commands::router())
         .merge(crate::routes::bindings::router())
         .merge(crate::routes::logs::router())
-}
-
-/// Resolve the LibreFang home directory without depending on the kernel crate.
-///
-/// Mirrors `librefang_kernel::config::librefang_home`:
-/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
-/// (falling back to the system temp dir if no home directory is available).
-///
-/// Kept here (rather than in `librefang_kernel`) because the API layer must
-/// not import kernel internals at the path-helper level (#3744).
-pub(super) fn librefang_home() -> PathBuf {
-    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
-        return PathBuf::from(home);
-    }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".librefang")
 }
 
 /// Get the machine hostname (best-effort).

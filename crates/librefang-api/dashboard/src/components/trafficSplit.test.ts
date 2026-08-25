@@ -14,4 +14,10 @@ describe("buildEvenTrafficSplit", () => {
   it("returns no split for empty input", () => {
     expect(buildEvenTrafficSplit(0)).toEqual([]);
   });
+
+  it("rejects variant counts that cannot all receive traffic", () => {
+    expect(() => buildEvenTrafficSplit(101)).toThrow(
+      "variantCount (101) cannot exceed 100",
+    );
+  });
 });

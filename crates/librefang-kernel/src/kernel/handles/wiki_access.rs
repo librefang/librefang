@@ -27,9 +27,12 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
         match vault.get(topic) {
             Ok(page) => serde_json::to_value(&page)
                 .map_err(|e| KernelOpError::Internal(format!("Wiki get serialize: {e}"))),
-            Err(librefang_memory_wiki::WikiError::NotFound(_)) => Err(KernelOpError::Internal(
-                format!("wiki topic `{topic}` not found"),
-            )),
+            Err(librefang_memory_wiki::WikiError::NotFound(_)) => {
+                Err(KernelOpError::ResourceNotFound {
+                    kind: "wiki topic".to_string(),
+                    id: topic.to_string(),
+                })
+            }
             Err(err) => Err(KernelOpError::Internal(format!("Wiki get failed: {err}"))),
         }
     }
@@ -75,7 +78,7 @@ impl kernel_handle::WikiAccess for LibreFangKernel {
             Ok(outcome) => serde_json::to_value(&outcome)
                 .map_err(|e| KernelOpError::Internal(format!("Wiki write serialize: {e}"))),
             Err(librefang_memory_wiki::WikiError::HandEditConflict { topic }) => {
-                Err(KernelOpError::Internal(format!(
+                Err(KernelOpError::Conflict(format!(
                     "wiki page `{topic}` was edited externally; re-read the file or pass force=true"
                 )))
             }

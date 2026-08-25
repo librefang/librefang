@@ -12,6 +12,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
+import { ErrorState } from "../components/ui/ErrorState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { StaggerList } from "../components/ui/StaggerList";
 import {
@@ -27,6 +28,38 @@ import {
 
 const NETWORK_ICON = <Network className="h-4 w-4" />;
 
+function FingerprintStatus({
+  fingerprint,
+  online,
+}: {
+  fingerprint?: string | null;
+  online?: boolean;
+}) {
+  const { t } = useTranslation();
+  if (fingerprint) {
+    return (
+      <p
+        className="text-xs font-mono mt-2 break-all"
+        title={t("network.identity_fingerprint_hint")}
+      >
+        {fingerprint}
+      </p>
+    );
+  }
+  if (online) {
+    return (
+      <p className="text-xs text-warning mt-2">
+        {t("network.identity_missing")}
+      </p>
+    );
+  }
+  return (
+    <p className="text-xs text-text-dim mt-2">
+      {t("network.ofp_disabled")}
+    </p>
+  );
+}
+
 export function NetworkPage() {
   const { t } = useTranslation();
 
@@ -39,16 +72,20 @@ export function NetworkPage() {
   const trustedPeers = trustedQuery.data ?? [];
   const addToast = useUIStore((s) => s.addToast);
   const isLoading = statusQuery.isPending || peersQuery.isPending || trustedQuery.isPending;
+  const isError = statusQuery.isError || peersQuery.isError || trustedQuery.isError;
+  const refetchStatus = statusQuery.refetch;
+  const refetchPeers = peersQuery.refetch;
+  const refetchTrusted = trustedQuery.refetch;
 
   const handleRefresh = useCallback(() => {
     Promise.all([
-      statusQuery.refetch(),
-      peersQuery.refetch(),
-      trustedQuery.refetch(),
+      refetchStatus(),
+      refetchPeers(),
+      refetchTrusted(),
     ]).catch((e) => {
       addToast(toastErr(e, t("common.error")), "error");
     });
-  }, [statusQuery, peersQuery, trustedQuery, addToast, t]);
+  }, [refetchStatus, refetchPeers, refetchTrusted, addToast, t]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -62,7 +99,9 @@ export function NetworkPage() {
         helpText={t("network.help")}
       />
 
-      {isLoading ? (
+      {isError ? (
+        <ErrorState onRetry={handleRefresh} />
+      ) : isLoading ? (
         <div className="grid gap-4 md:grid-cols-3">
           <CardSkeleton />
           <CardSkeleton />
@@ -143,22 +182,10 @@ export function NetworkPage() {
                 />
               </div>
             </div>
-            {status?.identity_fingerprint ? (
-              <p
-                className="text-xs font-mono mt-2 break-all"
-                title={t("network.identity_fingerprint_hint")}
-              >
-                {status.identity_fingerprint}
-              </p>
-            ) : status?.online ? (
-              <p className="text-xs text-warning mt-2">
-                {t("network.identity_missing")}
-              </p>
-            ) : (
-              <p className="text-xs text-text-dim mt-2">
-                {t("network.ofp_disabled")}
-              </p>
-            )}
+            <FingerprintStatus
+              fingerprint={status?.identity_fingerprint}
+              online={status?.online}
+            />
             <p className="text-[10px] text-text-dim mt-2">
               {t("network.pinned_peers_count", {
                 count: status?.pinned_peers ?? 0,
