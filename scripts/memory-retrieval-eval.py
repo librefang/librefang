@@ -4,14 +4,9 @@
 Why this exists
 ---------------
 
-LibreFang compiles in one retrieval strategy and one embedding model, and until now there was no supported way
-for an operator to ask whether either choice was costing them anything on their own corpus.
-That question was answered once, by @nevgenov on #7756, using an out-of-tree Python harness run against a
-read-only copy of a production database — five runs over three real corpora, ~5800 LLM-judged pairs.
-The headline finding of the first run ("the retriever the runtime hardcodes is the worst of five arms") did not
-survive the reporter's own control run: it was an artifact of a 4-bit-quantized embedder, and swapping the
-embedding model moved the vector arm further (+0.096 / +0.032 nDCG@10) than any difference between retrieval
-methods that any of the five runs could resolve.
+LibreFang compiles in one retrieval strategy and one embedding model, and until now there was no supported way for an operator to ask whether either choice was costing them anything on their own corpus.
+That question was answered once, by @nevgenov on #7756, using an out-of-tree Python harness run against a read-only copy of a production database — five runs over three real corpora, ~5800 LLM-judged pairs.
+The headline finding of the first run ("the retriever the runtime hardcodes is the worst of five arms") did not survive the reporter's own control run: it was an artifact of a 4-bit-quantized embedder, and swapping the embedding model moved the vector arm further (+0.096 / +0.032 nDCG@10) than any difference between retrieval methods that any of the five runs could resolve.
 
 Both the finding and its retraction are the argument for this file.
 The measurement was decisive twice, and both times it required work that lived nowhere in the tree.
@@ -20,64 +15,47 @@ What it does
 ------------
 
 For each query, every arm produces a ranked top-k.
-The union of those lists is pooled and shuffled, so the judge grades documents without seeing which arm
-retrieved them or in what position.
+The union of those lists is pooled and shuffled, so the judge grades documents without seeing which arm retrieved them or in what position.
 An LLM grades each (query, document) pair 0-3.
-nDCG@10 is computed per arm per query, and every arm is compared against the leader with a confidence interval
-bootstrapped over *paired* per-query differences.
+nDCG@10 is computed per arm per query, and every arm is compared against the leader with a confidence interval bootstrapped over *paired* per-query differences.
 
 The pairing is not a detail.
-Between-query variance dwarfs between-arm variance on corpora this size: an unpaired comparison cannot detect
-the effect at all, and will report "no difference" for a difference that is really there.
-This harness therefore has no unpaired mode, and `bootstrap_paired_ci` refuses inputs that are not aligned
-per query.
+Between-query variance dwarfs between-arm variance on corpora this size: an unpaired comparison cannot detect the effect at all, and will report "no difference" for a difference that is really there.
+This harness therefore has no unpaired mode, and `bootstrap_paired_ci` refuses inputs that are not aligned per query.
 
 What it deliberately does not do
 --------------------------------
 
 It does not run in CI, on any trigger, ever.
-It needs a live judge model and a live embedding endpoint, so it is neither hermetic nor deterministic — the
-same commit re-run gives slightly different nDCG.
+It needs a live judge model and a live embedding endpoint, so it is neither hermetic nor deterministic — the same commit re-run gives slightly different nDCG.
 That is fine for a decision harness and wrong for a test.
 
-The one part that *is* hermetic is the arithmetic — nDCG, the paired bootstrap, pool construction, and the
-judge-response parse rule — and getting that subtly wrong is the failure mode nobody would notice.
-So it is unit-tested with synthetic inputs under `--self-test`, which is what CI runs, in about a second, with
-no network and no secret.
+The one part that *is* hermetic is the arithmetic — nDCG, the paired bootstrap, pool construction, and the judge-response parse rule — and getting that subtly wrong is the failure mode nobody would notice.
+So it is unit-tested with synthetic inputs under `--self-test`, which is what CI runs, in about a second, with no network and no secret.
 
 Reading the numbers
 -------------------
 
 The method has a measurable noise floor of roughly 0.04 nDCG, and it is measurable rather than assumed.
-Because the judged pool is the union of all arms, changing one arm changes what the judge sees for every arm:
-in the reporter's runs the embedder-independent lexical arms moved by -0.040 and -0.016 between two runs whose
-only changed variable was the vector arm.
+Because the judged pool is the union of all arms, changing one arm changes what the judge sees for every arm: in the reporter's runs the embedder-independent lexical arms moved by -0.040 and -0.016 between two runs whose only changed variable was the vector arm.
 Any difference below that floor is not a result.
-`--noise-floor RUN_A.json RUN_B.json` recomputes it for your own setup from two runs, using the arms you
-declare embedder-independent.
+`--noise-floor RUN_A.json RUN_B.json` recomputes it for your own setup from two runs, using the arms you declare embedder-independent.
 
 Three things that each cost the reporter a re-run, and where this harness stands on each:
 
-* e5-family embedders are trained on an asymmetric `query:` / `passage:` pair, and omitting the prefixes
-  narrowed the relevant-vs-irrelevant margin from 0.12 to 0.07 — enough to produce a false confirmation of the
-  hypothesis under test.
-  Guarded: `--query-prefix` and `--passage-prefix` make this a measurable variable here, even though the
-  daemon cannot yet send prefixes (#7912, gap 3).
-* Comparing a candidate embedder against the stored vectors is meaningless, because a query in one embedding
-  space scored against vectors from another is not a comparison of anything.
+* e5-family embedders are trained on an asymmetric `query:` / `passage:` pair, and omitting the prefixes narrowed the relevant-vs-irrelevant margin from 0.12 to 0.07 — enough to produce a false confirmation of the hypothesis under test.
+  Guarded: `--query-prefix` and `--passage-prefix` make this a measurable variable here, even though the daemon cannot yet send prefixes (#7912, gap 3).
+* Comparing a candidate embedder against the stored vectors is meaningless, because a query in one embedding space scored against vectors from another is not a comparison of anything.
   Guarded: `--reembed` rebuilds the corpus vectors with the configured endpoint, and refuses to mix the two.
-* Comparing per-record retrieval counts without controlling for age inverts the conclusion — a same-month
-  cohort gave 29.5 against 110 where the uncontrolled numbers said the opposite.
-  Not guarded, because it is a corpus-composition question rather than a retrieval one; if you extend this
-  tool that way, control for age.
+* Comparing per-record retrieval counts without controlling for age inverts the conclusion — a same-month cohort gave 29.5 against 110 where the uncontrolled numbers said the opposite.
+  Not guarded, because it is a corpus-composition question rather than a retrieval one; if you extend this tool that way, control for age.
 
 Safety
 ------
 
 The corpus is opened read-only and immutable, and it must be a *copy*.
 This tool never contacts the daemon, never binds a port, and never writes to the database it reads.
-Corpus text is sent to whatever judge endpoint you configure — that is a third party unless you point it at
-something you run, so choose it deliberately.
+Corpus text is sent to whatever judge endpoint you configure — that is a third party unless you point it at something you run, so choose it deliberately.
 
 Usage
 -----
@@ -96,16 +74,14 @@ Usage
 
     python3 scripts/memory-retrieval-eval.py --noise-floor run-a.json run-b.json --stable-arms fts5
 
-To compare a different embedding model, re-embed the corpus rather than scoring new queries against old
-vectors:
+To compare a different embedding model, re-embed the corpus rather than scoring new queries against old vectors:
 
     python3 scripts/memory-retrieval-eval.py run \\
         --corpus /tmp/corpus.db --queries queries.txt --arms cosine,fts5 --reembed \\
         --embed-model intfloat/multilingual-e5-large --query-prefix 'query: ' --passage-prefix 'passage: ' \\
         --out run-e5.json
 
-Stdlib only, on purpose: no virtualenv, no requirements file, `python3 scripts/memory-retrieval-eval.py` and
-it runs, exactly like every other tool in `scripts/`.
+Stdlib only, on purpose: no virtualenv, no requirements file, `python3 scripts/memory-retrieval-eval.py` and it runs, exactly like every other tool in `scripts/`.
 
 Credit for the method, the corpus statistics and the noise-floor diagnostic: @nevgenov, on #7756 and #7912.
 """
@@ -129,37 +105,35 @@ from typing import Callable, Iterable, Sequence
 
 # ── Constants ────────────────────────────────────────────────────────────────────────────────────────────
 
-#: Rank cutoff for the reported metric. Ten because that is the pool depth the judge grades.
+#: Rank cutoff for the reported metric.
+#: Ten because that is the pool depth the judge grades.
 NDCG_K = 10
 
 #: Judge grades outside this range are discarded whole rather than clamped — see `parse_judge_grade`.
 GRADE_MIN = 0
 GRADE_MAX = 3
 
-#: Resamples for the paired bootstrap. 10_000 is enough that the interval is stable to the third decimal,
-#: which is a finer resolution than the method's ~0.04 noise floor can use anyway.
+#: Resamples for the paired bootstrap.
+#: 10_000 is enough that the interval is stable to the third decimal, which is a finer resolution than the method's ~0.04 noise floor can use anyway.
 BOOTSTRAP_ITERATIONS = 10_000
 
 #: Two-sided interval width.
 BOOTSTRAP_ALPHA = 0.05
 
 #: Reported alongside every comparison so nobody reads a 0.02 difference as a finding.
-#: Recompute it for your own setup with `--noise-floor`; this default is the figure @nevgenov measured across
-#: five runs on #7756 and should not be treated as universal.
+#: Recompute it for your own setup with `--noise-floor`; this default is the figure @nevgenov measured across five runs on #7756 and should not be treated as universal.
 DEFAULT_NOISE_FLOOR = 0.04
 
-#: Below this many counted queries the paired bootstrap resamples too few distinct values for its interval to
-#: mean much, so the report says so rather than letting a confident-looking interval stand unqualified.
+#: Below this many counted queries the paired bootstrap resamples too few distinct values for its interval to mean much, so the report says so rather than letting a confident-looking interval stand unqualified.
 #: The runs on #7756 counted 59-80.
 MIN_USEFUL_QUERIES = 30
 
-#: Reciprocal-rank-fusion damping. 60 is the constant from the original RRF paper and the one every reference
-#: implementation uses; it is exposed as a flag rather than tuned here, because tuning it on one corpus is the
-#: same unvalidated bet this harness exists to expose.
+#: Reciprocal-rank-fusion damping.
+#: 60 is the constant from the original RRF paper and the one every reference implementation uses; it is exposed as a flag rather than tuned here, because tuning it on one corpus is the same unvalidated bet this harness exists to expose.
 RRF_K = 60
 
-#: Documents are truncated before being shown to the judge. A 200_000-character PDF row (the largest observed
-#: on the reporter's corpus) would otherwise dominate the judge's context and cost.
+#: Documents are truncated before being shown to the judge.
+#: A 200_000-character PDF row (the largest observed on the reporter's corpus) would otherwise dominate the judge's context and cost.
 JUDGE_DOC_MAX_CHARS = 4_000
 
 JUDGE_SYSTEM_PROMPT = (
@@ -183,16 +157,15 @@ class Document:
     content: str
     scope: str
     source: str
-    #: Decoded from the stored BLOB. `None` for a text-only row, which the cosine arm cannot rank.
+    #: Decoded from the stored BLOB.
+    #: `None` for a text-only row, which the cosine arm cannot rank.
     embedding: tuple[float, ...] | None
 
 
 def decode_embedding(blob: bytes | None) -> tuple[float, ...] | None:
     """Decode the little-endian f32 array LibreFang stores in `memories.embedding`.
 
-    Mirrors `embedding_from_bytes` in `crates/librefang-memory/src/semantic.rs`, including its behaviour on a
-    trailing partial float: the Rust side uses `as_chunks::<4>()` and drops the remainder, so a truncated blob
-    yields a short vector rather than an error.
+    Mirrors `embedding_from_bytes` in `crates/librefang-memory/src/semantic.rs`, including its behaviour on a trailing partial float: the Rust side uses `as_chunks::<4>()` and drops the remainder, so a truncated blob yields a short vector rather than an error.
     Keeping that quirk means a corrupt row ranks the same here as it does in the daemon.
     """
     if not blob:
@@ -206,9 +179,8 @@ def decode_embedding(blob: bytes | None) -> tuple[float, ...] | None:
 def load_corpus(db_path: str, agent_id: str | None = None) -> list[Document]:
     """Read every live memory row from a read-only, immutable copy of the substrate.
 
-    `immutable=1` is not decoration: it tells SQLite the file cannot change underneath it, which is only true
-    because you copied it. Point this at a live daemon database and you are reading a file being written
-    through WAL, which is both wrong and the kind of wrong that produces plausible numbers.
+    `immutable=1` is not decoration: it tells SQLite the file cannot change underneath it, which is only true because you copied it.
+    Point this at a live daemon database and you are reading a file being written through WAL, which is both wrong and the kind of wrong that produces plausible numbers.
     """
     if not os.path.exists(db_path):
         raise SystemExit(f"corpus not found: {db_path}")
@@ -233,13 +205,9 @@ def fts_rank_ids(db_path: str, query: str, limit: int, agent_id: str | None = No
     """Rank document ids with the daemon's own FTS5 index.
 
     This is deliberately not a reimplementation of BM25.
-    `memories_fts` is built and kept in step by migration v50 (#7808) and `ORDER BY rank` on an FTS5 table is
-    FTS5's bm25 — so the lexical arm measured here is the lexical path the daemon would actually take, not a
-    lookalike that can drift away from it.
+    `memories_fts` is built and kept in step by migration v50 (#7808) and `ORDER BY rank` on an FTS5 table is FTS5's bm25 — so the lexical arm measured here is the lexical path the daemon would actually take, not a lookalike that can drift away from it.
 
-    Returns an empty list when the index is absent (a corpus copied from a pre-v50 database) or when the query
-    contains no indexable token, which is the same "no usable pre-selection" signal `fts_candidate_ids` uses in
-    `semantic.rs`.
+    Returns an empty list when the index is absent (a corpus copied from a pre-v50 database) or when the query contains no indexable token, which is the same "no usable pre-selection" signal `fts_candidate_ids` uses in `semantic.rs`.
     """
     uri = f"file:{urllib.request.pathname2url(os.path.abspath(db_path))}?mode=ro&immutable=1"
     conn = sqlite3.connect(uri, uri=True)
@@ -256,9 +224,8 @@ def fts_rank_ids(db_path: str, query: str, limit: int, agent_id: str | None = No
         params.append(limit)
         return [r[0] for r in conn.execute(sql, params).fetchall()]
     except sqlite3.OperationalError:
-        # No `memories_fts` table, or a MATCH expression FTS5 rejects. Either way the lexical arm has nothing
-        # to say about this query; returning [] lets the run continue with the other arms rather than aborting
-        # a several-hundred-call judging session.
+        # No `memories_fts` table, or a MATCH expression FTS5 rejects.
+        # Either way the lexical arm has nothing to say about this query; returning [] lets the run continue with the other arms rather than aborting a several-hundred-call judging session.
         return []
     finally:
         conn.close()
@@ -267,9 +234,8 @@ def fts_rank_ids(db_path: str, query: str, limit: int, agent_id: str | None = No
 def fts_match_expression(query: str) -> str:
     """Turn free text into an FTS5 MATCH expression that cannot be a syntax error.
 
-    Every token is double-quoted, so `AND`, `NEAR`, `*`, `-` and stray quotes in a real user message are data
-    rather than operators. Tokens are OR-ed, matching FTS5's default behaviour for a bare token list while
-    making the intent explicit.
+    Every token is double-quoted, so `AND`, `NEAR`, `*`, `-` and stray quotes in a real user message are data rather than operators.
+    Tokens are OR-ed, matching FTS5's default behaviour for a bare token list while making the intent explicit.
     """
     tokens = [t for t in "".join(c if c.isalnum() else " " for c in query).split() if t]
     if not tokens:
@@ -285,8 +251,7 @@ class Arm:
     """One retrieval strategy under test.
 
     `stable_under_embedder_change` marks an arm whose score cannot move when only the vector arm changes.
-    Those arms are the instrument for `--noise-floor`: any movement they show between two such runs is pool
-    churn, not signal.
+    Those arms are the instrument for `--noise-floor`: any movement they show between two such runs is pool churn, not signal.
     """
 
     name: str
@@ -297,8 +262,7 @@ class Arm:
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float | None:
     """Port of `librefang_types::memory::cosine_similarity`, `None` semantics included.
 
-    Returning `None` rather than 0.0 for an incomparable pair is load-bearing on both sides: 0.0 means "fully
-    dissimilar", so folding "not comparable" into it silently corrupts the ranking (#3536).
+    Returning `None` rather than 0.0 for an incomparable pair is load-bearing on both sides: 0.0 means "fully dissimilar", so folding "not comparable" into it silently corrupts the ranking (#3536).
     """
     if len(a) != len(b) or not a:
         return None
@@ -317,8 +281,7 @@ def cosine_arm(docs: Sequence[Document], embed: Callable[[str], Sequence[float]]
     """The embedding path the runtime actually takes: cosine against the stored vector, one sort key, no tiebreak.
 
     `semantic.rs` sorts on `similarity` alone and gives an unscorable row `f32::NEG_INFINITY`.
-    Reproduced here by dropping unscorable rows entirely, which is the same outcome once a `min_similarity`
-    floor or a top-k cut is applied.
+    Reproduced here by dropping unscorable rows entirely, which is the same outcome once a `min_similarity` floor or a top-k cut is applied.
     """
 
     def rank(query: str) -> list[str]:
@@ -348,8 +311,7 @@ def fts_arm(db_path: str, top_k: int, agent_id: str | None) -> Callable[[str], l
 def reciprocal_rank_fusion(rankings: Sequence[Sequence[str]], weights: Sequence[float], k: int, top_k: int) -> list[str]:
     """Weighted RRF over several ranked id lists.
 
-    Fusion is offered because the RFC proposed it, not because it is recommended: across five runs it never
-    reached significance over cosine alone in either direction.
+    Fusion is offered because the RFC proposed it, not because it is recommended: across five runs it never reached significance over cosine alone in either direction.
     It is here so the next person can settle that on their own corpus instead of inheriting either verdict.
     """
     scores: dict[str, float] = {}
@@ -367,14 +329,11 @@ def build_pool(rankings: dict[str, Sequence[str]], top_k: int, rng: random.Rando
     """Union every arm's top-k, then shuffle.
 
     Two properties the judge depends on and one the reader does.
-    The pool is a *set* union, so a document retrieved by three arms is graded once and every arm reads the
-    same grade — that is what makes the per-query differences paired.
-    The shuffle hides provenance and position, so the judge cannot infer which arm produced a document or how
-    highly it ranked it.
+    The pool is a *set* union, so a document retrieved by three arms is graded once and every arm reads the same grade — that is what makes the per-query differences paired.
+    The shuffle hides provenance and position, so the judge cannot infer which arm produced a document or how highly it ranked it.
     And the shuffle is seeded, so a re-run with a warm judge cache reproduces the same pool exactly.
 
-    The pool being the union is also why this method has a noise floor: adding an arm changes what the judge
-    sees for every arm, so scores move even for arms that did not change.
+    The pool being the union is also why this method has a noise floor: adding an arm changes what the judge sees for every arm, so scores move even for arms that did not change.
     """
     seen: list[str] = []
     marked: set[str] = set()
@@ -391,10 +350,8 @@ def parse_judge_grade(raw: str) -> int | None:
     """Parse a judge response into a grade, or `None` to discard the pair.
 
     Out-of-range and unparseable responses are discarded *whole* rather than clamped.
-    Clamping a 26 to a 3 substitutes plausible data for bad data, and the resulting number looks exactly like a
-    real judgment; that cost @nevgenov 2 of 80 queries on one corpus and it is better to lose them visibly.
-    A query is dropped from the run entirely if any of its pairs fail, so every arm is scored over the same
-    pairs and the comparison stays paired.
+    Clamping a 26 to a 3 substitutes plausible data for bad data, and the resulting number looks exactly like a real judgment; that cost @nevgenov 2 of 80 queries on one corpus and it is better to lose them visibly.
+    A query is dropped from the run entirely if any of its pairs fail, so every arm is scored over the same pairs and the comparison stays paired.
     """
     text = raw.strip()
     if not text:
@@ -414,13 +371,10 @@ def parse_judge_grade(raw: str) -> int | None:
 class JudgeCache:
     """On-disk judgment cache keyed by (judge model, query, document text).
 
-    Keyed by content, not by document id, so a re-run after the corpus changed does not silently reuse a grade
-    for text that no longer exists.
-    Keyed by judge model, so switching judges — the limitation every run in #7756 carries, since all five
-    shared one — starts from cold rather than mixing two judges into one number.
+    Keyed by content, not by document id, so a re-run after the corpus changed does not silently reuse a grade for text that no longer exists.
+    Keyed by judge model, so switching judges — the limitation every run in #7756 carries, since all five shared one — starts from cold rather than mixing two judges into one number.
 
-    This is the difference between "adding an arm costs one full re-spend" and "adding an arm costs the pairs
-    it newly contributes", which is the practical reason five runs was as far as anyone got.
+    This is the difference between "adding an arm costs one full re-spend" and "adding an arm costs the pairs it newly contributes", which is the practical reason five runs was as far as anyone got.
     """
 
     def __init__(self, path: str | None) -> None:
@@ -478,10 +432,8 @@ def ndcg_at_k(ranked_ids: Sequence[str], grades: dict[str, int], k: int = NDCG_K
     """nDCG@k for one arm on one query.
 
     The ideal ranking is taken over the judged pool, which is the union of every arm's list.
-    So a perfect score means "this arm put the pool's best documents on top", not "this arm found everything
-    relevant in the corpus" — the corpus is never exhaustively judged and cannot be at this size.
-    An arm that retrieves fewer than k documents is not padded: the missing slots contribute zero gain, which
-    is the correct penalty for returning nothing.
+    So a perfect score means "this arm put the pool's best documents on top", not "this arm found everything relevant in the corpus" — the corpus is never exhaustively judged and cannot be at this size.
+    An arm that retrieves fewer than k documents is not padded: the missing slots contribute zero gain, which is the correct penalty for returning nothing.
     """
     actual = dcg(grades.get(doc_id, 0) for doc_id in ranked_ids[:k])
     ideal = dcg(sorted(grades.values(), reverse=True)[:k])
@@ -499,12 +451,11 @@ def bootstrap_paired_ci(
     """Bootstrap a confidence interval over paired per-query differences.
 
     Resamples *queries*, not observations.
-    Between-query variance dwarfs between-arm variance on corpora of this size, so an unpaired comparison
-    cannot detect the effect at all — the interval is swamped by how hard each query happens to be.
+    Between-query variance dwarfs between-arm variance on corpora of this size, so an unpaired comparison cannot detect the effect at all — the interval is swamped by how hard each query happens to be.
     Pairing removes that variance because both arms are scored on the same query against the same judged pool.
 
-    Returns `(mean, low, high)`. The difference is significant at `alpha` when the interval excludes zero, and
-    is a *result* only when it also clears the noise floor.
+    Returns `(mean, low, high)`.
+    The difference is significant at `alpha` when the interval excludes zero, and is a *result* only when it also clears the noise floor.
     """
     if not diffs:
         raise ValueError("paired bootstrap needs at least one per-query difference")
@@ -523,10 +474,11 @@ def bootstrap_paired_ci(
 
 
 def verdict(low: float, high: float, noise_floor: float) -> str:
-    """Classify a comparison. Three outcomes, and the middle one is the one people skip.
+    """Classify a comparison.
 
-    An interval that excludes zero but sits inside the noise floor is *significant and not a result*: the
-    method itself moves scores by that much when only the pool composition changes.
+    Three outcomes, and the middle one is the one people skip.
+
+    An interval that excludes zero but sits inside the noise floor is *significant and not a result*: the method itself moves scores by that much when only the pool composition changes.
     """
     if low <= 0.0 <= high:
         return "noise"
@@ -573,9 +525,7 @@ class RunResult:
 def render_markdown(result: RunResult, seed: int) -> str:
     """Render the result as a markdown table.
 
-    The output format is a deliberate choice: the five runs that produced everything known about this
-    subsystem were reported by pasting tables into a GitHub issue, and that is the workflow this tool is meant
-    to keep working.
+    The output format is a deliberate choice: the five runs that produced everything known about this subsystem were reported by pasting tables into a GitHub issue, and that is the workflow this tool is meant to keep working.
     """
     means = result.mean_ndcg()
     if not means:
@@ -623,12 +573,9 @@ def render_markdown(result: RunResult, seed: int) -> str:
 def noise_floor_from_runs(run_a: dict, run_b: dict, stable_arms: Sequence[str]) -> tuple[float, dict[str, float]]:
     """Measure this method's noise floor from two runs, using arms that could not have changed.
 
-    An arm declared stable — a lexical arm, when the changed variable is the embedding model — has no path by
-    which its own scores can move between the two runs.
-    Whatever movement it shows is the judged pool shifting underneath it, because the pool is the union of all
-    arms and one of them changed.
-    That movement is the resolution limit of the whole method, and every difference below it should be
-    discounted, including differences the runs themselves report as significant.
+    An arm declared stable — a lexical arm, when the changed variable is the embedding model — has no path by which its own scores can move between the two runs.
+    Whatever movement it shows is the judged pool shifting underneath it, because the pool is the union of all arms and one of them changed.
+    That movement is the resolution limit of the whole method, and every difference below it should be discounted, including differences the runs themselves report as significant.
     """
     means_a = run_a.get("mean_ndcg", {})
     means_b = run_b.get("mean_ndcg", {})
@@ -664,16 +611,12 @@ def embed_texts(args: argparse.Namespace, texts: Sequence[str]) -> list[Sequence
 def reembed_corpus(docs: Sequence[Document], args: argparse.Namespace) -> list[Document]:
     """Rebuild every document vector with the configured embedding model, caching to disk.
 
-    This is what makes the control run possible — the run that overturned the headline finding on #7756 by
-    changing only the embedder.
-    It is also the run that must never be done halfway: a query embedded by one model and scored against
-    vectors written by another compares two unrelated coordinate systems and produces confident nonsense.
+    This is what makes the control run possible — the run that overturned the headline finding on #7756 by changing only the embedder.
+    It is also the run that must never be done halfway: a query embedded by one model and scored against vectors written by another compares two unrelated coordinate systems and produces confident nonsense.
     So this replaces *every* vector or fails; it never mixes stored and re-embedded rows.
 
-    `--passage-prefix` is applied here and `--query-prefix` at query time, because that asymmetry is the whole
-    point of the e5-family contract.
-    The cache is keyed by model, prefix and document text, so re-running a judged sweep after the first
-    embedding pass costs nothing.
+    `--passage-prefix` is applied here and `--query-prefix` at query time, because that asymmetry is the whole point of the e5-family contract.
+    The cache is keyed by model, prefix and document text, so re-running a judged sweep after the first embedding pass costs nothing.
     """
     cache: dict[str, list[float]] = {}
     if args.embed_cache and os.path.exists(args.embed_cache):
@@ -725,11 +668,8 @@ def reembed_corpus(docs: Sequence[Document], args: argparse.Namespace) -> list[D
 def make_embedder(args: argparse.Namespace) -> Callable[[str], Sequence[float]]:
     """Embed a query through an OpenAI-compatible `/v1/embeddings` endpoint.
 
-    `--query-prefix` exists because a large part of the current embedding landscape, the e5 family among it, is
-    trained on an asymmetric `query:` / `passage:` pair.
-    The daemon cannot send prefixes today (#7912, gap 3), so measuring what they are worth is only possible
-    here — and omitting them when the model expects them narrows the relevant-vs-irrelevant margin enough to
-    produce a false confirmation of whatever hypothesis is being tested.
+    `--query-prefix` exists because a large part of the current embedding landscape, the e5 family among it, is trained on an asymmetric `query:` / `passage:` pair.
+    The daemon cannot send prefixes today (#7912, gap 3), so measuring what they are worth is only possible here — and omitting them when the model expects them narrows the relevant-vs-irrelevant margin enough to produce a false confirmation of whatever hypothesis is being tested.
     """
     url = args.embed_url or os.environ.get("LIBREFANG_EVAL_EMBED_URL")
     model = args.embed_model or os.environ.get("LIBREFANG_EVAL_EMBED_MODEL")
@@ -864,8 +804,8 @@ def run(args: argparse.Namespace) -> int:
         for doc_id in pool:
             grade = judge(query, by_id[doc_id].content)
             if grade is None:
-                # One bad pair drops the whole query. Scoring the remaining arms over a pool the others were
-                # not scored on would break the pairing the intervals depend on.
+                # One bad pair drops the whole query.
+                # Scoring the remaining arms over a pool the others were not scored on would break the pairing the intervals depend on.
                 dropped = True
                 break
             grades[doc_id] = grade
@@ -907,10 +847,11 @@ def noise_floor_command(args: argparse.Namespace) -> int:
 
 
 class SelfTest(unittest.TestCase):
-    """Hermetic coverage of the arithmetic. No network, no corpus, no secret, about a second.
+    """Hermetic coverage of the arithmetic.
 
-    This is the half of the harness that can be wrong without anyone noticing, because a wrong nDCG or a
-    mis-specified bootstrap produces numbers that look exactly like right ones.
+    No network, no corpus, no secret, about a second.
+
+    This is the half of the harness that can be wrong without anyone noticing, because a wrong nDCG or a mis-specified bootstrap produces numbers that look exactly like right ones.
     """
 
     def test_ndcg_perfect_ranking_scores_one(self) -> None:
@@ -948,8 +889,7 @@ class SelfTest(unittest.TestCase):
         self.assertGreater(high, mean)
 
     def test_paired_bootstrap_detects_a_consistent_small_effect(self) -> None:
-        """The whole reason for pairing: a small effect present on every query is significant even though the
-        per-query scores themselves are all over the place."""
+        """The whole reason for pairing: a small effect present on every query is significant even though the per-query scores themselves are all over the place."""
         diffs = [0.02] * 40
         _, low, high = bootstrap_paired_ci(diffs, iterations=2000, seed=7)
         self.assertGreater(low, 0.0)
@@ -1059,8 +999,7 @@ class SelfTest(unittest.TestCase):
     def test_reembed_refuses_a_short_batch_rather_than_misaligning_vectors(self) -> None:
         """An endpoint that returns fewer vectors than inputs must abort, not zip and truncate.
 
-        Silently pairing vector[i] with document[i] over a short list attaches real embeddings to the wrong
-        documents, and every downstream number stays plausible.
+        Silently pairing vector[i] with document[i] over a short list attaches real embeddings to the wrong documents, and every downstream number stays plausible.
         """
         import argparse as _argparse
 
