@@ -293,10 +293,10 @@ impl ProactiveMemoryStore {
     /// "popular memories stick around longer" intent while keeping decay
     /// strictly monotonic (per tick, confidence never increases).
     ///
-    /// Runs the decay pass immediately on every call — there is no internal
-    /// throttle. The once-per-hour cadence is enforced by the periodic
-    /// maintenance scheduler (see `run_periodic_maintenance`), so a direct
-    /// call (e.g. a manual `/decay` endpoint or a test) decays right away.
+    /// Runs the decay pass immediately on every call — there is no internal throttle.
+    /// The once-per-hour cadence lives in `maybe_decay_confidence`, which `maybe_run_maintenance` calls from the search / auto_retrieve / consolidate paths.
+    /// It is not a scheduler: nothing decays while an agent is idle, and a direct call (a manual `/decay` endpoint, a test) decays right away.
+    /// That throttle is also process-local, so a restart clears it — which no longer changes the total, because `last_decayed_at` is durable and an interval already charged cannot be charged again.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
         let decay_rate = self.read_config().confidence_decay_rate;
         if decay_rate <= 0.0 {
