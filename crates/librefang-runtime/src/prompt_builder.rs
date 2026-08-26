@@ -625,16 +625,30 @@ pub const MEMORY_BULLET_LIMIT: usize = 10;
 /// Per-bullet character budget, applied before the boundary-aware cut.
 pub const MEMORY_BULLET_MAX_CHARS: usize = 500;
 
-/// Character budget for the memory bullets as a whole, counted over bullet *content*
-/// (the `- [key] ` scaffolding is bounded and excluded).
+/// Maximum characters of a memory key rendered into a bullet's `[key] ` label.
 ///
-/// Deliberately equal to `MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS`, so it is a
-/// true ceiling rather than a behaviour change: with today's constants it is saturated
-/// by ten full-length bullets and never binds. It exists because three producers feed
-/// this section — substrate recall, proactive memory, and the context engine — and
-/// until now nobody owned its total, so raising either constant would have silently
-/// multiplied the section's share of the context window (#7756 §1.3).
-pub const MEMORY_SECTION_MAX_CHARS: usize = MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS;
+/// The key half of a recalled memory is caller-controlled — `PromptContext.recalled_memories` is a public field and [`format_memory_items_as_personal_context`] a public function, and neither `librefang-memory` nor `librefang-types::memory` bounds a key's length — so an uncapped label let three memories with 50 000-character keys render 151 003 characters into a section whose stated budget is 5 000 (#7910).
+/// Mirrors `SKILL_NAME_DISPLAY_CAP`, which bounds a third-party-controlled name the same way.
+pub const MEMORY_KEY_DISPLAY_CAP: usize = 64;
+
+/// Characters a bullet spends on framing, over and above the content it carries.
+///
+/// - `- ` prefix and the trailing newline = 3
+/// - `[`, `] ` around the key label = 3
+/// - sanitized key (up to `MEMORY_KEY_DISPLAY_CAP`) + `...` = N + 3
+///
+/// Counted explicitly, the way `SKILL_BOILERPLATE_OVERHEAD` counts a skill entry's framing, so that [`MEMORY_SECTION_MAX_CHARS`] can be a ceiling over every character the bullet list contributes rather than over content alone.
+const MEMORY_BULLET_FRAMING_OVERHEAD: usize = 3 + 3 + MEMORY_KEY_DISPLAY_CAP + 3;
+
+/// Character budget for the memory bullets as a whole, counted over the bullets as they are rendered — content, `- [key] ` scaffolding, truncation marker and newline all included.
+///
+/// Deliberately equal to `MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD)`, so it is a true ceiling rather than a behaviour change: with today's constants it is saturated by ten full-length bullets carrying maximum-length keys, and never binds below that.
+/// It exists because three producers feed this section — substrate recall, proactive memory, and the context engine — and until now nobody owned its total, so raising either constant would have silently multiplied the section's share of the context window (#7756 §1.3).
+///
+/// The framing allowance is part of the budget rather than excluded from it because excluding a quantity is only safe while that quantity is bounded, and the key label was not (#7910).
+/// The fixed preamble above the bullets is a compile-time constant and is not counted.
+pub const MEMORY_SECTION_MAX_CHARS: usize =
+    MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD);
 
 /// Appended to a memory bullet that was cut short.
 ///
@@ -655,28 +669,39 @@ const MEMORY_BULLET_MIN_CHARS: usize = 80;
 /// meant to replace.
 const MEMORY_BOUNDARY_MIN_PERCENT: usize = 60;
 
+/// Byte index one past the `n`th character of `s`, or `s.len()` when `s` is shorter.
+///
+/// Always a character boundary, so slicing `s` with it cannot panic on multi-byte input.
+fn char_boundary_at(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
+}
+
 /// Truncate a memory bullet at a sentence boundary, falling back to a word boundary.
 ///
-/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there,
-/// this walks back to the last sentence terminator inside the budget, then to the last
-/// word boundary, and only performs a bare character cut when the text offers neither
-/// (scripts without spaces, or a single unbroken token). Every shortened result carries
-/// [`MEMORY_TRUNCATION_MARKER`].
+/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there, this walks back to the last sentence terminator inside the budget, then to the last word boundary, and only performs a bare character cut when the text offers neither (scripts without spaces, or a single unbroken token).
+/// Every shortened result carries [`MEMORY_TRUNCATION_MARKER`], except in the degenerate case where `max_chars` leaves no room for both a marker and any content at all.
 ///
-/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget,
-/// so a boundary never costs more content than it saves.
+/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget, so a boundary never costs more content than it saves.
+///
+/// The result never exceeds `max_chars` characters.
+/// The marker is part of what is returned, so it is reserved out of the budget before the window is chosen — appending it to a window that already filled `max_chars` is what let every truncated bullet overshoot the section budget by exactly one marker's worth (#7910).
+/// All cuts are made at character boundaries.
 fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();
     }
+    let marker_chars = MEMORY_TRUNCATION_MARKER.chars().count();
+    let content_chars = max_chars.saturating_sub(marker_chars);
+    if content_chars == 0 {
+        // Not enough room for content and a marker both.
+        // A bare character cut still honours the cap, and a bullet that is nothing but a marker carries no information anyway.
+        let end = char_boundary_at(content, max_chars);
+        return content[..end].trim_end().to_string();
+    }
     // Byte index one past the last character the budget allows.
-    let end = content
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(content.len());
+    let end = char_boundary_at(content, content_chars);
     let window = &content[..end];
-    let floor = max_chars * MEMORY_BOUNDARY_MIN_PERCENT / 100;
+    let floor = content_chars * MEMORY_BOUNDARY_MIN_PERCENT / 100;
 
     // Byte indices, exclusive. `sentence_cut` keeps the terminator; `word_cut` drops
     // the whitespace it found (the trailing trim below removes any that survives).
@@ -753,18 +778,25 @@ fn format_memory_items_within_budget(
     let mut spent = 0usize;
     let mut rendered = 0usize;
     for (key, content) in memories.iter().take(bullet_limit) {
+        // The key is caller-controlled, so it is sanitized and capped before it is rendered and charged at its rendered length — an uncapped, uncharged label is unbounded growth in the one section whose whole purpose is to be bounded (#7910).
+        let label = match sanitize_for_prompt(key, MEMORY_KEY_DISPLAY_CAP) {
+            k if k.is_empty() => String::new(),
+            k => format!("[{k}] "),
+        };
+        // `- ` + label + `\n`: everything in the rendered line that is not content.
+        let framing = 3 + label.chars().count();
         let remaining = section_max_chars.saturating_sub(spent);
-        if remaining < MEMORY_BULLET_MIN_CHARS {
+        // Charge the framing before deciding whether a bullet is worth rendering, so that what survives is at least `MEMORY_BULLET_MIN_CHARS` of content rather than a label.
+        let content_budget = remaining.saturating_sub(framing);
+        if content_budget < MEMORY_BULLET_MIN_CHARS {
             break;
         }
-        let capped = truncate_memory_bullet(content, bullet_max_chars.min(remaining));
-        spent += capped.chars().count();
+        let capped = truncate_memory_bullet(content, bullet_max_chars.min(content_budget));
+        let line = format!("- {label}{capped}\n");
+        // `truncate_memory_bullet` honours its budget, so this cannot exceed `remaining`.
+        spent += line.chars().count();
         rendered += 1;
-        if key.is_empty() {
-            out.push_str(&format!("- {capped}\n"));
-        } else {
-            out.push_str(&format!("- [{key}] {capped}\n"));
-        }
+        out.push_str(&line);
     }
     // Say so rather than dropping silently. The count is the only signal the model gets
     // that its recalled context was clipped, whether by `bullet_limit` or by the budget.
@@ -1496,11 +1528,7 @@ fn cap_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
-        let end = s
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(s.len());
+        let end = char_boundary_at(s, max_chars);
         // Defense in depth: walk back to a char boundary in case `end` is ever
         // produced by something other than `char_indices` in the future.
         format!("{}...", safe_truncate_str(s, end))
