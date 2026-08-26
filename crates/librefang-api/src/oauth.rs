@@ -649,11 +649,18 @@ fn build_login_redirect(provider: &ResolvedProvider) -> impl IntoResponse {
             );
             Redirect::temporary(auth_url.as_str()).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to build auth URL: {e}")})),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::error!(
+                provider = %provider.id,
+                %error,
+                "failed to build OAuth authorization URL"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to build authorization URL"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -2177,7 +2184,35 @@ fn email_domain(email: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use base64::Engine;
+
+    #[tokio::test]
+    async fn login_redirect_scrubs_authorization_url_parse_errors() {
+        let provider = ResolvedProvider {
+            id: "broken-provider".to_string(),
+            display_name: "Broken".to_string(),
+            auth_url: "https://[invalid-host".to_string(),
+            token_url: "https://idp.example/token".to_string(),
+            userinfo_url: String::new(),
+            jwks_uri: String::new(),
+            client_id: "client".to_string(),
+            client_secret_env: "TEST_SECRET".to_string(),
+            redirect_url: "https://app.example/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: false,
+        };
+
+        let response = build_login_redirect(&provider).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Failed to build authorization URL"));
+        assert!(!body.contains("invalid-host"));
+        assert!(!body.contains("IPv6"));
+    }
 
     #[test]
     fn email_domain_redacts_local_part_and_handles_malformed_input() {

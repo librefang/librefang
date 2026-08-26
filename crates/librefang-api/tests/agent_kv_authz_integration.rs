@@ -9,8 +9,8 @@
 //! as long as they knew the key name.
 //!
 //! These tests pin the helper `assert_kv_owner_or_admin` extracted in
-//! the #3749 11/N follow-up: viewer != author returns 404, owner / admin
-//! / anonymous all proceed.
+//! the #3749 11/N follow-up: viewer != author returns 404, while owner,
+//! admin, and trusted no-auth compatibility requests proceed.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -98,7 +98,21 @@ fn req_with_body(
 }
 
 async fn run(h: &Harness, request: Request<Body>) -> StatusCode {
-    h.app.clone().oneshot(request).await.unwrap().status()
+    run_response(h, request).await.status()
+}
+
+async fn run_response(h: &Harness, request: Request<Body>) -> axum::response::Response {
+    h.app.clone().oneshot(request).await.unwrap()
+}
+
+async fn run_json(h: &Harness, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let response = run_response(h, request).await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("read response body");
+    let body = serde_json::from_slice(&bytes).expect("JSON response body");
+    (status, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,12 +170,10 @@ async fn list_kv_viewer_owner_is_ok() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn list_kv_anonymous_proceeds() {
-    // No `AuthenticatedApiUser` extension — the auth middleware is not in
-    // play here, so this models an unauthenticated caller. The helper
-    // intentionally fails open for that case (the global middleware
-    // enforces the auth gate elsewhere); this test pins the contract so
-    // a future tightening doesn't silently break the unauth path.
+async fn list_kv_trusted_no_auth_mode_proceeds() {
+    // No `AuthenticatedApiUser` extension models the explicitly trusted
+    // no-auth compatibility mode. Production authentication middleware is
+    // tested separately; this router-level harness intentionally omits it.
     let h = boot();
     let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
     let status = run(
@@ -230,19 +242,54 @@ async fn delete_single_key_viewer_other_author_is_404() {
 async fn get_single_key_admin_proceeds_against_any_agent() {
     let h = boot();
     let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
-    // Key doesn't exist, so we expect 404 from the substrate path (NOT
-    // the owner-check path). Either result documents a non-403; the
-    // important pin is "admin is not blocked by owner-scoping".
-    let status = run(
+    let key_uri = format!("/api/memory/agents/{id}/kv/admin.visible");
+
+    let seed_status = run(
         &h,
-        req(
-            Method::GET,
-            &format!("/api/memory/agents/{id}/kv/never.set"),
-            Some(admin("ops")),
+        req_with_body(
+            Method::PUT,
+            &key_uri,
+            Some(viewer("alice")),
+            Body::from(r#"{"value":"seeded-by-owner"}"#),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(seed_status, StatusCode::OK);
+
+    let (status, body) = run_json(&h, req(Method::GET, &key_uri, Some(admin("ops")))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["key"], "admin.visible");
+    assert_eq!(body["value"], "seeded-by-owner");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_key_owner_round_trip_is_ok() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+    let key_uri = format!("/api/memory/agents/{id}/kv/user.preference");
+
+    let put = run(
+        &h,
+        req_with_body(
+            Method::PUT,
+            &key_uri,
+            Some(viewer("alice")),
+            Body::from(r#"{"value":{"theme":"dark"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(put, StatusCode::OK);
+
+    let (get, body) = run_json(&h, req(Method::GET, &key_uri, Some(viewer("alice")))).await;
+    assert_eq!(get, StatusCode::OK);
+    assert_eq!(body["key"], "user.preference");
+    assert_eq!(body["value"], serde_json::json!({"theme": "dark"}));
+
+    let delete = run(&h, req(Method::DELETE, &key_uri, Some(viewer("alice")))).await;
+    assert_eq!(delete, StatusCode::NO_CONTENT);
+
+    let missing = run(&h, req(Method::GET, &key_uri, Some(viewer("alice")))).await;
+    assert_eq!(missing, StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,4 +327,37 @@ async fn import_viewer_other_author_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_import_then_export_round_trip_is_ok() {
+    let h = boot();
+    let id = spawn_owned_by(&h.state, "owned-by-alice", "alice");
+
+    let (import_status, import_body) = run_json(
+        &h,
+        req_with_body(
+            Method::POST,
+            &format!("/api/agents/{id}/memory/import"),
+            Some(viewer("alice")),
+            Body::from(r#"{"kv":{"oncall.contact":"alice@example.com"}}"#),
+        ),
+    )
+    .await;
+    assert_eq!(import_status, StatusCode::OK);
+    assert_eq!(import_body["status"], "imported");
+    assert_eq!(import_body["keys_imported"], 1);
+
+    let (export_status, export_body) = run_json(
+        &h,
+        req(
+            Method::GET,
+            &format!("/api/agents/{id}/memory/export"),
+            Some(viewer("alice")),
+        ),
+    )
+    .await;
+    assert_eq!(export_status, StatusCode::OK);
+    assert_eq!(export_body["agent_id"], id.to_string());
+    assert_eq!(export_body["kv"]["oncall.contact"], "alice@example.com");
 }

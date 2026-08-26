@@ -375,7 +375,7 @@ async fn media_music_rejects_when_neither_prompt_nor_lyrics() {
 #[tokio::test(flavor = "multi_thread")]
 async fn media_music_rejects_overlong_lyrics() {
     let h = boot().await;
-    let huge = "la ".repeat(2000); // > 3500 chars
+    let huge = "la ".repeat(1200); // 3600 chars, just over the 3500-char limit
     let (status, body) = json_request(
         &h,
         Method::POST,
@@ -470,7 +470,7 @@ async fn media_transcribe_rejects_oversized_body() {
         Method::POST,
         "/api/media/transcribe",
         Some("audio/webm"),
-        vec![0u8; 11 * 1024 * 1024],
+        vec![0u8; 10 * 1024 * 1024 + 1],
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -483,7 +483,7 @@ async fn media_transcribe_strips_content_type_parameters() {
     // will hit the kernel's MediaEngine and bubble back a 5xx — but the
     // status MUST NOT be 400 (the content-type gate has already passed).
     let h = boot().await;
-    let (status, _body) = raw_request(
+    let (status, body) = raw_request(
         &h,
         Method::POST,
         "/api/media/transcribe",
@@ -491,9 +491,9 @@ async fn media_transcribe_strips_content_type_parameters() {
         b"\x00\x01\x02fake-audio-bytes".to_vec(),
     )
     .await;
-    assert_ne!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "audio/webm;codecs=opus must pass the content-type gate"
+    assert!(
+        status.is_server_error(),
+        "audio/webm;codecs=opus must pass the content-type gate and reach the kernel; \
+         expected 5xx, got {status}: {body}"
     );
 }

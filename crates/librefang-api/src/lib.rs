@@ -63,6 +63,41 @@ pub(crate) fn percent_decode(input: &str) -> String {
     std::hint::black_box(decoded)
 }
 
+fn lock_a2a_agents<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("API A2A agent registry lock poisoned; recovering trusted agent state");
+        mutex.clear_poison();
+        poisoned.into_inner()
+    })
+}
+
+#[cfg(test)]
+mod a2a_agent_lock_tests {
+    use super::lock_a2a_agents;
+    use std::sync::Mutex;
+
+    #[test]
+    fn poisoned_a2a_lock_recovers_preserved_agents_and_remains_usable() {
+        let agents = Mutex::new(vec!["trusted"]);
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = agents.lock().unwrap();
+                    state.push("discovered");
+                    panic!("poison API A2A registry lock");
+                })
+                .join()
+        });
+        assert!(poison.is_err());
+        assert!(agents.is_poisoned());
+        assert_eq!(&*lock_a2a_agents(&agents), &["trusted", "discovered"]);
+        assert!(!agents.is_poisoned());
+
+        lock_a2a_agents(&agents).push("later");
+        assert_eq!(agents.lock().unwrap().len(), 3);
+    }
+}
+
 fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),

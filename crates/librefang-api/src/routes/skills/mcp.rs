@@ -1031,7 +1031,7 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
     // add/remove` does this, then POSTs /api/mcp/reload) the reload would
     // otherwise run against the stale snapshot and miss the change.
     if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Failed to reload config before MCP reload: {e}");
+        return ApiErrorResponse::internal_scrub(e).into_json_tuple();
     }
 
     match state.kernel.clone().reload_mcp_servers().await {
@@ -1042,6 +1042,6 @@ pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl Into
                 "new_connections": connected,
             })),
         ),
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_json_tuple(),
     }
 }

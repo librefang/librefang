@@ -490,13 +490,39 @@ impl BedrockEmbeddingDriver {
     /// Build the Bedrock invoke URL for the configured model and region.
     fn invoke_url(&self) -> String {
         format!(
-            "https://bedrock-runtime.{}.amazonaws.com/model/{}/invoke",
-            self.region, self.model_id
+            "https://bedrock-runtime.{}.amazonaws.com{}",
+            self.region,
+            bedrock_invoke_path(&self.model_id)
         )
     }
 }
 
 // ── Minimal AWS SigV4 helpers ───────────────────────────────────────────
+
+/// Encode one URI path segment using the unreserved set required by SigV4.
+///
+/// Model identifiers can be ARNs and may therefore contain `/`, `:`, or other
+/// reserved characters. Encoding every non-unreserved UTF-8 byte keeps the
+/// identifier in one path segment and gives signing and dispatch the same URI.
+fn aws_uri_encode_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+fn bedrock_invoke_path(model_id: &str) -> String {
+    format!("/model/{}/invoke", aws_uri_encode_path_segment(model_id))
+}
 
 /// Compute SHA-256 hex digest.
 fn sha256_hex(data: &[u8]) -> String {
@@ -590,7 +616,7 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
             .host_str()
             .ok_or_else(|| EmbeddingError::Http("no host in Bedrock URL".into()))?
             .to_string();
-        let uri_path = parsed.path().to_string();
+        let uri_path = bedrock_invoke_path(&self.model_id);
 
         let mut embeddings = Vec::with_capacity(texts.len());
 
@@ -1063,6 +1089,29 @@ mod tests {
     }
 
     #[test]
+    fn test_bedrock_invoke_path_encodes_model_id_as_one_segment() {
+        assert_eq!(
+            bedrock_invoke_path(
+                "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/model 50%/日本"
+            ),
+            "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Aprovisioned-model%2Fmodel%2050%25%2F%E6%97%A5%E6%9C%AC/invoke"
+        );
+    }
+
+    #[test]
+    fn test_bedrock_encoded_path_is_preserved_by_url_parser() {
+        let path = bedrock_invoke_path("amazon.titan-embed-text-v2:0/alias");
+        let url = format!("https://bedrock-runtime.us-east-1.amazonaws.com{path}");
+        let parsed = url::Url::parse(&url).unwrap();
+
+        assert_eq!(
+            parsed.path(),
+            "/model/amazon.titan-embed-text-v2%3A0%2Falias/invoke"
+        );
+        assert_eq!(parsed.path(), path);
+    }
+
+    #[test]
     fn test_sha256_hex_empty() {
         // SHA-256 of empty string is a well-known constant.
         let hash = sha256_hex(b"");
@@ -1118,7 +1167,7 @@ mod tests {
             "us-east-1",
             "bedrock",
             "bedrock-runtime.us-east-1.amazonaws.com",
-            "/model/amazon.titan-embed-text-v2:0/invoke",
+            "/model/amazon.titan-embed-text-v2%3A0/invoke",
             b"{\"inputText\":\"hello\"}",
             &now,
         );

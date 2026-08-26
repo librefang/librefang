@@ -1472,6 +1472,123 @@ impl AuditLog {
         entries[start..].to_vec()
     }
 
+    /// Counts every retained non-success outcome for one agent.
+    ///
+    /// Persistent logs use the `audit_entries(agent_id, timestamp)` index
+    /// instead of cloning and scanning the bounded in-memory window. An
+    /// in-memory-only log has no durable history, so its retained entries are
+    /// the authoritative source.
+    pub fn count_agent_errors(&self, agent_id: &str) -> Result<u64, String> {
+        let Some(pool) = self.db.as_ref() else {
+            let entries = lock_audit_recover(&self.entries, "entries");
+            return Ok(entries
+                .iter()
+                .filter(|entry| {
+                    entry.agent_id == agent_id
+                        && entry.outcome != "ok"
+                        && entry.outcome != "success"
+                })
+                .count() as u64);
+        };
+
+        let db = pool
+            .get()
+            .map_err(|error| format!("failed to acquire audit database connection: {error}"))?;
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_entries \
+                 WHERE agent_id = ?1 AND outcome != 'ok' AND outcome != 'success'",
+                [agent_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("failed to count agent audit errors: {error}"))?;
+        u64::try_from(count).map_err(|_| "agent audit error count was negative".to_string())
+    }
+
+    /// Returns one newest-first page of audit entries for an agent.
+    ///
+    /// Persistent logs are filtered and paginated in SQLite. Schema v41's
+    /// `(agent_id, timestamp)` index makes the work proportional to the
+    /// requested agent page rather than the global audit population.
+    pub fn recent_for_agent(
+        &self,
+        agent_id: &str,
+        outcome: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, String> {
+        let Some(pool) = self.db.as_ref() else {
+            let entries = lock_audit_recover(&self.entries, "entries");
+            return Ok(entries
+                .iter()
+                .rev()
+                .filter(|entry| entry.agent_id == agent_id)
+                .filter(|entry| {
+                    outcome.is_none_or(|value| entry.outcome.eq_ignore_ascii_case(value))
+                })
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect());
+        };
+
+        let db = pool
+            .get()
+            .map_err(|error| format!("failed to acquire audit database connection: {error}"))?;
+        let offset = i64::try_from(offset)
+            .map_err(|_| "agent audit offset exceeds SQLite range".to_string())?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| "agent audit limit exceeds SQLite range".to_string())?;
+        let sql = if outcome.is_some() {
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash \
+             FROM audit_entries WHERE agent_id = ?1 AND outcome = ?2 COLLATE NOCASE \
+             ORDER BY timestamp DESC, seq DESC LIMIT ?3 OFFSET ?4"
+        } else {
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash \
+             FROM audit_entries WHERE agent_id = ?1 \
+             ORDER BY timestamp DESC, seq DESC LIMIT ?2 OFFSET ?3"
+        };
+        let mut stmt = db
+            .prepare(sql)
+            .map_err(|error| format!("failed to prepare agent audit query: {error}"))?;
+        let decode = |row: &rusqlite::Row<'_>| {
+            let action_str: String = row.get(3)?;
+            let action = action_str.parse::<AuditAction>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            let seq_raw: i64 = row.get(0)?;
+            let seq = u64::try_from(seq_raw)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
+            let user_id_str: Option<String> = row.get(6)?;
+            Ok(AuditEntry {
+                seq,
+                timestamp: row.get(1)?,
+                agent_id: row.get(2)?,
+                action,
+                detail: row.get(4)?,
+                outcome: row.get(5)?,
+                user_id: user_id_str.as_deref().and_then(|value| value.parse().ok()),
+                channel: row.get(7)?,
+                prev_hash: row.get(8)?,
+                hash: row.get(9)?,
+            })
+        };
+        let rows = match outcome {
+            Some(outcome) => {
+                stmt.query_map(rusqlite::params![agent_id, outcome, limit, offset], decode)
+            }
+            None => stmt.query_map(rusqlite::params![agent_id, limit, offset], decode),
+        }
+        .map_err(|error| format!("failed to query agent audit entries: {error}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to decode agent audit entry: {error}"))
+    }
+
     /// Returns every entry with `seq > cursor`, in insertion order.
     ///
     /// Intended for cursor-based streaming consumers — e.g. the

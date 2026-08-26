@@ -703,7 +703,8 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                         "sidecar --describe failed; discovery card will have no form fields"
                     );
                     // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    write_cache_recover(schema_error_cache(), "schema error").insert(entry.name, e);
+                    write_cache_recover(schema_error_cache(), "schema error")
+                        .insert(entry.name, e.to_string());
                 }
             }
         }

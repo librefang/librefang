@@ -9,6 +9,23 @@
 
 use super::*;
 
+fn lock_recover<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    name: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!(
+                lock = name,
+                "scriptable context lock poisoned; recovering state"
+            );
+            mutex.clear_poison();
+            poisoned.into_inner()
+        }
+    }
+}
+
 mod engine;
 
 /// One recorded hook invocation — input, output, timing, and outcome.
@@ -618,9 +635,10 @@ impl ScriptableContextEngine {
                             }
 
                             let effective_env = {
-                                let guard = bootstrap_overrides
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner());
+                                let guard = lock_recover(
+                                    &bootstrap_overrides,
+                                    "bootstrap_applied_overrides",
+                                );
                                 let mut env = plugin_env.clone();
                                 for (k, v) in &guard.env_overrides {
                                     if !env.iter().any(|(ek, _)| ek == k) {
@@ -630,9 +648,10 @@ impl ScriptableContextEngine {
                                 env
                             };
                             let effective_allow_network = {
-                                let guard = bootstrap_overrides
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner());
+                                let guard = lock_recover(
+                                    &bootstrap_overrides,
+                                    "bootstrap_applied_overrides",
+                                );
                                 guard.allow_network.unwrap_or(allow_network)
                             };
                             let input = serde_json::json!({"event": event});
@@ -685,17 +704,12 @@ impl ScriptableContextEngine {
 
     /// Return a snapshot of all hook invocation metrics.
     pub fn metrics(&self) -> HookMetrics {
-        self.metrics
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        lock_recover(&self.metrics, "metrics").clone()
     }
 
     /// Return recent hook invocation traces (up to `TRACE_BUFFER_CAPACITY`).
     pub fn traces_snapshot(&self) -> Vec<HookTrace> {
-        self.traces
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        lock_recover(&self.traces, "traces")
             .iter()
             .cloned()
             .collect()
@@ -925,10 +939,7 @@ impl ScriptableContextEngine {
     }
 
     pub fn per_agent_metrics_snapshot(&self) -> std::collections::HashMap<String, HookStats> {
-        self.per_agent_metrics
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        lock_recover(&self.per_agent_metrics, "per_agent_metrics").clone()
     }
 
     pub async fn prewarm(&self) {
@@ -1178,10 +1189,10 @@ impl ScriptableContextEngine {
         let runtime = self.runtime.clone();
         let timeout_secs = self.hook_timeout_secs;
         let plugin_env = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -1198,10 +1209,10 @@ impl ScriptableContextEngine {
         let retry_delay_ms = 0u64;
         let max_memory_mb = self.max_memory_mb;
         let allow_network = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             guard.allow_network.unwrap_or(self.allow_network)
         };
         let output_schema_strict = self.inner.config.output_schema_strict;
@@ -1436,7 +1447,7 @@ impl ScriptableContextEngine {
         // Rate limiting check.
         let max_rpm = self.inner.config.max_hook_calls_per_minute;
         if max_rpm > 0 {
-            let mut limiters = self.rate_limiters.lock().unwrap_or_else(|e| e.into_inner());
+            let mut limiters = lock_recover(&self.rate_limiters, "rate_limiters");
             // Key by "{agent_id}:{hook_name}" so one agent cannot exhaust the
             // rate limit for all other agents sharing the same plugin.
             let rl_key = format!(
@@ -1487,10 +1498,10 @@ impl ScriptableContextEngine {
     ) -> Result<(serde_json::Value, u64), String> {
         // Compute effective env and network permission, merging bootstrap overrides.
         let (mut effective_env, effective_allow_network) = {
-            let guard = self
-                .bootstrap_applied_overrides
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(
+                &self.bootstrap_applied_overrides,
+                "bootstrap_applied_overrides",
+            );
             let mut env = self.plugin_env.clone();
             for (k, v) in &guard.env_overrides {
                 if !env.iter().any(|(ek, _)| ek == k) {
@@ -1683,10 +1694,7 @@ impl ScriptableContextEngine {
         // Keys are stored as "{agent_id}:{hook}" or bare "{hook}".
         // We report bare hook names; agent-scoped keys use the portion after the last ':'.
         let circuit_open: std::collections::HashMap<String, bool> = {
-            let guard = self
-                .circuit_breakers
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let guard = lock_recover(&self.circuit_breakers, "circuit_breakers");
             guard
                 .iter()
                 .map(|(key, state)| {
@@ -1702,7 +1710,7 @@ impl ScriptableContextEngine {
 
         // Recent traces from the in-memory ring buffer (sync Mutex).
         let (recent_calls, recent_errors) = {
-            let buf = self.traces.lock().unwrap_or_else(|p| p.into_inner());
+            let buf = lock_recover(&self.traces, "traces");
             let calls = buf.len();
             let errors = buf.iter().filter(|t| t.error.is_some()).count();
             (calls, errors)

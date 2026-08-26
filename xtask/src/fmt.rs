@@ -28,6 +28,23 @@ fn has_command(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn prettier_invocation(
+    has_pnpm: bool,
+    has_prettier: bool,
+) -> Option<(&'static str, &'static [&'static str])> {
+    if has_pnpm {
+        Some(("pnpm", &["exec", "prettier"]))
+    } else if has_prettier {
+        Some(("prettier", &[]))
+    } else {
+        None
+    }
+}
+
+fn command_status_failed(status: &std::io::Result<std::process::ExitStatus>) -> bool {
+    !matches!(status, Ok(exit) if exit.success())
+}
+
 pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let total_start = Instant::now();
@@ -75,9 +92,9 @@ pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
             (root.join("docs"), "docs"),
         ];
 
-        let has_prettier = has_command("prettier") || has_command("pnpm");
+        let prettier = prettier_invocation(has_command("pnpm"), has_command("prettier"));
 
-        if has_prettier {
+        if let Some((cmd_name, prefix_args)) = prettier {
             for (dir, label) in &web_dirs {
                 if !dir.join("package.json").exists() {
                     continue;
@@ -86,27 +103,9 @@ pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
                 println!("=== prettier: {} ===", label);
                 let start = Instant::now();
 
-                let (cmd_name, cmd_args) = if args.fix {
-                    (
-                        "pnpm",
-                        vec![
-                            "exec",
-                            "prettier",
-                            "--write",
-                            "src/**/*.{ts,tsx,js,jsx,css,json}",
-                        ],
-                    )
-                } else {
-                    (
-                        "pnpm",
-                        vec![
-                            "exec",
-                            "prettier",
-                            "--check",
-                            "src/**/*.{ts,tsx,js,jsx,css,json}",
-                        ],
-                    )
-                };
+                let mode = if args.fix { "--write" } else { "--check" };
+                let mut cmd_args = prefix_args.to_vec();
+                cmd_args.extend([mode, "src/**/*.{ts,tsx,js,jsx,css,json}"]);
 
                 let status = Command::new(cmd_name)
                     .args(&cmd_args)
@@ -114,6 +113,9 @@ pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .status();
 
                 let elapsed = start.elapsed();
+                if command_status_failed(&status) {
+                    issues += 1;
+                }
 
                 match status {
                     Ok(s) if s.success() => {
@@ -125,7 +127,6 @@ pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(_) => {
                         println!("  Issues found ({:.1}s)", elapsed.as_secs_f64());
-                        issues += 1;
                     }
                     Err(e) => {
                         println!("  Error: {} ({:.1}s)", e, elapsed.as_secs_f64());
@@ -150,5 +151,33 @@ pub fn run(args: FmtCheckArgs) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("All formatting OK ({:.1}s total)", total.as_secs_f64());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_status_failed, prettier_invocation};
+
+    #[test]
+    fn prettier_invocation_matches_the_detected_executable() {
+        assert_eq!(
+            prettier_invocation(true, true),
+            Some(("pnpm", &["exec", "prettier"][..]))
+        );
+        assert_eq!(
+            prettier_invocation(false, true),
+            Some(("prettier", &[][..]))
+        );
+        assert_eq!(prettier_invocation(false, false), None);
+    }
+
+    #[test]
+    fn command_launch_error_is_a_formatting_failure() {
+        let status = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "prettier executable disappeared",
+        ));
+
+        assert!(command_status_failed(&status));
     }
 }

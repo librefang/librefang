@@ -13,6 +13,7 @@ fn lock_a2a_agents(
 ) -> MutexGuard<'_, Vec<(String, AgentCard)>> {
     agents.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("A2A registry lock poisoned; recovering trusted agent state");
+        agents.clear_poison();
         poisoned.into_inner()
     })
 }
@@ -82,11 +83,14 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(agents.is_poisoned());
         let mut recovered = lock_a2a_agents(&agents);
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].1.name, "Trusted");
+        assert!(!agents.is_poisoned());
         recovered.retain(|(_, card)| card.name != "Backup");
         drop(recovered);
         assert_eq!(lock_a2a_agents(&agents).len(), 1);
+        assert!(!agents.is_poisoned());
     }
 }

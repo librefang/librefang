@@ -1502,10 +1502,15 @@ pub struct WorkflowEngine {
 }
 
 fn lock_workflow_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
-    lock.lock().unwrap_or_else(|poisoned| {
-        warn!("workflow persistence lock poisoned; recovering write serialization");
-        poisoned.into_inner()
-    })
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("workflow persistence lock poisoned; recovering write serialization");
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        }
+    }
 }
 
 /// Format the error returned when a workflow step's `agent_resolver` returns
@@ -7230,11 +7235,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(lock.is_poisoned());
         let recovered = lock_workflow_persistence(&lock);
         assert!(lock.try_lock().is_err());
         drop(recovered);
-        let recovered_again = lock_workflow_persistence(&lock);
-        drop(recovered_again);
+        assert!(!lock.is_poisoned());
+        let ordinary_guard = lock.lock().unwrap();
+        drop(ordinary_guard);
     }
 
     fn test_workflow() -> Workflow {

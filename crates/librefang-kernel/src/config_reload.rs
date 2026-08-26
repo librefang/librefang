@@ -162,9 +162,10 @@ impl ReloadPlan {
 /// `serde_json::to_string` serializes a `HashMap` in its per-instance iteration order, so two content-identical maps built from separate deserializations (the live config vs the reload candidate) produce different strings and `field_changed` fired spuriously — emitting a needless `ReloadAuth` / `restart_required` on every reload for any multi-entry deployment.
 /// `to_value` normalizes every (possibly nested) map to a `BTreeMap`-backed `Value::Object` (the workspace does not enable serde_json's `preserve_order`), so semantically-equal configs compare equal regardless of map iteration order.
 fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
-    let old_val = serde_json::to_value(old).ok();
-    let new_val = serde_json::to_value(new).ok();
-    old_val != new_val
+    match (serde_json::to_value(old), serde_json::to_value(new)) {
+        (Ok(old_val), Ok(new_val)) => old_val != new_val,
+        _ => true,
+    }
 }
 
 /// Decide whether two `[external_auth]` snapshots disagree on a field
@@ -1200,6 +1201,25 @@ pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 mod tests {
     use super::*;
     use librefang_types::config::KernelConfig;
+
+    struct SerializationFailure;
+
+    impl serde::Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn field_changed_fails_closed_when_both_values_fail_to_serialize() {
+        assert!(
+            field_changed(&SerializationFailure, &SerializationFailure),
+            "serialization failures must be treated as a change"
+        );
+    }
 
     /// Regression (#6441 follow-up): `field_changed` must not report a change
     /// for two content-identical `HashMap`s that merely iterate in different

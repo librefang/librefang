@@ -18,7 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Modal } from "../components/ui/Modal";
-import { useTaskQueue, useTaskQueueStatus } from "../lib/queries/runtime";
+import { useTaskQueue } from "../lib/queries/runtime";
 import {
   useCreateTask,
   useUpdateTaskStatus,
@@ -26,6 +26,8 @@ import {
   useRetryTask,
 } from "../lib/mutations/runtime";
 import type { TaskQueueItem } from "../api";
+import { toastErr } from "../lib/errors";
+import { useUIStore } from "../lib/store";
 
 // Operator-visible status columns (order: left to right).
 // Cancelled is shown last and is collapsed when empty.
@@ -79,6 +81,7 @@ interface TaskCardProps {
 
 function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const deleteMutation = useDeleteTask();
   const retryMutation = useRetryTask();
   const updateMutation = useUpdateTaskStatus();
@@ -88,10 +91,14 @@ function TaskCard({ task, isDragTarget, onDragStart }: TaskCardProps) {
 
   function handleAction(action: "requeue" | "cancel" | "retry" | "delete") {
     if (!id) return;
-    if (action === "delete") { deleteMutation.mutate(id); return; }
-    if (action === "retry")  { retryMutation.mutate(id); return; }
-    if (action === "cancel") { updateMutation.mutate({ id, status: "cancelled" }); return; }
-    if (action === "requeue"){ updateMutation.mutate({ id, status: "pending" }); return; }
+    const onError = (err: unknown) => addToast(
+      toastErr(err, t("common.error")),
+      "error",
+    );
+    if (action === "delete") { deleteMutation.mutate(id, { onError }); return; }
+    if (action === "retry")  { retryMutation.mutate(id, { onError }); return; }
+    if (action === "cancel") { updateMutation.mutate({ id, status: "cancelled" }, { onError }); return; }
+    if (action === "requeue"){ updateMutation.mutate({ id, status: "pending" }, { onError }); return; }
   }
 
   const isBusy = deleteMutation.isPending || retryMutation.isPending || updateMutation.isPending;
@@ -233,7 +240,6 @@ function KanbanColumn({
 }: KanbanColumnProps) {
   const { t } = useTranslation();
   const [isDragOver, setIsDragOver] = useState(false);
-  const updateMutation = useUpdateTaskStatus();
 
   // Only the Pending column accepts drops (re-queue operation)
   const acceptsDrop = columnKey === "pending";
@@ -251,9 +257,9 @@ function KanbanColumn({
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setIsDragOver(false);
-    if (!acceptsDrop || !dragTaskId) return;
-    onDropRequeue(dragTaskId);
-    updateMutation.mutate({ id: dragTaskId, status: "pending" });
+    if (!acceptsDrop) return;
+    const taskId = e.dataTransfer.getData("text/plain") || dragTaskId;
+    if (taskId) onDropRequeue(taskId);
   }
 
   return (
@@ -287,9 +293,9 @@ function KanbanColumn({
         {tasks.length === 0 ? (
           <p className="text-[11px] text-text-dim/40 italic text-center py-4">{t("tasks.empty")}</p>
         ) : (
-          tasks.map((task) => (
+          tasks.filter((task) => Boolean(task.id)).map((task) => (
             <TaskCard
-              key={task.id ?? task.created_at}
+              key={task.id}
               task={task}
               isDragTarget={dragTaskId === task.id && !acceptsDrop}
               onDragStart={onDragStart}
@@ -444,21 +450,24 @@ function NewTaskModal({ isOpen, onClose, agents }: NewTaskModalProps) {
 
 export function TasksPage() {
   const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
   const [agentFilter, setAgentFilter] = useState("");
   const [showNewTask, setShowNewTask] = useState(false);
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
+  const updateMutation = useUpdateTaskStatus();
 
   // Fetch all tasks (no status filter — we split client-side)
   const taskListQuery = useTaskQueue();
-  const taskStatusQuery = useTaskQueueStatus();
 
   const allTasks: TaskQueueItem[] = taskListQuery.data?.tasks ?? [];
-  const taskStatus = taskStatusQuery.data;
+  const validTasks = allTasks.filter(
+    (task): task is TaskQueueItem & { id: string } => typeof task.id === "string" && task.id.length > 0,
+  );
 
   // Derive unique agent names for the filter dropdown
   const agentNames = Array.from(
     new Set(
-      allTasks
+      validTasks
         .map((t) => t.assigned_to)
         .filter((a): a is string => typeof a === "string" && a.length > 0),
     ),
@@ -466,8 +475,8 @@ export function TasksPage() {
 
   // Apply agent filter
   const filteredTasks = agentFilter
-    ? allTasks.filter((t) => t.assigned_to === agentFilter)
-    : allTasks;
+    ? validTasks.filter((t) => t.assigned_to === agentFilter)
+    : validTasks;
 
   // Group by status
   function getColumnTasks(statuses: string[]): TaskQueueItem[] {
@@ -478,30 +487,36 @@ export function TasksPage() {
     setDragTaskId(id);
   }, []);
 
-  const handleDropRequeue = useCallback((_taskId: string) => {
+  const handleDropRequeue = useCallback((taskId: string) => {
     setDragTaskId(null);
-    // The actual mutation is fired inside KanbanColumn.handleDrop
-    // to keep column-level responsibility clear.
-  }, []);
+    updateMutation.mutate(
+      { id: taskId, status: "pending" },
+      {
+        onError: (err) => addToast(
+          toastErr(err, t("common.error")),
+          "error",
+        ),
+      },
+    );
+  }, [addToast, t, updateMutation]);
 
   function handleRefresh() {
     taskListQuery.refetch();
-    taskStatusQuery.refetch();
   }
 
   const isLoading = taskListQuery.isLoading;
   const isError = taskListQuery.isError;
 
   // Summary stats
-  const summaryStats = taskStatus
-    ? [
-        { key: "status_total",       value: taskStatus.total ?? 0,       color: "text-text" },
-        { key: "status_pending",     value: taskStatus.pending ?? 0,     color: "text-warning" },
-        { key: "status_in_progress", value: taskStatus.in_progress ?? 0, color: "text-brand" },
-        { key: "status_completed",   value: taskStatus.completed ?? 0,   color: "text-success" },
-        { key: "status_failed",      value: taskStatus.failed ?? 0,      color: (taskStatus.failed ?? 0) > 0 ? "text-error" : "text-text-dim" },
-      ]
-    : [];
+  const countStatus = (status: string) => filteredTasks.filter((task) => task.status === status).length;
+  const failedCount = countStatus("failed");
+  const summaryStats = [
+    { key: "status_total",       value: filteredTasks.length,          color: "text-text" },
+    { key: "status_pending",     value: countStatus("pending"),        color: "text-warning" },
+    { key: "status_in_progress", value: countStatus("in_progress"),    color: "text-brand" },
+    { key: "status_completed",   value: countStatus("completed"),      color: "text-success" },
+    { key: "status_failed",      value: failedCount, color: failedCount > 0 ? "text-error" : "text-text-dim" },
+  ];
 
   // Columns — hide Cancelled when it has no tasks and no filter
   const visibleColumns = COLUMNS.filter((col) => {
@@ -551,6 +566,7 @@ export function TasksPage() {
               leftIcon={<RefreshCw className="w-3 h-3" />}
               onClick={handleRefresh}
               isLoading={taskListQuery.isFetching}
+              aria-label={t("common.refresh")}
             >
               {null}
             </Button>
@@ -614,7 +630,7 @@ export function TasksPage() {
       )}
 
       {/* ── No tasks at all ── */}
-      {!isLoading && !isError && allTasks.length === 0 && (
+      {!isLoading && !isError && validTasks.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 gap-4">
           <CheckCircle2 className="w-10 h-10 text-text-dim/30" />
           <p className="text-sm text-text-dim">{t("tasks.empty")}</p>

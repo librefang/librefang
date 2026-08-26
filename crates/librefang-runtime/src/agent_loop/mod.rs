@@ -130,6 +130,70 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
     session.last_repaired_generation = Some(session.messages_generation);
 }
 
+fn apply_context_compaction(
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    new_messages_start: &mut usize,
+    summary: String,
+    kept_messages: Vec<Message>,
+) {
+    let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
+    let current_turn = &session.messages[previous_new_messages_start..];
+    let current_turn_json = current_turn
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            warn!(%error, "Failed to identify current-turn boundary during compaction");
+        })
+        .ok();
+
+    let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
+    if !summary.is_empty() {
+        compacted.push(Message {
+            role: Role::User,
+            content: MessageContent::Text(format!(
+                "[Context compaction summary] Earlier conversation turns were summarised to \
+                 preserve context space. Summary of removed messages: {summary}"
+            )),
+            pinned: false,
+            timestamp: None,
+        });
+    }
+    compacted.extend(kept_messages);
+
+    let compacted_new_messages_start = current_turn_json
+        .as_ref()
+        .and_then(|turn| {
+            if turn.is_empty() {
+                return Some(compacted.len());
+            }
+            let compacted_json = compacted
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    warn!(%error, "Failed to identify compacted current-turn boundary");
+                })
+                .ok()?;
+            compacted_json
+                .windows(turn.len())
+                .rposition(|window| window == turn.as_slice())
+        })
+        .unwrap_or_else(|| {
+            // A custom context engine may omit or rewrite the current turn.
+            // Keep it in persistent history and in the next LLM request rather
+            // than letting a stale pre-compaction boundary hide or lose it.
+            let start = compacted.len();
+            compacted.extend_from_slice(current_turn);
+            start
+        });
+
+    session.set_messages(compacted.clone());
+    *messages = compacted;
+    *new_messages_start = compacted_new_messages_start;
+}
+
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
 /// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
@@ -1010,26 +1074,13 @@ async fn run_agent_loop_inner(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete"
                         );
-                        // Inject the LLM-generated summary as a synthetic user message
-                        // so the agent retains context about what was compacted.
-                        // Without this, the summary is silently discarded and the agent
-                        // loses all knowledge of earlier turns.
-                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
-                        if !result.summary.is_empty() {
-                            compacted.push(Message {
-                                role: Role::User,
-                                content: MessageContent::Text(format!(
-                                    "[Context compaction summary] Earlier conversation turns \
-                                     were summarised to preserve context space. Summary of \
-                                     removed messages: {}",
-                                    result.summary
-                                )),
-                                pinned: false,
-                                timestamp: None,
-                            });
-                        }
-                        compacted.extend(result.kept_messages);
-                        messages = compacted;
+                        apply_context_compaction(
+                            session,
+                            &mut messages,
+                            &mut new_messages_start,
+                            result.summary,
+                            result.kept_messages,
+                        );
                         // `last_prompt_tokens` is intentionally NOT reset here.
                         // A second compaction should only fire after the next
                         // LLM call raises it above threshold again.  Resetting
