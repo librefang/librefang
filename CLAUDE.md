@@ -198,6 +198,16 @@ The rules you must not break without asking:
 - **At most two follow-up comments** on a thread without human input, then stop. No "looks good" drive-bys. Every reply links evidence: commit SHAs, file paths, test names.
 - **Latest maintainer intent wins** in conflict resolution, and preserve both sides' intent — dropping a hunk because "it'll be reapplied later" is how regressions land.
 - **Batch merging is runner-pool bound, not merge bound.** Merging >10 PRs back-to-back saturates the free-plan `ubuntu-latest` pool; merge in batches, cancel *superseded* runs (never a run whose `head_sha` **is** its branch tip — `CI Gate` fails on `cancelled` and does not re-evaluate), and remember a stalled queue is not a CI failure.
+- **Deciding whether CI is alive has exactly one honest test, and every shortcut lies.**
+  A workflow file GitHub cannot parse produces a run that completes as `failure` within seconds *without ever taking a runner*, so a queue full of those looks identical to throughput.
+  `gh run list --status in_progress` counts **runs**, not jobs, and those startup failures flicker through `in_progress` on their way to `completed` — so a poll on "in_progress != 0" reports a live pool against a dead one.
+  The only condition that means anything: **a run whose workflow is not one of the known startup-failing ones reached `success` or `failure`, with a timestamp later than a baseline you recorded before you started watching.**
+  Three separate monitors in one session got this wrong three different ways — polling `in_progress`, comparing a timestamp against a `jq` expression that yields `null` on an empty array (`null != baseline`, so it fires forever), and counting matches with a `select(...)` whose `test(...)|not` did not bind to the field intended.
+  Write the check to produce the *timestamped run itself*, print it, and read it — never a derived boolean.
+- **A suspiciously fast `cargo check` is not evidence of anything until you prove the compiler saw your tree.**
+  In a shared `CARGO_TARGET_DIR` a check can print `Finished in 0.35s` with no `Checking` lines because the artifacts are already there.
+  `touch`ing sources often does not force a rebuild.
+  Appending `compile_error!("SENTINEL");` to the crate's `lib.rs` and confirming cargo reports it takes one command and is conclusive; do that before trusting a green that arrived too quickly, and before reporting one.
 - **Two green PRs can still break `main` together.** The `main` ruleset has no `strict_required_status_checks_policy`, so each PR merges on CI run against its own base. Group a merge sweep by changed file, re-run CI on later PRs in a group, and verify `main` itself after the batch.
 
 ## Common Gotchas
