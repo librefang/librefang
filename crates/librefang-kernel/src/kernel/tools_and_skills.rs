@@ -480,11 +480,8 @@ impl LibreFangKernel {
         // Step 5: Apply global tool_policy rules (deny/allow with glob patterns).
         // This filters tools based on the kernel-wide tool policy from config.toml.
         // Check hot-reloadable override first, then fall back to initial config.
-        let effective_policy = self
-            .tool_policy_override
-            .read()
-            .ok()
-            .and_then(|guard| guard.clone());
+        let effective_policy =
+            read_config_override(&self.tool_policy_override, "tool_policy_override").clone();
         let effective_policy = effective_policy.as_ref().unwrap_or(&cfg.tool_policy);
         if !effective_policy.is_empty() {
             all_tools.retain(|t| {

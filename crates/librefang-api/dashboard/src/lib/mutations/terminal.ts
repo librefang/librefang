@@ -15,7 +15,7 @@ export function useCreateTerminalWindow() {
   });
 }
 
-interface RenameContext {
+interface WindowMutationContext {
   previous: TerminalWindow[] | undefined;
 }
 
@@ -25,7 +25,7 @@ export function useRenameTerminalWindow() {
     void,
     Error,
     { windowId: string; name: string },
-    RenameContext
+    WindowMutationContext
   >({
     mutationFn: ({ windowId, name }) => renameTerminalWindow(windowId, name),
     // Optimistic update: swap the tab label immediately so the UI feels
@@ -39,18 +39,36 @@ export function useRenameTerminalWindow() {
       return { previous };
     },
     onError: (_err, _vars, context) => {
-      if (context?.previous) {
+      if (context?.previous !== undefined) {
         qc.setQueryData(terminalKeys.windows(), context.previous);
       }
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: terminalKeys.all }),
+    onSettled: () => qc.invalidateQueries({ queryKey: terminalKeys.windows() }),
   });
 }
 
 export function useDeleteTerminalWindow() {
   const qc = useQueryClient();
-  return useMutation({
+  return useMutation<
+    Awaited<ReturnType<typeof deleteTerminalWindow>>,
+    Error,
+    string,
+    WindowMutationContext
+  >({
     mutationFn: (windowId: string) => deleteTerminalWindow(windowId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: terminalKeys.windows() }),
+    onMutate: async (windowId) => {
+      await qc.cancelQueries({ queryKey: terminalKeys.windows() });
+      const previous = qc.getQueryData<TerminalWindow[]>(terminalKeys.windows());
+      qc.setQueryData<TerminalWindow[]>(terminalKeys.windows(), (prev) =>
+        prev?.filter((window) => window.id !== windowId)
+      );
+      return { previous };
+    },
+    onError: (_err, _windowId, context) => {
+      if (context?.previous !== undefined) {
+        qc.setQueryData(terminalKeys.windows(), context.previous);
+      }
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: terminalKeys.windows() }),
   });
 }

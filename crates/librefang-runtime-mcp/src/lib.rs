@@ -314,13 +314,18 @@ static UNKNOWN_RULE_SET_WARNED: std::sync::OnceLock<
 fn lock_unknown_rule_set_warnings(
     cell: &std::sync::Mutex<std::collections::HashSet<String>>,
 ) -> std::sync::MutexGuard<'_, std::collections::HashSet<String>> {
-    cell.lock().unwrap_or_else(|poisoned| {
-        warn!(
-            target: "librefang_runtime_mcp::taint",
-            "unknown taint rule-set warning cache lock poisoned; recovering inner state"
-        );
-        poisoned.into_inner()
-    })
+    match cell.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!(
+                target: "librefang_runtime_mcp::taint",
+                "unknown taint rule-set warning cache lock poisoned; recovering inner state"
+            );
+            let guard = poisoned.into_inner();
+            cell.clear_poison();
+            guard
+        }
+    }
 }
 
 fn warn_unknown_rule_set_once(set_name: &str, tool_name: &str) {
@@ -3751,11 +3756,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(warned.is_poisoned());
         let mut recovered = lock_unknown_rule_set_warnings(&warned);
         assert!(!recovered.insert("existing".to_string()));
         assert!(recovered.insert("new".to_string()));
         drop(recovered);
-        assert_eq!(lock_unknown_rule_set_warnings(&warned).len(), 2);
+        assert!(!warned.is_poisoned());
+        assert_eq!(warned.lock().unwrap().len(), 2);
     }
 
     // ── MCP outbound taint scanning ──────────────────────────────────────

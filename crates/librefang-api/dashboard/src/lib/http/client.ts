@@ -51,6 +51,7 @@ export {
   // goals
   listGoals,
   listGoalTemplates,
+  getGoalRun,
   // hands
   listHands,
   listActiveHands,
@@ -252,7 +253,6 @@ export {
   deleteGoal,
   startGoalRun,
   stopGoalRun,
-  getGoalRun,
   // hands
   activateHand,
   deactivateHand,

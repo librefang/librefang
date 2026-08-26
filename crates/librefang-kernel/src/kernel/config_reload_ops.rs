@@ -254,11 +254,10 @@ impl LibreFangKernel {
                     );
                     // Invalidate cached drivers — the default provider may have changed.
                     self.llm.driver_cache.clear();
-                    let mut guard = self
-                        .llm
-                        .default_model_override
-                        .write()
-                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    let mut guard = write_config_override(
+                        &self.llm.default_model_override,
+                        "default_model_override",
+                    );
                     *guard = Some(new_config.default_model.clone());
                 }
                 HotAction::UpdateToolPolicy => {
@@ -267,10 +266,8 @@ impl LibreFangKernel {
                         new_config.tool_policy.global_rules.len(),
                         new_config.tool_policy.agent_rules.len(),
                     );
-                    let mut guard = self
-                        .tool_policy_override
-                        .write()
-                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    let mut guard =
+                        write_config_override(&self.tool_policy_override, "tool_policy_override");
                     *guard = Some(new_config.tool_policy.clone());
                 }
                 HotAction::UpdateProactiveMemory => {

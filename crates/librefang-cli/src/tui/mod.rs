@@ -631,6 +631,55 @@ impl App {
                     crate::i18n::t_args("tui-models-status-reset", &[("model", &key)]);
                 self.refresh_models();
             }
+            AppEvent::BackupsLoaded(backups) => {
+                self.settings.backups = backups;
+                if self.settings.backups.is_empty() {
+                    self.settings.backup_list.select(None);
+                } else {
+                    let last = self.settings.backups.len() - 1;
+                    let keep = self
+                        .settings
+                        .backup_list
+                        .selected()
+                        .map_or(0, |sel| sel.min(last));
+                    self.settings.backup_list.select(Some(keep));
+                }
+                self.settings.loading = false;
+            }
+            AppEvent::BackupCreated(filename) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-backup-created", &[("filename", &filename)]);
+                self.refresh_settings_backups();
+            }
+            AppEvent::BackupDeleted(filename) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-backup-deleted", &[("filename", &filename)]);
+                self.refresh_settings_backups();
+            }
+            AppEvent::BackupRestored {
+                filename,
+                restored_files,
+                errors,
+            } => {
+                self.settings.status_msg = if errors == 0 {
+                    crate::i18n::t_args(
+                        "tui-mod-backup-restored",
+                        &[
+                            ("filename", &filename),
+                            ("files", &restored_files.to_string()),
+                        ],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-mod-backup-restored-with-errors",
+                        &[
+                            ("filename", &filename),
+                            ("files", &restored_files.to_string()),
+                            ("errors", &errors.to_string()),
+                        ],
+                    )
+                };
+            }
             AppEvent::PeersLoaded(list) => {
                 self.peers.peers = list;
                 if !self.peers.peers.is_empty() && self.peers.list_state.selected().is_none() {
@@ -1147,7 +1196,15 @@ impl App {
             Tab::Security => self.refresh_security(),
             Tab::Audit => self.refresh_audit(),
             Tab::Usage => self.refresh_usage(),
-            Tab::Settings => self.refresh_settings_providers(),
+            Tab::Settings => {
+                // `sub` is a plain field that outlives the tab, so without this
+                // the screen reopens on whatever sub-tab was last used while
+                // `on_tab_enter` reloads providers — and a sub-tab holding a
+                // modal had no second way out. Re-entering the tab is now that
+                // way out.
+                self.settings.reset_sub();
+                self.refresh_settings_providers();
+            }
             Tab::Peers => self.refresh_peers(),
             Tab::Comms => self.refresh_comms(),
             Tab::Logs => self.refresh_logs(),
@@ -1296,6 +1353,12 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.models.loading = true;
             event::spawn_fetch_model_catalog(backend, self.event_tx.clone());
+        }
+    }
+    fn refresh_settings_backups(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_backups(backend, self.event_tx.clone());
         }
     }
 
@@ -1883,6 +1946,7 @@ impl App {
             settings::SettingsAction::RefreshProviders => self.refresh_settings_providers(),
             settings::SettingsAction::RefreshModels => self.refresh_settings_models(),
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
+            settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());
@@ -1896,6 +1960,21 @@ impl App {
             settings::SettingsAction::TestProvider(name) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_test_provider(backend, name, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::CreateBackup => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_create_backup(backend, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::DeleteBackup(filename) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_backup(backend, filename, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::RestoreBackup(body) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_restore_backup(backend, body, self.event_tx.clone());
                 }
             }
         }

@@ -37,12 +37,13 @@ const ARTIFACT_PATH_RE = /^\/api\/media\/artifacts\/[A-Za-z0-9_-]+/;
 // `.` so a hostile / mistaken path like `/api/uploads/foo.html` is not
 // classified as an image and rendered as `<img src>`.
 const UPLOAD_PATH_RE = /^\/api\/uploads\/[A-Za-z0-9_-]+$/;
-const DATA_IMAGE_RE = /^data:image\/[a-z0-9.+-]+;[^,]*,/i;
+const DATA_IMAGE_RE = /^data:image\/[a-z0-9.+-]+;[^,]*,[A-Za-z0-9+/=_-]+$/i;
+const IMAGE_MIME_RE = /^image\/[a-z0-9.+-]+$/i;
 
-const HTTP_URL_RE = /https?:\/\/[^\s"'<>)]+/gi;
-const DATA_URI_RE = /data:image\/[a-z0-9.+-]+;[^,]*,[A-Za-z0-9+/=_-]+/gi;
+const HTTP_URL_RE = /https?:\/\/[^\s"'<>)]+/i;
+const DATA_URI_RE = /data:image\/[a-z0-9.+-]+;[^,]*,[A-Za-z0-9+/=_-]+/i;
 // Same UUID constraint as UPLOAD_PATH_RE; artifacts already follow it.
-const APIPATH_RE = /\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+/gi;
+const APIPATH_RE = /\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+/i;
 
 /**
  * Validate a string is a safe image source we'll render as `<img src>`.
@@ -116,11 +117,23 @@ interface CandidateNode {
 // deeper is almost certainly a non-image payload that just happens to
 // contain `{` characters.
 const MAX_HARVEST_DEPTH = 32;
+const MAX_HARVEST_NODES = 10_000;
+const MAX_JSON_SLICE_LENGTH = 1_000_000;
 
 function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): void {
   // FIFO queue so iteration order matches document order — galleries
   // should render images in the same sequence the agent produced them.
-  const queue: (CandidateNode & { depth: number })[] = [{ value: root, depth: 0 }];
+  const queue: (CandidateNode & { depth: number })[] = [];
+  const visited = new WeakSet<object>();
+  const enqueue = (value: unknown, alt: string | undefined, depth: number) => {
+    if (queue.length >= MAX_HARVEST_NODES) return;
+    if (typeof value === "object" && value !== null) {
+      if (visited.has(value)) return;
+      visited.add(value);
+    }
+    queue.push({ value, alt, depth });
+  };
+  enqueue(root, undefined, 0);
   let head = 0;
 
   while (head < queue.length) {
@@ -140,7 +153,7 @@ function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): voi
     if (depth >= MAX_HARVEST_DEPTH) continue;
 
     if (Array.isArray(value)) {
-      for (const item of value) queue.push({ value: item, alt, depth: depth + 1 });
+      for (const item of value) enqueue(item, alt, depth + 1);
       continue;
     }
 
@@ -188,11 +201,11 @@ function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): voi
 
       // base64 blob directly on the object — synthesize a data URI.
       if (typeof obj.data_base64 === "string" && obj.data_base64) {
-        const mime = typeof obj.mime === "string" && obj.mime.startsWith("image/")
+        const mime = typeof obj.mime === "string" && IMAGE_MIME_RE.test(obj.mime)
           ? obj.mime
           : "image/png";
         const src = `data:${mime};base64,${obj.data_base64}`;
-        if (!seen.has(src)) {
+        if (classifyImageRef(src) && !seen.has(src)) {
           seen.add(src);
           out.push({ kind: "data-uri", src, alt: altText });
         }
@@ -201,7 +214,7 @@ function harvestFromJson(root: unknown, out: ImageRef[], seen: Set<string>): voi
       // Recurse into known container fields and any unknown nested values.
       for (const v of Object.values(obj)) {
         if (v !== null && (typeof v === "object")) {
-          queue.push({ value: v, alt: altText, depth: depth + 1 });
+          enqueue(v, altText, depth + 1);
         }
       }
     }
@@ -232,6 +245,10 @@ function harvestFromText(text: string, out: ImageRef[], seen: Set<string>): void
         i = end + 1;
         continue;
       }
+      // scanBalanced reached the end or the slice-size cap. A later opener
+      // is nested in the same malformed region, so rescanning it would only
+      // repeat the work and can make hostile text quadratic.
+      break;
     }
     i += 1;
   }
@@ -246,6 +263,7 @@ function scanBalanced(s: string, start: number): number {
   let inStr = false;
   let escape = false;
   for (let i = start; i < s.length; i += 1) {
+    if (i - start >= MAX_JSON_SLICE_LENGTH) return -1;
     const c = s[i];
     if (inStr) {
       if (escape) {
@@ -273,10 +291,7 @@ function scanBalanced(s: string, start: number): number {
 /** Fallback: pull bare image-shaped URLs out of prose. */
 function harvestBareUrls(text: string, out: ImageRef[], seen: Set<string>): void {
   const collect = (re: RegExp) => {
-    let m: RegExpExecArray | null;
-    // Reset lastIndex to be safe — these regexes are module-scope.
-    re.lastIndex = 0;
-    while ((m = re.exec(text)) !== null) {
+    for (const m of text.matchAll(new RegExp(re.source, "gi"))) {
       // Trim trailing punctuation that often glues onto URLs in prose.
       const raw = m[0].replace(/[)\].,;:!?"']+$/, "");
       const ref = classifyImageRef(raw);
@@ -296,8 +311,8 @@ function harvestBareUrls(text: string, out: ImageRef[], seen: Set<string>): void
  * an empty array when nothing image-shaped is found — callers fall back
  * to plain-text rendering.
  *
- * Accepts `unknown` so callers don't need to narrow first; non-strings
- * are treated as empty.
+ * Accepts `unknown` so callers can pass either free-form text or an already
+ * parsed JSON-like value. Parsed object graphs are identity- and node-bounded.
  */
 export function extractImageRefs(output: unknown): ImageRef[] {
   if (output == null) return [];
@@ -315,6 +330,7 @@ export function extractImageRefs(output: unknown): ImageRef[] {
 
   const out: ImageRef[] = [];
   const seen = new Set<string>();
+  let wholeParsed = false;
 
   // 1. Try parsing the whole string as JSON first — the cleanest case
   //    (a step that returns nothing but the tool's JSON result).
@@ -323,13 +339,14 @@ export function extractImageRefs(output: unknown): ImageRef[] {
     try {
       const parsed: unknown = JSON.parse(trimmed);
       harvestFromJson(parsed, out, seen);
+      wholeParsed = true;
     } catch {
       // Fall through to embedded-block scan.
     }
   }
 
   // 2. Scan for embedded JSON blocks (agent prose + a tool result blob).
-  harvestFromText(text, out, seen);
+  if (!wholeParsed) harvestFromText(text, out, seen);
 
   // 3. Bare URLs in prose (no surrounding JSON).
   harvestBareUrls(text, out, seen);

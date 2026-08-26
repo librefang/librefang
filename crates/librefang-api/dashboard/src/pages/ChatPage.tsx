@@ -45,8 +45,7 @@ import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
-  usePatchAgentConfig,
-  usePatchHandAgentRuntimeConfig,
+  usePatchAgentRuntimeConfig,
   useResolveApproval,
   useSendAgentMessage,
   useStopAgent,
@@ -2398,11 +2397,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   // Route by role: hand agents go through the hand-runtime-config endpoint,
   // everyone else hits the standalone /config route. Both hooks share the
   // same AgentConfigPatch payload shape.
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
-  const modelConfigMutation = isHand
-    ? patchHandAgentRuntimeConfigMutation
-    : patchAgentConfigMutation;
+  const modelConfigMutation = usePatchAgentRuntimeConfig();
   const modelsQuery = useModels(
     { available: true },
     {
@@ -2491,6 +2486,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     try {
       await modelConfigMutation.mutateAsync({
         agentId,
+        isHand: isHand === true,
         config: { model: model.id, provider: model.provider },
       });
       setModelOpen(false);
@@ -2970,8 +2966,7 @@ export function ChatPage() {
   // #2959. Sessions are URL-driven per tab; other callers (CLI, cron) still
   // use the endpoint for registry-canonical switching.
   const deleteSessionMutation = useDeleteAgentSession();
-  const patchAgentConfigMutation = usePatchAgentConfig();
-  const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
+  const patchAgentRuntimeConfigMutation = usePatchAgentRuntimeConfig();
 
   // Sync agent selection to URL search params. Also reset the visible-message
   // window so new agent sessions start from the tail end of history.
@@ -3619,11 +3614,9 @@ export function ChatPage() {
                 try {
                   // Branch in the caller — only the caller knows from the
                   // cached agent detail whether this is a hand role.
-                  const mutation = selectedAgent?.is_hand
-                    ? patchHandAgentRuntimeConfigMutation
-                    : patchAgentConfigMutation;
-                  await mutation.mutateAsync({
+                  await patchAgentRuntimeConfigMutation.mutateAsync({
                     agentId: selectedAgentId,
+                    isHand: selectedAgent?.is_hand === true,
                     config: { web_search_augmentation: mode },
                   });
                   await agentsQuery.refetch();

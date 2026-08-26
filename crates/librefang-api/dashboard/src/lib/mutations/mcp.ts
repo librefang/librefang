@@ -25,7 +25,10 @@ export function useAddMcpServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: addMcpServer,
-    onSuccess: () => qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: mcpKeys.servers() }),
+      qc.invalidateQueries({ queryKey: mcpKeys.health() }),
+    ]),
   });
 }
 
@@ -34,10 +37,7 @@ export function useUpdateMcpServer() {
   return useMutation({
     mutationFn: ({ id, server }: { id: string; server: Parameters<typeof updateMcpServer>[1] }) =>
       updateMcpServer(id, server),
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: mcpKeys.servers() });
-      qc.invalidateQueries({ queryKey: mcpKeys.server(variables.id) });
-    },
+    onSuccess: (_data, variables) => invalidateMcpServer(qc, variables.id),
   });
 }
 
@@ -47,7 +47,9 @@ export function useDeleteMcpServer() {
     mutationFn: deleteMcpServer,
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: mcpKeys.servers() });
+      qc.invalidateQueries({ queryKey: mcpKeys.health() });
       qc.removeQueries({ queryKey: mcpKeys.server(variables) });
+      qc.removeQueries({ queryKey: mcpKeys.authStatus(variables) });
     },
   });
 }
@@ -56,10 +58,7 @@ export function useReconnectMcpServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: reconnectMcpServer,
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: mcpKeys.server(variables) });
-      qc.invalidateQueries({ queryKey: mcpKeys.health() });
-    },
+    onSuccess: (_data, variables) => invalidateMcpServer(qc, variables),
   });
 }
 
@@ -107,7 +106,12 @@ export function useUpdateMcpTaintPolicy() {
       id: string;
       taint_scanning?: boolean;
       taint_policy?: McpTaintPolicy;
-    }) => patchMcpServerTaint(id, { taint_scanning, taint_policy }),
+    }) => {
+      if (taint_scanning === undefined && taint_policy === undefined) {
+        throw new Error("Taint policy update requires at least one changed field");
+      }
+      return patchMcpServerTaint(id, { taint_scanning, taint_policy });
+    },
     onSuccess: (_data, variables) => invalidateMcpServer(qc, variables.id),
   });
 }

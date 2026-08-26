@@ -213,28 +213,56 @@ async fn dispatch_pending<K: AcpKernel>(
     // (fail-closed, and offered by the modal unconditionally).
     let remember = sanitize_remember(remember, high_risk, &decision);
 
-    // Persist "always" choices so future tool requests for the same
-    // (agent_id, tool_name) skip the editor entirely. Done before the
-    // resolve so the cache is populated by the time any concurrent
-    // tool call queries `requires_approval_with_context_for`.
-    if remember {
-        if let Err(e) = kernel
-            .remember_decision(&approval.agent_id, &approval.tool_name, decision.clone())
-            .await
-        {
-            warn!(error = %e, request_id = %req_id,
-                  "ACP permission bridge: remember_decision failed");
-        }
-    }
-
-    if let Err(e) = kernel
-        .resolve_approval(req_id, decision, Some("acp".into()))
-        .await
-    {
-        warn!(error = %e, request_id = %req_id, "ACP permission bridge: resolve_approval failed");
-    }
+    resolve_then_remember(
+        kernel,
+        req_id,
+        &approval.agent_id,
+        &approval.tool_name,
+        decision,
+        remember,
+    )
+    .await;
 
     Ok(())
+}
+
+/// Apply the one-shot decision before installing any persistent decision.
+///
+/// A failed resolution leaves the approval pending. Remembering first would
+/// nevertheless let later calls bypass that pending approval, so persistence
+/// is conditional on the resolution succeeding.
+async fn resolve_then_remember<K: AcpKernel>(
+    kernel: &Arc<K>,
+    request_id: Uuid,
+    agent_id: &str,
+    tool_name: &str,
+    decision: ApprovalDecision,
+    remember: bool,
+) {
+    if let Err(e) = kernel
+        .resolve_approval(request_id, decision.clone(), Some("acp".into()))
+        .await
+    {
+        warn!(
+            error = %e,
+            request_id = %request_id,
+            "ACP permission bridge: resolve_approval failed"
+        );
+        return;
+    }
+
+    if remember {
+        if let Err(e) = kernel
+            .remember_decision(agent_id, tool_name, decision)
+            .await
+        {
+            warn!(
+                error = %e,
+                request_id = %request_id,
+                "ACP permission bridge: remember_decision failed"
+            );
+        }
+    }
 }
 
 /// Translate ACP's [`RequestPermissionOutcome`] into LibreFang's
@@ -249,14 +277,19 @@ fn decision_from_outcome(outcome: RequestPermissionOutcome) -> (ApprovalDecision
     match outcome {
         RequestPermissionOutcome::Selected(selected) => {
             let id: &str = &selected.option_id.0;
-            let approved = id.starts_with("allow");
-            let remember = id.ends_with("_always");
-            let decision = if approved {
-                ApprovalDecision::Approved
-            } else {
-                ApprovalDecision::Denied
-            };
-            (decision, remember)
+            match id {
+                "allow_once" => (ApprovalDecision::Approved, false),
+                "allow_always" => (ApprovalDecision::Approved, true),
+                "reject_once" => (ApprovalDecision::Denied, false),
+                "reject_always" => (ApprovalDecision::Denied, true),
+                _ => {
+                    warn!(
+                        option_id = id,
+                        "ACP permission bridge: unrecognised permission option; denying"
+                    );
+                    (ApprovalDecision::Denied, false)
+                }
+            }
         }
         // Cancellation = client wants to abort this turn; deny so the
         // tool execution path bails out cleanly. Don't remember.
@@ -310,6 +343,11 @@ fn is_high_risk_tool(tool: &str) -> bool {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{PermissionOptionId, SelectedPermissionOutcome};
+    use async_trait::async_trait;
+    use librefang_llm_driver::StreamEvent;
+    use librefang_types::agent::AgentId;
+    use std::sync::Mutex;
+    use tokio::sync::mpsc;
 
     fn outcome(id: &'static str) -> RequestPermissionOutcome {
         RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(PermissionOptionId::new(
@@ -359,10 +397,112 @@ mod tests {
 
     #[test]
     fn unknown_id_is_denied_no_remember() {
-        assert_eq!(
-            decision_from_outcome(outcome("frobnicate")),
-            (ApprovalDecision::Denied, false)
-        );
+        for id in ["frobnicate", "allow_bomb", "reject_once_extra"] {
+            assert_eq!(
+                decision_from_outcome(outcome(id)),
+                (ApprovalDecision::Denied, false),
+                "unexpected option {id:?} must fail closed"
+            );
+        }
+    }
+
+    struct DecisionKernel {
+        calls: Mutex<Vec<&'static str>>,
+        approval_tx: broadcast::Sender<ApprovalEvent>,
+        fail_resolve: bool,
+    }
+
+    impl DecisionKernel {
+        fn new(fail_resolve: bool) -> Self {
+            let (approval_tx, _) = broadcast::channel(1);
+            Self {
+                calls: Mutex::new(Vec::new()),
+                approval_tx,
+                fail_resolve,
+            }
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl AcpKernel for DecisionKernel {
+        async fn resolve_agent(&self, _name_or_id: &str) -> crate::AcpResult<AgentId> {
+            unreachable!("not used by permission decision tests")
+        }
+
+        async fn send_prompt(
+            &self,
+            _agent_id: AgentId,
+            _message: String,
+            _librefang_session_id: LfSessionId,
+        ) -> crate::AcpResult<mpsc::Receiver<StreamEvent>> {
+            unreachable!("not used by permission decision tests")
+        }
+
+        fn subscribe_approvals(&self) -> broadcast::Receiver<ApprovalEvent> {
+            self.approval_tx.subscribe()
+        }
+
+        async fn resolve_approval(
+            &self,
+            _request_id: Uuid,
+            _decision: ApprovalDecision,
+            _decided_by: Option<String>,
+        ) -> crate::AcpResult<()> {
+            self.calls.lock().expect("calls lock").push("resolve");
+            if self.fail_resolve {
+                Err(AcpError::internal("test resolution failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn remember_decision(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _decision: ApprovalDecision,
+        ) -> crate::AcpResult<()> {
+            self.calls.lock().expect("calls lock").push("remember");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_resolution_precedes_remembering() {
+        let kernel = Arc::new(DecisionKernel::new(false));
+
+        resolve_then_remember(
+            &kernel,
+            Uuid::new_v4(),
+            "agent-id",
+            "file_read",
+            ApprovalDecision::Approved,
+            true,
+        )
+        .await;
+
+        assert_eq!(kernel.calls(), vec!["resolve", "remember"]);
+    }
+
+    #[tokio::test]
+    async fn failed_resolution_is_not_remembered() {
+        let kernel = Arc::new(DecisionKernel::new(true));
+
+        resolve_then_remember(
+            &kernel,
+            Uuid::new_v4(),
+            "agent-id",
+            "file_read",
+            ApprovalDecision::Approved,
+            true,
+        )
+        .await;
+
+        assert_eq!(kernel.calls(), vec!["resolve"]);
     }
 
     #[test]

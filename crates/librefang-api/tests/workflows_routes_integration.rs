@@ -1252,6 +1252,19 @@ async fn cron_job_toggle_unknown_uuid_returns_404() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_unknown_uuid_returns_404() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        "/api/cron/jobs/00000000-0000-0000-0000-000000000000",
+        Some(serde_json::json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+}
+
 // ---------------------------------------------------------------------------
 // /api/workflow-templates
 // ---------------------------------------------------------------------------
@@ -1547,6 +1560,20 @@ async fn seed_cron_job(h: &Harness) -> String {
         .add_job(job, false)
         .expect("seed cron add_job");
     id.0.to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_update_rejects_malformed_agent_id_as_bad_request() {
+    let h = boot().await;
+    let id = seed_cron_job(&h).await;
+    let (status, body) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/cron/jobs/{id}"),
+        Some(serde_json::json!({"agent_id": "not-a-uuid"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

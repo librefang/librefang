@@ -14,7 +14,7 @@ const { execFileSync } = require('node:child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'postinstall.js');
 
-function mkFixture(chatsJsContents) {
+function mkFixture(chatsJsContents, version = '6.7.22') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'librefang-postinstall-'));
   // Mirror the layout the patcher expects:
   //   <fixture>/scripts/postinstall.js     (copy of the real script — copy,
@@ -36,6 +36,11 @@ function mkFixture(chatsJsContents) {
   fs.mkdirSync(chatsDir, { recursive: true });
   const chatsJs = path.join(chatsDir, 'chats.js');
   fs.writeFileSync(chatsJs, chatsJsContents, 'utf8');
+  fs.writeFileSync(
+    path.join(root, 'node_modules', '@whiskeysockets', 'baileys', 'package.json'),
+    JSON.stringify({ name: '@whiskeysockets/baileys', version }),
+    'utf8',
+  );
   return { root, chatsJs };
 }
 
@@ -109,7 +114,7 @@ test('no-op on Baileys 7.x (call site shape gone) — exits cleanly without modi
         ]);
     };
   `;
-  const { root, chatsJs } = mkFixture(BAILEYS_7X);
+  const { root, chatsJs } = mkFixture(BAILEYS_7X, '7.0.0');
   const before = fs.readFileSync(chatsJs, 'utf8');
   runPostinstall(root);
   const after = fs.readFileSync(chatsJs, 'utf8');
@@ -117,10 +122,6 @@ test('no-op on Baileys 7.x (call site shape gone) — exits cleanly without modi
 });
 
 test('fails loudly when Baileys is missing the expected call site (e.g. major rewrite)', () => {
-  // No `Promise.all(...fetchProps()...)` and no `Promise.allSettled(...
-  // fetchProps()...)` — the patcher cannot find the line, so it should
-  // skip silently (file untouched). This is the "Baileys version doesn't
-  // expose this call shape" path. Verified via no-write.
   const REWRITTEN = `
     const executeInitQueries = async () => {
         // entirely refactored
@@ -129,38 +130,48 @@ test('fails loudly when Baileys is missing the expected call site (e.g. major re
   `;
   const { root, chatsJs } = mkFixture(REWRITTEN);
   const before = fs.readFileSync(chatsJs, 'utf8');
-  runPostinstall(root);
+  assert.throws(
+    () => runPostinstall(root),
+    (error) => {
+      assert.match(error.stderr, /unrecognized executeInitQueries shape in Baileys 6\.7\.22/);
+      return true;
+    },
+  );
   const after = fs.readFileSync(chatsJs, 'utf8');
-  assert.equal(before, after, 'unrecognized Baileys shape: file unchanged, no throw');
+  assert.equal(before, after, 'unrecognized Baileys shape is not modified');
 });
 
-test('post-write verification: throws if the writeFileSync somehow produced an unmarked file', () => {
-  // Direct unit test of the patcher: monkeypatch fs.writeFileSync to drop
-  // the [librefang-baileys-patch] marker, then assert the verification
-  // step catches it.
-  const fixturesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'librefang-postinstall-verify-'));
-  const chatsDir = path.join(
-    fixturesDir,
-    'node_modules',
-    '@whiskeysockets',
-    'baileys',
-    'lib',
-    'Socket',
-  );
-  fs.mkdirSync(chatsDir, { recursive: true });
-  const chatsJs = path.join(chatsDir, 'chats.js');
-  fs.writeFileSync(chatsJs, VANILLA_INIT_QUERIES, 'utf8');
-  // Require the script as a library (no side-effects thanks to
-  // require.main === module guard).
+test('post-write verification requires every per-query marker', () => {
   const script = require('../scripts/postinstall.js');
-  // Re-route __dirname expectation: the script joins __dirname/..
-  // /node_modules. Use a local helper that monkeypatches by writing the
-  // fixture inside the package itself? We instead duplicate the small
-  // path-resolution: simpler to assert that the exported helpers exist
-  // and the needle/replacement constants are well-formed.
   assert.equal(typeof script.patchBaileysInitQueries, 'function');
   assert.equal(typeof script.isTermux, 'function');
   assert.ok(script.BAILEYS_INIT_QUERIES_NEEDLE.includes('Promise.all(['));
   assert.ok(script.BAILEYS_INIT_QUERIES_REPLACEMENT.includes('Promise.allSettled'));
   assert.ok(script.BAILEYS_INIT_QUERIES_REPLACEMENT.includes('[librefang-baileys-patch]'));
+  assert.equal(script.hasCompleteBaileysPatch(script.BAILEYS_INIT_QUERIES_REPLACEMENT), true);
+  for (const marker of [
+    'fetchProps rejected',
+    'fetchBlocklist rejected',
+    'fetchPrivacySettings rejected',
+  ]) {
+    assert.equal(
+      script.hasCompleteBaileysPatch(script.BAILEYS_INIT_QUERIES_REPLACEMENT.replaceAll(marker, 'missing')),
+      false,
+      marker,
+    );
+  }
+});
+
+test('patchAndroidNdkCflags removes only the Termux NDK include', () => {
+  const { patchAndroidNdkCflags } = require('../scripts/postinstall.js');
+  const input = "'cflags': [ '-fPIC', '-I<(android_ndk_path)/sources/android/cpufeatures' ],";
+  assert.equal(patchAndroidNdkCflags(input), "'cflags': [ '-fPIC' ],");
+});
+
+test('patchAndroidNdkCflags rejects unknown NDK cflags shapes', () => {
+  const { patchAndroidNdkCflags } = require('../scripts/postinstall.js');
+  assert.throws(
+    () => patchAndroidNdkCflags("'cflags': [ '-Wall', '-I<(android_ndk_path)/include' ]"),
+    /cflags shape is unrecognized/,
+  );
 });

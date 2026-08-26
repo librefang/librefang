@@ -17,7 +17,9 @@ const sizeStyles: Record<AvatarSize, string> = {
 
 function getInitials(name: string): string {
   const initials = name
-    .split(" ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
     .map((n) => n[0])
     .join("")
     .toUpperCase()

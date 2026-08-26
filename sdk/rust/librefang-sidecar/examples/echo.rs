@@ -22,12 +22,18 @@ struct EchoAdapter {
     /// Uses `tokio::sync::watch` instead of `Notify + Mutex<Option<EmitFn>>` because watch has proper signal-storage semantics: a `send` made before any waiter exists is still observable by the next waiter, eliminating the cold-start lost-wake race where `on_send` arriving before `produce` is scheduled would otherwise park forever.
     emit_tx: watch::Sender<Option<EmitFn>>,
     emit_rx: watch::Receiver<Option<EmitFn>>,
+    greeting: String,
 }
 
 impl EchoAdapter {
     fn new() -> Self {
         let (emit_tx, emit_rx) = watch::channel(None);
-        Self { emit_tx, emit_rx }
+        let greeting = configured_greeting(std::env::var("greeting"));
+        Self {
+            emit_tx,
+            emit_rx,
+            greeting,
+        }
     }
 
     fn schema() -> Schema {
@@ -69,7 +75,7 @@ impl SidecarAdapter for EchoAdapter {
         drop(guard);
         emit(
             MessageBuilder::new("echo-user", "Echo")
-                .text(format!("you said: {}", cmd.text))
+                .text(format!("{} {}", self.greeting, cmd.text))
                 .channel_id(cmd.channel_id.clone())
                 .platform("echo")
                 .build(),
@@ -81,8 +87,7 @@ impl SidecarAdapter for EchoAdapter {
         // Publish the emit handle so any concurrent on_send is unblocked, then park forever so the runtime keeps treating us as live.
         // A clean Ok(()) return would also be fine — the run loop only exits the produce side on Err — but `pending` keeps the cancellation point explicit, and the runtime now aborts the inner produce task on shutdown so this future does not leak past run() return.
         let _ = self.emit_tx.send(Some(emit));
-        std::future::pending::<()>().await;
-        Ok(())
+        std::future::pending().await
     }
 
     async fn on_shutdown(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -91,9 +96,30 @@ impl SidecarAdapter for EchoAdapter {
     }
 }
 
+fn configured_greeting(value: Result<String, std::env::VarError>) -> String {
+    value.unwrap_or_else(|_| "you said:".to_string())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // `run_stdio_main` handles the daemon's `--describe` discovery contract (emit schema JSON + return) before touching any platform-side state, and only constructs the adapter via the builder closure when not in discovery mode — important for adapters whose `new()` reads env vars that are not yet configured at boot.
     // The builder closure returns `Result<EchoAdapter, DynError>` so a real adapter that validates env vars in `new()` can fail cleanly with a structured error instead of `expect()`-panicking; echo has nothing to fail on so it just wraps in `Ok`.
     run_stdio_main(EchoAdapter::schema, || Ok(EchoAdapter::new())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::configured_greeting;
+
+    #[test]
+    fn greeting_uses_configuration_or_default() {
+        assert_eq!(
+            configured_greeting(Ok("echo:".to_string())),
+            "echo:".to_string()
+        );
+        assert_eq!(
+            configured_greeting(Err(std::env::VarError::NotPresent)),
+            "you said:".to_string()
+        );
+    }
 }

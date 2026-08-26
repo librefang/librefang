@@ -1,0 +1,1 @@
+Index ACP sessions by both protocol and kernel identifiers so approval routing is constant-time, state reads avoid full clones, cancellation avoids dead state, replacements and session cleanup cancel displaced prompts and registrations, and both indexes recover consistently after lock poison. (#7642) (@houko)

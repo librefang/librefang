@@ -73,6 +73,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: "2.11.4"
   # Network resilience for crate downloads. A release that fails one
   # CLI build job ships without that platform's asset and becomes a
   # "stuck" release (see #6272). The dominant cause is a flaky
@@ -1891,6 +1892,10 @@ jobs:
         run: |
           NDK_BIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           for tool in ar ranlib nm strip; do
+            [ -x "$NDK_BIN/llvm-$tool" ] || {
+              echo "::error::NDK tool not found: $NDK_BIN/llvm-$tool"
+              exit 1
+            }
             ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/aarch64-linux-android-$tool"
             ln -sf "$NDK_BIN/llvm-$tool" "$NDK_BIN/arm-linux-androideabi-$tool"
           done
@@ -1928,13 +1933,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
-            cargo install tauri-cli@^2 --locked
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
+            cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -2145,13 +2151,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-tauri
-          key: tauri-cli-${{ runner.os }}-v2
+          key: tauri-cli-${{ runner.os }}-${{ env.TAURI_CLI_VERSION }}
 
       - name: Install Tauri CLI
         run: |
-          if ! command -v cargo-tauri >/dev/null; then
-            cargo install tauri-cli@^2 --locked
+          if [ "$(cargo tauri --version 2>/dev/null)" != "tauri-cli $TAURI_CLI_VERSION" ]; then
+            cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
           fi
+          test "$(cargo tauri --version)" = "tauri-cli $TAURI_CLI_VERSION"
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -2173,7 +2180,9 @@ jobs:
         # step patches that — see its comment for the full rationale.
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-        run: cargo tauri ios init
+        run: |
+          rm -rf gen/apple
+          cargo tauri ios init
 
       - name: Configure manual code signing via xcodebuild shim
         env:

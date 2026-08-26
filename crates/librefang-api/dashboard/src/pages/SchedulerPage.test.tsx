@@ -290,7 +290,7 @@ describe("SchedulerPage", () => {
     expect(mutate).toHaveBeenCalledWith("sched-1");
   });
 
-  it("toggles a trigger via useUpdateTrigger including its agentId", () => {
+  it("toggles a trigger via useUpdateTrigger", () => {
     const mutate = vi.fn();
     useUpdateTriggerMock.mockReturnValue(makeMutation({ mutate }));
 
@@ -305,7 +305,6 @@ describe("SchedulerPage", () => {
     expect(mutate).toHaveBeenCalledWith({
       id: "trig-1",
       data: { enabled: false },
-      agentId: "agent-1",
     });
   });
 

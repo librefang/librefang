@@ -29,7 +29,13 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 
 // ── Known media providers (mirrors MEDIA_PROVIDER_ORDER in runtime) ─────
 
-/// Known media provider names, in preference order.
+/// Built-in media provider names, in preference order, for
+/// `GET /media/providers` to report configuration status against.
+///
+/// This is a **display list, not an allowlist**: `create_media_driver` also
+/// serves user-defined providers that have `provider_urls.<name>` configured,
+/// via the generic OpenAI-compatible driver. Gating a route on membership here
+/// would reject those.
 /// Keep in sync with `librefang_kernel::media::MEDIA_PROVIDER_ORDER`.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["openai", "gemini", "elevenlabs", "minimax", "google_tts"];
 
@@ -42,7 +48,10 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         MediaError::MissingKey(_) => (StatusCode::UNPROCESSABLE_ENTITY, "missing_key"),
         MediaError::Http(_) => (StatusCode::BAD_GATEWAY, "upstream_http_error"),
         MediaError::Api { status, .. } => {
-            let sc = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let sc = StatusCode::from_u16(*status)
+                .ok()
+                .filter(StatusCode::is_client_error)
+                .unwrap_or(StatusCode::BAD_GATEWAY);
             (sc, "upstream_api_error")
         }
         MediaError::RateLimit(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
@@ -51,13 +60,33 @@ fn media_error_response(err: MediaError) -> ApiErrorResponse {
         MediaError::TaskNotFound(_) => (StatusCode::NOT_FOUND, "task_not_found"),
         MediaError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     };
+    let error = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        tracing::error!(error = %err, "media request failed");
+        "Internal server error".to_string()
+    } else {
+        err.to_string()
+    };
     ApiErrorResponse {
-        error: err.to_string(),
+        error,
         code: Some(code.to_string()),
         r#type: None,
         details: None,
         request_id: None,
         status,
+    }
+}
+
+fn image_content_type(data: &[u8]) -> Option<(&'static str, &'static str)> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "png"))
+    } else if data.starts_with(b"\xff\xd8\xff") {
+        Some(("image/jpeg", "jpg"))
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some(("image/gif", "gif"))
+    } else if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
     }
 }
 
@@ -163,8 +192,16 @@ pub async fn generate_image(
             }
         };
 
-        let filename = format!("image_{i}.png");
-        match save_upload(&state, &bytes, &filename, "image/png").await {
+        let Some((content_type, extension)) = image_content_type(&bytes) else {
+            tracing::warn!(index = i, "generated image has an unknown byte signature");
+            image_urls.push(serde_json::json!({
+                "data_base64": img.data_base64,
+                "url": img.url,
+            }));
+            continue;
+        };
+        let filename = format!("image_{i}.{extension}");
+        match save_upload(&state, &bytes, &filename, content_type).await {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -460,6 +497,7 @@ pub async fn transcribe_audio(
     if let Err(e) = tokio::fs::write(&file_path, &body).await {
         return ApiErrorResponse::internal_scrub(e).into_response();
     }
+    let mut temp_file = TempUploadGuard(Some(file_path.clone()));
 
     let attachment = librefang_types::media::MediaAttachment {
         media_type: librefang_types::media::MediaType::Audio,
@@ -470,25 +508,32 @@ pub async fn transcribe_audio(
         size_bytes: body.len() as u64,
     };
 
-    match state
+    let response = match state
         .kernel
         .media()
         .transcribe_audio(&attachment, None, None)
         .await
     {
-        Ok(result) => {
-            // Clean up temp file
-            let _ = tokio::fs::remove_file(&file_path).await;
-            Json(serde_json::json!({
-                "text": result.description,
-                "provider": result.provider,
-                "model": result.model,
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&file_path).await;
-            ApiErrorResponse::internal_scrub(e).into_response()
+        Ok(result) => Json(serde_json::json!({
+            "text": result.description,
+            "provider": result.provider,
+            "model": result.model,
+        }))
+        .into_response(),
+        Err(e) => ApiErrorResponse::internal_scrub(e).into_response(),
+    };
+    if tokio::fs::remove_file(&file_path).await.is_ok() {
+        temp_file.0 = None;
+    }
+    response
+}
+
+struct TempUploadGuard(Option<std::path::PathBuf>);
+
+impl Drop for TempUploadGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -526,8 +571,69 @@ pub async fn list_media_providers(State(state): State<Arc<AppState>>) -> impl In
 }
 
 #[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn generated_image_signatures_select_the_real_mime_type() {
+        assert_eq!(
+            image_content_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some(("image/png", "png"))
+        );
+        assert_eq!(
+            image_content_type(b"\xff\xd8\xffrest"),
+            Some(("image/jpeg", "jpg"))
+        );
+        assert_eq!(
+            image_content_type(b"GIF89arest"),
+            Some(("image/gif", "gif"))
+        );
+        assert_eq!(
+            image_content_type(b"RIFF1234WEBPrest"),
+            Some(("image/webp", "webp"))
+        );
+        assert_eq!(image_content_type(b"not an image"), None);
+    }
+
+    #[test]
+    fn upstream_statuses_only_preserve_client_errors() {
+        let client = media_error_response(MediaError::Api {
+            status: 422,
+            message: "invalid".to_string(),
+        });
+        let server = media_error_response(MediaError::Api {
+            status: 503,
+            message: "unavailable".to_string(),
+        });
+        assert_eq!(client.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(server.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn temp_upload_guard_removes_an_abandoned_file() {
+        let path =
+            std::env::temp_dir().join(format!("librefang-media-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"audio").unwrap();
+        {
+            let _guard = TempUploadGuard(Some(path.clone()));
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unknown_video_poll_provider_keeps_the_invalid_request_code() {
+        let err = media_error_response(MediaError::InvalidRequest(
+            "Unknown media provider 'definitely_not_a_provider' and no base_url configured."
+                .to_string(),
+        ));
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.code.as_deref(), Some("invalid_request"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::video_task_status_json;
+    use super::*;
     use librefang_types::media::MediaTaskStatus;
 
     #[test]
@@ -553,5 +659,22 @@ mod tests {
                 "error": "provider failed",
             }),
         );
+    }
+
+    #[test]
+    fn internal_media_errors_are_scrubbed_but_client_errors_are_preserved() {
+        let internal = media_error_response(MediaError::Other(
+            "failed to read /srv/librefang/media.key".to_string(),
+        ));
+        assert_eq!(internal.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(internal.code.as_deref(), Some("internal_error"));
+        assert_eq!(internal.error, "Internal server error");
+        assert!(!internal.error.contains("/srv/librefang"));
+
+        let invalid = media_error_response(MediaError::InvalidRequest(
+            "prompt must not be empty".to_string(),
+        ));
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.error, "Invalid request: prompt must not be empty");
     }
 }

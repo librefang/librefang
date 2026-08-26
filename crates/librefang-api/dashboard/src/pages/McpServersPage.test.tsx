@@ -1,8 +1,19 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { McpServersPage } from "./McpServersPage";
+import { Plug } from "lucide-react";
+import {
+  AUTH_POLL_MAX_ATTEMPTS,
+  AuthBadge,
+  McpServersPage,
+  authPollTermination,
+  computeAuthLabel,
+  resolveLucideIcon,
+  serverIdOf,
+  serverIdentityOf,
+  shouldShowAuthBanner,
+} from "./McpServersPage";
 import { useMcpServers, useMcpCatalog, useMcpHealth } from "../lib/queries/mcp";
 import {
   useAddMcpServer,
@@ -14,6 +25,7 @@ import {
   useRevokeMcpAuth,
 } from "../lib/mutations/mcp";
 import type { McpServerConfigured, McpServersResponse } from "../api";
+import { useUIStore } from "../lib/store";
 
 // ---------------------------------------------------------------------------
 // Mocks (#3853 — McpServersPage MCP server management page).
@@ -28,6 +40,10 @@ vi.mock("../lib/queries/mcp", () => ({
     servers: () => ({ queryKey: ["mcp", "servers"] }),
     catalog: () => ({ queryKey: ["mcp", "catalog"] }),
     health: () => ({ queryKey: ["mcp", "health"] }),
+    authStatus: (serverId: string) => ({
+      queryKey: ["mcp", "auth", serverId],
+      queryFn: vi.fn(),
+    }),
   },
 }));
 
@@ -58,6 +74,40 @@ vi.mock("react-i18next", async () => {
             key,
     }),
   };
+});
+
+describe("McpServersPage helpers", () => {
+  it("uses one server identity contract for empty ids", () => {
+    const server = makeServer({ id: "", name: "fallback-name" });
+    expect(serverIdOf(server)).toBe("fallback-name");
+    expect(serverIdentityOf(server)).toBe("fallback-name");
+  });
+
+  it("maps auth labels and attention banners to backend states", () => {
+    expect(computeAuthLabel("authorized", 0)).toBe("oauth");
+    expect(computeAuthLabel("not_required", 1)).toBe("token");
+    expect(computeAuthLabel("not_required", 0)).toBe("none");
+    expect(computeAuthLabel("needs_auth", 0)).toBe("needs_auth");
+    expect(shouldShowAuthBanner("authorized")).toBe(false);
+    expect(shouldShowAuthBanner("not_required")).toBe(false);
+    expect(shouldShowAuthBanner("needs_auth")).toBe(true);
+  });
+
+  it("terminates auth polling for final states, popup close, and timeout", () => {
+    expect(authPollTermination("authorized", true, 1)).toBe("authorized");
+    expect(authPollTermination("error", false, 1)).toBe("error");
+    expect(authPollTermination("pending_auth", true, 1)).toBe("popup_closed");
+    expect(
+      authPollTermination("pending_auth", false, AUTH_POLL_MAX_ATTEMPTS),
+    ).toBe("timeout");
+    expect(authPollTermination("pending_auth", false, 1)).toBeNull();
+  });
+
+  it("resolves missing lucide exports to a stable fallback", () => {
+    const ExampleIcon = () => null;
+    expect(resolveLucideIcon("example-icon", { ExampleIcon })).toBe(ExampleIcon);
+    expect(resolveLucideIcon("missing-icon", {})).toBe(Plug);
+  });
 });
 
 vi.mock("@tanstack/react-router", () => ({
@@ -178,6 +228,7 @@ function renderPage() {
 describe("McpServersPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
     setMutationDefaults();
 
     // Catalog and health queries are always idle in these unit tests.
@@ -240,5 +291,55 @@ describe("McpServersPage", () => {
     expect(
       screen.getByRole("button", { name: "mcp.reload" }),
     ).toBeInTheDocument();
+  });
+
+  it("stops OAuth polling when the authorization popup closes", async () => {
+    vi.useFakeTimers();
+    const popup = {
+      closed: false,
+      opener: window,
+      location: { href: "about:blank" },
+      close: vi.fn(),
+    } as unknown as Window;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(popup);
+    const startAuth = vi.fn().mockResolvedValue({ auth_url: "https://idp.test" });
+    useStartMcpAuthMock.mockReturnValue({
+      mutateAsync: startAuth,
+      isPending: false,
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const fetchQuery = vi.spyOn(queryClient, "fetchQuery");
+    fetchQuery.mockResolvedValue({ auth: { state: "pending_auth" } } as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AuthBadge
+          server={makeServer({ auth_state: { state: "needs_auth" } })}
+        />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "mcp.auth_authorize" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(startAuth).toHaveBeenCalledWith("test-server-1");
+
+    Object.defineProperty(popup, "closed", { value: true, configurable: true });
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(fetchQuery).toHaveBeenCalledTimes(1);
+    expect(useUIStore.getState().toasts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: "mcp.auth_failed", type: "error" }),
+      ]),
+    );
+    openSpy.mockRestore();
+    vi.useRealTimers();
   });
 });
