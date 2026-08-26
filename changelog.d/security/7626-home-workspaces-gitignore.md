@@ -1,0 +1,1 @@
+Keep runtime `workspaces/` data out of the home-directory Git repository. Existing tracked workspace files are retained on disk but removed from the index, with a warning that sensitive data in prior history must be purged before sharing (#7626) (@houko)
