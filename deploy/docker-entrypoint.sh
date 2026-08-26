@@ -66,9 +66,15 @@ own_as_app() {
 #   LIBREFANG_MODEL='gpt-5"\n[provider]\napi_key = "stolen'
 # Reject the offending bytes here, before any rewrite happens, so a bad
 # value crashes the container fast instead of silently exfiltrating config.
-if [ -n "${PORT-}" ] && ! printf '%s' "$PORT" | grep -qE '^[0-9]+$'; then
-  echo "ERROR: PORT must be a positive integer (got: $PORT)" >&2
-  exit 1
+if [ -n "${PORT-}" ]; then
+  if ! printf '%s' "$PORT" | grep -qE '^[0-9]+$'; then
+    echo "ERROR: PORT must be an integer from 1 to 65535 (got: $PORT)" >&2
+    exit 1
+  fi
+  if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+    echo "ERROR: PORT must be an integer from 1 to 65535 (got: $PORT)" >&2
+    exit 1
+  fi
 fi
 if [ -n "${LIBREFANG_MODEL-}" ]; then
   # Forbid TOML-significant characters: " \ [ ] (any one of these can
@@ -77,8 +83,8 @@ if [ -n "${LIBREFANG_MODEL-}" ]; then
   # without surprises around backslash quoting in regex bracket
   # expressions.
   case "$LIBREFANG_MODEL" in
-    *'"'*|*'\'*|*'['*|*']'*)
-      echo "ERROR: LIBREFANG_MODEL contains a forbidden character (one of: \" \\ [ ])" >&2
+    *'"'*|*'\'*|*'['*|*']'*|*'&'*|*'|'*)
+      echo "ERROR: LIBREFANG_MODEL contains a forbidden character (one of: \" \\ [ ] & |)" >&2
       exit 1
       ;;
   esac
@@ -168,11 +174,19 @@ if [ -w "$CONFIG" ]; then
   fi
 
   if [ -n "$PORT" ]; then
+    if ! grep -q '^api_listen = ' "$CONFIG" 2>/dev/null; then
+      echo "ERROR: cannot apply PORT because config.toml has no api_listen key" >&2
+      exit 1
+    fi
     sed -i "s|^api_listen = .*|api_listen = \"0.0.0.0:${PORT}\"|" "$CONFIG"
     own_as_app "$CONFIG"
   fi
 
   if [ -n "$LIBREFANG_MODEL" ]; then
+    if ! grep -q '^model = ' "$CONFIG" 2>/dev/null; then
+      echo "ERROR: cannot apply LIBREFANG_MODEL because config.toml has no model key" >&2
+      exit 1
+    fi
     sed -i "s|^model = .*|model = \"${LIBREFANG_MODEL}\"|" "$CONFIG"
     own_as_app "$CONFIG"
   fi
