@@ -70,7 +70,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use tracing::{debug, warn};
+
+const ORPHAN_STAGING_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The `librefang/` package tree, embedded at compile time. Path is
 /// relative to `crates/librefang-channels/`, hence the `../../` to
@@ -164,6 +167,7 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
     let target = root.join(hash);
     let marker = target.join(".complete");
     if marker.exists() {
+        cleanup_orphaned_staging_dirs(&root, hash);
         return Ok(target);
     }
 
@@ -185,6 +189,8 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
         return Ok(target);
     }
 
+    cleanup_orphaned_staging_dirs(&root, hash);
+
     // Torn previous run? An existing `target` directory without the
     // `.complete` marker means a prior extract was killed before it
     // could finish — its tree may be partial, byte-corrupt, or stale.
@@ -195,14 +201,9 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
         std::fs::remove_dir_all(&target)?;
     }
 
-    // Extract into a sibling pid-tagged staging dir, then atomically
-    // rename onto `target`. Concurrent extractions (multi-daemon or
-    // racing threads inside one daemon) all converge on the same
-    // final path — whoever loses the rename simply cleans their tmp.
+    // Extract into a sibling pid-tagged staging dir, then atomically rename onto `target`.
+    // The per-hash lock makes every matching staging directory an orphan from an interrupted earlier extract.
     let tmp = root.join(format!("{hash}.tmp.{}", std::process::id()));
-    if tmp.exists() {
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
     let librefang_root = tmp.join("librefang");
     std::fs::create_dir_all(&librefang_root)?;
     extract_tree(&EMBEDDED_SDK, &librefang_root)?;
@@ -226,6 +227,71 @@ pub(crate) fn ensure_extracted(home_dir: &Path) -> std::io::Result<PathBuf> {
                 // rather than silently shipping a half-extracted SDK.
                 let _ = std::fs::remove_dir_all(&tmp);
                 Err(rename_err)
+            }
+        }
+    }
+}
+
+/// Remove staging trees left by interrupted extractors for this content hash.
+///
+/// The caller has either observed the active hash's completed marker or holds its extraction lock, so matching staging trees can be removed immediately.
+/// Staging trees for older hashes are retained for 24 hours so a concurrently running older daemon cannot lose active work during an upgrade.
+/// Cleanup remains best-effort: a stale tree with unusual permissions must not prevent a fresh extraction at a distinct pid-tagged path.
+fn cleanup_orphaned_staging_dirs(root: &Path, active_hash: &str) {
+    cleanup_orphaned_staging_dirs_at(root, active_hash, SystemTime::now());
+}
+
+fn cleanup_orphaned_staging_dirs_at(root: &Path, active_hash: &str, now: SystemTime) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn!(
+                root = %root.display(),
+                error = %error,
+                "Failed to inspect embedded SDK staging directory"
+            );
+            return;
+        }
+    };
+
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((staging_hash, pid)) = name.split_once(".tmp.") else {
+            continue;
+        };
+        if staging_hash.len() != active_hash.len()
+            || !staging_hash
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+            || pid.is_empty()
+            || !pid.chars().all(|character| character.is_ascii_digit())
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let expired = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= ORPHAN_STAGING_MAX_AGE);
+        if staging_hash != active_hash && !expired {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "Failed to remove orphaned embedded SDK staging directory"
+                );
             }
         }
     }
@@ -329,6 +395,7 @@ fn parse_pyproject_version(pyproject: &str) -> Option<&str> {
 /// installed/missing state on a developer machine does not flicker
 /// under a running daemon, and the cache keeps the spawn-time pre-check
 /// at one subprocess per unique command path.
+/// The probe uses the daemon's environment and is intentionally sticky, so installing the SDK or changing that environment requires a daemon restart.
 ///
 /// Reading the version rather than only probing importability is what makes the #7140 failure visible: a pip install four months older than the daemon still imports, so an importability-only probe reported exactly the same thing for a matching install and for a stale one that silently shadows the embedded tree.
 fn installed_sdk_version(command: &str) -> Option<String> {
@@ -577,6 +644,56 @@ mod tests {
         let out = ensure_extracted(tmp.path()).expect("recovers");
         assert!(out.join(".complete").exists());
         assert!(out.join("librefang/__init__.py").exists());
+    }
+
+    #[test]
+    fn extract_cleans_staging_dirs_without_removing_live_or_unrelated_entries() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("sidecar-python");
+        let hash = embedded_hash();
+        let orphan = root.join(format!("{hash}.tmp.424242"));
+        let non_pid_suffix = root.join(format!("{hash}.tmp.keep"));
+        let other_hash = if hash == "0123456789ab" {
+            "fedcba987654"
+        } else {
+            "0123456789ab"
+        };
+        let other_hash_staging = root.join(format!("{other_hash}.tmp.424242"));
+        let unrelated = root.join("operator-notes");
+        std::fs::create_dir_all(orphan.join("librefang")).unwrap();
+        std::fs::create_dir_all(&non_pid_suffix).unwrap();
+        std::fs::create_dir_all(&other_hash_staging).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+
+        let out = ensure_extracted(tmp.path()).expect("extract after orphan cleanup");
+
+        assert!(out.join(".complete").exists());
+        assert!(!orphan.exists(), "matching orphan must be removed");
+        assert!(
+            non_pid_suffix.exists(),
+            "only pid-tagged staging directories may be removed"
+        );
+        assert!(
+            other_hash_staging.exists(),
+            "recent staging for another hash must be retained"
+        );
+        assert!(unrelated.exists(), "unrelated directories must be retained");
+
+        let late_orphan = root.join(format!("{hash}.tmp.424243"));
+        std::fs::create_dir_all(&late_orphan).unwrap();
+        ensure_extracted(tmp.path()).expect("cached extract cleanup");
+        assert!(
+            !late_orphan.exists(),
+            "the completed-marker fast path must still sweep orphans"
+        );
+
+        let after_retention = SystemTime::now() + ORPHAN_STAGING_MAX_AGE + Duration::from_secs(1);
+        cleanup_orphaned_staging_dirs_at(&root, hash, after_retention);
+        assert!(
+            !other_hash_staging.exists(),
+            "expired staging for an older hash must be removed"
+        );
+        assert!(unrelated.exists(), "unrelated directories must be retained");
     }
 
     #[test]
