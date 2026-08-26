@@ -2116,6 +2116,8 @@ pub async fn auth(
 }
 
 const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
+// If the inline script in login_page.html changes, recompute its script-src
+// SHA-256 below. dashboard_login_page_script_is_allowed_by_csp_hash enforces it.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'sha256-TDA4xCzDRyoMM+fopfpKCyivlfu44tSPBzidGFvUgNM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
 
 /// Security headers middleware — applied to ALL API responses.
