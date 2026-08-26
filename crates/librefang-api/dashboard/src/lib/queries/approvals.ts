@@ -9,10 +9,8 @@ import {
 import { approvalKeys, totpKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
-const STALE_APPROVALS = 10_000;
-const REFETCH_APPROVALS = 15_000;
-const STALE_COUNT = 10_000;
-const REFETCH_COUNT = 15_000;
+const STALE_DEFAULT = 10_000;
+const REFETCH_DEFAULT = 15_000;
 const STALE_PENDING = 3_000;
 const REFETCH_PENDING = 5_000;
 const STALE_TOTP = 60_000;
@@ -22,16 +20,16 @@ export const approvalQueries = {
     queryOptions({
       queryKey: approvalKeys.lists(),
       queryFn: listApprovals,
-      staleTime: STALE_APPROVALS,
-      refetchInterval: REFETCH_APPROVALS,
+      staleTime: STALE_DEFAULT,
+      refetchInterval: REFETCH_DEFAULT,
       refetchIntervalInBackground: false, // #3393
     }),
   count: () =>
     queryOptions({
       queryKey: approvalKeys.count(),
       queryFn: fetchApprovalCount,
-      staleTime: STALE_COUNT,
-      refetchInterval: REFETCH_COUNT,
+      staleTime: STALE_DEFAULT,
+      refetchInterval: REFETCH_DEFAULT,
       refetchIntervalInBackground: false, // #3393
     }),
   pending: (agentId?: string) =>
@@ -73,10 +71,10 @@ export function usePendingApprovals(
   agentId?: string,
   options: QueryOverrides = {},
 ) {
-  return useQuery({
-    ...withOverrides(approvalQueries.pending(agentId), options),
-    enabled: options.enabled ?? Boolean(agentId),
-  });
+  return useQuery(withOverrides(approvalQueries.pending(agentId), {
+    enabled: Boolean(agentId),
+    ...options,
+  }));
 }
 
 export function useApprovalAudit(

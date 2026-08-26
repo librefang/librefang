@@ -180,6 +180,17 @@ pub enum VerifyResult {
     Denied,
 }
 
+fn verify_legacy_password(input_pass: &str, cfg_pass: &str) -> (bool, Option<String>) {
+    use subtle::ConstantTimeEq;
+
+    // Match the Argon2-class work performed by the preferred hash branch even
+    // when the plaintext password is wrong. On success this is also the
+    // migration hash, so a legacy login still pays for Argon2 only once.
+    let upgrade_hash = hash_password(input_pass).ok();
+    let matches = input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into();
+    (matches, upgrade_hash)
+}
+
 /// Pick the server-side secret used to derive dashboard session tokens.
 fn dashboard_session_secret<'a>(cfg_pass: &'a str, pass_hash: &'a str) -> Option<&'a str> {
     if !pass_hash.is_empty() {
@@ -212,9 +223,9 @@ pub fn derive_dashboard_session_token(
 /// - Otherwise, fall back to constant-time plaintext comparison against `cfg_pass`.
 ///   On success, returns an `upgrade_hash` so the caller can transparently migrate.
 ///
-/// **Timing safety**: The password verification path always executes regardless of
-/// whether the username matched. This prevents attackers from enumerating valid
-/// usernames via timing differences (Argon2id is ~tens of ms vs instant return).
+/// **Timing safety**: Every credential mode performs Argon2-class work regardless
+/// of whether the username or password matched. This prevents username enumeration
+/// and avoids exposing legacy plaintext configuration through an instant branch.
 ///
 /// Returns a randomly generated `SessionToken` on success instead of a
 /// deterministic HMAC-derived token, preventing token replay and enabling
@@ -232,14 +243,14 @@ pub fn verify_dashboard_password(
 
     // Always verify password to prevent timing side-channel on username enumeration.
     // Even if username is wrong, we still run Argon2id so timing is constant.
-    let pass_ok = if !pass_hash.is_empty() {
-        verify_password(input_pass, pass_hash)
+    let (pass_ok, legacy_upgrade_hash) = if !pass_hash.is_empty() {
+        (verify_password(input_pass, pass_hash), None)
     } else if !cfg_pass.is_empty() {
-        input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into()
+        verify_legacy_password(input_pass, cfg_pass)
     } else {
         // No credentials configured — run a dummy hash to keep timing constant.
         let _ = hash_password(input_pass);
-        false
+        (false, None)
     };
 
     if !user_ok || !pass_ok {
@@ -255,11 +266,9 @@ pub fn verify_dashboard_password(
         }
     } else {
         let token = generate_session_token();
-        // Generate an Argon2id hash so the caller can persist it for future logins.
-        let upgrade_hash = hash_password(input_pass).ok();
         VerifyResult::Ok {
             token,
-            upgrade_hash,
+            upgrade_hash: legacy_upgrade_hash,
         }
     }
 }
@@ -530,6 +539,14 @@ mod tests {
             verify_dashboard_password("admin", "wrong", "admin", "secret", ""),
             VerifyResult::Denied
         ));
+    }
+
+    #[test]
+    fn legacy_wrong_password_still_performs_argon2_work() {
+        let (matches, dummy_hash) = verify_legacy_password("wrong", "secret");
+
+        assert!(!matches);
+        assert!(dummy_hash.is_some());
     }
 
     #[test]

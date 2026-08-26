@@ -29,6 +29,175 @@ fn test_max_iterations_constant() {
     );
 }
 
+#[test]
+fn context_compaction_updates_working_and_persistent_messages() {
+    let current_user = Message::user("current user");
+    let original = vec![
+        Message::user("old user"),
+        Message::assistant("old answer"),
+        current_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 7,
+        last_repaired_generation: Some(7),
+        peer_id: None,
+    };
+    let mut working = original;
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "earlier facts".to_string(),
+        vec![current_user.clone()],
+    );
+
+    assert_eq!(working.len(), session.messages.len());
+    for (working_message, persisted_message) in working.iter().zip(&session.messages) {
+        assert_eq!(working_message.role, persisted_message.role);
+        assert_eq!(
+            working_message.content.text_content(),
+            persisted_message.content.text_content()
+        );
+        assert_eq!(working_message.pinned, persisted_message.pinned);
+    }
+    assert_eq!(session.messages_generation, 8);
+    assert_eq!(session.last_repaired_generation, Some(7));
+    assert_eq!(new_messages_start, 1);
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[0].role, Role::User);
+    assert!(session.messages[0]
+        .content
+        .text_content()
+        .contains("earlier facts"));
+    assert_eq!(session.messages[1].role, current_user.role);
+    assert_eq!(
+        session.messages[1].content.text_content(),
+        current_user.content.text_content()
+    );
+}
+
+#[test]
+fn context_compaction_preserves_current_turn_when_engine_omits_it() {
+    let current_user = Message::user("current user");
+    let current_tool_result = Message::user("current tool result");
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: vec![
+            Message::user("old user"),
+            current_user.clone(),
+            current_tool_result.clone(),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = session.messages.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "old history".to_string(),
+        Vec::new(),
+    );
+
+    assert_eq!(new_messages_start, 1);
+    assert_eq!(session.messages.len(), 3);
+    assert_eq!(session.messages[1].timestamp, current_user.timestamp);
+    assert_eq!(session.messages[2].timestamp, current_tool_result.timestamp);
+    assert_eq!(working.len(), session.messages.len());
+}
+
+#[test]
+fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
+    let duplicate_user = Message::user("same request");
+    let original = vec![
+        duplicate_user.clone(),
+        Message::assistant("old answer"),
+        duplicate_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 2);
+    assert_eq!(working.len(), session.messages.len());
+}
+
+#[test]
+fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
+    let repeated_user = Message::user("same request");
+    let original = vec![
+        Message::user("old request"),
+        repeated_user.clone(),
+        Message::assistant("intermediate answer"),
+        repeated_user,
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 1);
+    let current_turn_text: Vec<_> = session.messages[new_messages_start..]
+        .iter()
+        .map(|message| message.content.text_content())
+        .collect();
+    assert_eq!(
+        current_turn_text,
+        ["same request", "intermediate answer", "same request"]
+    );
+    assert_eq!(working.len(), session.messages.len());
+}
+
 // ── push_accumulated_text bounded growth ──────────────────────────────
 
 #[test]

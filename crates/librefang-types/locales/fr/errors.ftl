@@ -17,6 +17,11 @@ api-error-template-invalid-name = Nom de modèle non valide
 api-error-template-not-found = Modèle '{ $name }' non trouvé
 api-error-template-parse-failed = Échec de l'analyse du modèle : { $error }
 api-error-template-required = 'manifest_toml' ou 'template' est requis
+api-error-template-invalid-manifest = Manifeste de modèle non valide
+api-error-template-read-failed = Échec de la lecture du modèle
+api-error-agent-type-exists = Un type d'agent nommé '{ $name }' existe déjà
+api-error-agent-type-name-taken = '{ $name }' est le nom d'un agent actif ; choisissez un autre nom pour le type d'agent
+api-error-agent-type-not-editable = Le type d'agent '{ $name }' provient de l'espace de travail d'un agent actif et se gère via /api/agents
 
 # Manifest errors
 api-error-manifest-too-large = Manifeste trop volumineux (max. 1 Mo)

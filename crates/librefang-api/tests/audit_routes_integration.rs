@@ -479,9 +479,9 @@ async fn audit_query_clamps_oversized_limit() {
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     let limit = body["limit"].as_u64().expect("limit must be a number");
-    assert!(
-        limit <= 5000,
-        "limit must be clamped to MAX_AUDIT_QUERY_LIMIT (5000); got {limit}"
+    assert_eq!(
+        limit, 5000,
+        "limit must be clamped exactly to MAX_AUDIT_QUERY_LIMIT (5000); got {limit}"
     );
 }
 
@@ -501,7 +501,10 @@ async fn audit_query_clamps_zero_limit_up_to_one() {
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
     let limit = body["limit"].as_u64().expect("limit number");
-    assert!(limit >= 1, "limit must be clamped up to >= 1; got {limit}");
+    assert_eq!(
+        limit, 1,
+        "limit must be clamped up to exactly 1; got {limit}"
+    );
     let entries = body["items"].as_array().expect("items[]");
     assert!(
         entries.len() <= limit as usize,
@@ -718,10 +721,9 @@ async fn audit_recent_returns_documented_shape() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_recent_caps_n_at_1000() {
-    // Handler clamps `?n=` at 1000. A megaroute request must not blow the
-    // response size. We can't easily seed 1k entries in a unit test, so we
-    // assert the structure stays valid at the cap and document the contract
-    // (`n` is silently capped — there's no error).
+    // Handler clamps `?n=` at 1000. An oversized request must not blow the
+    // response size. The reported limit pins the clamp without needing to
+    // seed 1,000 entries (`n` is silently capped — there's no error).
     let h = build_admin_audit_harness();
 
     let (status, bytes) = send_get(
@@ -732,6 +734,11 @@ async fn audit_recent_caps_n_at_1000() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
+    assert_eq!(
+        body["limit"].as_u64().expect("limit"),
+        1000,
+        "?n=999999 must be clamped to exactly 1000 in the reported limit"
+    );
     let entries = body["items"].as_array().expect("items[]");
     assert!(
         entries.len() <= 1000,

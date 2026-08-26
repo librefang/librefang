@@ -299,7 +299,7 @@ async fn initialize_and_prompt_emits_text_chunks_and_end_turn() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn prompt_channel_close_without_completion_returns_internal_error() {
+async fn prompt_channel_close_without_completion_returns_scrubbed_internal_error() {
     use tokio::task::LocalSet;
 
     let local = LocalSet::new();
@@ -345,9 +345,7 @@ async fn prompt_channel_close_without_completion_returns_internal_error() {
                     );
                     assert_eq!(
                         error.data,
-                        Some(serde_json::json!(
-                            "internal acp error: prompt event channel closed before ContentComplete"
-                        ))
+                        Some(serde_json::json!("internal acp error"))
                     );
                     Ok(())
                 })

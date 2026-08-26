@@ -29,6 +29,7 @@ export { default as ChevronUp } from "lucide-react/dist/esm/icons/chevron-up.mjs
 export { default as ClipboardPaste } from "lucide-react/dist/esm/icons/clipboard-paste.mjs";
 export { default as Clock } from "lucide-react/dist/esm/icons/clock.mjs";
 export { default as Cloud } from "lucide-react/dist/esm/icons/cloud.mjs";
+export { default as CloudOff } from "lucide-react/dist/esm/icons/cloud-off.mjs";
 export { default as Code } from "lucide-react/dist/esm/icons/code.mjs";
 export { default as Copy } from "lucide-react/dist/esm/icons/copy.mjs";
 export { default as Cpu } from "lucide-react/dist/esm/icons/cpu.mjs";

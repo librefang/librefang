@@ -157,11 +157,6 @@
   -webkit-overflow-scrolling: touch;
 }
 
-:focus-visible {
-  outline: 1px solid #06b6d4;
-  outline-offset: 2px;
-}
-
 :focus:not(:focus-visible) {
   outline: none;
 }
@@ -187,7 +182,7 @@
 
 /* Prevent horizontal overflow */
 html {
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 /* Respect the user's OS setting — disable all animations and transitions

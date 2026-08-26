@@ -17,6 +17,8 @@ use librefang_testing::{MockKernelBuilder, TestAppState};
 use std::sync::Arc;
 use tower::ServiceExt;
 
+const UNKNOWN_GOAL_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
 struct Harness {
     app: Router,
     _state: Arc<AppState>,
@@ -227,13 +229,28 @@ async fn goals_create_rejects_progress_over_100() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn goals_create_rejects_wrong_typed_progress_and_links() {
+    let h = boot().await;
+    for payload in [
+        serde_json::json!({"title": "bad", "progress": "12"}),
+        serde_json::json!({"title": "bad", "progress": 12.5}),
+        serde_json::json!({"title": "bad", "parent_id": 123}),
+        serde_json::json!({"title": "bad", "parent_id": "not-a-uuid"}),
+        serde_json::json!({"title": "bad", "agent_id": false}),
+    ] {
+        let (status, body) = json_request(&h, Method::POST, "/api/goals", Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn goals_create_with_unknown_parent_returns_404() {
     let h = boot().await;
     let (status, _) = json_request(
         &h,
         Method::POST,
         "/api/goals",
-        Some(serde_json::json!({"title": "child", "parent_id": "no-such-parent"})),
+        Some(serde_json::json!({"title": "child", "parent_id": UNKNOWN_GOAL_ID})),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -431,8 +448,35 @@ async fn goals_update_rejects_non_uuid_agent_id() {
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_get_unknown_returns_404() {
     let h = boot().await;
-    let (status, _) = json_request(&h, Method::GET, "/api/goals/does-not-exist", None).await;
+    let (status, _) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/goals/{UNKNOWN_GOAL_ID}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_resource_routes_reject_non_uuid_ids() {
+    let h = boot().await;
+    for (method, path, body) in [
+        (Method::GET, "/api/goals/not-a-uuid", None),
+        (Method::GET, "/api/goals/not-a-uuid/children", None),
+        (
+            Method::PUT,
+            "/api/goals/not-a-uuid",
+            Some(serde_json::json!({"title": "ignored"})),
+        ),
+        (Method::DELETE, "/api/goals/not-a-uuid", None),
+        (Method::GET, "/api/goals/not-a-uuid/run", None),
+        (Method::POST, "/api/goals/not-a-uuid/start", None),
+        (Method::POST, "/api/goals/not-a-uuid/stop", None),
+    ] {
+        let (status, response) = json_request(&h, method, path, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {response:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -480,8 +524,13 @@ async fn goals_children_lists_only_direct_children() {
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_children_unknown_parent_returns_empty_list() {
     let h = boot().await;
-    let (status, body) =
-        json_request(&h, Method::GET, "/api/goals/no-such-id/children", None).await;
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/goals/{UNKNOWN_GOAL_ID}/children"),
+        None,
+    )
+    .await;
     // Endpoint returns 200 with empty list rather than 404 — encode that.
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
@@ -620,7 +669,7 @@ async fn goals_update_unknown_returns_404() {
     let (status, _) = json_request(
         &h,
         Method::PUT,
-        "/api/goals/ghost",
+        &format!("/api/goals/{UNKNOWN_GOAL_ID}"),
         Some(serde_json::json!({"status": "completed"})),
     )
     .await;
@@ -653,7 +702,7 @@ async fn goals_update_rejects_unknown_parent() {
         &h,
         Method::PUT,
         &format!("/api/goals/{id}"),
-        Some(serde_json::json!({"parent_id": "nope"})),
+        Some(serde_json::json!({"parent_id": UNKNOWN_GOAL_ID})),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -694,6 +743,31 @@ async fn goals_update_rejects_invalid_progress() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_update_rejects_wrong_typed_progress_and_links() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "unchanged"})).await;
+    let id = goal["id"].as_str().unwrap();
+
+    for payload in [
+        serde_json::json!({"progress": "42"}),
+        serde_json::json!({"progress": -1}),
+        serde_json::json!({"parent_id": 123}),
+        serde_json::json!({"parent_id": "not-a-uuid"}),
+        serde_json::json!({"agent_id": {"id": "bad"}}),
+    ] {
+        let (status, body) =
+            json_request(&h, Method::PUT, &format!("/api/goals/{id}"), Some(payload)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+
+    let (_, stored) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(stored["title"], "unchanged");
+    assert_eq!(stored["progress"], 0);
+    assert!(stored.get("parent_id").is_none());
+    assert!(stored.get("agent_id").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -751,8 +825,54 @@ async fn goals_delete_removes_goal_and_descendants() {
 #[tokio::test(flavor = "multi_thread")]
 async fn goals_delete_unknown_returns_404() {
     let h = boot().await;
-    let (status, _) = json_request(&h, Method::DELETE, "/api/goals/missing", None).await;
+    let (status, _) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/goals/{UNKNOWN_GOAL_ID}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_delete_missing_parent_does_not_remove_orphan_children() {
+    let h = boot().await;
+    let orphan_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    h._state
+        .kernel
+        .memory_substrate()
+        .structured_modify(
+            librefang_types::goal::goals_storage_agent_id(),
+            librefang_types::goal::GOALS_STORAGE_KEY,
+            |current| {
+                let mut goals = current
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default();
+                goals.push(serde_json::json!({
+                    "id": orphan_id,
+                    "title": "legacy orphan",
+                    "parent_id": UNKNOWN_GOAL_ID,
+                    "status": "pending",
+                    "progress": 0,
+                }));
+                Ok((serde_json::Value::Array(goals), ()))
+            },
+        )
+        .unwrap();
+
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        &format!("/api/goals/{UNKNOWN_GOAL_ID}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "got: {body:?}");
+
+    let (status, orphan) =
+        json_request(&h, Method::GET, &format!("/api/goals/{orphan_id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "orphan was deleted: {orphan:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +985,39 @@ async fn goal_run_start_requires_assigned_agent() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_start_rejects_invalid_iteration_limits() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Bounded",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+
+    for max_iterations in [
+        serde_json::json!(0),
+        serde_json::json!("25"),
+        serde_json::json!(12.5),
+        serde_json::json!(u64::from(u32::MAX) + 1),
+    ] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/{id}/start"),
+            Some(serde_json::json!({"max_iterations": max_iterations})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "got: {body:?}");
+    }
+
+    let (_, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(run["running"], false);
+}
+
 /// #6562: create / update now reject a non-UUID `agent_id`, but goals written
 /// before that fix still carry junk.
 /// Reporting those as unassigned points the operator at a field that already looks filled in, so the two cases get distinct messages.
@@ -937,4 +1090,29 @@ async fn goal_run_start_then_stop_with_agent() {
     // Stopping again reports no active run.
     let (_s2, stop2) = json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
     assert_eq!(stop2["stopped"].as_bool(), Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_goal_stops_its_active_run() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({
+            "title": "Delete while running",
+            "agent_id": "11111111-1111-1111-1111-111111111111",
+        }),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+
+    let (status, _) = json_request(&h, Method::DELETE, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, run) = json_request(&h, Method::GET, &format!("/api/goals/{id}/run"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(run["running"], false);
 }

@@ -588,27 +588,22 @@ impl WasmSandbox {
         // Serialize input JSON → bytes
         let input_bytes = serde_json::to_vec(&input)
             .map_err(|e| SandboxError::Execution(format!("JSON serialize failed: {e}")))?;
+        let input_len = Self::guest_abi_len(input_bytes.len(), "Input payload")?;
 
         // Allocate space in guest memory for input
         let input_ptr = alloc_fn
-            .call(&mut store, input_bytes.len() as i32)
+            .call(&mut store, input_len)
             .map_err(|e| SandboxError::AbiError(format!("alloc call failed: {e}")))?;
 
         // Write input into guest memory. Use checked_add so a malicious or
         // buggy guest returning an out-of-range alloc pointer can't wrap
         // the bounds check (reachable on 32-bit hosts, defensive on 64-bit).
         let mem_data = memory.data_mut(&mut store);
-        let start = input_ptr as usize;
-        let end = start.checked_add(input_bytes.len()).ok_or_else(|| {
-            SandboxError::AbiError("Input pointer + length overflows usize".into())
-        })?;
-        if end > mem_data.len() {
-            return Err(SandboxError::AbiError("Input exceeds memory bounds".into()));
-        }
-        mem_data[start..end].copy_from_slice(&input_bytes);
+        let input_range = Self::checked_guest_range(input_ptr, input_len, mem_data.len(), "Input")?;
+        mem_data[input_range].copy_from_slice(&input_bytes);
 
         // Call guest execute
-        let packed = match execute_fn.call(&mut store, (input_ptr, input_bytes.len() as i32)) {
+        let packed = match execute_fn.call(&mut store, (input_ptr, input_len)) {
             Ok(v) => v,
             Err(e) => {
                 // Check for fuel exhaustion via trap code
@@ -751,10 +746,20 @@ impl WasmSandbox {
                  msg_ptr: i32,
                  msg_len: i32| {
                     let mut caller = caller;
-                    // Clamp the guest-supplied length before touching memory.
-                    let clamped_len = (msg_len as usize).min(MAX_LOG_BYTES) as i32;
-                    let was_truncated = (msg_len as usize) > MAX_LOG_BYTES;
-                    let original_len = msg_len as usize;
+                    // Reject signed ABI underflow before converting to usize,
+                    // then clamp the validated length before touching memory.
+                    let (clamped_len, original_len, was_truncated) =
+                        match Self::clamp_host_log_len(msg_len) {
+                            Ok(lengths) => lengths,
+                            Err(error) => {
+                                tracing::error!(
+                                    agent = %caller.data().agent_id,
+                                    error = %error,
+                                    "host_log rejected invalid guest length"
+                                );
+                                return;
+                            }
+                        };
 
                     match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
                         Ok(bytes) => {
@@ -904,18 +909,51 @@ impl WasmSandbox {
             .and_then(|e| e.into_memory())
             .ok_or_else(|| SandboxError::AbiError(format!("{op}: no memory export")))?;
 
+        let data = memory.data(&mut *caller);
+        let range = Self::checked_guest_range(ptr, len, data.len(), op)?;
+
+        Ok(data[range].to_vec())
+    }
+
+    fn clamp_host_log_len(len: i32) -> Result<(i32, usize, bool), SandboxError> {
+        let original_len = usize::try_from(len).map_err(|_| {
+            SandboxError::AbiError(format!("host_log: negative length (len={len})"))
+        })?;
+        let was_truncated = original_len > MAX_LOG_BYTES;
+        let clamped_len = original_len.min(MAX_LOG_BYTES) as i32;
+        Ok((clamped_len, original_len, was_truncated))
+    }
+
+    fn guest_abi_len(len: usize, op: &str) -> Result<i32, SandboxError> {
+        i32::try_from(len).map_err(|_| {
+            SandboxError::AbiError(format!(
+                "{op} too large for guest ABI: {len} bytes (max {})",
+                i32::MAX
+            ))
+        })
+    }
+
+    fn checked_guest_range(
+        ptr: i32,
+        len: i32,
+        memory_len: usize,
+        op: &str,
+    ) -> Result<std::ops::Range<usize>, SandboxError> {
+        if ptr < 0 || len < 0 {
+            return Err(SandboxError::AbiError(format!(
+                "{op}: negative pointer or length (ptr={ptr}, len={len})"
+            )));
+        }
         let start = ptr as usize;
         let end = start
             .checked_add(len as usize)
             .ok_or_else(|| SandboxError::AbiError(format!("{op}: pointer overflow")))?;
-        let data = memory.data(&mut *caller);
-        if end > data.len() {
+        if end > memory_len {
             return Err(SandboxError::AbiError(format!(
                 "{op}: pointer out of bounds"
             )));
         }
-
-        Ok(data[start..end].to_vec())
+        Ok(start..end)
     }
 
     fn write_guest_json(
@@ -926,7 +964,7 @@ impl WasmSandbox {
         // into typed `SandboxError` variants — keeps `?` ergonomic without
         // erasing the source chain the way `anyhow::Error` used to.
         let response_bytes = serde_json::to_vec(value)?;
-        let len = response_bytes.len() as i32;
+        let len = Self::guest_abi_len(response_bytes.len(), "host_call response")?;
 
         let alloc_fn = caller
             .get_export("alloc")
@@ -939,17 +977,9 @@ impl WasmSandbox {
             .get_export("memory")
             .and_then(|e| e.into_memory())
             .ok_or_else(|| SandboxError::AbiError("host_call: no memory export".into()))?;
-        let dest_start = ptr as usize;
-        let dest_end = dest_start
-            .checked_add(response_bytes.len())
-            .ok_or_else(|| SandboxError::AbiError("host_call: response pointer overflow".into()))?;
         let mem_data = memory.data_mut(caller);
-        if dest_end > mem_data.len() {
-            return Err(SandboxError::AbiError(
-                "host_call: response exceeds memory bounds".into(),
-            ));
-        }
-        mem_data[dest_start..dest_end].copy_from_slice(&response_bytes);
+        let range = Self::checked_guest_range(ptr, len, mem_data.len(), "host_call response")?;
+        mem_data[range].copy_from_slice(&response_bytes);
 
         Ok(((ptr as i64) << 32) | (len as i64))
     }
@@ -1510,6 +1540,53 @@ mod tests {
     fn test_size_caps_are_one_mib() {
         assert_eq!(MAX_HOST_CALL_REQUEST_BYTES, 1024 * 1024);
         assert_eq!(MAX_GUEST_RESULT_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_guest_abi_length_rejects_i32_overflow() {
+        assert_eq!(
+            WasmSandbox::guest_abi_len(i32::MAX as usize, "input").unwrap(),
+            i32::MAX
+        );
+        let error = WasmSandbox::guest_abi_len(i32::MAX as usize + 1, "input").unwrap_err();
+        assert!(matches!(
+            error,
+            SandboxError::AbiError(message)
+                if message.contains("too large for guest ABI")
+                    && message.contains(&i32::MAX.to_string())
+        ));
+    }
+
+    #[test]
+    fn test_guest_memory_range_rejects_negative_abi_values() {
+        for (ptr, len) in [(-1, 1), (0, -1), (-1, -1)] {
+            let error = WasmSandbox::checked_guest_range(ptr, len, 16, "test").unwrap_err();
+            assert!(matches!(
+                error,
+                SandboxError::AbiError(message)
+                    if message.contains("negative pointer or length")
+                        && message.contains(&format!("ptr={ptr}"))
+                        && message.contains(&format!("len={len}"))
+            ));
+        }
+        assert_eq!(
+            WasmSandbox::checked_guest_range(2, 3, 5, "test").unwrap(),
+            2..5
+        );
+    }
+
+    #[test]
+    fn test_host_log_length_rejects_negative_before_clamping() {
+        let error = WasmSandbox::clamp_host_log_len(-1).unwrap_err();
+        assert!(matches!(
+            error,
+            SandboxError::AbiError(message)
+                if message.contains("negative length") && message.contains("len=-1")
+        ));
+        assert_eq!(
+            WasmSandbox::clamp_host_log_len(MAX_LOG_BYTES as i32 + 7).unwrap(),
+            (MAX_LOG_BYTES as i32, MAX_LOG_BYTES + 7, true)
+        );
     }
 
     /// Per-store interrupt semantics (Bug #3864): the

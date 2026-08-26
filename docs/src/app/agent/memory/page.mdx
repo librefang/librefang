@@ -15,7 +15,7 @@ LibreFang's memory system provides persistent storage, semantic search, and know
 - [Knowledge Graph](#knowledge-graph)
 - [Session Compaction](#session-compaction)
 - [Background Consolidation (Auto-Dream)](#background-consolidation-auto-dream)
-- [Memory Provider Plugin API](#memory-provider-plugin-api)
+- [External Vector Backend](#external-vector-backend)
 - [Usage Tracking](#usage-tracking)
 - [API Endpoints](#api-endpoints)
 - [Best Practices](#best-practices)
@@ -174,6 +174,70 @@ librefang memory list --prefix "project:"
 
 ---
 
+## Agent-callable semantic memory
+
+Semantic memory is not only something an agent is *given* — it is something an agent can *ask*.
+The `memory_semantic_*` tools reach the embedding-backed `memories` table, which is the store the agent loop already recalls from automatically before each turn.
+
+<Note>
+The three `memory_store` / `memory_recall` / `memory_list` tools are a **separate**, exact-key key/value store.
+`memory_recall` matches a key character for character; it does no fuzzy, semantic, or substring matching.
+Reaching for it to "search memory" returns a key miss, not an empty result.
+</Note>
+
+| Tool | Effect |
+| --- | --- |
+| `memory_semantic_search(query, limit?, min_confidence?, min_similarity?)` | Search remembered facts by meaning. Each result carries an `id`, and a `similarity` when embeddings ranked it. |
+| `memory_semantic_add(content)` | Record a durable fact. The extractor may distil, merge, or decline it; the result says which. |
+| `memory_semantic_forget(memory_id)` | Retract one memory so it stops being recalled. |
+| `memory_semantic_stats()` | Counts per level and category, plus whether the subsystem is switched on. |
+| `memory_semantic_duplicates()` | Report near-duplicate groups. Changes nothing. |
+| `memory_semantic_consolidate()` | Merge every near-duplicate group, keeping the newest of each and retracting the rest. **Opt-in, see below.** |
+
+Only `memory_semantic_search` ships in every request; the rest are reachable through `tool_search` / `tool_load`.
+All six are withheld when `[proactive_memory] enabled = false`, and gated a second time on the agent's declared `memory_read` / `memory_write` capability scopes.
+
+### Consolidation is opt-in, per agent
+
+`memory_semantic_consolidate` is the only tool here whose reach is the agent's whole store rather than a row it named: it soft-deletes every member but the newest of each near-duplicate group, in one unattended call, with no undo the agent can reach.
+It is therefore withheld unless the agent's own manifest asks for it.
+
+```toml
+# {workspace}/agent.toml — NOT config.toml (#5476)
+[proactive_memory]
+allow_self_consolidation = true
+```
+
+An explicit `capabilities.tools` entry does not stand in for this, and neither does `tools = ["*"]`: naming a tool grants reach, and this switch grants permission to delete rows the caller never named.
+There is deliberately no kernel-global counterpart — a deployment-wide switch would arm destructive maintenance on agents nobody re-examined.
+
+Leaving it off costs nothing an operator cannot recover.
+`memory_semantic_duplicates` still reports every group the merge would have touched, and `POST /api/memory/agents/{id}/consolidate` still performs it with a human deciding when.
+
+### Asking for nothing rather than noise
+
+Recall over-fetches candidates, ranks them by cosine similarity, and truncates to the top few.
+With no floor, a sparse store fills that top-k with whatever exists — irrelevant memories are promoted on merit and land in the prompt as if they were answers.
+
+`min_similarity` sets the floor below which a memory is not recalled at all, which makes an empty recall possible:
+
+```toml
+# ~/.librefang/config.toml — deployment default, applies to automatic recall too
+[proactive_memory]
+min_similarity = 0.3
+```
+
+```toml
+# {workspace}/agent.toml — per-agent override
+[proactive_memory]
+min_similarity = 0.45
+```
+
+Resolution is per-call argument → agent override → deployment default → no floor.
+It is inert when no embedding provider is configured, because then nothing has been scored: distinct from `min_confidence`, which is decay-derived trust in a memory's content and says nothing about whether that memory answers *this* query.
+
+---
+
 ## Vector Search
 
 ### Semantic Search
@@ -191,6 +255,12 @@ librefang memory search --vector "machine learning techniques for text classific
 [memory]
 similarity_threshold = 0.75
 ```
+
+### Full-text fallback
+
+When no embedding provider is reachable — including the deliberate `[memory] fts_only = true` mode — search falls back to the `memories_fts` FTS5 index over memory content, ranked by bm25.
+The index is maintained by triggers on the `memories` table, so nothing has to remember to keep it current, and it is rebuilt from `memories` when the schema migration runs.
+Queries that the index cannot serve (a substring landing inside a word, a query made only of punctuation) still fall through to substring matching, so the index only ever adds matches.
 
 ### API Endpoint
 
@@ -274,7 +344,7 @@ librefang session compaction-status
 
 ## Background Consolidation (Auto-Dream)
 
-Session compaction keeps a **single session** from overflowing. Auto-dream is a complementary mechanism that works at a longer time horizon: once in a while it wakes an opted-in agent up, hands it a four-phase prompt (Orient / Gather / Consolidate / Prune), and lets the agent curate its own long-term memory across recent sessions — upserting durable insights via `memory_store` and trimming stale entries.
+Session compaction keeps a **single session** from overflowing. Auto-dream is a complementary mechanism that works at a longer time horizon: once in a while it wakes an opted-in agent up, hands it a four-phase prompt (Orient / Gather / Consolidate / Prune), and lets the agent curate its own long-term memory across recent sessions — upserting durable insights via `memory_semantic_add` and retracting stale ones via `memory_semantic_forget`.
 
 <Note>
 **Disabled by default.** Auto-dream spends real tokens on a recurring schedule, so both the global switch and every agent's opt-in flag are `false` unless you turn them on. See [`[auto_dream]`](/configuration/core#auto_dream) for the full reference.
@@ -304,7 +374,7 @@ auto_dream_min_sessions = 1     # after every session, for a chatty one
 ### How a dream runs
 
 1. The primary trigger is the `AgentLoopEnd` hook — the moment an agent finishes a turn, the kernel evaluates its four gates in order: global enabled → time since last dream → session activity count → per-agent file lock. Any miss and the dream is skipped. A sparse backstop scheduler (default `check_interval_secs = 86400` / 1 day) covers opted-in agents that never turn (e.g. channel bots waiting on inbound traffic).
-2. On a pass, the agent is invoked as a **forked turn** off the canonical session via `kernel.run_forked_agent_streaming` — same system prompt, tools, and message prefix as the parent turn so Anthropic's prompt cache hits. Fork turns don't persist their messages back to canonical session, so the user's conversation history isn't polluted by consolidation chatter. A runtime tool allowlist (`memory_store` / `memory_recall` / `memory_list`) is enforced at execute time, not request-build time, so the schema stays byte-identical to the parent and cache alignment holds. Prompt-injected dreams that try a non-memory tool get a synthetic error back and can't actually invoke anything outside the allowlist.
+2. On a pass, the agent is invoked as a **forked turn** off the canonical session via `kernel.run_forked_agent_streaming` — same system prompt, tools, and message prefix as the parent turn so Anthropic's prompt cache hits. Fork turns don't persist their messages back to canonical session, so the user's conversation history isn't polluted by consolidation chatter. A runtime tool allowlist covering the key/value and `memory_semantic_*` tools is enforced at execute time, not request-build time, so the schema stays byte-identical to the parent and cache alignment holds. Prompt-injected dreams that try a non-memory tool get a synthetic error back and can't actually invoke anything outside the allowlist. `memory_semantic_consolidate` is in that allowlist but reaches a dream only for an agent whose manifest also sets `allow_self_consolidation` — so three switches, all defaulting to off, stand between a fresh install and an unattended whole-store merge.
 3. Streamed progress (phase, tool calls, memories touched, last turn preview, token/cost) is kept in a per-agent registry and surfaced via the status endpoint.
 4. On success the lock's mtime advances to "now" (driving the time gate); on failure or abort the mtime is rolled back so the next tick will retry.
 
@@ -325,77 +395,76 @@ See [`[auto_dream]`](/configuration/core#auto_dream) for every field, default, a
 
 ---
 
-## Memory Provider Plugin API
+## External Vector Backend
 
-The `MemoryProvider` trait allows integrating external memory backends — such as vector databases, knowledge graphs, or remote storage services — alongside LibreFang's built-in SQLite memory.
+Approximate-nearest-neighbour search is the one part of the memory subsystem that accepts an external implementation today, and the seam is the `VectorStore` trait.
+LibreFang keeps owning the SQLite row store, the extraction pipeline and every isolation guard; the backend you attach decides only which memory IDs are nearest to a query embedding.
 
-### Architecture
+### Enabling the HTTP backend
 
-- There is always **one built-in provider** (the default SQLite-backed store). It cannot be removed.
-- At most **one external provider** can be registered at a time. External providers supplement the built-in store; they do not replace it.
-- If an external provider fails, the built-in provider continues operating normally. Errors from external providers are captured, logged at `WARN` level, and never propagated to the agent loop.
+```toml
+[memory]
+vector_backend = "http"                                        # "sqlite" (the default) keeps everything in-process
+vector_store_url = "http://127.0.0.1:6333/collections/memories"
+```
 
-### Trait interface
+`vector_backend = "http"` without `vector_store_url` fails the boot rather than silently falling back to SQLite, and any value other than `"http"` / `"sqlite"` is rejected by name.
+The base URL is used verbatim with a trailing slash stripped, so paths are appended directly to it.
+
+### The HTTP contract
+
+Your service answers four endpoints under that base URL.
+Responses are capped at 64 MiB, connect timeout is 10s and total request timeout is 30s.
+
+| Method | Path | Request body | Response body |
+|---|---|---|---|
+| POST | `/insert` | `{ id, embedding, payload, metadata }` | ignored; any 2xx means stored |
+| POST | `/search` | `{ query_embedding, limit, filter? }` | `[{ id, payload, score, metadata }]` |
+| DELETE | `/delete` | `{ id }` | ignored; any 2xx means deleted |
+| POST | `/get_embeddings` | `{ ids }` | `{ "<id>": [f32, …], … }` |
+
+`filter` is the caller's `MemoryFilter` serialized as-is — agent, source, scope, minimum confidence, created-at bounds, metadata equality pairs and peer.
+Honouring it lets the backend prune before it ranks, which is the whole reason it is sent.
+
+### What the backend does not get to decide
+
+Everything `/search` returns is treated as untrusted, because the search result is an ID list from a process LibreFang does not control.
+
+- **IDs are hydrated from SQLite, never from the backend's payload.** The `payload` and `metadata` a backend returns are not what reaches the prompt; the row LibreFang already has under that ID is.
+- **The caller's `MemoryFilter` is re-applied after hydration.** A backend that ignores the filter it was handed cannot widen the caller's scope: agent, scope, source, confidence floor, created-at bounds and metadata equality are all re-checked against the hydrated rows, and `peer_id` is enforced as a SQL predicate during hydration because `MemoryFragment` does not carry it.
+- **Cross-chat (`chat_scope`) and cross-session (`session_scope`) isolation run after that**, on the same post-recall path as the in-process backend, so attaching a backend cannot reopen either guard.
+
+### Failure behaviour
+
+- An ID that is not a UUID is dropped with a `WARN` and the rest of the result set is still hydrated. One malformed row costs that row, not the recall.
+- An ID that hydrates to nothing — deleted, unknown, or belonging to another peer — is dropped the same way.
+- A transport-level failure (connection refused, timeout, non-2xx, unparseable body) surfaces as an error from that recall. Callers differ in how they treat it: the prompt-assembly path logs and continues with whatever else it has, while a direct API search returns the error.
+
+### Implementing the trait in-process
+
+`vector_backend = "http"` covers any backend you can put behind a small HTTP service, which is the supported path.
+If you would rather link a native client, implement `VectorStore` and attach it to the substrate at boot:
 
 ```rust
+use librefang_types::memory::{MemoryFilter, VectorSearchResult, VectorStore};
+
 #[async_trait]
-pub trait MemoryProvider: Send + Sync {
-    /// A short, unique name for this provider (e.g. "pinecone", "weaviate").
-    fn name(&self) -> &str;
+impl VectorStore for QdrantVectorStore {
+    async fn insert(&self, id: &str, embedding: &[f32], payload: &str,
+                    metadata: HashMap<String, serde_json::Value>) -> LibreFangResult<()> { … }
 
-    /// Returns `true` for the built-in provider, `false` for all external providers.
-    fn is_builtin(&self) -> bool;
+    async fn search(&self, query_embedding: &[f32], limit: usize,
+                    filter: Option<MemoryFilter>) -> LibreFangResult<Vec<VectorSearchResult>> { … }
 
-    /// Returns a text block to inject into the agent system prompt at session start,
-    /// or `None` if there is nothing to inject for this session.
-    async fn system_prompt_block(&self, session_id: &str) -> Option<String>;
+    async fn delete(&self, id: &str) -> LibreFangResult<()> { … }
 
-    /// Fetches relevant context for the given query string before an LLM call.
-    /// The returned string is appended to the context window.
-    async fn prefetch(&self, query: &str, session_id: &str) -> Result<String, MemoryError>;
+    async fn get_embeddings(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> { … }
 
-    /// Called after each agent turn completes. Use this hook to index new content,
-    /// synchronize state, or flush write buffers to the external backend.
-    async fn on_turn_complete(&self, session_id: &str, turn_summary: &str) -> Result<(), MemoryError>;
+    fn backend_name(&self) -> &str { "qdrant" }
 }
 ```
 
-### Registering an external provider
-
-Pass your implementation to the kernel's memory subsystem during initialization:
-
-```rust
-use librefang_memory::{MemoryManager, MemoryProvider};
-
-// Build your custom provider
-let my_provider: Arc<dyn MemoryProvider> = Arc::new(MyVectorDbProvider::new(config));
-
-// Register it with the memory manager
-memory_manager.set_external_provider(my_provider).await;
-```
-
-Only one external provider can be registered at a time. Calling `set_external_provider` again replaces the previous one.
-
-### Aggregated context with `prefetch_all`
-
-The memory manager exposes `prefetch_all(query, session_id)`, which calls `prefetch` on every registered provider and concatenates the results:
-
-```rust
-// Called internally by the agent loop before each LLM request
-let context = memory_manager.prefetch_all(&user_query, &session_id).await;
-```
-
-Results from each provider are separated by a blank line and prepended with the provider name as a label. If any provider returns an error, that provider's result is skipped (with a `WARN` log) and the remaining providers are still queried.
-
-### Error isolation
-
-External provider errors never surface to the agent or the user:
-
-1. `prefetch` errors → logged at `WARN`, empty string used for that provider's contribution.
-2. `on_turn_complete` errors → logged at `WARN`, silently dropped.
-3. `system_prompt_block` errors (panics) → caught at the call site, `None` returned.
-
-This design ensures that a misconfigured or temporarily unavailable external backend cannot disrupt the agent loop.
+`search` is called from a blocking bridge on the recall path, so it must not block the executor for long — the timeouts above exist for exactly that reason and a native client needs its own.
 
 ---
 
