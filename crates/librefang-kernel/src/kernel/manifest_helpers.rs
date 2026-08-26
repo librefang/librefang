@@ -1183,6 +1183,21 @@ mod context_window_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn custom_agent_example_grants_tools_matching_its_scopes() {
+        let source = include_str!("../../../../examples/custom-agent/agent.toml");
+        let manifest: AgentManifest = toml::from_str(source).unwrap();
+        let caps = manifest_to_capabilities(&manifest);
+
+        assert!(caps.contains(&Capability::ToolInvoke("web_fetch".into())));
+        assert!(caps.contains(&Capability::NetConnect("*".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_store".into())));
+        assert!(caps.contains(&Capability::ToolInvoke("memory_recall".into())));
+        assert!(caps.contains(&Capability::MemoryRead("self.*".into())));
+        assert!(caps.contains(&Capability::MemoryWrite("self.*".into())));
+        assert_eq!(manifest.resources.max_cost_per_hour_usd, 1.0);
+    }
+
     const HAND_TOML: &str = r#"
 id = "jarvis"
 version = "1.0.0"
