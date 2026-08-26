@@ -542,6 +542,25 @@ jobs:
       - name: Docker startup probe helper corpus
         run: sh .github/scripts/tests/docker-smoke.test.sh
 
+  # ── Memory retrieval eval harness self-test ───────────────────────────────────
+  # `scripts/memory-retrieval-eval.py` compares memory retrieval strategies on a real corpus using an LLM judge (#7756).
+  # The judging half needs a live judge model and a live embedding endpoint, so it is not hermetic, not deterministic, and never runs here — PR runners are deliberately never given a provider key.
+  # Its arithmetic is the opposite: nDCG@10, the paired bootstrap, pool construction and the judge-response parse rule are pure functions, and a subtle error in any of them produces numbers that look exactly like correct ones.
+  # That is the half worth pinning, so `--self-test` runs the synthetic-input suite with no network and no secret.
+  #
+  # Unconditional, stdlib-only and ~1s, matching image-vuln-gate: a path filter here would be another thing to keep in sync.
+  memory-eval-self-test:
+    name: Memory Eval Harness Self-Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Synthetic corpus — nDCG, the paired bootstrap and the pool hold their contracts
+        run: python3 scripts/memory-retrieval-eval.py --self-test
+
   # ── CHANGELOG attribution check ────────────────────────────────────────────────
   # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
   # section in this PR, and on `changelog.d/` fragments this PR introduces —
@@ -1253,6 +1272,7 @@ jobs:
       - sdk-python
       - githook-tests
       - image-vuln-gate
+      - memory-eval-self-test
       - changelog-attribution
       - changelog-attribution-full
       - openapi-drift
