@@ -4425,7 +4425,7 @@
           "system"
         ],
         "summary": "GET /api/authz/whoami — the calling credential's own resolved identity (#7746).",
-        "description": "# Why it is not `require_admin`\n\nThe two sibling endpoints in this module report on *another* user and are\ngated at `Admin`. This one reports on the caller and nothing else, so it\ndiscloses to a `Viewer` only what that `Viewer` already presented, and\ngating it at `Admin` would withhold it from exactly the person most likely\nto need it — the SSO user whose claims mapped to less than they expected.\nAn unauthenticated caller never reaches the handler at all: `/api/authz/*`\nis on no public allowlist, so `middleware::auth` has already answered 401.\n\n# Why the IdP-derived membership is recomputed here\n\nIt is not stored anywhere to read. `IdpGroupMembership` is put into request\nextensions by the OIDC middleware from the token this request carried, and\ndies with the request; `KernelConfig::effective_groups_for` unions it with\nthe declared `[[groups]]` at the moment of the call. That is what makes a\nrevocation in the identity provider visible here as soon as the caller's\ntoken stops carrying the claim, with no local cleanup step.",
+        "description": "# Why it is not `require_admin`\n\nThe two sibling endpoints in this module report on *another* user and are gated at `Admin`.\nThis one reports on the caller and nothing else, so it discloses to a `Viewer` only what that `Viewer` already presented, and gating it at `Admin` would withhold it from exactly the person most likely to need it — the SSO user whose claims mapped to less than they expected.\nAn unauthenticated caller never reaches the handler at all: `/api/authz/*` is on no public allowlist, so `middleware::auth` has already answered 401.\n\n# Why the IdP-derived membership is recomputed here\n\nIt is not stored anywhere to read.\n`IdpGroupMembership` is put into request extensions by the OIDC middleware from the token this request carried, and dies with the request; `KernelConfig::effective_groups_for` unions it with the declared `[[groups]]` at the moment of the call.\nThat is what makes a revocation in the identity provider visible here as soon as the caller's token stops carrying the claim, with no local cleanup step.",
         "operationId": "whoami",
         "responses": {
           "200": {
@@ -15982,7 +15982,7 @@
       },
       "WhoamiView": {
         "type": "object",
-        "description": "Response of `GET /api/authz/whoami`.\n\nThe four fields answer the four questions an operator debugging an SSO\ndenial actually has, in the order they ask them: who does the daemon think\nI am, what privilege did that resolve to, which teams am I on, and what did\nthose teams confer.",
+        "description": "Response of `GET /api/authz/whoami`.\n\nThe four fields answer the four questions an operator debugging an SSO denial actually has, in the order they ask them: who does the daemon think I am, what privilege did that resolve to, which teams am I on, and what did those teams confer.",
         "required": [
           "name",
           "user_id",
@@ -15997,25 +15997,25 @@
             "items": {
               "type": "string"
             },
-            "description": "Every `[[groups]]` entry the caller effectively belongs to: declared\nmembers unioned with the identity provider's mapped claims."
+            "description": "Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims."
           },
           "idp_groups": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "The subset of `groups` that came from this request's token rather than\nfrom `[[groups]] members`. Empty for every non-OIDC credential.\n\nPresent as its own field because the difference is the thing an operator\nis trying to see: a name in `groups` but not here is something they have\nto remove from `config.toml` by hand, and a name in both is a grant that\nthe identity provider can no longer retract."
+            "description": "The subset of `groups` that came from this request's token rather than from `[[groups]] members`.\nEmpty for every non-OIDC credential.\n\nPresent as its own field because the difference is the thing an operator is trying to see: a name in `groups` but not here is something they have to remove from `config.toml` by hand, and a name in both is a grant that the identity provider can no longer retract."
           },
           "name": {
             "type": "string",
-            "description": "Display name the credential resolved to. `root` for the master api key,\na trusted loopback caller, or an `allow_no_auth` deployment."
+            "description": "Display name the credential resolved to.\n`root` for the master api key, a trusted loopback caller, or an `allow_no_auth` deployment."
           },
           "principal": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The caller's [`librefang_types::principal::Principal`] in canonical\n`kind:uuid` form, or `null` for the synthetic root credential — which\nnames no `[[users]]` entry and is therefore not a principal that can own\nanything. Mirrors `AuthenticatedApiUser::owner_principal`."
+            "description": "The caller's [`librefang_types::principal::Principal`] in canonical `kind:uuid` form, or `null` for the synthetic root credential — which names no `[[users]]` entry and is therefore not a principal that can own anything.\nMirrors `AuthenticatedApiUser::owner_principal`."
           },
           "role": {
             "type": "string",
@@ -16026,11 +16026,11 @@
             "items": {
               "type": "string"
             },
-            "description": "Group-conferred role strings — each effective group's own name plus its\ndeclared `roles`. The channel-binding vocabulary, deliberately **not**\nthe RBAC ladder: `role` above is a separate answer and no entry here\ncontributes to it."
+            "description": "Group-conferred role strings — each effective group's own name plus its declared `roles`.\nThe channel-binding vocabulary, deliberately **not** the RBAC ladder: `role` above is a separate answer and no entry here contributes to it."
           },
           "user_id": {
             "type": "string",
-            "description": "Canonical `UserId` — the value that reaches `authorize()` and every\naudit entry."
+            "description": "Canonical `UserId` — the value that reaches `authorize()` and every audit entry."
           }
         }
       }

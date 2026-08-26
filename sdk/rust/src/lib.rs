@@ -4523,7 +4523,6 @@ impl SystemResource {
         .await
     }
 
-    /// The calling credential's own resolved identity: role, principal, effective groups, and which of them came from an identity-provider claim rather than `[[groups]]` (#7746).
     pub async fn whoami(&self) -> Result<Value> {
         do_req(
             &self.client,
