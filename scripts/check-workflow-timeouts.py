@@ -13,6 +13,10 @@ inherits the six-hour default unless its author remembers the key.
 
 Jobs that only call a reusable workflow (``uses:`` at job level) are skipped, because
 GitHub rejects ``timeout-minutes`` on those -- the cap belongs to the called workflow.
+
+The same pass also rejects a duplicate key anywhere in a workflow file.
+``yaml.safe_load`` silently keeps the last of two identical keys, so a file that YAML accepts can still be one GitHub Actions refuses to start -- and a refused workflow reports as a red run with no jobs, which reads like a test failure rather than a malformed file.
+That is not hypothetical: resolving a merge where ``main`` and a branch had each added ``timeout-minutes`` to the same job by keeping *both* lines produced exactly that, passed every YAML check, and reached ``main``.
 """
 
 from __future__ import annotations
@@ -29,6 +33,29 @@ except ImportError:  # pragma: no cover - CI always has PyYAML
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
 
+class DuplicateKey(Exception):
+    """A mapping in a workflow file declares the same key twice."""
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """``SafeLoader`` that refuses a duplicate mapping key instead of keeping the last one."""
+
+
+def _no_duplicate_keys(loader: _StrictLoader, node, deep: bool = False) -> dict:
+    mapping: dict = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise DuplicateKey(f"duplicate key {key!r} on line {key_node.start_mark.line + 1}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys
+)
+
+
 def main() -> int:
     if not WORKFLOW_DIR.is_dir():
         print(f"check-workflow-timeouts: no workflow directory at {WORKFLOW_DIR}", file=sys.stderr)
@@ -40,7 +67,15 @@ def main() -> int:
 
     for path in sorted(WORKFLOW_DIR.glob("*.y*ml")):
         try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+            doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_StrictLoader)
+        except DuplicateKey as exc:
+            print(
+                f"check-workflow-timeouts: {path.name} has a {exc}."
+                " GitHub Actions refuses to start a workflow with a duplicate key, and"
+                " reports it as a failed run with no jobs. Keep one of the two lines.",
+                file=sys.stderr,
+            )
+            return 1
         except yaml.YAMLError as exc:
             print(f"check-workflow-timeouts: {path.name} is not valid YAML: {exc}", file=sys.stderr)
             return 2
