@@ -26,11 +26,25 @@ fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../conformance/sidecar/corpus")
 }
 
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
 /// Tests in this file are integration tests against the SHARED corpus that lives at the LibreFang repo root.
 /// When the crate is consumed outside that repo (a `cargo publish` package, a docs.rs build, a downstream vendor that ran `cargo test -p librefang-sidecar`), the corpus path does not exist and every test below would otherwise panic with "corpus dir missing".
 /// This helper returns true when the corpus IS present (in-repo) and false otherwise; tests skip-with-stderr-message in the absent case instead of failing.
 fn corpus_available() -> bool {
-    corpus_dir().is_dir()
+    let corpus = corpus_dir();
+    if corpus.is_dir() {
+        return true;
+    }
+    if repository_root().join("openapi.json").is_file() {
+        panic!(
+            "sidecar conformance corpus is missing inside the LibreFang repository: {}",
+            corpus.display()
+        );
+    }
+    false
 }
 
 macro_rules! require_corpus {
@@ -56,7 +70,17 @@ fn list_json(subdir: &str) -> HashSet<String> {
     let dir = corpus_dir().join(subdir);
     fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            let entry =
+                entry.unwrap_or_else(|e| panic!("read directory entry in {}: {e}", dir.display()));
+            entry.file_name().into_string().unwrap_or_else(|name| {
+                panic!(
+                    "non-UTF-8 fixture filename in {}: {:?}",
+                    dir.display(),
+                    name
+                )
+            })
+        })
         .filter(|n| n.ends_with(".json"))
         .collect()
 }

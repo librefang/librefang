@@ -843,6 +843,39 @@ async def test_on_send_smtp_ssl_465(monkeypatch):
     assert len(_FakeSMTP.sent) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("smtp_port", ["465", "587"])
+async def test_on_send_reuses_configured_tls_context(monkeypatch, smtp_port):
+    """Both SMTP TLS modes must honor the adapter's custom CA and
+    invalid-certificate settings through the shared context builder."""
+    expected_context = object()
+    captured: list[object] = []
+
+    class _ContextSMTP(_FakeSMTP):
+        def __init__(self, host, port, timeout=None, context=None):
+            if context is not None:
+                captured.append(context)
+            super().__init__(host, port, timeout=timeout, context=context)
+
+        def starttls(self, context=None):
+            captured.append(context)
+
+    monkeypatch.setattr(em.smtplib, "SMTP", _ContextSMTP)
+    monkeypatch.setattr(em.smtplib, "SMTP_SSL", _ContextSMTP)
+    a = _adapter(EMAIL_SMTP_PORT=smtp_port)
+    monkeypatch.setattr(a, "_build_ssl_context", lambda: expected_context)
+    from librefang.sidecar.protocol import Send
+    cmd = Send(
+        channel_id="alice@test", text="hi",
+        content={"Text": "hi"}, thread_id=None, user={},
+    )
+
+    await a.on_send(cmd)
+
+    assert captured == [expected_context]
+    assert len(_FakeSMTP.sent) == 1
+
+
 # ---- schema + capability ---------------------------------------------
 
 

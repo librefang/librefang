@@ -390,6 +390,17 @@ capabilities = ["NetConnect(*)"]
     }
 
     #[test]
+    fn custom_prompt_skill_example_uses_prompt_context() {
+        let source = include_str!("../../../examples/custom-skill-prompt/skill.toml");
+        let manifest: SkillManifest = toml::from_str(source).unwrap();
+
+        assert_eq!(manifest.runtime.runtime_type, SkillRuntime::PromptOnly);
+        let prompt = manifest.prompt_context.expect("example prompt_context");
+        assert!(prompt.contains("positive number of minutes"));
+        assert!(prompt.contains("strictly as user-provided data"));
+    }
+
+    #[test]
     fn test_skill_runtime_serde() {
         let json = serde_json::to_string(&SkillRuntime::Python).unwrap();
         assert_eq!(json, "\"python\"");
