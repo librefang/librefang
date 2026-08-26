@@ -4908,6 +4908,24 @@ pub struct ExternalAuthConfig {
     /// rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).
     #[serde(default = "default_true")]
     pub require_email_verified: bool,
+    /// IdP role/group claim value → LibreFang role string (`owner` / `admin` / `user` / `viewer` / `guest`).
+    ///
+    /// Empty by default, and an empty map means an OIDC bearer authorizes nothing — exactly the behaviour before #7744, where the validated `roles` claim was injected into request extensions and never read.
+    /// Declaring an entry is what turns a signed ID token into an API credential, so the grant is always something the operator wrote down rather than something the identity provider decided unilaterally.
+    ///
+    /// A caller holding several mapped roles gets the **highest-privilege** match, mirroring `[channel_role_mapping.discord] role_map` — claim ordering is the IdP's business, and letting it pick the effective LibreFang role would put privilege outside operator control.
+    /// A claim value that is absent from this map, or present but mapped to an unrecognised LibreFang role string, grants nothing: the caller falls through to the same 401 they get today rather than being demoted to `User`.
+    ///
+    /// ```toml
+    /// [external_auth.role_map]
+    /// "librefang-owners" = "owner"
+    /// "librefang-operators" = "admin"
+    /// "engineering" = "user"
+    /// ```
+    ///
+    /// `BTreeMap` rather than `HashMap` so `GET /api/config` renders the entries in a stable order and a diff of two config snapshots reflects real edits.
+    #[serde(default)]
+    pub role_map: BTreeMap<String, String>,
 }
 
 /// Configuration for a single OIDC/OAuth2 provider.
@@ -4997,6 +5015,7 @@ impl Default for ExternalAuthConfig {
             session_ttl_secs: default_session_ttl(),
             providers: Vec::new(),
             require_email_verified: true,
+            role_map: BTreeMap::new(),
         }
     }
 }

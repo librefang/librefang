@@ -18,6 +18,13 @@ redirect_url = "http://127.0.0.1:4545/api/auth/callback"
 scopes = ["openid", "profile", "email"]
 allowed_domains = ["example.com"]
 session_ttl_secs = 86400
+
+# 哪些 IdP 群组可以调用 API，以及对应的权限级别。
+# 默认为空：未配置时，OIDC bearer 令牌不会通过任何认证。
+[external_auth.role_map]
+"librefang-owners" = "owner"
+"librefang-operators" = "admin"
+"engineering" = "user"
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -31,7 +38,28 @@ session_ttl_secs = 86400
 | `allowed_domains` | list of strings | `[]` | 限制登录到这些邮箱域名。空列表 = 允许所有。 |
 | `audience` | string | `""` | 要验证的 JWT audience 声明。为空时默认使用 `client_id`。 |
 | `session_ttl_secs` | u64 | `86400` | 会话令牌有效期（秒）。默认 24 小时。 |
+| `require_email_verified` | bool | `true` | 拒绝 ID 令牌中没有 `email_verified = true` 的登录。仅当提供商不签发该声明时才设为 `false`。 |
 | `providers` | list of objects | `[]` | 多个 OIDC/OAuth2 提供商。配置后优先于上述单提供商字段。 |
+| `role_map` | table of string → string | `{}` | IdP 角色/群组声明值 → LibreFang 角色（`owner` / `admin` / `user` / `viewer` / `guest`）。详见下文。 |
+
+#### `role_map`：把 ID 令牌变成 API 凭据
+
+在这里添加条目之前，通过验证的 OIDC bearer 令牌不会授予任何权限——守护进程会用提供商的 JWKS 验证令牌，而调用方仍然收到与完全不带令牌时相同的 401。
+授予权限的是这份映射本身，因此权限始终来自运维人员写下的配置，而不是身份提供商单方面的决定。
+
+键是令牌 `roles` 声明中的值，值是 LibreFang 角色，使用与 `[[users]] role` 和 `[channel_role_mapping]` 相同的 `viewer` < `user` < `admin` < `owner` 阶梯。
+持有多个已映射群组的调用方会获得**权限最高**的匹配项，因此声明的顺序（那是提供商的事，不是你的）无法决定最终生效的角色。
+
+以下三种情况有意不授予任何权限，而不是回退到某个默认值：
+
+- 映射中不存在的声明值，
+- 存在但指向无法识别的角色字符串的声明值（例如 `"admn"` 这类拼写错误，会在启动和配置重载时以 `WARN` 报告），
+- 来自既未配置 `audience` 也未配置 `client_id` 的提供商的令牌，因为此时 JWT audience 校验被禁用，任何由该发行者密钥签名的令牌都会通过验证。
+
+`require_email_verified` 同样适用于此：邮箱未经提供商验证的令牌不携带任何角色。
+
+该映射从配置快照中实时读取，因此 `POST /api/config/reload` 会让修改在下一个请求生效，无需重启。
+它有意**不能**通过 `POST /api/config/set` 写入——能编辑它的调用方可以通过写入自己已持有的群组名把自己提升为 `owner`——但 `GET /api/config` 可以读回它，以便确认当前哪些群组携带权限。
 
 对于多提供商配置，使用 `[[external_auth.providers]]`，支持以下字段：`id`、`display_name`、`issuer_url`、`auth_url`、`token_url`、`userinfo_url`、`jwks_uri`、`client_id`、`client_secret_env`、`redirect_url`、`scopes`、`allowed_domains`、`audience`。
 

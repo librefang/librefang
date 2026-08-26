@@ -1297,20 +1297,13 @@ pub async fn export_session_trajectory(
     use axum::http::header;
     use axum::response::IntoResponse;
 
-    let (
-        err_invalid_id,
-        err_session_invalid,
-        err_not_found,
-        err_session_not_found,
-        err_generic_key,
-    ) = {
+    let (err_invalid_id, err_session_invalid, err_not_found, err_session_not_found) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
             t.t("api-error-agent-invalid-id"),
             t.t("api-error-session-invalid-id"),
             t.t("api-error-agent-not-found"),
             "Session not found".to_string(),
-            "api-error-generic".to_string(),
         )
     };
 
@@ -1369,10 +1362,9 @@ pub async fn export_session_trajectory(
         }
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            let msg = t.t_args(&err_generic_key, &[("error", &e.to_string())]);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": msg})),
+                Json(serde_json::json!({"error": scrub_500(&e, &t)})),
             )
                 .into_response();
         }
@@ -1389,12 +1381,10 @@ pub async fn export_session_trajectory(
         let json = match bundle.to_json() {
             Ok(json) => json,
             Err(error) => {
-                tracing::error!(%error, "failed to serialize trajectory bundle");
                 let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                let msg = t.t_args(&err_generic_key, &[("error", &error.to_string())]);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": msg})),
+                    Json(serde_json::json!({"error": scrub_500(&error, &t)})),
                 )
                     .into_response();
             }
@@ -1802,5 +1792,16 @@ mod tests {
         assert!(capped.len() <= 102_400);
         assert!(capped.is_char_boundary(capped.len()));
         assert!(input.starts_with(&capped));
+    }
+
+    #[test]
+    fn trajectory_export_internal_errors_are_scrubbed() {
+        let t = ErrorTranslator::new("en");
+        let detail = "database failure at /srv/private/memory.db";
+        let body = scrub_500(&detail, &t);
+
+        assert_eq!(body, "Internal server error");
+        assert!(!body.contains("/srv/private"));
+        assert!(!body.contains("database"));
     }
 }

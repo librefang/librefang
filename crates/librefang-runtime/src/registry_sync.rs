@@ -88,10 +88,17 @@ pub const DEFAULT_CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 static SYNC_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_registry_sync(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
-    mutex.lock().unwrap_or_else(|poisoned| {
-        tracing::warn!("registry sync lock poisoned; recovering and serializing subsequent writes");
-        poisoned.into_inner()
-    })
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "registry sync lock poisoned; recovering and serializing subsequent writes"
+            );
+            let guard = poisoned.into_inner();
+            mutex.clear_poison();
+            guard
+        }
+    }
 }
 
 /// Refresh only the `~/.librefang/registry/` checkout from upstream —
@@ -948,6 +955,49 @@ mod tests {
     }
 
     #[test]
+    fn devops_hand_fixture_preserves_automation_safety_contract() {
+        let manifest =
+            std::fs::read_to_string(Path::new(REGISTRY_FIXTURE_DIR).join("hands/devops/HAND.toml"))
+                .unwrap();
+
+        assert_eq!(manifest.matches("## Phase 7 —").count(), 1);
+        assert_eq!(manifest.matches("## Phase 8 —").count(), 1);
+        assert!(manifest.contains(
+            "After the draft PR is successfully created, bump dashboard counter `devops_hand_draft_prs_opened`"
+        ));
+        assert!(manifest.contains("Parse the setting as an unsigned base-10 integer"));
+        assert!(manifest.contains("regardless of `approval_mode`"));
+
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let zh_tw = parsed
+            .get("i18n")
+            .and_then(|i18n| i18n.get("zh-TW"))
+            .unwrap();
+        for agent in ["main", "engineer", "monitor", "reviewer"] {
+            assert!(zh_tw
+                .get("agents")
+                .and_then(|agents| agents.get(agent))
+                .is_some());
+        }
+        for setting in [
+            "infrastructure",
+            "ci_platform",
+            "monitoring_focus",
+            "auto_monitor",
+            "check_interval",
+            "service_urls",
+            "alert_on_failure",
+            "rollback_strategy",
+            "approval_mode",
+        ] {
+            assert!(zh_tw
+                .get("settings")
+                .and_then(|settings| settings.get(setting))
+                .is_some());
+        }
+    }
+
+    #[test]
     fn poisoned_registry_sync_lock_recovers_and_remains_exclusive() {
         let mutex = Mutex::new(());
         let poison = std::thread::scope(|scope| {
@@ -960,11 +1010,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(mutex.is_poisoned());
         let guard = lock_registry_sync(&mutex);
         assert!(mutex.try_lock().is_err());
         drop(guard);
-        let recovered_again = lock_registry_sync(&mutex);
-        drop(recovered_again);
+        assert!(!mutex.is_poisoned());
+        let ordinary_guard = mutex.lock().unwrap();
+        drop(ordinary_guard);
     }
 
     /// The offline switch is truthy for anything except unset / empty / `0` / `false` (#6404).

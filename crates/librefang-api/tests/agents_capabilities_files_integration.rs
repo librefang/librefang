@@ -262,6 +262,56 @@ async fn test_files_write_then_read_round_trip() {
     assert_eq!(soul["size_bytes"], content.len());
 }
 
+/// Concurrent requests must not share a staging path. Every request goes
+/// through the production router and the final file must equal one complete
+/// payload, never a truncated or interleaved combination.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_files_concurrent_writes_leave_one_payload_intact() {
+    const WRITERS: usize = 8;
+    let h = boot().await;
+    let id = spawn_named(&h.state, "files-concurrent-write");
+    let barrier = Arc::new(tokio::sync::Barrier::new(WRITERS));
+    let payloads: Vec<String> = (0..WRITERS)
+        .map(|index| format!("payload-{index}").repeat(index * 500 + 1))
+        .collect();
+
+    let mut tasks = Vec::with_capacity(WRITERS);
+    for payload in &payloads {
+        let payload = payload.clone();
+        let app = h.app.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            send(
+                app,
+                put_json(
+                    &format!("/api/agents/{id}/files/SOUL.md"),
+                    serde_json::json!({ "content": payload }),
+                ),
+            )
+            .await
+        }));
+    }
+
+    for task in tasks {
+        let (status, body) = task.await.expect("writer task");
+        assert_eq!(status, StatusCode::OK, "concurrent write failed: {body:?}");
+    }
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!("/api/agents/{id}/files/SOUL.md")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "read should succeed: {body:?}");
+    let written = body["content"].as_str().expect("content string");
+    assert!(
+        payloads.iter().any(|payload| payload == written),
+        "content must equal exactly one complete payload; got {} bytes",
+        written.len()
+    );
+}
+
 /// SECURITY (highest-value test): a path-traversal filename must be rejected
 /// with a 4xx — never written, never a 500. The filename whitelist
 /// (`KNOWN_IDENTITY_FILES`) rejects `../../etc/passwd` before any path

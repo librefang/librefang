@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-workers-production
+  cancel-in-progress: false
+
 jobs:
   deploy-worker:
     name: Deploy Main Worker
@@ -24,10 +28,12 @@ jobs:
 
       - name: Test Worker
         working-directory: deploy/worker
+        shell: bash
         run: npm test
 
       - name: Deploy Worker
         working-directory: deploy/worker
+        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -45,6 +51,7 @@ jobs:
 
       - name: Deploy GitHub Stats Worker
         working-directory: web/workers/github-stats-worker
+        shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

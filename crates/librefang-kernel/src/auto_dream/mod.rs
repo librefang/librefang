@@ -32,7 +32,7 @@ use crate::AgentSubsystemApi;
 use crate::MemorySubsystemApi;
 use crate::MeteringSubsystemApi;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -227,6 +227,14 @@ static DREAM_PROGRESS: LazyLock<DashMap<AgentId, DreamProgress>> = LazyLock::new
 /// flight". Wrapped in a `std::sync::Mutex` because DashMap entries are
 /// accessed through shared references and `Sender::send` consumes self.
 type AbortSlot = Mutex<Option<oneshot::Sender<()>>>;
+
+fn lock_abort_slot(slot: &AbortSlot) -> MutexGuard<'_, Option<oneshot::Sender<()>>> {
+    slot.lock().unwrap_or_else(|poisoned| {
+        tracing::warn!("auto-dream abort slot lock poisoned; recovering sender state");
+        slot.clear_poison();
+        poisoned.into_inner()
+    })
+}
 
 /// Abort channels for in-flight manually-triggered dreams. Sending on the
 /// oneshot notifies `run_dream`'s drain loop to break out and run the
@@ -1324,12 +1332,7 @@ pub async fn abort_dream(agent_id: AgentId) -> AbortOutcome {
             reason: "no abort-capable dream in flight for this agent".to_string(),
         };
     };
-    let sender = match slot_ref.lock() {
-        Ok(mut g) => g.take(),
-        // A poisoned mutex would mean a prior panic while the sender was
-        // held; recover the inner data and continue rather than deadlock.
-        Err(poisoned) => poisoned.into_inner().take(),
-    };
+    let sender = lock_abort_slot(&slot_ref).take();
     let Some(tx) = sender else {
         return AbortOutcome {
             aborted: false,
@@ -1368,6 +1371,27 @@ mod hook_tests {
     use super::*;
     use librefang_runtime::hooks::{HookContext, HookHandler};
     use librefang_types::agent::HookEvent;
+
+    #[tokio::test]
+    async fn poisoned_abort_slot_recovers_sender_and_clears_poison() {
+        let (sender, receiver) = oneshot::channel();
+        let slot = Mutex::new(Some(sender));
+        let poison = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _sender = slot.lock().unwrap();
+                    panic!("poison auto-dream abort slot");
+                })
+                .join()
+        });
+
+        assert!(poison.is_err());
+        assert!(slot.is_poisoned());
+        lock_abort_slot(&slot).take().unwrap().send(()).unwrap();
+        assert!(!slot.is_poisoned());
+        assert_eq!(receiver.await, Ok(()));
+        assert!(slot.lock().unwrap().is_none());
+    }
 
     /// Hook must handle a dangling `Weak<LibreFangKernel>` (the kernel was
     /// dropped, e.g. shutdown between turn end and hook dispatch) without

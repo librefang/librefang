@@ -1939,11 +1939,7 @@ async fn handle_command(
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
         "a2a" => {
-            let agents = state
-                .kernel
-                .a2a_agents()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let agents = crate::lock_a2a_agents(state.kernel.a2a_agents());
             let msg = if agents.is_empty() {
                 "No external A2A agents discovered.".to_string()
             } else {
@@ -2222,11 +2218,17 @@ fn classify_streaming_error(err: &dyn std::fmt::Display) -> ClassifiedStreamingE
     // provider 429/billing error that merely contains the word "quota". Match the
     // exact thiserror Display prefix so provider strings fall through to the
     // classifier below (RateLimit / Billing), not this branch.
-    if inner.contains("Resource quota exceeded:") {
-        return streaming_error(
-            "Usage budget reached for this window. This is a token, cost, or tool-call cap, not a full context window \u{2014} /compact will NOT help. Wait for the relevant window to reset, or raise the matching agent resource limit in its manifest or the matching [budget] limit in config.toml.",
-            "budget_exceeded",
-        );
+    if let Some(detail_start) = inner.find("Resource quota exceeded:") {
+        // The kernel already computed which cap was breached and by how much — "Agent <id> exceeded hourly cost quota: $0.0123 + $0.0045 / $0.0100", i.e. spent + this call / limit.
+        // Dropping that left the operator with advice to "raise the matching limit" and no way to learn which one or what it is currently set to (#7352).
+        let detail = inner[detail_start + "Resource quota exceeded:".len()..].trim();
+        let guidance = "Usage budget reached for this window. This is a token, cost, or tool-call cap, not a full context window \u{2014} /compact will NOT help. Wait for the relevant window to reset, or raise the matching agent resource limit in its manifest or the matching [budget] limit in config.toml.";
+        let message = if detail.is_empty() {
+            guidance.to_string()
+        } else {
+            format!("{guidance} ({detail})")
+        };
+        return streaming_error(&message, "budget_exceeded");
     }
 
     // Use the LLM error classifier for everything else
@@ -2483,6 +2485,33 @@ mod tests {
         let error = classify_streaming_error(&E);
         assert!(error.message.to_lowercase().contains("usage budget"));
         assert_eq!(error.code, "budget_exceeded");
+    }
+
+    /// The kernel names the cap and its value; the surface must not drop that.
+    /// Without it the message tells an operator to raise "the matching limit" while withholding which limit and what it is set to, which is what left #7352 unanswerable from the error alone.
+    #[test]
+    fn test_classify_streaming_error_budget_names_the_cap_that_was_hit() {
+        let error = classify_streaming_error(
+            &"Resource quota exceeded: Agent scout exceeded hourly cost quota: $0.0123 + $0.0045 / $0.0100",
+        );
+        assert_eq!(error.code, "budget_exceeded");
+        assert!(error.message.contains("Usage budget"), "{}", error.message);
+        assert!(
+            error.message.contains("hourly cost quota"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("$0.0100"), "{}", error.message);
+        assert!(error.message.contains("scout"), "{}", error.message);
+    }
+
+    /// A bare prefix with no detail must still produce the guidance alone, never a dangling empty parenthetical.
+    #[test]
+    fn test_classify_streaming_error_budget_without_detail_is_unchanged() {
+        let error = classify_streaming_error(&"Resource quota exceeded:");
+        assert_eq!(error.code, "budget_exceeded");
+        assert!(error.message.contains("Usage budget"));
+        assert!(!error.message.contains("()"), "{}", error.message);
     }
 
     #[test]

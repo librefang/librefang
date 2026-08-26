@@ -18,6 +18,7 @@ explicitly-acknowledged improvements:
 import io
 import json
 import os
+import threading
 import urllib.error
 import urllib.parse
 
@@ -359,6 +360,47 @@ def test_token_refresh_buffer_subtracted(monkeypatch):
     assert 250 < delta < 350
 
 
+def test_concurrent_token_reads_share_one_fetch(monkeypatch):
+    a = _adapter()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def _fetch():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        ra.time.sleep(0.01)
+        return "shared", ra.time.monotonic() + 600
+
+    monkeypatch.setattr(a, "_fetch_token", _fetch)
+    start = threading.Barrier(8)
+    results = []
+
+    def _read():
+        start.wait()
+        results.append(a._get_token())
+
+    threads = [threading.Thread(target=_read) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert calls == 1
+    assert results == ["shared"] * 8
+
+
+def test_stale_401_does_not_clear_new_token():
+    a = _adapter()
+    a._cached_token = ("new", ra.time.monotonic() + 600)
+
+    a._invalidate_token("old")
+
+    assert a._cached_token is not None
+    assert a._cached_token[0] == "new"
+
+
 # ---- verify_credentials -------------------------------------------
 
 
@@ -565,6 +607,28 @@ def test_poll_once_dedupes_seen_comments(monkeypatch):
     emitted = []
     a._poll_once(emitted.append)
     assert emitted == []
+
+
+def test_poll_once_marks_seen_only_after_emit_succeeds(monkeypatch):
+    a = _adapter()
+    a.own_username = "bot"
+    a._cached_token = ("tok", ra.time.monotonic() + 600)
+    response = (200, _children(_comment(cid="retry-me", body="hello")))
+    fake = _FakeUrlopen([response, response])
+    monkeypatch.setattr(ra.urllib.request, "urlopen", fake)
+
+    with pytest.raises(RuntimeError, match="emit unavailable"):
+        a._poll_once(
+            lambda _event: (_ for _ in ()).throw(
+                RuntimeError("emit unavailable"),
+            ),
+        )
+    assert "retry-me" not in a._seen.ids
+
+    emitted = []
+    a._poll_once(emitted.append)
+    assert len(emitted) == 1
+    assert "retry-me" in a._seen.ids
 
 
 def test_poll_once_401_clears_token_and_raises(monkeypatch):
@@ -851,3 +915,15 @@ def test_on_send_rejects_non_reddit_fullname_in_librefang_user(monkeypatch):
     form = _form(fake.calls[0]["body_raw"])
     # URL-shaped librefang_user rejected → falls back to thread_id.
     assert form["thing_id"] == "t1_fallback"
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["https://reddit.com/r/test", "foreign-id", "t1_bad value", "t1_bad/path"],
+)
+def test_on_send_rejects_invalid_thread_id_fallback(thread_id):
+    a = _adapter()
+    import asyncio as _asyncio
+
+    with pytest.raises(RuntimeError, match="missing parent fullname"):
+        _asyncio.run(a.on_send(_StubCmd(text="hi", thread_id=thread_id)))

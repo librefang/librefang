@@ -1105,6 +1105,16 @@ impl LibreFangKernel {
                  LibreFang role and will default-deny — see WARN lines above"
             );
         }
+        // Same visibility fix for `[external_auth.role_map]` (#7744): a typo'd
+        // target role grants nothing, and without a boot WARN the only symptom
+        // is SSO callers getting 401 with no explanation.
+        let oidc_typo_count = crate::auth::validate_oidc_role_map(&config.external_auth.role_map);
+        if oidc_typo_count > 0 {
+            warn!(
+                "external_auth.role_map: {oidc_typo_count} entr(ies) reference an unrecognized \
+                 LibreFang role and grant nothing — see WARN lines above"
+            );
+        }
 
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);

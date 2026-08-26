@@ -14,8 +14,9 @@
 //! `list_agent_templates` / `get_agent_template` / `get_agent_template_toml`
 //! all read from `librefang_home()/workspaces/agents/`, where `librefang_home`
 //! honours the `LIBREFANG_HOME` env var. We pin a single tempdir for the
-//! whole test binary via `OnceLock` and serialise the template tests behind
-//! a `Mutex` so unique-name fixtures can coexist without env-var races.
+//! whole test binary via `OnceLock`. Every harness passes through that
+//! initializer before kernel boot, and template mutations are serialised
+//! behind a `Mutex` so unique-name fixtures cannot overlap.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -39,6 +40,11 @@ struct Harness {
 }
 
 async fn boot() -> Harness {
+    // All tests in this binary pass through the same OnceLock before any
+    // kernel boot can read LIBREFANG_HOME. This closes the initialization
+    // race between the pure profile tests and the filesystem template tests.
+    let _ = templates_root();
+
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(|cfg| {
         // Minimal default model so kernel boot is happy. Same shape as
         // `users_test.rs::boot`.
@@ -99,17 +105,18 @@ async fn profiles_list_returns_six_known_profiles() {
     let (status, body) = get_json(&h, "/api/profiles").await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().expect("array");
-    let names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
+    let mut names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
     // Pin the registered set so a refactor that drops a profile is loud.
     assert_eq!(
         names,
         vec![
-            "minimal",
-            "coding",
-            "research",
-            "messaging",
             "automation",
+            "coding",
             "full",
+            "messaging",
+            "minimal",
+            "research",
         ],
         "profile registration drift: {body}"
     );
@@ -162,10 +169,11 @@ fn templates_root() -> PathBuf {
     static HOME: OnceLock<TempDir> = OnceLock::new();
     let dir = HOME.get_or_init(|| {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Safety: env mutation. Setting it once, before any concurrent
-        // test reads, is the standard pattern in this workspace's
-        // env-var-driven tests; see `crates/librefang-llm-drivers` etc.
-        // The unsafe block is only required on Rust 2024+.
+        // NOTE: set_var is process-global. Every test in this binary calls
+        // templates_root before boot, so OnceLock completes this mutation
+        // before any kernel can read LIBREFANG_HOME.
+        // TODO(edition-2024): wrap this call in an unsafe block when the
+        // workspace migrates from edition 2021.
         std::env::set_var("LIBREFANG_HOME", tmp.path());
         tmp
     });
@@ -182,16 +190,48 @@ fn templates_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn write_template(name: &str, body: &str) {
+struct TemplateFixture {
+    name: String,
+}
+
+impl Drop for TemplateFixture {
+    fn drop(&mut self) {
+        remove_template(&self.name);
+    }
+}
+
+fn write_template(name: &str, body: &str) -> TemplateFixture {
     let root = templates_root();
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("create template dir");
+    let fixture = TemplateFixture {
+        name: name.to_string(),
+    };
     std::fs::write(dir.join("agent.toml"), body).expect("write agent.toml");
+    fixture
 }
 
 fn remove_template(name: &str) {
     let dir = templates_root().join(name);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_fixture_cleans_up_during_unwind() {
+    let _g = templates_lock().lock().await;
+    let unique = "tmpl_unwind_cleanup";
+
+    let unwind = std::panic::catch_unwind(|| {
+        let _fixture = write_template(unique, "not parsed by this guard test");
+        assert!(templates_root().join(unique).exists());
+        panic!("exercise fixture unwind cleanup");
+    });
+
+    assert!(unwind.is_err(), "fixture test must exercise unwinding");
+    assert!(
+        !templates_root().join(unique).exists(),
+        "template fixture must be removed while unwinding"
+    );
 }
 
 fn minimal_manifest_toml(name: &str, description: &str) -> String {
@@ -220,7 +260,7 @@ async fn templates_list_includes_seeded_template() {
     let _ = templates_root();
 
     let unique = "tmpl_list_alpha";
-    write_template(
+    let _fixture = write_template(
         unique,
         &minimal_manifest_toml("alpha", "Alpha test template"),
     );
@@ -240,8 +280,6 @@ async fn templates_list_includes_seeded_template() {
         .find(|r| r["name"] == unique)
         .unwrap_or_else(|| panic!("seeded template missing from list: {body}"));
     assert_eq!(row["description"], "Alpha test template", "{body}");
-
-    remove_template(unique);
 }
 
 /// The TUI templates screen renders provider/model per row and gates spawning on whether that provider is configured.
@@ -349,7 +387,7 @@ async fn templates_get_known_template_returns_manifest() {
 
     let unique = "tmpl_get_bravo";
     let toml_body = minimal_manifest_toml("bravo", "Bravo description");
-    write_template(unique, &toml_body);
+    let _fixture = write_template(unique, &toml_body);
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -365,8 +403,6 @@ async fn templates_get_known_template_returns_manifest() {
             .unwrap_or(false),
         "manifest_toml must round-trip the raw file: {body}"
     );
-
-    remove_template(unique);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -403,7 +439,7 @@ async fn templates_toml_returns_plaintext_for_known_template() {
 
     let unique = "tmpl_toml_charlie";
     let toml_body = minimal_manifest_toml("charlie", "Charlie raw");
-    write_template(unique, &toml_body);
+    let _fixture = write_template(unique, &toml_body);
 
     let h = boot().await;
     let (status, headers, bytes) = get(&h, &format!("/api/templates/{unique}/toml")).await;
@@ -425,8 +461,6 @@ async fn templates_toml_returns_plaintext_for_known_template() {
         body_str.contains("Charlie raw"),
         "raw TOML must include description: {body_str:?}"
     );
-
-    remove_template(unique);
 }
 
 #[tokio::test(flavor = "multi_thread")]

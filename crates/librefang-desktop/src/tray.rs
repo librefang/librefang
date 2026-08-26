@@ -48,7 +48,7 @@ fn open_browser(app: &tauri::AppHandle) {
 fn change_server(app: &tauri::AppHandle) {
     // Shut down existing local server if running.
     if let Some(holder) = app.try_state::<crate::ServerHandleHolder>() {
-        let mut guard = holder.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = crate::lock_server_handle(&holder.0);
         if let Some(handle) = guard.take() {
             std::thread::spawn(move || handle.shutdown());
         }

@@ -15,6 +15,7 @@ const SERVERS_STALE_MS = 30_000;
 const SERVERS_REFRESH_MS = 30_000;
 const CATALOG_STALE_MS = 300_000;
 const HEALTH_STALE_MS = 15_000;
+const AUTH_STATUS_STALE_MS = 2_000;
 // `[[taint_rules]]` is operator-edited config, not runtime-derived state.
 // 5 minutes matches the catalog cadence — operators don't expect rule-set
 // renames to land instantly in the editor, and reload-config flows already
@@ -37,12 +38,11 @@ export const mcpQueries = {
       staleTime: SERVERS_STALE_MS,
       enabled: Boolean(id),
     }),
-  catalog: (opts: QueryOverrides = {}) =>
+  catalog: () =>
     queryOptions({
       queryKey: mcpKeys.catalog(),
       queryFn: listMcpCatalog,
       staleTime: CATALOG_STALE_MS,
-      enabled: opts.enabled,
     }),
   catalogEntry: (id: string) =>
     queryOptions({
@@ -57,13 +57,13 @@ export const mcpQueries = {
       queryFn: getMcpHealth,
       staleTime: HEALTH_STALE_MS,
     }),
-  authStatus: (id: string, opts: QueryOverrides = {}) =>
+  authStatus: (id: string) =>
     queryOptions({
       queryKey: mcpKeys.authStatus(id),
       queryFn: () => getMcpAuthStatus(id),
       // 2s staleTime balances OAuth polling freshness with request deduplication during rapid refetch cycles.
-      staleTime: 2_000,
-      enabled: opts.enabled ?? Boolean(id),
+      staleTime: AUTH_STATUS_STALE_MS,
+      enabled: Boolean(id),
     }),
   taintRules: () =>
     queryOptions({
@@ -78,7 +78,10 @@ export function useMcpServers(options: QueryOverrides = {}) {
 }
 
 export function useMcpServer(id: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(mcpQueries.server(id), options));
+  return useQuery(withOverrides(mcpQueries.server(id), {
+    ...options,
+    enabled: Boolean(id) && options.enabled !== false,
+  }));
 }
 
 export function useMcpCatalog(options: QueryOverrides = {}) {
@@ -86,7 +89,10 @@ export function useMcpCatalog(options: QueryOverrides = {}) {
 }
 
 export function useMcpCatalogEntry(id: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(mcpQueries.catalogEntry(id), options));
+  return useQuery(withOverrides(mcpQueries.catalogEntry(id), {
+    ...options,
+    enabled: Boolean(id) && options.enabled !== false,
+  }));
 }
 
 export function useMcpHealth(options: QueryOverrides = {}) {
@@ -94,7 +100,10 @@ export function useMcpHealth(options: QueryOverrides = {}) {
 }
 
 export function useMcpAuthStatus(id: string, options: QueryOverrides = {}) {
-  return useQuery(withOverrides(mcpQueries.authStatus(id), options));
+  return useQuery(withOverrides(mcpQueries.authStatus(id), {
+    ...options,
+    enabled: Boolean(id) && options.enabled !== false,
+  }));
 }
 
 export function useMcpTaintRules(options: QueryOverrides = {}) {

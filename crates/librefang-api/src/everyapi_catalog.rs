@@ -303,11 +303,10 @@ pub(crate) fn parse_pricing_entries(body: &serde_json::Value) -> HashMap<String,
         let completion_ratio = item
             .get("completion_ratio")
             .and_then(serde_json::Value::as_f64)
-            .filter(|r| r.is_finite() && *r >= 0.0)
-            .unwrap_or(0.0);
+            .filter(|r| r.is_finite() && *r >= 0.0);
 
-        let entry = match (per_call, model_ratio) {
-            (false, Some(model_ratio)) => PricingEntry {
+        let entry = match (per_call, model_ratio, completion_ratio) {
+            (false, Some(model_ratio), Some(completion_ratio)) => PricingEntry {
                 context_window,
                 input_cost_per_m: model_ratio * RATIO_USD_PER_MILLION,
                 output_cost_per_m: model_ratio * completion_ratio * RATIO_USD_PER_MILLION,
@@ -1129,6 +1128,29 @@ mod tests {
         ]});
         let entry = parse_pricing_entries(&body)["mystery-model"];
         assert!(!entry.pricing_known);
+    }
+
+    #[test]
+    fn rows_without_a_valid_completion_ratio_are_not_asserted_to_be_free() {
+        let body = serde_json::json!({"data": [
+            {"model_name": "missing", "quota_type": 0, "model_ratio": 1.0, "billing_mode": "per_token"},
+            {"model_name": "negative", "quota_type": 0, "model_ratio": 1.0, "completion_ratio": -1.0, "billing_mode": "per_token"},
+            {"model_name": "nonnumeric", "quota_type": 0, "model_ratio": 1.0, "completion_ratio": "unknown", "billing_mode": "per_token"},
+            {"model_name": "explicitly-free", "quota_type": 0, "model_ratio": 1.0, "completion_ratio": 0.0, "billing_mode": "per_token"},
+        ]});
+        let pricing = parse_pricing_entries(&body);
+
+        for name in ["missing", "negative", "nonnumeric"] {
+            let entry = &pricing[name];
+            assert!(!entry.pricing_known, "{name} must remain unpriced");
+            assert_eq!(entry.input_cost_per_m, 0.0);
+            assert_eq!(entry.output_cost_per_m, 0.0);
+        }
+
+        let explicitly_free = &pricing["explicitly-free"];
+        assert!(explicitly_free.pricing_known);
+        assert_eq!(explicitly_free.input_cost_per_m, 2.0);
+        assert_eq!(explicitly_free.output_cost_per_m, 0.0);
     }
 
     #[test]

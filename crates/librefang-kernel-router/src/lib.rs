@@ -527,6 +527,20 @@ pub fn auto_select_hand(
     }
 }
 
+fn has_multi_domain_marker(normalized: &str) -> bool {
+    ["同时", "分别", "协作", "多个", "multi", "together"]
+        .iter()
+        .any(|token| {
+            if token.is_ascii() {
+                normalized
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|word| word == *token)
+            } else {
+                normalized.contains(token)
+            }
+        })
+}
+
 pub fn auto_select_template(
     message: &str,
     agents_dir: &Path,
@@ -586,9 +600,7 @@ pub fn auto_select_template(
 
     if scored.len() > 1 {
         let (second_score, second_template, _) = &scored[1];
-        let multi_domain = ["同时", "分别", "协作", "多个", "multi", "together"]
-            .iter()
-            .any(|token| normalized.contains(token));
+        let multi_domain = has_multi_domain_marker(&normalized);
         if *second_score > 0 && best_template != second_template && multi_domain {
             return TemplateSelection {
                 template: "orchestrator".to_string(),
@@ -1348,6 +1360,27 @@ weak_aliases = ["changelog"]
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
+    }
+
+    #[test]
+    fn test_auto_select_template_requires_ascii_multi_domain_word_boundaries() {
+        for message in [
+            "Research and code this multimedia parser",
+            "Research and code this multitask parser",
+            "Research and code an altogether different parser",
+            "Research and code a multithreaded parser",
+        ] {
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
+            assert_eq!(selection.template, "researcher", "{message}");
+        }
+
+        for message in [
+            "Research and code this multi domain task",
+            "Research and code this together",
+        ] {
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
+            assert_eq!(selection.template, "orchestrator", "{message}");
+        }
     }
 
     #[test]

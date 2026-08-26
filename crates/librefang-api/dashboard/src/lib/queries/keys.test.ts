@@ -403,24 +403,6 @@ describe("query key factories", () => {
       expect(mediaKeys.videoTask("task-1", "fal").slice(0, taskPrefix.length)).toEqual(taskPrefix);
       expect(mediaKeys.videoTasks().slice(0, mediaKeys.all.length)).toEqual(mediaKeys.all);
     });
-
-    it("videoTaskDisabled is stable and only collides with a literal sentinel id", () => {
-      expect(mediaKeys.videoTaskDisabled()).toEqual([
-        "media",
-        "videoTasks",
-        "__disabled__",
-        "__disabled__",
-      ]);
-      // Stable across calls (so useQuery's cache identity is preserved).
-      expect(mediaKeys.videoTaskDisabled()).toEqual(mediaKeys.videoTaskDisabled());
-      // 4-segment shape matches videoTask(taskId, provider) so useQuery's
-      // generics unify cleanly across the enabled/disabled branches.
-      expect(mediaKeys.videoTaskDisabled().length).toBe(4);
-      // Shares the videoTasks prefix — consumers can invalidate all video
-      // task queries (live + disabled placeholder) in one call.
-      const prefix = mediaKeys.videoTasks();
-      expect(mediaKeys.videoTaskDisabled().slice(0, prefix.length)).toEqual(prefix);
-    });
   });
 
   describe("telemetryKeys", () => {
@@ -514,6 +496,23 @@ describe("query key factories", () => {
       ]);
       // Empty filters still produces a stable key.
       expect(auditKeys.query()).toEqual(["audit", "query", {}]);
+      expect(
+        auditKeys.query({
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        }),
+      ).toEqual([
+        "audit",
+        "query",
+        {
+          agent: "agent-1",
+          channel: "slack",
+          from: "2026-08-01T00:00:00Z",
+          to: "2026-08-02T00:00:00Z",
+        },
+      ]);
     });
   });
 

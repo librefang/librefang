@@ -631,6 +631,45 @@ fn test_manifest_to_capabilities_profile_overridden_by_explicit_tools() {
 }
 
 #[test]
+fn poisoned_config_override_locks_recover_and_remain_usable() {
+    let default_model = std::sync::RwLock::new(vec!["loaded"]);
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut state = default_model.write().unwrap();
+                state.push("preserved");
+                panic!("poison default model override before read recovery");
+            })
+            .join()
+    });
+    assert!(poison.is_err());
+    assert!(default_model.is_poisoned());
+    assert_eq!(
+        &*read_config_override(&default_model, "default_model_override"),
+        &["loaded", "preserved"]
+    );
+    assert!(!default_model.is_poisoned());
+
+    let tool_policy = std::sync::RwLock::new(vec!["old"]);
+    let poison = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _state = tool_policy.write().unwrap();
+                panic!("poison tool policy override before write recovery");
+            })
+            .join()
+    });
+    assert!(poison.is_err());
+    assert!(tool_policy.is_poisoned());
+    write_config_override(&tool_policy, "tool_policy_override").push("new");
+    assert!(!tool_policy.is_poisoned());
+    assert_eq!(
+        &*read_config_override(&tool_policy, "tool_policy_override"),
+        &["old", "new"]
+    );
+}
+
+#[test]
 fn test_spawn_agent_applies_local_default_model_override() {
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join("librefang-kernel-local-model-test");
@@ -6693,6 +6732,74 @@ async fn gc_sweep_aborts_orphaned_running_task_5142() {
     kernel.shutdown();
 }
 
+/// A live agent that starts one short-lived background watcher may never call `register_agent_watcher` again, so registration-time cleanup alone cannot reclaim the completed JoinHandle.
+/// The periodic sweep must drop completed handles while retaining tasks that are still running for `kill_agent` to abort later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gc_sweep_reaps_finished_agent_watchers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-gc-agent-watchers");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "gc-agent-watcher".to_string(),
+        description: "agent for watcher GC".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    let finished = tokio::spawn(async {});
+    while !finished.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let running = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    });
+    let running_abort = running.abort_handle();
+
+    kernel.agents.agent_watchers.insert(
+        agent_id,
+        Arc::new(std::sync::Mutex::new(vec![finished, running])),
+    );
+
+    kernel.gc_sweep();
+
+    {
+        let slot = kernel
+            .agents
+            .agent_watchers
+            .get(&agent_id)
+            .expect("live agent watcher slot must remain");
+        let handles = slot.lock().expect("watcher lock");
+        assert_eq!(handles.len(), 1, "finished watcher must be reclaimed");
+        assert!(
+            !handles[0].is_finished(),
+            "running watcher must remain tracked for kill_agent"
+        );
+    }
+
+    kernel.kill_agent(agent_id).expect("kill should succeed");
+    for _ in 0..50 {
+        if running_abort.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        running_abort.is_finished(),
+        "retained watcher must still be aborted when the agent is killed"
+    );
+
+    kernel.shutdown();
+}
+
 /// TOCTOU regression: the periodic GC sweep must NOT abort a *successor* turn that swapped into `running_tasks` after the sweep snapshotted a finished predecessor under the same `(agent, session)` key.
 /// Pre-fix the sweep collected the keys, then did a bare `running_tasks.remove(&key)`; a faster successor inserted between the collect and the remove was dropped and its in-flight `AbortHandle` fired, killing a live turn.
 /// The fix snapshots the observed `task_id` and removes via `remove_if(... v.task_id == observed)`, so a swapped-in successor (different task_id) is never touched.
@@ -9576,6 +9683,16 @@ fn minimal_kernel(test_name: &str) -> (LibreFangKernel, tempfile::TempDir) {
     };
     let k = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
     (k, dir)
+}
+
+#[test]
+fn goal_run_start_reports_unset_self_handle() {
+    let (kernel, _dir) = minimal_kernel("goal-run-start-unset-self-handle");
+    let goal_id = librefang_types::goal::GoalId::new();
+    let agent_id = AgentId::new();
+
+    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1)));
+    assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
 /// Helper: minimal agent manifest with a specific session_mode and

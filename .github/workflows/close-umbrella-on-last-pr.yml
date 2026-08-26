@@ -47,6 +47,10 @@ permissions:
   issues: write
   pull-requests: read
 
+concurrency:
+  group: umbrella-autoclose
+  cancel-in-progress: false
+
 jobs:
   maybe-close-umbrella:
     if: github.event.pull_request.merged == true

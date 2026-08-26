@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import {
   useRunWorkflow,
+  useRerunWorkflowRun,
   useDryRunWorkflow,
   useDeleteWorkflow,
   useCreateWorkflow,
@@ -15,6 +16,7 @@ import { createQueryClientWrapper } from "../test/query-client";
 
 vi.mock("../http/client", () => ({
   runWorkflow: vi.fn().mockResolvedValue({ status: "ok" }),
+  rerunWorkflowRun: vi.fn().mockResolvedValue({ status: "ok" }),
   dryRunWorkflow: vi.fn().mockResolvedValue({ valid: true, steps: [] }),
   deleteWorkflow: vi.fn().mockResolvedValue({ status: "ok" }),
   createWorkflow: vi.fn().mockResolvedValue({ id: "wf-1" }),
@@ -65,6 +67,31 @@ describe("useRunWorkflow", () => {
       queryKey: workflowKeys.runDetails(),
     });
     expect(invalidateSpy.mock.calls).toHaveLength(2);
+  });
+});
+
+describe("useRerunWorkflowRun", () => {
+  it("invalidates workflow runs, lists, and the returned run detail", async () => {
+    vi.mocked(httpClient.rerunWorkflowRun).mockResolvedValueOnce({
+      status: "ok",
+      run_id: "run-2",
+    });
+
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useRerunWorkflowRun(), { wrapper });
+
+    await result.current.mutateAsync({ runId: "run-1", workflowId: "wf-1" });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.runs("wf-1"),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.lists(),
+    });
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.runDetail("run-2"),
+    });
   });
 });
 
@@ -143,5 +170,23 @@ describe("useDeleteWorkflow detail eviction", () => {
     expect(removeSpy).toHaveBeenCalledWith({
       queryKey: workflowKeys.detail("wf-1"),
     });
+  });
+});
+
+describe("useUpdateWorkflow detail cache", () => {
+  it("does not replace a complete entity with a partial response", async () => {
+    vi.mocked(httpClient.updateWorkflow).mockResolvedValueOnce({ id: "wf-1" } as never);
+
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const cached = { id: "wf-1", name: "Existing workflow", steps: 4 };
+    queryClient.setQueryData(workflowKeys.detail("wf-1"), cached);
+    const { result } = renderHook(() => useUpdateWorkflow(), { wrapper });
+
+    await result.current.mutateAsync({
+      workflowId: "wf-1",
+      payload: { name: "Updated workflow" },
+    });
+
+    expect(queryClient.getQueryData(workflowKeys.detail("wf-1"))).toEqual(cached);
   });
 });

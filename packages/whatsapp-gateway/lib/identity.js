@@ -12,13 +12,15 @@
 //   - '<digits>:<device>@s.whatsapp.net'   — device-scoped multi-device JID
 //   - '<digits>@lid'                       — WhatsApp anonymous LID (opaque)
 //   - '<digits>@hosted.lid'                — hosted LID (Baileys docs; guard)
-//   - '<digits>-<digits>@g.us'             — group JID
+//   - '<digits>[-<digits>]@g.us'            — group JID
 // ---------------------------------------------------------------------------
 
 const LID_SUFFIX_RE = /@(lid|hosted\.lid)$/;
 const GROUP_SUFFIX_RE = /@g\.us$/;
-const DEVICE_SUFFIX_RE = /:(\d+)@/;
+const DEVICE_SUFFIX_RE = /:(\d+)@s\.whatsapp\.net$/;
 const E164_JID_RE = /^(\d+)@s\.whatsapp\.net$/;
+const SENDABLE_JID_RE = /^(?:\d+(?::\d+)?@(?:s\.whatsapp\.net|lid|hosted\.lid)|\d+(?:-\d+)?@g\.us)$/;
+const PHONE_NUMBER_RE = /^\+?\d+$/;
 
 function isLidJid(jid) {
   if (!jid || typeof jid !== 'string') return false;
@@ -35,7 +37,7 @@ function isGroupJid(jid) {
 function normalizeDeviceScopedJid(jid) {
   if (!jid || typeof jid !== 'string') return jid || '';
   if (isGroupJid(jid)) return jid;
-  return jid.replace(DEVICE_SUFFIX_RE, '@');
+  return jid.replace(DEVICE_SUFFIX_RE, '@s.whatsapp.net');
 }
 
 // Returns '+<digits>' for phone JIDs, empty string otherwise.
@@ -48,11 +50,13 @@ function extractE164(jid) {
 }
 
 // Accepts '+391234', '391234', '123@s.whatsapp.net', '123-456@g.us'.
-// Returns a sendable Baileys JID. Group JIDs and existing JIDs passthrough.
+// Returns a sendable Baileys JID. Only known WhatsApp JID shapes passthrough.
 function phoneToJid(phoneOrJid) {
   if (!phoneOrJid || typeof phoneOrJid !== 'string') return '';
-  if (isGroupJid(phoneOrJid)) return phoneOrJid;
-  if (phoneOrJid.includes('@')) return phoneOrJid;
+  if (phoneOrJid.includes('@')) {
+    return SENDABLE_JID_RE.test(phoneOrJid) ? phoneOrJid : '';
+  }
+  if (!PHONE_NUMBER_RE.test(phoneOrJid)) return '';
   return phoneOrJid.replace(/^\+/, '') + '@s.whatsapp.net';
 }
 
@@ -84,6 +88,8 @@ function resolvePeerId(jid, opts) {
   const participant = options.participant || '';
   const cache = options.lidToPnCache || null;
 
+  // senderPn identifies the individual author of a group message. It
+  // intentionally takes precedence; callers needing the group peer omit it.
   if (senderPn) {
     return { peer: senderPn, confidence: 'direct' };
   }
@@ -91,7 +97,7 @@ function resolvePeerId(jid, opts) {
     return { peer: jid, confidence: 'group' };
   }
   if (isLidJid(jid) && cache && typeof cache.has === 'function' && cache.has(jid)) {
-    return { peer: cache.get(jid), confidence: 'cache' };
+    return { peer: normalizeDeviceScopedJid(cache.get(jid)), confidence: 'cache' };
   }
   if (jid && !isLidJid(jid) && !isGroupJid(jid)) {
     return { peer: normalizeDeviceScopedJid(jid), confidence: 'direct' };

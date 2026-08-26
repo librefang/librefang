@@ -569,7 +569,11 @@ fn redacted_config_json(
         "token_expiry_secs": config.pairing.token_expiry_secs,
         "public_base_url": config.pairing.public_base_url,
         "push_provider": config.pairing.push_provider,
-        "ntfy_url": config.pairing.ntfy_url,
+        "ntfy_url": config
+            .pairing
+            .ntfy_url
+            .as_deref()
+            .map(redact_url_credentials),
         "ntfy_topic": config.pairing.ntfy_topic,
     });
 
@@ -682,6 +686,13 @@ fn redacted_config_json(
         ea.insert(
             "require_email_verified".into(),
             serde_json::json!(config.external_auth.require_email_verified),
+        );
+        // Read-only for the same reason as `require_email_verified`, and readable for the same reason too (#7744).
+        // `role_map` is what turns a signed ID token into an API credential, so a caller who could write it could grant themselves Owner by naming a claim they already hold; it stays out of the writable sets.
+        // Reading it back is how an operator confirms which IdP groups currently carry privilege — the values are group names the operator chose, never secrets.
+        ea.insert(
+            "role_map".into(),
+            serde_json::json!(config.external_auth.role_map),
         );
     }
 
@@ -1741,6 +1752,41 @@ mod config_read_write_parity_tests {
                 "`{path}` must be the serde encoding the write path accepts, not Debug's \
                  variant name"
             );
+        }
+    }
+
+    #[test]
+    fn pairing_ntfy_url_hides_embedded_credentials() {
+        let mut config = KernelConfig::default();
+        config.pairing.ntfy_url =
+            Some("https://notify-user:notify-password@ntfy.example.test/topic".to_string());
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let rendered = lookup(&payload, "pairing.ntfy_url")
+            .and_then(|value| value.as_str())
+            .expect("configured ntfy URL remains visible in redacted form");
+
+        assert_eq!(rendered, "https://***@ntfy.example.test/topic");
+        assert!(!rendered.contains("notify-user"));
+        assert!(!rendered.contains("notify-password"));
+    }
+
+    #[test]
+    fn pairing_ntfy_url_preserves_at_signs_outside_the_authority() {
+        for url in [
+            "https://ntfy.example.test/topic@tenant",
+            "https://ntfy.example.test/topic?contact=ops@example.test",
+            "https://ntfy.example.test/topic#owner@tenant",
+        ] {
+            let mut config = KernelConfig::default();
+            config.pairing.ntfy_url = Some(url.to_string());
+
+            let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+            let rendered = lookup(&payload, "pairing.ntfy_url")
+                .and_then(|value| value.as_str())
+                .expect("configured ntfy URL remains visible");
+
+            assert_eq!(rendered, url);
         }
     }
 

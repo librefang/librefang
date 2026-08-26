@@ -370,6 +370,14 @@ struct BrowserSession {
     target_created_over_cdp: bool,
 }
 
+fn navigation_error_text(result: &serde_json::Value) -> Option<&str> {
+    result
+        .get("errorText")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
 impl BrowserSession {
     /// Launch Chromium and establish a CDP connection.
     async fn launch(config: &BrowserConfig) -> Result<Self, String> {
@@ -775,9 +783,12 @@ impl BrowserSession {
             .cdp
             .send("Page.navigate", serde_json::json!({ "url": url }))
             .await;
-
-        if let Err(e) = result {
-            return BrowserResponse::err(format!("Navigate failed: {e}"));
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => return BrowserResponse::err(format!("Navigate failed: {error}")),
+        };
+        if let Some(error) = navigation_error_text(&result) {
+            return BrowserResponse::err(format!("Navigate failed: {error}"));
         }
 
         // Wait for page load
@@ -2952,6 +2963,27 @@ mod tests {
         let err = BrowserResponse::err("bad");
         assert!(!err.success);
         assert_eq!(err.error.unwrap(), "bad");
+    }
+
+    #[test]
+    fn test_navigation_error_text_classifies_cdp_failures() {
+        let failed = serde_json::json!({
+            "frameId": "frame-1",
+            "errorText": "net::ERR_NAME_NOT_RESOLVED"
+        });
+        assert_eq!(
+            navigation_error_text(&failed),
+            Some("net::ERR_NAME_NOT_RESOLVED")
+        );
+
+        assert_eq!(
+            navigation_error_text(&serde_json::json!({"frameId": "frame-1"})),
+            None
+        );
+        assert_eq!(
+            navigation_error_text(&serde_json::json!({"errorText": "  "})),
+            None
+        );
     }
 
     #[test]
