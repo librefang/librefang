@@ -12560,45 +12560,9 @@
         "summary": "GET /api/usage — Get per-agent usage statistics.",
         "description": "The per-agent rollup is materialized from the in-memory agent registry\nand returned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Per-agent usage statistics",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12617,45 +12581,9 @@
         ],
         "summary": "GET /api/usage/by-model — Get usage grouped by model.",
         "operationId": "usage_by_model",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Usage grouped by model",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12674,45 +12602,9 @@
         ],
         "summary": "GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.",
         "operationId": "usage_by_model_performance",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Model performance metrics",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12731,128 +12623,9 @@
         ],
         "summary": "GET /api/usage/daily — Get daily usage breakdown for the last 7 days.",
         "operationId": "usage_daily",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "days",
-            "in": "query",
-            "description": "How many days back from now to report on. Defaults to 7, capped at 366.\nMutually exclusive with `start_date` / `end_date`.",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int32",
-              "minimum": 0
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Daily usage breakdown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed range, out-of-bounds `days`, or `days` combined with a date range",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/usage/export": {
-      "get": {
-        "tags": [
-          "budget"
-        ],
-        "summary": "GET /api/usage/export — Stream raw usage events for a date range as CSV.",
-        "operationId": "usage_export",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the export window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the export window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "format",
-            "in": "query",
-            "description": "Output format. Only `csv` is supported; omitted means `csv`.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "CSV stream of usage events",
-            "content": {
-              "text/csv": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed or inverted date range, or unsupported format",
             "content": {
               "application/json": {
                 "schema": {
@@ -12871,45 +12644,9 @@
         ],
         "summary": "GET /api/usage/summary — Get overall usage summary from UsageStore.",
         "operationId": "usage_summary",
-        "parameters": [
-          {
-            "name": "start_date",
-            "in": "query",
-            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          {
-            "name": "end_date",
-            "in": "query",
-            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Overall usage summary",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
