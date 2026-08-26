@@ -787,18 +787,42 @@ mod tests {
     /// `:memory:` DB with `max_size(1)` cannot exercise the race the
     /// transactional `modify` fixes.
     ///
-    /// `busy_timeout` must be set via `with_init`, not on a single connection pulled from the pool after `build()`: r2d2 defaults `min_idle` to `max_size`, so it eagerly opens up to 8 connections in the background, and every subsequent checkout can hand out a fresh one on demand too.
-    /// Configuring only the one connection grabbed here left the other pooled connections with SQLite's default 0ms busy timeout, so concurrent `modify()` calls under contention failed immediately with "database is locked" instead of waiting — flaky, mostly on Windows CI where lock contention is more likely to line up.
+    /// The pragmas must match what a file-backed store actually runs with in production, and they must be applied via `with_init` rather than to one connection pulled from the pool after `build()`: r2d2 defaults `min_idle` to `max_size`, so it eagerly opens up to 8 connections in the background and every subsequent checkout can hand out a fresh one on demand.
+    ///
+    /// `busy_timeout` alone is not enough, and a pool configured with only that flaked on Windows CI with "database is locked" (`SQLITE_BUSY`).
+    /// Without `journal_mode=WAL` the database runs in rollback-journal mode, where committing a `BEGIN IMMEDIATE` transaction has to promote RESERVED to EXCLUSIVE and therefore has to wait for every other connection to drop its SHARED read lock.
+    /// SQLite deliberately does *not* invoke the busy handler on that promotion path — two connections each waiting for the other to release a read lock would deadlock — so it returns `SQLITE_BUSY` immediately and the timeout never applies.
+    /// Every file-backed pool in production is built with `DEFAULT_CONNECTION_PRAGMAS`, which selects WAL, where writers serialise on a single write lock that the busy handler *does* cover; the only pools without it are `:memory:` ones pinned to `max_size(1)`, which cannot contend at all.
+    /// Configuring the test differently from production meant this regression test exercised a lock-escalation path the store is never deployed on.
     fn setup_file_backed(path: &std::path::Path) -> StructuredStore {
         let pool = Pool::builder()
             .max_size(8)
-            .build(
-                SqliteConnectionManager::file(path)
-                    .with_init(|c| c.busy_timeout(std::time::Duration::from_secs(10))),
-            )
+            .build(SqliteConnectionManager::file(path).with_init(|c| {
+                c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS)?;
+                // Longer than the 5 s production default: CI runners are slow and 24 threads contend far harder than any real workload.
+                c.busy_timeout(std::time::Duration::from_secs(30))
+            }))
             .unwrap();
         run_migrations(&pool.get().unwrap()).unwrap();
         StructuredStore::new(pool)
+    }
+
+    #[test]
+    fn file_backed_test_pool_runs_in_wal_like_production() {
+        // Guard for the #7905 main-red: `modify_concurrent_appends_lose_no_writes_5138` contends 24 threads on one key, and in rollback-journal mode the commit-time RESERVED -> EXCLUSIVE promotion returns SQLITE_BUSY without ever consulting the busy handler.
+        // The pool has already been "fixed" once by raising busy_timeout, which cannot help on that path.
+        // Pin the journal mode so the next edit to the helper cannot silently drop back to a configuration production never uses.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = setup_file_backed(&tmp.path().join("kv.db"));
+        let conn = store.pool.get().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            "wal",
+            "the file-backed test pool must use the production pragmas"
+        );
     }
 
     #[test]
