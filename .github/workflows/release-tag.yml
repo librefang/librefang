@@ -35,7 +35,6 @@ jobs:
     name: Create release tag
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     environment: release-tag
     timeout-minutes: 10
     steps:

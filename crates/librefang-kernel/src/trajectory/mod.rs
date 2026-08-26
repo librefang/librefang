@@ -488,28 +488,91 @@ impl TrajectoryExporter {
         out
     }
 
-    /// Recursively redact every string inside a JSON value. Keys are left
-    /// untouched (they're typically not secret-bearing in tool inputs).
+    /// Redact every string inside a JSON value. Keys are left untouched (they're typically not secret-bearing in tool inputs).
+    ///
+    /// The traversal is an explicit work stack rather than recursion, and the over-depth value is dropped iteratively too.
+    /// `librefang-rl-export`'s `redact_metadata` was hardened this way and this function was not, which left two functions doing the same job in the same repository with only one of them safe on a deeply nested input.
+    ///
+    /// A `Value` that arrived through `serde_json::from_str` cannot exceed the parser's own 128-deep limit, but the tool inputs and outputs reaching here are not all parsed — a programmatically constructed value nests as far as its builder chose, and both the recursive walk and the recursive `Drop` glue for such a value run on the same stack frame budget.
     fn redact_json(&self, v: serde_json::Value) -> serde_json::Value {
         use serde_json::Value;
-        match v {
-            Value::String(s) => Value::String(self.redact_text(&s)),
-            Value::Array(arr) => {
-                Value::Array(arr.into_iter().map(|x| self.redact_json(x)).collect())
-            }
-            Value::Object(map) => {
-                let mut out = serde_json::Map::with_capacity(map.len());
-                for (k, val) in map {
-                    out.insert(k, self.redact_json(val));
-                }
-                Value::Object(out)
-            }
-            other => other,
+
+        enum Work {
+            Visit(Value, usize),
+            FinishArray(usize),
+            FinishObject(Vec<String>),
         }
+
+        let mut work = vec![Work::Visit(v, 0)];
+        let mut output: Vec<Value> = Vec::new();
+        while let Some(item) = work.pop() {
+            match item {
+                Work::Visit(Value::String(s), _) => {
+                    output.push(Value::String(self.redact_text(&s)));
+                }
+                Work::Visit(value @ (Value::Array(_) | Value::Object(_)), depth)
+                    if depth >= MAX_REDACT_DEPTH =>
+                {
+                    drop_value_iteratively(value);
+                    output.push(Value::String(TOO_DEEP_SENTINEL.to_string()));
+                }
+                Work::Visit(Value::Array(values), depth) => {
+                    work.push(Work::FinishArray(values.len()));
+                    work.extend(
+                        values
+                            .into_iter()
+                            .rev()
+                            .map(|value| Work::Visit(value, depth + 1)),
+                    );
+                }
+                Work::Visit(Value::Object(map), depth) => {
+                    let (keys, values): (Vec<_>, Vec<_>) = map.into_iter().unzip();
+                    work.push(Work::FinishObject(keys));
+                    work.extend(
+                        values
+                            .into_iter()
+                            .rev()
+                            .map(|value| Work::Visit(value, depth + 1)),
+                    );
+                }
+                Work::Visit(value, _) => output.push(value),
+                Work::FinishArray(len) => {
+                    let values = output.split_off(output.len() - len);
+                    output.push(Value::Array(values));
+                }
+                Work::FinishObject(keys) => {
+                    let values = output.split_off(output.len() - keys.len());
+                    output.push(Value::Object(keys.into_iter().zip(values).collect()));
+                }
+            }
+        }
+        output.pop().expect("redaction always produces one value")
     }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Depth past which a nested JSON value is replaced by a sentinel rather than walked.
+/// Matches `MAX_METADATA_DEPTH` in `librefang-rl-export`, and matches `serde_json`'s own parser limit, so nothing that arrived over the wire is affected.
+const MAX_REDACT_DEPTH: usize = 128;
+
+/// Stand-in for a subtree that exceeded `MAX_REDACT_DEPTH`.
+const TOO_DEEP_SENTINEL: &str = "<REDACTED:TOO_DEEP>";
+
+/// Drop a `Value` without recursing.
+///
+/// Dropping a deeply nested value recurses through `Drop` glue, so a value too deep to walk is also too deep to drop the ordinary way — replacing the walk alone would move the overflow from the traversal to the end of the scope.
+fn drop_value_iteratively(value: serde_json::Value) {
+    use serde_json::Value;
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(values) => pending.extend(values),
+            Value::Object(map) => pending.extend(map.into_values()),
+            _ => {}
+        }
+    }
+}
 
 fn collapse_workspace_paths(input: &str, root: Option<&std::path::Path>) -> String {
     let Some(root) = root else {
@@ -593,6 +656,81 @@ mod tests {
         // throwaway in-memory substrate so Arc<MemorySubstrate> exists.
         let mem = MemorySubstrate::open_in_memory(0.01).expect("substrate boots");
         TrajectoryExporter::new(Arc::new(mem), policy)
+    }
+
+    /// Build `[[[ ... "leaf" ... ]]]` nested `depth` deep, without recursing.
+    fn nested_array(depth: usize, leaf: serde_json::Value) -> serde_json::Value {
+        let mut v = leaf;
+        for _ in 0..depth {
+            v = serde_json::Value::Array(vec![v]);
+        }
+        v
+    }
+
+    #[test]
+    fn redact_json_still_rewrites_strings_at_every_level() {
+        let exp = dummy_exporter(RedactionPolicy::default());
+        let input = serde_json::json!({
+            "outer": {
+                "list": ["sk_live_abcdef0123456789ABCDEF", 7, true, null],
+                "kept": "ordinary text"
+            }
+        });
+        let out = exp.redact_json(input);
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("sk_live_abcdef0123456789ABCDEF"),
+            "leaked: {rendered}"
+        );
+        assert!(rendered.contains("<REDACTED"), "no placeholder: {rendered}");
+        // Structure and non-string scalars survive the iterative rebuild.
+        assert_eq!(out["outer"]["kept"], serde_json::json!("ordinary text"));
+        assert_eq!(out["outer"]["list"][1], serde_json::json!(7));
+        assert_eq!(out["outer"]["list"][2], serde_json::json!(true));
+        assert!(out["outer"]["list"][3].is_null());
+    }
+
+    #[test]
+    fn redact_json_preserves_object_keys_and_ordering() {
+        let exp = dummy_exporter(RedactionPolicy::default());
+        let input = serde_json::json!({"b": "two", "a": "one", "c": {"z": "zed"}});
+        let out = exp.redact_json(input.clone());
+        let before: Vec<&String> = input.as_object().unwrap().keys().collect();
+        let after: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert_eq!(before, after, "key order changed");
+        assert_eq!(out["c"]["z"], serde_json::json!("zed"));
+    }
+
+    #[test]
+    fn redact_json_replaces_a_subtree_past_the_depth_cap() {
+        let exp = dummy_exporter(RedactionPolicy::default());
+        let deep = nested_array(MAX_REDACT_DEPTH + 5, serde_json::json!("leaf"));
+        let out = exp.redact_json(deep);
+
+        // Walk down to the sentinel without recursing.
+        let mut cur = &out;
+        let mut levels = 0usize;
+        while let Some(inner) = cur.get(0) {
+            cur = inner;
+            levels += 1;
+        }
+        assert_eq!(
+            cur,
+            &serde_json::Value::String(TOO_DEEP_SENTINEL.to_string()),
+            "over-depth subtree was not replaced"
+        );
+        assert_eq!(levels, MAX_REDACT_DEPTH, "cap applied at the wrong depth");
+    }
+
+    /// The recursive walk this replaced overflowed the stack on a value this deep, taking the whole daemon with it rather than returning an error.
+    /// A recursion-based implementation cannot pass this test at any depth cap, because the recursive `Drop` glue overflows even if the walk is bounded.
+    #[test]
+    fn redact_json_survives_a_value_far_deeper_than_any_stack() {
+        let exp = dummy_exporter(RedactionPolicy::default());
+        let deep = nested_array(200_000, serde_json::json!("sk_live_abcdef0123456789ABCDEF"));
+        let out = exp.redact_json(deep);
+        // The credential is inside the discarded subtree, so it cannot survive.
+        assert!(!out.to_string().contains("sk_live_abcdef0123456789ABCDEF"));
     }
 
     #[test]
