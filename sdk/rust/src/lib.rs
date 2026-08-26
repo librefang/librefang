@@ -4698,6 +4698,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn provisioning_status(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "provisioning", "status"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn queue_status(&self) -> Result<Value> {
         do_req(
             &self.client,
