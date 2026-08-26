@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 50;
+const SCHEMA_VERSION: u32 = 51;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -242,6 +242,15 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // provider gets real full-text search instead of a `content LIKE` scan —
     // and so `memory.fts_only` finally has a memories index to fall back to.
     run_step!(50, migrate_v50);
+
+    // v51 (#7912): add `memories.embedding_model` so a stored vector records
+    // which model produced it. Before this, `memories.embedding` was a bare
+    // BLOB: swapping `[memory] embedding_model` between two models of the same
+    // dimensionality left every pre-existing vector in the table, and cosine
+    // similarity was computed across two unrelated spaces with no error
+    // anywhere. NULL means "written before this migration, model unknown" and
+    // is treated as comparable, so no existing deployment changes behaviour.
+    run_step!(51, migrate_v51);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -936,6 +945,45 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v51 (#7912): Record which embedding model produced each stored vector.
+///
+/// `memories.embedding` was a bare BLOB with no provenance, and the only guard
+/// against comparing vectors from different models was the length check inside
+/// `cosine_similarity`, which returns `None` on a dimension mismatch.
+/// Two models of the *same* dimensionality — the issue measured `bge-m3` against
+/// `multilingual-e5-large`, both 1024-d — slip straight past that guard, so an
+/// operator editing one config line turned every pre-existing row's similarity
+/// into a meaningless number with no error and no log line.
+///
+/// `NULL` means "written before this migration, provenance unknown". Those rows
+/// stay comparable: the overwhelmingly common case is that the operator never
+/// changed the model, and silently dropping every historical vector out of
+/// retrieval would be a far worse default than the risk it removes.
+/// The census in `SemanticStore::embedding_model_census` reports them as
+/// unstamped so an operator can see how much of their corpus predates the
+/// stamp.
+///
+/// The index exists for the census and for a future re-embedding sweep, both of
+/// which group by this column over the whole table.
+fn migrate_v51(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "memories", "embedding_model")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN embedding_model TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (51, datetime('now'), 'Add memories.embedding_model so a stored vector records which model produced it (#7912)')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// v49 (#7714): Record who owns a workflow run, and who a call's spend bills to.
 ///
 /// `workflow_runs.owner_agent_id` is the agent that asked for the run — the caller of `workflow_run` / `workflow_start`, the agent bound to the channel that issued the command, or the agent an API caller named.
@@ -1035,7 +1083,7 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
         [],
     )?;
     Ok(())
@@ -2181,6 +2229,69 @@ mod tests {
         }
     }
 
+    /// Companion to `test_every_migration_records_audit_row`, and the guard that test could not be (#7924).
+    ///
+    /// That test asserts every applied version *has* an audit row, but the #3538 backfill at the end of `run_migrations` creates any missing row before the assertion runs — so a migration that stamps the wrong version number passes it, rescued by the repair path.
+    /// `migrate_v50` did exactly that: it recorded under version 49, where `INSERT OR IGNORE` silently dropped it against `migrate_v49`'s row, and every fresh database then warned about historical drift on its first boot.
+    ///
+    /// The invariant the backfill's own doc comment already claims is the stronger one and is what this pins: on a clean database the backfill inserts nothing, because every migration recorded itself.
+    /// A placeholder description surviving a fresh `run_migrations` means some migration is stamping a version that is not its own.
+    #[test]
+    fn no_migration_relies_on_the_audit_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT version, description FROM migrations ORDER BY version")
+            .unwrap();
+        let rescued: Vec<u32> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .filter(|(_, description)| description.contains("audit-row backfill"))
+            .map(|(version, _)| version)
+            .collect();
+
+        assert!(
+            rescued.is_empty(),
+            "these versions were rescued by the #3538 backfill on a clean database, which means the \
+             migration that applied their DDL stamped a version that is not its own: {rescued:?}"
+        );
+    }
+
+    /// The specific collision from #7924, pinned by description rather than by presence.
+    ///
+    /// Both rows existing is not enough — that was already true, because the backfill supplied the missing one.
+    /// What has to hold is that each version's description names the DDL that version actually applied.
+    #[test]
+    fn v49_and_v50_each_describe_their_own_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let description = |version: u32| -> String {
+            conn.query_row(
+                "SELECT description FROM migrations WHERE version = ?1",
+                [version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|e| panic!("no audit row for v{version}: {e}"))
+        };
+
+        assert!(
+            description(49).contains("owner_agent_id"),
+            "v49 must describe the run-ownership columns it adds (#7714), got: {}",
+            description(49)
+        );
+        assert!(
+            description(50).contains("memories_fts"),
+            "v50 must describe the FTS5 index it adds (#7808), not a backfill placeholder or v49's \
+             description, got: {}",
+            description(50)
+        );
+    }
+
     /// Boot-time ladder invariant: a DB whose `migrations` audit table
     /// claims a higher MAX(version) than `pragma user_version` is in an
     /// inconsistent state — `run_migrations` would otherwise restart
@@ -2635,6 +2746,76 @@ mod tests {
         assert_eq!(name, "Acme");
         assert_eq!(props, "{\"k\":1}");
         assert_eq!(peer, "", "a pre-v47 row migrates to the '' shared sentinel");
+    }
+
+    #[test]
+    fn test_migrate_v51_adds_embedding_model_column_nullable_and_indexed() {
+        // #7912: `memories.embedding` carried no provenance, so swapping
+        // `[memory] embedding_model` between two models of the same
+        // dimensionality left every stored vector in place and cosine ran
+        // across two unrelated spaces with no error anywhere.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "embedding_model"));
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_memories_embedding_model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 1,
+            "the census and any future re-embedding sweep group by this column over the whole table"
+        );
+
+        // A legacy-shaped INSERT that omits embedding_model leaves it NULL,
+        // which the recall guard reads as "provenance unknown, still comparable".
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding) \
+             VALUES ('legacy-vec', 'agent-1', 'c', 'conversation', 'episodic', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0, X'00000000')",
+            [],
+        )
+        .unwrap();
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT embedding_model FROM memories WHERE id = 'legacy-vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp, None,
+            "a pre-v51 vector must read back NULL, not a synthetic model name"
+        );
+
+        // Re-running is a no-op on both the column and the index, and must not
+        // disturb the seeded row.
+        migrate_v51(&conn).unwrap();
+        migrate_v51(&conn).unwrap();
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_memories_embedding_model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 1,
+            "the index must exist exactly once after repeated boots"
+        );
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM memories WHERE id = 'legacy-vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "c", "re-running migrate_v51 must not touch data");
     }
 
     #[test]
