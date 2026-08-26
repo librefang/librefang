@@ -1446,6 +1446,16 @@ impl LibreFangKernel {
             ),
         };
 
+        // #7912: the identity of the embedding model actually in use, in
+        // `provider/model` form. This is deliberately not
+        // `config.memory.embedding_model` — the resolution below substitutes a
+        // provider default when the configured string is one of the two
+        // built-in placeholders, and auto-detection picks the provider from the
+        // environment, so the configured string and the model that produced a
+        // vector routinely differ. Only the resolved pair identifies the vector
+        // space a stored embedding belongs to.
+        let mut effective_embedding_identity: Option<String> = None;
+
         // Auto-detect embedding driver for vector similarity search
         let embedding_driver: Option<
             Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
@@ -1493,6 +1503,7 @@ impl LibreFangKernel {
                 ) {
                     Ok(d) => {
                         info!(provider = %provider, model = %model, "Embedding driver configured from memory config");
+                        effective_embedding_identity = Some(format!("{provider}/{model}"));
                         Some(Arc::from(d))
                     }
                     Err(e) => {
@@ -1543,6 +1554,7 @@ impl LibreFangKernel {
                     ) {
                         Ok(d) => {
                             info!(provider = %detected, model = %model, "Embedding driver auto-detected");
+                            effective_embedding_identity = Some(format!("{detected}/{model}"));
                             Some(Arc::from(d))
                         }
                         Err(e) => {
@@ -1561,6 +1573,41 @@ impl LibreFangKernel {
                 }
             }
         };
+
+        // #7912: stamp new vectors with the model that produced them, and tell
+        // the operator when the store already holds vectors from a different
+        // one. Both models in the report on that issue are 1024-dimensional, so
+        // the length check inside `cosine_similarity` never fires and the only
+        // symptom of a model swap is that retrieval quietly goes random.
+        if let Some(ref identity) = effective_embedding_identity {
+            memory.set_embedding_model(identity);
+            match memory.embedding_model_census() {
+                Ok(census) => {
+                    // BTreeMap, so the rendered summary is byte-identical across
+                    // boots for the same store rather than reshuffling per run.
+                    let stale: Vec<String> = census
+                        .iter()
+                        .filter(|(model, _)| model.as_str() != identity.as_str())
+                        .map(|(model, count)| format!("{model}={count}"))
+                        .collect();
+                    if !stale.is_empty() {
+                        warn!(
+                            active_model = %identity,
+                            stale = %stale.join(", "),
+                            "Stored embeddings were produced by a different model than the one now configured. \
+                             Cosine similarity across two embedding spaces is meaningless, so those vectors are \
+                             skipped during vector recall. Restore the previous embedding_model, or re-embed \
+                             the affected rows."
+                        );
+                    } else {
+                        debug!(active_model = %identity, "Embedding model census clean");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Embedding model census failed; skipping the model-drift check");
+                }
+            }
+        }
 
         let browser_ctx = librefang_runtime::browser::BrowserManager::new(config.browser.clone());
 
