@@ -4,6 +4,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { useRunSchedule } from "./schedules";
 import {
   useBatchSetConfigValues,
+  hasBatchConfigErrors,
   useSetConfigValue,
   useReloadConfig,
 } from "./config";
@@ -109,10 +110,12 @@ describe("useBatchSetConfigValues", () => {
 
     const { result } = renderHook(() => useBatchSetConfigValues(), { wrapper });
 
-    await expect(result.current.mutateAsync([
+    const results = await result.current.mutateAsync([
       { path: "kernel.max_agents", value: 10 },
       { path: "kernel.max_memory", value: 20 },
-    ])).resolves.toEqual([
+    ]);
+
+    expect(results).toEqual([
       {
         path: "kernel.max_agents",
         value: 10,
@@ -124,6 +127,18 @@ describe("useBatchSetConfigValues", () => {
         error: expect.any(Error),
       },
     ]);
+    expect(hasBatchConfigErrors(results)).toBe(true);
+  });
+
+  it("reports an aggregate success when every entry saves", async () => {
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useBatchSetConfigValues(), { wrapper });
+
+    const results = await result.current.mutateAsync([
+      { path: "kernel.max_agents", value: 10 },
+    ]);
+
+    expect(hasBatchConfigErrors(results)).toBe(false);
   });
 });
 

@@ -1,0 +1,11 @@
+{
+  "method": "message",
+  "params": {
+    "user_id": "42",
+    "user_name": "Alice",
+    "content": { "Command": { "name": "agent", "args": ["researcher"] } },
+    "message_id": "8891",
+    "channel_id": "-100123",
+    "platform": "telegram"
+  }
+}

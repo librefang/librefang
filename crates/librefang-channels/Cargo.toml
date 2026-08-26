@@ -63,9 +63,9 @@ fs2 = "0.4"
 # Content hash of the embedded SDK tree — drives the
 # `<home>/sidecar-python/<hash>/` directory name so a daemon upgrade
 # extracts to a fresh subdirectory. The wider `librefang-channels`
-# cleanup in #5473 pruned `sha2` from this crate alongside the
-# webhook-verifying in-process adapters; `embedded_sdk.rs` is the
-# only re-consumer.
+# cleanup in #5473 removed the in-process webhook adapter uses of
+# `sha2`; `embedded_sdk.rs` remains the sole consumer, so the
+# dependency stays in this crate.
 sha2 = { workspace = true }
 
 # Sidecar migration cleanup: with every channel adapter moved
@@ -92,7 +92,6 @@ sha2 = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 wiremock = "0.6"
-serde_json = { workspace = true }
 
 [[bench]]
 name = "dispatch"

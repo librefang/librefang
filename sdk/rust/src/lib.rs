@@ -553,6 +553,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn spawn_ephemeral_agent(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "agents", "spawn-ephemeral"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -2766,6 +2778,42 @@ impl ModelsResource {
         .await
     }
 
+    pub async fn get_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "models", "overrides", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_model_overrides(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "models", "overrides", id],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_model_overrides(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "models", "overrides", id],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_model(&self, id: &str) -> Result<Value> {
         do_req(
             &self.client,
@@ -4734,11 +4782,47 @@ impl SystemResource {
         .await
     }
 
+    pub async fn create_agent_type(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
+            &["api", "templates", name],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn update_agent_type(&self, name: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "templates", name],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn delete_agent_type(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
             &["api", "templates", name],
             None,
             &[],

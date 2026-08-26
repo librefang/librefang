@@ -247,6 +247,13 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
     candidates
 }
 
+/// Resolve the registry's agent-templates directory for hand `base` resolution.
+///
+/// Delegates to [`librefang_types::registry_paths::resolve_agent_templates_dir`], the single resolver shared with the runtime's fan-out and the hands registry, so a missing directory is reported once at error level instead of quietly dropping every `base = "<template>"` hand out of routing (#7767).
+fn registry_agents_dir(home_dir: &Path) -> Option<PathBuf> {
+    librefang_types::registry_paths::resolve_agent_templates_dir(&home_dir.join("registry"))
+}
+
 fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();
@@ -264,12 +271,8 @@ fn load_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
     // "requires agents registry directory" and emits a WARN on every
     // routing scan — and routing happens on every inbound message dispatch,
     // so the warning floods the log.
-    let agents_dir = home_dir.join("registry").join("agents");
-    let agents_dir_arg: Option<&Path> = if agents_dir.is_dir() {
-        Some(agents_dir.as_path())
-    } else {
-        None
-    };
+    let agents_dir = registry_agents_dir(home_dir);
+    let agents_dir_arg: Option<&Path> = agents_dir.as_deref();
 
     for hands_dir in &dirs {
         let Ok(entries) = fs::read_dir(hands_dir) else {
@@ -524,6 +527,20 @@ pub fn auto_select_hand(
     }
 }
 
+fn has_multi_domain_marker(normalized: &str) -> bool {
+    ["同时", "分别", "协作", "多个", "multi", "together"]
+        .iter()
+        .any(|token| {
+            if token.is_ascii() {
+                normalized
+                    .split(|character: char| !character.is_ascii_alphanumeric())
+                    .any(|word| word == *token)
+            } else {
+                normalized.contains(token)
+            }
+        })
+}
+
 pub fn auto_select_template(
     message: &str,
     agents_dir: &Path,
@@ -583,9 +600,7 @@ pub fn auto_select_template(
 
     if scored.len() > 1 {
         let (second_score, second_template, _) = &scored[1];
-        let multi_domain = ["同时", "分别", "协作", "多个", "multi", "together"]
-            .iter()
-            .any(|token| normalized.contains(token));
+        let multi_domain = has_multi_domain_marker(&normalized);
         if *second_score > 0 && best_template != second_template && multi_domain {
             return TemplateSelection {
                 template: "orchestrator".to_string(),
@@ -1172,6 +1187,32 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Routing must resolve the agent-templates directory through the shared resolver so it cannot drift from the runtime fan-out and the hands registry, and so its absence is reported rather than dropping every `base = "<template>"` hand from routing in silence (#7767).
+    #[test]
+    fn registry_agents_dir_delegates_to_the_shared_resolver() {
+        let tmp = tempdir().unwrap();
+        let home_dir = tmp.path();
+        let registry_root = home_dir.join("registry");
+        std::fs::create_dir_all(registry_root.join("hands")).unwrap();
+
+        assert_eq!(registry_agents_dir(home_dir), None);
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+
+        std::fs::create_dir_all(registry_root.join("agents")).unwrap();
+
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            Some(registry_root.join("agents"))
+        );
+        assert_eq!(
+            registry_agents_dir(home_dir),
+            librefang_types::registry_paths::resolve_agent_templates_dir(&registry_root),
+        );
+    }
+
     #[test]
     fn poisoned_router_state_lock_recovers_and_remains_usable() {
         let state = Mutex::new(vec!["cached"]);
@@ -1319,6 +1360,27 @@ weak_aliases = ["changelog"]
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
+    }
+
+    #[test]
+    fn test_auto_select_template_requires_ascii_multi_domain_word_boundaries() {
+        for message in [
+            "Research and code this multimedia parser",
+            "Research and code this multitask parser",
+            "Research and code an altogether different parser",
+            "Research and code a multithreaded parser",
+        ] {
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
+            assert_eq!(selection.template, "researcher", "{message}");
+        }
+
+        for message in [
+            "Research and code this multi domain task",
+            "Research and code this together",
+        ] {
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
+            assert_eq!(selection.template, "orchestrator", "{message}");
+        }
     }
 
     #[test]

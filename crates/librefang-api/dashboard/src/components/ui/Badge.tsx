@@ -1,4 +1,5 @@
 import { type HTMLAttributes, type ReactNode } from "react";
+import { cn } from "../../lib/cn";
 
 export type BadgeVariant = "default" | "success" | "warning" | "error" | "info" | "brand";
 
@@ -35,13 +36,13 @@ export function Badge({
 }: BadgeProps) {
   return (
     <span
-      className={`
-        inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5
-        text-[10px] font-black uppercase tracking-wider
-        border transition-colors duration-200 whitespace-nowrap
-        ${variantStyles[variant]}
-        ${className}
-      `}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5",
+        "text-[10px] font-black uppercase tracking-wider",
+        "border transition-colors duration-200 whitespace-nowrap",
+        variantStyles[variant],
+        className,
+      )}
       {...props}
     >
       {dot ? <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${dotColors[variant]}`} /> : null}

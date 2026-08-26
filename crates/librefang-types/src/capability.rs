@@ -186,6 +186,23 @@ pub fn validate_capability_inheritance(
     Ok(())
 }
 
+/// The namespace string the proactive (semantic) memory store is addressed by in the per-user ACL and the REST layer.
+///
+/// Kept next to [`glob_matches`] because every consumer of it is deciding whether a declared `memory_read` / `memory_write` scope reaches this store.
+pub const OWN_MEMORY_NAMESPACE: &str = "proactive";
+
+/// Whether one declared `memory_read` / `memory_write` scope covers the agent's own semantic-memory store.
+///
+/// Three accepting forms, each for a concrete reason:
+///   * `*` — the unrestricted grant.
+///   * `self.*` — what every non-memory `ToolProfile` implies for `memory_write`. Those profiles mean "this agent may write its own memory", not "this agent may not use the semantic store", so matching it literally against `proactive` would strip the write half from every profile-based agent.
+///   * anything glob-matching [`OWN_MEMORY_NAMESPACE`], so an operator can name the store explicitly.
+///
+/// Lives here rather than on the kernel because both the tool gate (#7808) and the automatic memorize / retrieve gate (#7605) have to answer the same question, and they run in different crates.
+pub fn scope_covers_own_memory(scope: &str) -> bool {
+    scope == "*" || scope == "self.*" || glob_matches(scope, OWN_MEMORY_NAMESPACE)
+}
+
 /// Glob pattern matching supporting `*` and `**` wildcards.
 ///
 /// # Pattern rules

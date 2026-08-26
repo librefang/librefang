@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEventHandler } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEventHandler } from 'react'
 import { Search, X, Sparkles, Hash } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getLocalizedName } from '../useRegistry'
 import RegistryIcon from './RegistryIcon'
@@ -16,9 +16,12 @@ type Hit =
   | { kind: 'item'; category: RegistryCategory; item: Detail }
   | { kind: 'anchor'; id: string; label: string; desc: string }
 
+type ItemHit = Extract<Hit, { kind: 'item' }>
+
 const CATEGORIES: RegistryCategory[] = [
   'skills', 'hands', 'agents', 'providers', 'workflows', 'channels', 'plugins', 'mcp',
 ]
+const LOCALE_PREFIXES = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es', 'pl', 'uk'])
 
 const PER_CATEGORY_CAP = 5
 
@@ -29,15 +32,17 @@ function isPopular(d: Detail) {
 // Simple subsequence fuzzy match: returns a bonus if every character of
 // query appears in order in target (not necessarily contiguous). Scores
 // higher when characters cluster tightly. Cheap: O(|target|) per call.
-function fuzzySubseq(query: string, target: string): number {
+export function fuzzySubseq(query: string, target: string): number {
   if (!query) return 0
   const q = query.toLowerCase()
   const t = target.toLowerCase()
   let qi = 0
+  let firstMatch = -1
   let lastMatch = -1
   let gaps = 0
   for (let i = 0; i < t.length && qi < q.length; i++) {
     if (t[i] === q[qi]) {
+      if (firstMatch < 0) firstMatch = i
       if (lastMatch >= 0) gaps += (i - lastMatch - 1)
       lastMatch = i
       qi++
@@ -45,8 +50,25 @@ function fuzzySubseq(query: string, target: string): number {
   }
   if (qi < q.length) return 0
   // Reward short spans: full score when all chars are contiguous.
-  const span = lastMatch - (lastMatch - q.length + 1) + 1
+  const span = lastMatch - firstMatch + 1
   return Math.max(20, 80 - Math.min(60, gaps)) - Math.min(15, span - q.length)
+}
+
+export function resolvePastedItem(raw: string, itemHits: ItemHit[]): ItemHit | undefined {
+  const path = raw.trim().replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '').replace(/[?#].*$/, '')
+  const segs = path.split('/').filter(Boolean)
+  const [first, ...rest] = segs
+  const parts = first && LOCALE_PREFIXES.has(first) ? rest : segs
+
+  if (parts.length >= 2 && CATEGORIES.includes(parts[0] as RegistryCategory)) {
+    const category = parts[0] as RegistryCategory
+    const id = parts[1]
+    return itemHits.find(hit => hit.category === category && hit.item.id === id)
+  }
+  if (parts.length !== 1 || !parts[0]) return undefined
+
+  const matches = itemHits.filter(hit => hit.item.id === parts[0])
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 function scoreText(query: string, ...fields: string[]): number {
@@ -132,7 +154,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
       // No query — show homepage anchors first (navigation shortcut), then a
       // sampling of popular items across categories.
       const perCat = new Map<RegistryCategory, number>()
-      const items = itemHits
+      const items = allHits
         .filter(h => h.kind === 'item' && isPopular(h.item))
         .filter(h => {
           if (h.kind !== 'item') return false
@@ -169,9 +191,21 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
       if (out.length >= 40) break
     }
     return out
-  }, [allHits, itemHits, anchorHits, debouncedQuery, lang])
+  }, [allHits, anchorHits, debouncedQuery, lang])
 
-  useEffect(() => { setActiveIndex(0) }, [query])
+  useEffect(() => { setActiveIndex(0) }, [debouncedQuery])
+
+  // App selects its page route once during startup and does not expose a
+  // client router, so route changes intentionally require hard navigation.
+  const navigate = useCallback((hit: Hit) => {
+    const prefix = lang === 'en' ? '' : `/${lang}`
+    if (hit.kind === 'item') {
+      window.location.href = `${prefix}/${hit.category}/${hit.item.id}`
+    } else {
+      const home = lang === 'en' ? '/' : `/${lang}/`
+      window.location.href = `${home}#${hit.id}`
+    }
+  }, [lang])
 
   useEffect(() => {
     if (!open) return
@@ -195,19 +229,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, filtered, activeIndex])
-
-  const navigate = (hit: Hit) => {
-    const prefix = lang === 'en' ? '' : `/${lang}`
-    if (hit.kind === 'item') {
-      window.location.href = `${prefix}/${hit.category}/${hit.item.id}`
-    } else {
-      // Anchor: homepage + hash. Same-page case is handled by the browser.
-      const home = lang === 'en' ? '/' : `/${lang}/`
-      window.location.href = `${home}#${hit.id}`
-    }
-  }
+  }, [open, filtered, activeIndex, navigate, onClose])
 
   // Paste handler: when a user pastes a URL or "category/id" string that
   // matches an existing registry item, navigate straight to it. Prevents
@@ -216,25 +238,8 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
   const onPaste: ClipboardEventHandler<HTMLInputElement> = (e) => {
     const raw = e.clipboardData.getData('text').trim()
     if (!raw) return
-    // Strip scheme + host if a full URL was pasted.
-    const path = raw.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '').replace(/[?#].*$/, '')
-    const segs = path.split('/').filter(Boolean)
-    // Tolerate a leading lang prefix (zh/ja/...) when present.
-    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es', 'pl', 'uk'])
-    const [first, ...rest] = segs
-    const parts = first && langs.has(first) ? rest : segs
-    if (parts.length >= 2 && CATEGORIES.includes(parts[0] as RegistryCategory)) {
-      const cat = parts[0] as RegistryCategory
-      const id = parts[1]!
-      const hit = itemHits.find(h => h.kind === 'item' && h.category === cat && h.item.id === id)
-      if (hit) { e.preventDefault(); navigate(hit); return }
-    }
-    // Bare ID paste — match against any category.
-    if (parts.length === 1 && parts[0]) {
-      const id = parts[0]
-      const hit = itemHits.find(h => h.kind === 'item' && h.item.id === id)
-      if (hit) { e.preventDefault(); navigate(hit); return }
-    }
+    const hit = resolvePastedItem(raw, itemHits.filter((item): item is ItemHit => item.kind === 'item'))
+    if (hit) { e.preventDefault(); navigate(hit) }
   }
 
   if (!open) return null

@@ -23,7 +23,15 @@ on:
       - 'nix/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
+      # Keep this aligned with the source fileset assembled in flake.nix.
+      - '.cargo/**'
+      - 'crates/**'
+      - 'xtask/**'
+      - 'examples/**'
+      - 'sdk/rust/**'
+      - 'sdk/python/librefang/**'
+      - 'packages/whatsapp-gateway/**'
+      - 'deploy/**'
       - '.github/workflows/nix-build.yml'
   pull_request:
     paths:
@@ -32,7 +40,14 @@ on:
       - 'nix/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
+      - '.cargo/**'
+      - 'crates/**'
+      - 'xtask/**'
+      - 'examples/**'
+      - 'sdk/rust/**'
+      - 'sdk/python/librefang/**'
+      - 'packages/whatsapp-gateway/**'
+      - 'deploy/**'
       - '.github/workflows/nix-build.yml'
   workflow_dispatch:
 
@@ -84,9 +99,10 @@ jobs:
 
   nix-build:
     name: nix build (${{ matrix.package }})
+    needs: nix-eval
     # Post-merge and manual dispatch only.
     # The nix-eval job above is what gates a PR; this leg is the expensive compile the header comment reserves for push-to-main.
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.nix-eval.result == 'success'
     runs-on: ubuntu-latest
     # Cold builds are the norm here: the Rust CI lanes churn through the repo's 10 GB Actions cache quota daily, so the /nix/store cache below is usually evicted before the next run and each leg rebuilds the full crane deps + workspace closure from scratch.
     # A cold librefang-cli leg takes ~80-95 minutes (it was still compiling workspace crates when a 60-minute limit cancelled it), so 120 covers a cold build with margin while still catching a genuinely hung one.

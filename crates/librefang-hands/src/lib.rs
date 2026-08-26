@@ -599,15 +599,14 @@ pub(crate) fn parse_multi_agent_entry(
         .map(|s| s.to_string());
 
     let manifest = if let Some(ref template_name) = base_ref {
-        // Validate template name: must be a simple directory name without path
-        // separators or parent-directory references to prevent path traversal.
-        if template_name.contains("..")
-            || template_name.contains('/')
-            || template_name.contains('\\')
-        {
+        // Base templates and hand ids are both registry directory names. Use
+        // the same allow-list so platform-specific separators, control bytes,
+        // empty names, and overlong components cannot reach Path::join.
+        if validate_hand_id(template_name).is_err() {
             return Err(format!(
                 "[agents.{role}]: invalid base template name '{template_name}': \
-                 must be a simple name without path separators"
+                 must start with an alphanumeric and contain 1-{MAX_HAND_ID_LEN} \
+                 characters from [A-Za-z0-9_-]"
             ));
         }
         // Load the base agent template and merge hand overrides on top.
@@ -2636,6 +2635,30 @@ metrics = []
             err.contains("does-not-exist"),
             "Error should mention the missing template name: {err}"
         );
+    }
+
+    #[test]
+    fn base_template_name_uses_safe_component_allowlist() {
+        let invalid_names = ["", ".", "-prefixed", "C:", "control\0byte"];
+
+        for name in invalid_names {
+            let value = toml::Value::Table(
+                [("base".to_string(), toml::Value::String(name.to_string()))]
+                    .into_iter()
+                    .collect(),
+            );
+            let error = parse_multi_agent_entry(
+                "main",
+                &value,
+                Some(std::path::Path::new("unused-agents-dir")),
+            )
+            .expect_err("unsafe base template name must be rejected before filesystem access");
+
+            assert!(
+                error.contains("invalid base template name"),
+                "{name:?}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -3080,3 +3080,133 @@ async fn test_approval_listener_binding_respects_account_id_scope() {
 
     manager.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Broadcast dispatch session scope (#7140)
+// ---------------------------------------------------------------------------
+
+/// Records, per agent, the sender scope each dispatched turn carried.
+///
+/// `None` means the turn reached the kernel without a `SenderContext` at all,
+/// which is what makes the difference visible: the kernel's session resolver
+/// only derives the per-chat `SessionId::for_sender_scope` when a sender
+/// context is present, and otherwise falls back to the agent's canonical
+/// `entry.session_id` — the session the dashboard chat writes to, and one no
+/// channel command can address.
+struct ScopeRecordingHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+    #[allow(clippy::type_complexity)]
+    scopes: Arc<Mutex<Vec<(AgentId, Option<(String, Option<String>)>)>>>,
+}
+
+impl ScopeRecordingHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+            scopes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for ScopeRecordingHandle {
+    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
+        self.scopes.lock().unwrap().push((agent_id, None));
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn send_message_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &librefang_channels::types::SenderContext,
+    ) -> Result<String, String> {
+        self.scopes.lock().unwrap().push((
+            agent_id,
+            Some((sender.channel.clone(), sender.chat_id.clone())),
+        ));
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
+}
+
+/// A broadcast turn must be session-scoped like every other channel turn.
+///
+/// Before #7140 the broadcast fan-out was the one channel dispatch that sent
+/// without a `SenderContext`, so every turn landed on the agent's canonical
+/// session while `/new` cleared the per-chat one: the reset acked success on
+/// an empty session and the visible conversation kept its history.
+#[tokio::test]
+async fn broadcast_dispatch_carries_the_per_chat_session_scope() {
+    let alice = AgentId::new();
+    let bob = AgentId::new();
+    let handle = Arc::new(ScopeRecordingHandle::new(vec![
+        (alice, "alice".to_string()),
+        (bob, "bob".to_string()),
+    ]));
+    let scopes = handle.scopes.clone();
+
+    let router = Arc::new(AgentRouter::new());
+    router.register_agent("alice".to_string(), alice);
+    router.register_agent("bob".to_string(), bob);
+    let mut routes = HashMap::new();
+    routes.insert(
+        "vip_user".to_string(),
+        vec!["alice".to_string(), "bob".to_string()],
+    );
+    router.load_broadcast(librefang_types::config::BroadcastConfig {
+        strategy: librefang_types::config::BroadcastStrategy::Sequential,
+        routes,
+    });
+
+    let (adapter, tx) = MockAdapter::new("test-adapter", ChannelType::Telegram);
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(
+        ChannelType::Telegram,
+        "vip_user",
+        "Hello both",
+    ))
+    .await
+    .unwrap();
+
+    wait_until("broadcast dispatch", || scopes.lock().unwrap().len() == 2).await;
+
+    let recorded = scopes.lock().unwrap().clone();
+    for (agent_id, scope) in &recorded {
+        assert_eq!(
+            scope
+                .as_ref()
+                .map(|(c, chat)| (c.as_str(), chat.as_deref())),
+            Some(("telegram", Some("vip_user"))),
+            "broadcast target {agent_id} was dispatched without the per-chat sender scope",
+        );
+    }
+    let mut reached: Vec<AgentId> = recorded.iter().map(|(id, _)| *id).collect();
+    reached.sort_by_key(|a| a.to_string());
+    let mut expected = vec![alice, bob];
+    expected.sort_by_key(|a| a.to_string());
+    assert_eq!(
+        reached, expected,
+        "both broadcast targets must receive the turn"
+    );
+
+    manager.stop().await;
+}
