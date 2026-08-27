@@ -356,6 +356,10 @@ func (r *AgentsResource) GetAgentDeliveries(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", id), nil, nil)
 }
 
+func (r *AgentsResource) ListAgentEphemeralRuns(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/ephemeral-runs", id), nil, query)
+}
+
 func (r *AgentsResource) ListAgentEvents(id string, query map[string]string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/events", id), nil, query)
 }

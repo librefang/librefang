@@ -221,6 +221,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/deliveries`);
   }
 
+  async listAgentEphemeralRuns(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/ephemeral-runs`, undefined, query);
+  }
+
   async listAgentEvents(id, query) {
     return this._c._request("GET", `/api/agents/${id}/events`, undefined, query);
   }

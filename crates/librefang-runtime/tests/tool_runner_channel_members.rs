@@ -216,8 +216,8 @@ impl ChannelSender for RosterKernel {
             return Ok(vec![]);
         }
         Ok(vec![
-            json!({"user_id": "U001", "display_name": "Ana", "username": "ana"}),
-            json!({"user_id": "U002", "display_name": "Bo", "username": null}),
+            json!({"user_id": "U001", "display_name": "Ana", "username": "ana", "source": "observed"}),
+            json!({"user_id": "U002", "display_name": "Bo", "username": null, "source": "observed"}),
         ])
     }
 }
@@ -278,12 +278,14 @@ async fn channel_members_reads_the_current_conversation_with_no_arguments() {
     assert_eq!(body["channel"], "slack");
     assert_eq!(body["chat_id"], "C0DESIGN");
     assert_eq!(body["count"], 2);
+    assert_eq!(body["observed_count"], 2);
+    assert_eq!(body["enumerated_count"], 0);
     assert_eq!(body["members"][0]["user_id"], "U001");
     assert_eq!(body["members"][0]["display_name"], "Ana");
     assert_eq!(body["members"][1]["user_id"], "U002");
     assert!(
         body.get("note").is_none(),
-        "a populated roster carries no empty-roster note: {}",
+        "an all-observed roster needs no note: nothing here is unreachable by channel_dm: {}",
         result.content
     );
 

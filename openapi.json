@@ -1037,6 +1037,56 @@
         }
       }
     },
+    "/api/agents/{id}/ephemeral-runs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/ephemeral-runs — what this agent delegated to ephemeral workers, and what each one cost (refs #7752).",
+        "description": "An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.\nIts spend reached the parent's ledger through `usage_events.billed_agent_id`, but the *work* behind the spend had no record, so an operator watching an agent misbehave through workers had nothing to inspect.\nThis endpoint is that record.\n\nThe rollup covers the same retained rows as `runs`, not all time: the store keeps a bounded number of runs per parent so a path designed to be called cheaply and often cannot grow the table without limit.",
+        "operationId": "list_agent_ephemeral_runs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Parent agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ephemeral worker runs spawned by this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EphemeralRunsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/events": {
       "get": {
         "tags": [
@@ -14726,6 +14776,159 @@
             },
             "propertyNames": {
               "type": "string"
+            }
+          }
+        }
+      },
+      "EphemeralRunRollupView": {
+        "type": "object",
+        "description": "Aggregate across the runs retained for one parent.",
+        "required": [
+          "runs",
+          "failed",
+          "cost_usd",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EphemeralRunView": {
+        "type": "object",
+        "description": "Wire-shape for one ephemeral worker run under a parent agent (refs #7752).\n\nMirrors [`librefang_memory::EphemeralRunRow`], defined here as a `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the shape without forcing utoipa into the memory crate.",
+        "required": [
+          "id",
+          "label",
+          "worker_name",
+          "task",
+          "response",
+          "status",
+          "provider",
+          "model",
+          "iterations",
+          "tool_calls",
+          "input_tokens",
+          "output_tokens",
+          "cost_usd",
+          "latency_ms",
+          "started_at",
+          "finished_at"
+        ],
+        "properties": {
+          "agent_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent type whose template supplied the worker's persona, when one was named."
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Cost billed to the parent for this run."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the run failed, when it did."
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "label": {
+            "type": "string",
+            "description": "Caller-supplied mission label, before sanitization into a directory name."
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "response": {
+            "type": "string",
+            "description": "The worker's answer, clipped to the store's text cap. Empty for a failed run."
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`completed` or `failed`."
+          },
+          "task": {
+            "type": "string",
+            "description": "The task the parent delegated, clipped to the store's text cap."
+          },
+          "tool_calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "worker_name": {
+            "type": "string",
+            "description": "Uid-style name the worker ran under (`<label>-<8 hex>`)."
+          }
+        }
+      },
+      "EphemeralRunsResponse": {
+        "type": "object",
+        "required": [
+          "runs",
+          "rollup"
+        ],
+        "properties": {
+          "rollup": {
+            "$ref": "#/components/schemas/EphemeralRunRollupView"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EphemeralRunView"
             }
           }
         }

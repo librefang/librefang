@@ -45,11 +45,15 @@ struct OutboundMessage {
     account_id: Option<String>,
 }
 
-/// One `(channel, chat_id)` pair the tool asked the roster about.
+/// One roster read the tool performed.
+///
+/// `set` records *which* read — `"observed"` for `roster_observed_members` and `"all"` for `roster_members`.
+/// It is part of the assertion rather than incidental bookkeeping: `channel_dm` authorizing against the wider read is the #7086 escalation, and a mock that answered both reads identically would let that change land green.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RosterQuery {
     channel: String,
     chat_id: String,
+    set: &'static str,
 }
 
 struct Captures {
@@ -60,26 +64,60 @@ struct Captures {
 // --- The mock kernel -------------------------------------------------------
 
 struct RosterKernel {
-    /// `(user_id, display_name)` pairs the roster reports for any lookup.
+    /// `(user_id, display_name)` pairs the daemon has **observed speaking** here.
     /// Empty models both a DM and a group nobody has spoken in.
-    members: Vec<(String, String)>,
+    observed: Vec<(String, String)>,
+    /// `(user_id, display_name)` pairs a platform's member list named, whom the daemon has never heard from (#7086).
+    /// Present in `roster_members`, absent from `roster_observed_members` — exactly the split the real store makes with its `source` column.
+    enumerated: Vec<(String, String)>,
     sent: Arc<Mutex<Vec<OutboundMessage>>>,
     queries: Arc<Mutex<Vec<RosterQuery>>>,
 }
 
+fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+        .collect()
+}
+
 impl RosterKernel {
     fn new(members: &[(&str, &str)]) -> (Self, Captures) {
+        Self::with_enumerated(members, &[])
+    }
+
+    fn with_enumerated(observed: &[(&str, &str)], enumerated: &[(&str, &str)]) -> (Self, Captures) {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let queries = Arc::new(Mutex::new(Vec::new()));
         let kernel = Self {
-            members: members
-                .iter()
-                .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
-                .collect(),
+            observed: owned_pairs(observed),
+            enumerated: owned_pairs(enumerated),
             sent: Arc::clone(&sent),
             queries: Arc::clone(&queries),
         };
         (kernel, Captures { sent, queries })
+    }
+
+    fn as_rows(pairs: &[(String, String)], source: &str) -> Vec<serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(user_id, display_name)| {
+                json!({
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": null,
+                    "source": source,
+                })
+            })
+            .collect()
+    }
+
+    fn record(&self, channel: &str, chat_id: &str, set: &'static str) {
+        self.queries.lock().unwrap().push(RosterQuery {
+            channel: channel.to_string(),
+            chat_id: chat_id.to_string(),
+            set,
+        });
     }
 }
 
@@ -108,17 +146,19 @@ impl ChannelSender for RosterKernel {
         channel: &str,
         chat_id: &str,
     ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
-        self.queries.lock().unwrap().push(RosterQuery {
-            channel: channel.to_string(),
-            chat_id: chat_id.to_string(),
-        });
-        Ok(self
-            .members
-            .iter()
-            .map(|(user_id, display_name)| {
-                json!({"user_id": user_id, "display_name": display_name, "username": null})
-            })
-            .collect())
+        self.record(channel, chat_id, "all");
+        let mut rows = Self::as_rows(&self.observed, "observed");
+        rows.extend(Self::as_rows(&self.enumerated, "enumerated"));
+        Ok(rows)
+    }
+
+    fn roster_observed_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
+        self.record(channel, chat_id, "observed");
+        Ok(Self::as_rows(&self.observed, "observed"))
     }
 }
 
@@ -393,6 +433,7 @@ async fn channel_dm_reaches_only_the_named_member() {
         vec![RosterQuery {
             channel: "slack".to_string(),
             chat_id: "C0DESIGN".to_string(),
+            set: "observed",
         }]
     );
 }
@@ -418,6 +459,97 @@ async fn channel_dm_refuses_a_platform_id_that_is_not_in_this_conversation() {
     assert!(
         caps.sent.lock().unwrap().is_empty(),
         "a refused recipient must produce no send at all"
+    );
+}
+
+// The #7086 security boundary, and the reason bulk enumeration is not simply
+// poured into the roster.
+//
+// `channel_members` may report everyone Slack lists in the channel. `channel_dm`
+// may address only the subset that has actually spoken here. Bulk-filling the
+// observational rows — the obvious way to answer "who is in this channel?" —
+// would have widened the authorization set from "people this agent has
+// interacted with" to "everyone the workspace lists", handing the agent a DM
+// channel to strangers.
+//
+// This test is the negative control for that. `U7` is enumerated and has never
+// spoken; the mock returns it from `roster_members` and withholds it from
+// `roster_observed_members`, exactly as the store's `AND source = 'observed'`
+// predicate does. Point `tool_channel_dm` at the wider read and the send
+// succeeds and this fails.
+#[tokio::test]
+async fn channel_dm_refuses_an_enumerated_member_who_has_never_spoken() {
+    let (kernel, caps) = RosterKernel::with_enumerated(&[("U1", "Ana")], &[("U7", "Never Spoken")]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = turn_ctx(&kernel, Some("slack"), Some("C0DESIGN"), Some("U1"), None);
+    let input = json!({"user_id": "U7", "message": "psst"});
+    let result = execute_tool_raw("t1", "channel_dm", &input, &ctx).await;
+
+    assert!(
+        result.is_error,
+        "an enumerated-but-never-observed member must be refused: {}",
+        result.content
+    );
+    assert!(
+        caps.sent.lock().unwrap().is_empty(),
+        "no send may leave the daemon for an unauthorized recipient"
+    );
+    assert!(
+        result.content.contains("enumerated"),
+        "the refusal must name the classification so the model can pick a reachable member instead: {}",
+        result.content
+    );
+
+    // The authorization read itself must be the narrow one. Asserting only on
+    // the refusal would still pass if the tool asked for every member and
+    // filtered afterwards — a filter a later refactor can drop without any test
+    // noticing.
+    assert_eq!(
+        *caps.queries.lock().unwrap(),
+        vec![RosterQuery {
+            channel: "slack".to_string(),
+            chat_id: "C0DESIGN".to_string(),
+            set: "observed",
+        }],
+        "channel_dm must authorize against roster_observed_members, never roster_members"
+    );
+}
+
+// The other half of the same boundary: enumeration widens what can be
+// *reported*, and `channel_members` is where that widening is supposed to show
+// up. Reporting only the observed set would make bulk enumeration pointless;
+// reporting it without the `source` marker would leave the model unable to tell
+// who it can actually reach.
+#[tokio::test]
+async fn channel_members_reports_enumerated_members_and_marks_them() {
+    let (kernel, _caps) =
+        RosterKernel::with_enumerated(&[("U1", "Ana")], &[("U7", "Never Spoken")]);
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = turn_ctx(&kernel, Some("slack"), Some("C0DESIGN"), Some("U1"), None);
+    let result = execute_tool_raw("t1", "channel_members", &json!({}), &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "channel_members failed: {}",
+        result.content
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(parsed["count"], 2);
+    assert_eq!(parsed["observed_count"], 1);
+    assert_eq!(parsed["enumerated_count"], 1);
+    assert_eq!(parsed["members"][0]["user_id"], "U1");
+    assert_eq!(parsed["members"][0]["source"], "observed");
+    assert_eq!(parsed["members"][1]["user_id"], "U7");
+    assert_eq!(parsed["members"][1]["source"], "enumerated");
+    assert!(
+        parsed["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("channel_dm"),
+        "a mixed roster must say which members channel_dm will refuse: {}",
+        result.content
     );
 }
 
@@ -521,6 +653,7 @@ async fn channel_dm_strips_the_whatsapp_channel_suffix() {
         vec![RosterQuery {
             channel: "whatsapp".to_string(),
             chat_id: "123@g.us".to_string(),
+            set: "observed",
         }]
     );
     let sent = caps.sent.lock().unwrap();

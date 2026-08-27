@@ -1100,6 +1100,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map_err(|error| error.to_string())
     }
 
+    async fn roster_upsert_enumerated(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.kernel
+            .memory_substrate()
+            .roster()
+            .upsert_enumerated(channel, chat_id, user_id, display_name, username)
+            .map_err(|error| error.to_string())
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();

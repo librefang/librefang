@@ -16787,6 +16787,124 @@ impl librefang_runtime::hooks::HookHandler for MissionObserver {
     }
 }
 
+/// A finished ephemeral run leaves a record filed under the agent that spawned it (#7752).
+///
+/// The three properties in one test, because they are the same claim seen from three sides:
+///
+/// - the run is **reachable** under its parent, which it was not before — a worker vanished completely, so "what did this agent delegate, and what did it cost" had no answer at all;
+/// - the mission workspace is still **gone**, because a run record and a surviving workspace are different things and #7723's guarantee is not being traded away to get the first one;
+/// - an agent that spawned nothing is **untouched**, so the table cannot attribute one agent's workers to another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_ephemeral_run_is_recorded_under_its_parent() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-record");
+    let parent = register_test_agent(&kernel, "record-parent");
+    let bystander = register_test_agent(&kernel, "record-bystander");
+
+    // The stub driver's refusal is recovered by the agent loop into an ordinary response, so this reaches the completion path.
+    // Whether it returns Ok or Err, a record must exist either way — that is the point.
+    let _ = kernel
+        .spawn_ephemeral_worker(ephemeral_request(parent))
+        .await;
+
+    let runs = kernel
+        .ephemeral_runs_for_agent(parent, 50)
+        .expect("run records are readable");
+    assert_eq!(
+        runs.len(),
+        1,
+        "one ephemeral spawn must leave exactly one run record under its parent"
+    );
+    let run = &runs[0];
+    assert_eq!(run.parent_agent_id, parent.0.to_string());
+    assert_eq!(run.label, "mission");
+    assert!(
+        run.worker_name.starts_with("mission-"),
+        "the record must name the uid the worker ran under, got {}",
+        run.worker_name
+    );
+    assert_eq!(
+        run.task, "do the thing",
+        "the record must say what was delegated"
+    );
+
+    // The workspace is a separate guarantee and it still holds.
+    // Persisting a run record is not the same as keeping the worker's scratch directory, and #7723 says the directory goes.
+    assert!(
+        transient_entries(&kernel).is_empty(),
+        "a recorded run must not keep its mission workspace alive, found: {:?}",
+        transient_entries(&kernel)
+    );
+
+    // A parent that spawned nothing sees nothing, and in particular does not see the other parent's worker.
+    assert!(
+        kernel
+            .ephemeral_runs_for_agent(bystander, 50)
+            .expect("an agent with no runs is an ordinary answer, not an error")
+            .is_empty(),
+        "an agent that spawned no workers must have no run records"
+    );
+
+    kernel.shutdown();
+}
+
+/// The run record names the parent, exactly as the usage row does (#7752, #7714).
+///
+/// The ledger already bills a worker's spend to `billed_agent_id = parent`.
+/// If the run record disagreed about the owner, the two views of one run would answer "whose was this" differently, which is the orphan problem the record exists to end, moved one table over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_record_and_its_usage_row_agree_on_the_owner() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-owner");
+    let parent = register_test_agent(&kernel, "owner-parent");
+
+    let _ = kernel
+        .spawn_ephemeral_worker(ephemeral_request(parent))
+        .await;
+
+    let runs = kernel.ephemeral_runs_for_agent(parent, 50).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].parent_agent_id,
+        parent.0.to_string(),
+        "the run record must name the parent, not a throwaway id"
+    );
+
+    let rollup = kernel.ephemeral_run_rollup_for_agent(parent).unwrap();
+    assert_eq!(rollup.runs, 1, "the rollup must count the run it recorded");
+
+    kernel.shutdown();
+}
+
+/// Deleting the parent takes its run records with it — no orphans by construction (#7752).
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_parent_removes_its_ephemeral_run_records() {
+    let (_tmp, kernel) = boot_kernel_for_ephemeral_tests("eph-cascade");
+    let parent = register_test_agent(&kernel, "cascade-parent");
+
+    let _ = kernel
+        .spawn_ephemeral_worker(ephemeral_request(parent))
+        .await;
+    assert_eq!(
+        kernel.ephemeral_runs_for_agent(parent, 50).unwrap().len(),
+        1
+    );
+
+    kernel
+        .memory
+        .substrate
+        .remove_agent(parent)
+        .expect("removing an agent cascades its owned rows");
+
+    assert!(
+        kernel
+            .ephemeral_runs_for_agent(parent, 50)
+            .unwrap()
+            .is_empty(),
+        "a deleted agent's ephemeral run records must not outlive it"
+    );
+
+    kernel.shutdown();
+}
+
 /// The mission folder exists while the worker runs and is gone once it stops.
 ///
 /// This is #7723's acceptance criterion — "folder exists during the run and is
@@ -16939,6 +17057,15 @@ async fn a_failed_run_leaves_no_mission_workspace_behind() {
         transient_entries(&kernel).is_empty(),
         "a failed run must leave the transient root empty, found: {:?}",
         transient_entries(&kernel)
+    );
+
+    // …and no run record either (#7752).
+    // This failure is driver resolution, which happens before `run_agent_loop` is entered, so no turn ran and there is nothing to report a cost or an answer for.
+    // That is the line the record draws: a run record exists exactly when a run actually started.
+    // A failure *inside* the loop does leave a record, marked `failed`.
+    assert!(
+        kernel.ephemeral_runs_for_agent(id, 50).unwrap().is_empty(),
+        "a refusal before the agent loop ran must not fabricate a run record"
     );
 
     kernel.shutdown();
