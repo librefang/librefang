@@ -29,9 +29,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-// `rand_core` is not a direct workspace dep; `argon2` (already a dependency of
-// `librefang-api`) re-exports the same `OsRng` the `rsa` crate's
-// `CryptoRngCore` bound wants. Same trick as `oauth_sub_required_test.rs`.
+// `rand_core` is not a direct workspace dep; `argon2` (already a dependency of `librefang-api`) re-exports the same `OsRng` the `rsa` crate's `CryptoRngCore` bound wants.
+// Same trick as `oauth_sub_required_test.rs`.
 use argon2::password_hash::rand_core::OsRng;
 
 // ─── JWKS harness ───────────────────────────────────────────────────────
@@ -75,8 +74,7 @@ fn generate_test_key(kid: &str) -> TestKey {
     }
 }
 
-/// Serve the JWKS from a local listener so `validate_jwt_cached` runs its real
-/// fetch + RS256 verification path without a live identity provider.
+/// Serve the JWKS from a local listener so `validate_jwt_cached` runs its real fetch + RS256 verification path without a live identity provider.
 async fn spawn_jwks_server(jwks_body: String) -> (String, tokio::task::JoinHandle<()>) {
     async fn jwks_handler(State(body): State<Arc<String>>) -> impl IntoResponse {
         ([("content-type", "application/json")], (*body).clone())
@@ -143,10 +141,10 @@ async fn boot(
     audience: &str,
     require_email_verified: bool,
 ) -> (RouterHarness, TestKey) {
-    // `external_auth.enabled = true` makes the kernel require a well-formed
-    // `LIBREFANG_STATE_SECRET` at boot. 32 zero bytes, base64. Only ever set,
-    // never cleared, and valid for any concurrent boot, so parallel tests in
-    // this binary are unaffected. These tests never exercise the state HMAC.
+    // `external_auth.enabled = true` makes the kernel require a well-formed `LIBREFANG_STATE_SECRET` at boot.
+    // 32 zero bytes, base64.
+    // Only ever set, never cleared, and valid for any concurrent boot, so parallel tests in this binary are unaffected.
+    // These tests never exercise the state HMAC.
     std::env::set_var(
         "LIBREFANG_STATE_SECRET",
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -175,9 +173,7 @@ async fn boot(
                 userinfo_url: String::new(),
                 jwks_uri,
                 // Empty when the test is pinning the audience-unbound refusal.
-                // `resolve_single_provider` falls back to `client_id` when
-                // `audience` is unset, so a provider is only genuinely unbound
-                // when neither is configured.
+                // `resolve_single_provider` falls back to `client_id` when `audience` is unset, so a provider is only genuinely unbound when neither is configured.
                 client_id: audience.into(),
                 client_secret_env: "LIBREFANG_OIDC_ROLE_TEST_SECRET_DOES_NOT_EXIST".into(),
                 redirect_url: "http://127.0.0.1:4545/api/auth/callback".into(),

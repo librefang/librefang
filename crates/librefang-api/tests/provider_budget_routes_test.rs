@@ -261,6 +261,31 @@ async fn provider_put_partial_body_keeps_prior_values() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn concurrent_provider_patches_preserve_both_updates() {
+    let h = boot().await;
+    let hourly = request(
+        &h,
+        Method::PUT,
+        "/api/budget/providers/openai",
+        Some(serde_json::json!({"max_cost_per_hour_usd": 8.0})),
+    );
+    let daily = request(
+        &h,
+        Method::PUT,
+        "/api/budget/providers/openai",
+        Some(serde_json::json!({"max_cost_per_day_usd": 80.0})),
+    );
+    let ((hourly_status, hourly_body), (daily_status, daily_body)) = tokio::join!(hourly, daily);
+    assert_eq!(hourly_status, StatusCode::OK, "{hourly_body:?}");
+    assert_eq!(daily_status, StatusCode::OK, "{daily_body:?}");
+
+    let live = h.state.kernel.budget_config();
+    let openai = live.providers.get("openai").unwrap();
+    assert_eq!(openai.max_cost_per_hour_usd, 8.0);
+    assert_eq!(openai.max_cost_per_day_usd, 80.0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn provider_put_rejects_negative_or_nan_caps() {
     let h = boot().await;
     for bad in [
