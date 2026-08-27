@@ -306,6 +306,8 @@ image_description = true
 audio_transcription = true
 video_description = false
 max_concurrency = 2
+transcription_timeout_secs = 60
+ffmpeg_timeout_secs = 30
 # image_provider = "openai"   # 省略则自动检测
 # audio_provider = "openai"   # 省略则自动检测
 ```
@@ -316,6 +318,8 @@ max_concurrency = 2
 | `audio_transcription` | bool | `true` | 启用对传入音频附件的自动转录。 |
 | `video_description` | bool | `false` | 启用视频描述。默认禁用（耗费大且速度慢）。 |
 | `max_concurrency` | usize | `2` | 并发媒体处理任务的最大数量。 |
+| `transcription_timeout_secs` | u64 | `60` | 单次音频转录提供商请求的超时时间（秒）。修改后需要重启守护进程。 |
+| `ffmpeg_timeout_secs` | u64 | `30` | 单次 ffmpeg 子进程的超时时间（秒）。修改后需要重启守护进程。 |
 | `image_provider` | string 或 null | `null` | 首选的图片描述提供商。为 `null` 时根据可用提供商自动检测。 |
 | `audio_provider` | string 或 null | `null` | 首选的音频转录提供商。为 `null` 时根据可用提供商自动检测。 |
 | `audio_model` | string 或 null | `null` | 首选的音频转录模型。为 `null` 时使用提供商的默认模型。 |
@@ -980,4 +984,3 @@ shell_allowlist = ["git", "cargo", "npm"]
 | `[a2a]` | A2A 协议监听路径 + 跨实例鉴权的可信发行者列表。 | 联邦多个 LibreFang 实例时设置。 |
 | `[pairing]` | 设备配对 TTL 与主开关。 | 单用户场景禁掉。 |
 | `[exec_policy]` | 全局默认 shell/exec 允许列表;`agent.toml` 里的 per-agent `[exec_policy]` 覆盖给那个 agent。 | 锁死 daemon 默认,选择性给可信 agent 更宽访问。 |
-

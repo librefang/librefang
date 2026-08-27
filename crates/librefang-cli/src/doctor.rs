@@ -101,6 +101,10 @@ impl AuditResult {
 pub struct AuditContext {
     /// `~/.librefang/` (or `$LIBREFANG_HOME`).
     pub librefang_home: PathBuf,
+    /// The `config.toml` the daemon would load, resolved once by the caller.
+    ///
+    /// Carried rather than recomputed as `librefang_home.join("config.toml")` so a doctor run under `LIBREFANG_CONFIG_PATH` inspects the file the daemon reads instead of an unrelated path that happens to sit in the home directory (#6695).
+    pub config_path: PathBuf,
 }
 
 pub trait AuditCheck {
@@ -193,7 +197,7 @@ pub struct ApiListenAddrCheck;
 impl AuditCheck for ApiListenAddrCheck {
     fn run(&self, ctx: &AuditContext) -> AuditResult {
         const NAME: &str = "api_listen_addr";
-        let config_path = ctx.librefang_home.join("config.toml");
+        let config_path = ctx.config_path.clone();
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(s) => s,
             Err(_) => {
@@ -270,7 +274,7 @@ pub struct ConfigTomlSchemaCheck;
 impl AuditCheck for ConfigTomlSchemaCheck {
     fn run(&self, ctx: &AuditContext) -> AuditResult {
         const NAME: &str = "config_toml_schema";
-        let path = ctx.librefang_home.join("config.toml");
+        let path = ctx.config_path.clone();
         if !path.exists() {
             return AuditResult::warn(
                 NAME,
@@ -862,6 +866,7 @@ mod tests {
 
     fn ctx_with_home(home: PathBuf) -> AuditContext {
         AuditContext {
+            config_path: home.join("config.toml"),
             librefang_home: home,
         }
     }

@@ -1,85 +1,139 @@
 name: Issue-PR Link Labels
 
 # When a PR is opened/edited that references an issue (via "Closes #N",
-# "Fixes #N", etc.), add "has-pr" to the issue. When the PR is merged,
-# close the issue (GitHub does this natively, but we also clean up the label).
-# When the PR is closed without merge, remove "has-pr" from the issue.
+# "Fixes #N", etc.), reconcile "has-pr" against every open PR. Merge,
+# close, reopen, and body edits all use the same source-of-truth scan.
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/issue-pr-links.js'
+      - '.github/scripts/tests/issue-pr-links.test.js'
+      - '.github/workflows/issue-pr-link.yml'
   pull_request_target:
     types: [opened, edited, closed, reopened]
 
 permissions:
-  issues: write
-  pull-requests: read
+  contents: read
+
+# Each run re-derives the linked-issue set from the PR body and the PR's current open/closed state, so the newest run converges on the correct `has-pr` labels whatever a cancelled predecessor had applied so far.
+# `pull_request_target` reports `github.ref` as the base branch for every PR, so the group keys on the PR number to stay collision-free across PRs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  link:
+  test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test issue link parser and API error handling
+        run: node .github/scripts/tests/issue-pr-links.test.js
+
+  link:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    concurrency:
+      group: issue-pr-link-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
       - name: Sync has-pr label on linked issues
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
+            const { collectReconciliationState, getIssueOrNull } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/issue-pr-links.js`,
+            );
             const LABEL = 'has-pr';
-            const pr = context.payload.pull_request;
-
-            // Extract issue numbers from PR body ("Closes #N", "Fixes #N", etc.)
-            const body = pr.body || '';
-            const pattern = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
-            const issueNumbers = new Set();
-            let match;
-            while ((match = pattern.exec(body)) !== null) {
-              issueNumbers.add(parseInt(match[1], 10));
-            }
+            const eventPr = context.payload.pull_request;
+            // Queued workflow jobs can execute after a newer body edit or
+            // reopen/close event. Re-read the PR so an older webhook payload
+            // cannot overwrite the latest link state when it runs last.
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: eventPr.number,
+            });
+            // Reconcile the full repository state. GitHub concurrency keeps at
+            // most one pending run, so a later event can replace an intermediate
+            // edit even with cancel-in-progress disabled. Scanning every open PR
+            // and every currently labeled issue makes the latest run sufficient.
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const labeledItems = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: LABEL,
+              state: 'all',
+              per_page: 100,
+            });
+            const { issueNumbers, linkedIssueNumbers } = collectReconciliationState(
+              openPrs,
+              labeledItems,
+              context.repo,
+              pr,
+            );
+            const labeledIssues = new Map(
+              labeledItems
+                .filter(item => !item.pull_request)
+                .map(item => [item.number, item]),
+            );
 
             if (issueNumbers.size === 0) {
-              core.info('No linked issues found in PR body');
+              core.info('No linked or labeled issues found');
               return;
             }
 
             for (const num of issueNumbers) {
-              try {
-                const { data: issue } = await github.rest.issues.get({
+              // Reuse the labeled-issue snapshot. Only newly linked targets
+              // need an individual lookup, keeping steady-state API use small.
+              const issue = labeledIssues.get(num) ||
+                await getIssueOrNull(github, context.repo, num);
+              if (!issue) {
+                core.info(`Issue #${num}: not found, skipping`);
+                continue;
+              }
+              if (issue.pull_request) {
+                core.info(`#${num}: linked target is a PR, skipping`);
+                continue;
+              }
+              const labels = issue.labels.map(l => l.name);
+              const hasLabel = labels.includes(LABEL);
+              const shouldHaveLabel = issue.state === 'open' && linkedIssueNumbers.has(num);
+
+              if (shouldHaveLabel && !hasLabel) {
+                await github.rest.issues.addLabels({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: num,
+                  labels: [LABEL],
                 });
-                const labels = issue.labels.map(l => l.name);
-                const hasLabel = labels.includes(LABEL);
-
-                if (pr.state === 'open' && !hasLabel) {
-                  await github.rest.issues.addLabels({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: num,
-                    labels: [LABEL],
-                  });
-                  core.info(`Issue #${num}: added "${LABEL}"`);
-                } else if (pr.state === 'closed' && !pr.merged && hasLabel) {
-                  // PR closed without merge — check if any other open PR links this issue
-                  const prs = await github.paginate(github.rest.pulls.list, {
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    state: 'open',
-                    per_page: 100,
-                  });
-                  const otherLinked = prs.some(p => {
-                    const b = p.body || '';
-                    const re = new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${num}\\b`, 'i');
-                    return re.test(b);
-                  });
-                  if (!otherLinked) {
-                    await github.rest.issues.removeLabel({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
-                      issue_number: num,
-                      name: LABEL,
-                    }).catch(() => {});
-                    core.info(`Issue #${num}: removed "${LABEL}" (PR closed without merge)`);
-                  }
-                }
-              } catch (e) {
-                core.warning(`Issue #${num}: ${e.message}`);
+                core.info(`Issue #${num}: added "${LABEL}"`);
+              } else if (!shouldHaveLabel && hasLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  name: LABEL,
+                });
+                core.info(`Issue #${num}: removed "${LABEL}" (no open linked PR)`);
               }
             }

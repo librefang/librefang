@@ -293,7 +293,7 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
 }
 
 fn load_language_from_config() -> Option<String> {
-    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let config_path = librefang_kernel::config::default_config_path();
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("language")?.as_str().map(|s| s.to_string())
@@ -303,7 +303,7 @@ fn load_language_from_config() -> Option<String> {
 /// Returns the configured level (e.g. "debug", "warn") or falls back to "info".
 fn load_log_level_from_config() -> String {
     let level = (|| -> Option<String> {
-        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let config_path = librefang_kernel::config::default_config_path();
         let content = std::fs::read_to_string(&config_path).ok()?;
         let config: toml::Value = toml::from_str(&content).ok()?;
         config.get("log_level")?.as_str().map(|s| s.to_string())
@@ -314,7 +314,7 @@ fn load_log_level_from_config() -> String {
 /// Load just the `log_dir` field from config.toml without fully deserializing.
 /// Returns the configured custom log directory, or `None` to use the default.
 fn load_log_dir_from_config() -> Option<PathBuf> {
-    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let config_path = librefang_kernel::config::default_config_path();
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("log_dir")?.as_str().map(PathBuf::from)
@@ -629,6 +629,7 @@ fn main() {
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
             SecurityCommands::Verify => cmd_security_verify(),
             SecurityCommands::AuditReset { confirm } => cmd_audit_reset(cli.config, confirm),
+            SecurityCommands::AuditReanchor { confirm } => cmd_audit_reanchor(cli.config, confirm),
         },
         Some(Commands::Memory(sub)) => match sub {
             MemoryCommands::List { agent, json } => cmd_memory_list(&agent, json),
@@ -640,6 +641,19 @@ fn main() {
             DevicesCommands::List { json } => cmd_devices_list(json),
             DevicesCommands::Pair => cmd_devices_pair(),
             DevicesCommands::Remove { id } => cmd_devices_remove(&id),
+        },
+        Some(Commands::Group(sub)) => match sub {
+            GroupCommands::List { json } => cmd_group_list(json),
+            GroupCommands::Show { name, json } => cmd_group_show(&name, json),
+            GroupCommands::Create {
+                name,
+                description,
+                roles,
+            } => cmd_group_create(&name, description.as_deref(), &roles),
+            GroupCommands::Delete { name } => cmd_group_delete(&name),
+            GroupCommands::AddMember { group, user } => cmd_group_member(&group, &user, true),
+            GroupCommands::RemoveMember { group, user } => cmd_group_member(&group, &user, false),
+            GroupCommands::Of { user, json } => cmd_group_of(&user, json),
         },
         Some(Commands::Qr) => cmd_devices_pair(),
         Some(Commands::Webhooks(sub)) => match sub {
@@ -661,7 +675,8 @@ fn main() {
             text,
             json,
             incognito,
-        }) => cmd_message(&agent, &text, json, incognito),
+            session_id,
+        }) => cmd_message(&agent, &text, json, incognito, session_id.as_deref()),
         Some(Commands::System(sub)) => match sub {
             SystemCommands::Info { json } => cmd_system_info(json),
             SystemCommands::Version { json } => cmd_system_version(json),

@@ -207,7 +207,9 @@ async fn test_cron_defaults_return_errors() {
     // can match on the variant directly instead of substring-grepping on
     // the formatted message (#3541). Display still includes
     // "Cron scheduler not available" for log-output continuity.
-    let result = handle.cron_create("agent", serde_json::json!({})).await;
+    let result = handle
+        .cron_create("agent", serde_json::json!({}), None)
+        .await;
     match result {
         Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_create: expected Unavailable, got {other:?}"),
@@ -275,5 +277,29 @@ fn test_wiki_access_defaults_return_unavailable_with_method_name() {
     match handle.wiki_write("any", "body", serde_json::json!({}), false) {
         Err(KernelOpError::Unavailable(c)) if c == "wiki_write" => {}
         other => panic!("wiki_write: expected Unavailable(\"wiki_write\"), got {other:?}"),
+    }
+}
+
+/// `spawn_ephemeral`'s default impl must refuse by name (#6699).
+///
+/// A kernel that has not wired the ephemeral spawn engine has no mission workspace, no budget attribution and no depth counter, so answering with anything other than a refusal would hand the caller a worker that none of the feature's guarantees apply to.
+/// Naming the capability in the error is what lets a tool layer tell the model *which* entry point was missing rather than reporting a generic failure.
+#[tokio::test]
+async fn test_spawn_ephemeral_default_returns_unavailable_with_method_name() {
+    use librefang_kernel_handle::KernelOpError;
+    use librefang_types::ephemeral::EphemeralSpawnRequest;
+
+    let handle = NoopKernelHandle;
+    let request = EphemeralSpawnRequest::new(
+        librefang_types::agent::AgentId::new(),
+        "research",
+        "find the thing",
+    );
+
+    match handle.spawn_ephemeral(request).await {
+        Err(KernelOpError::Unavailable(c)) if c == "spawn_ephemeral" => {}
+        other => {
+            panic!("spawn_ephemeral: expected Unavailable(\"spawn_ephemeral\"), got {other:?}")
+        }
     }
 }

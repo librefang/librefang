@@ -132,7 +132,7 @@ export interface MediaVideoResult {
 }
 
 export interface MediaVideoStatus {
-  status: string;
+  status: "submitted" | "pending" | "queued" | "processing" | "completed" | "failed";
   task_id?: string;
   result?: MediaVideoResult;
   error?: string;
@@ -178,6 +178,9 @@ export interface ChannelItem {
   /** Set on an unconfigured sidecar row when `--describe` failed at daemon boot and there is no static fallback — i.e. `fields` is empty and the configure form would otherwise be a blank drawer.
    *  Carries the actionable reason (typically: the Python sidecar SDK is not installed), surfaced in the configure form so the operator knows why the form is empty and how to fix it. */
   schema_error?: string;
+  /** `librefang-sdk` version the sidecar adapter reported on `--describe`, absent when it reported none (an SDK too old to carry the field, or a failed describe).
+   *  `--describe` resolves the same interpreter and PYTHONPATH as the eventual spawn, so this is the SDK that will actually serve traffic — the thing #7140 had no way to see short of shelling into the host. */
+  sdk_version?: string;
   /** Read-only TOML snippet the operator can copy into config.toml
    *  if they prefer hand-editing over the configure drawer. Emitted
    *  by the backend on every row. */
@@ -373,7 +376,12 @@ export interface AgentItem {
   /** Raw serde field from `AgentEntry::parent` — present on endpoints that
    *  serialize the kernel struct directly. */
   parent?: string | null;
-  /** UUIDs of child agents spawned by this agent (fork tree). */
+  /** Disambiguates a null `parent_agent_id` (#7930).
+   *  `false` means the agent genuinely has no parent; `true` means the row predates the schema that started persisting lineage, so its parent was never recorded and is unrecoverable.
+   *  Render the latter as unknown, not as a root agent. */
+  parent_unknown?: boolean;
+  /** UUIDs of child agents spawned by this agent (fork tree).
+   *  Derived server-side from the stored parent links rather than persisted, so it cannot drift out of step with `parent_agent_id`. */
   children?: string[];
   /** Active session UUID. */
   session_id?: string;
@@ -594,6 +602,12 @@ export interface WorkflowStep {
   timeout_secs?: number;
   inherit_context?: boolean;
   depends_on?: string[];
+  /** Per-step `SessionMode` override. `null` / absent defers to the target
+   *  agent's manifest, which is how the API serializes an unset value. */
+  session_mode?: "persistent" | "new" | null;
+  /** Skill names the step's resolved agent must be able to use (#7721).
+   *  Empty when the step requires nothing; the API sorts and de-duplicates the list on persist. */
+  required_skills?: string[];
 }
 
 export interface WorkflowLastRunSummary {
@@ -909,6 +923,7 @@ export interface MemoryListResponse {
 
 export interface MemoryStatsResponse {
   total?: number;
+  by_agent?: Record<string, number>;
   user_count?: number;
   session_count?: number;
   agent_count?: number;
@@ -1178,6 +1193,23 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+const AUTHENTICATED_IMAGE_PATH_RE = /^\/api\/(?:uploads|media\/artifacts)\/[A-Za-z0-9_-]+$/;
+
+export function isAuthenticatedImagePath(path: string): boolean {
+  return AUTHENTICATED_IMAGE_PATH_RE.test(path);
+}
+
+export async function fetchAuthenticatedImage(path: string, signal?: AbortSignal): Promise<Blob> {
+  if (!isAuthenticatedImagePath(path)) {
+    throw new Error("Authenticated image path is not allowed");
+  }
+  const response = await fetch(path, { headers: buildHeaders(), signal });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return response.blob();
+}
+
 async function post<T>(
   path: string,
   body: unknown,
@@ -1339,6 +1371,13 @@ export interface AgentDetail {
   tools_disabled?: boolean;
   /** `agent.toml: skills_disabled` — hard off switch for every skill. */
   skills_disabled?: boolean;
+  /** Declared skills the daemon's registry does not have (#7713).
+   *  The manifest keeps the name; it activates on the next skills reload. */
+  pending_skills?: string[];
+  /** Declared MCP servers with no live connection (#7713).
+   *  Derived from the live connection pool, not the configured server list, so a
+   *  server that is configured here and unreachable is listed rather than hidden. */
+  pending_mcp_servers?: string[];
   /** Human-readable schedule summary derived from manifest.schedule:
    *  'manual' for reactive, the cron expression, 'proactive', or
    *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
@@ -1555,10 +1594,37 @@ export interface AgentSkillsResponse {
   available: string[];
   mode: "all" | "allowlist" | "none";
   disabled: boolean;
+  /** Assigned names the registry does not have — declared but not installed (#7713). */
+  pending?: string[];
 }
 
 export async function getAgentSkills(agentId: string): Promise<AgentSkillsResponse> {
   return get<AgentSkillsResponse>(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+}
+
+/**
+ * Per-agent MCP server assignment, returned by `GET /api/agents/{id}/mcp_servers`.
+ *
+ * - `assigned`: the manifest allowlist (`agent.toml: mcp_servers`).
+ * - `available`: server names the daemon currently has connected tools for.
+ * - `mode`: `"all"` (`["*"]`), `"allowlist"` (a pinned set), or `"none"` (empty list — no server is granted).
+ * - `pending`: assigned names with no live connection (#7713). A server that is
+ *   configured but unreachable appears here, which is the whole point: it is
+ *   indistinguishable from a healthy one in the configured server list.
+ */
+export interface AgentMcpServersResponse {
+  assigned: string[];
+  available: string[];
+  mode: "all" | "allowlist" | "none";
+  pending?: string[];
+}
+
+export async function getAgentMcpServers(
+  agentId: string,
+): Promise<AgentMcpServersResponse> {
+  return get<AgentMcpServersResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/mcp_servers`,
+  );
 }
 
 /**
@@ -1595,9 +1661,50 @@ export async function listAgents(
   return data.items ?? [];
 }
 
+/**
+ * Where a catalog row comes from, and therefore whether this API can write it.
+ *
+ * `"agent-type"` is an operator-authored document under `agent-types/` that the
+ * write verbs own. `"agent"` is a live agent's own `agent.toml`, which is listed
+ * here because it is spawnable-from but is edited through `/api/agents` — the
+ * server refuses a `PUT`/`DELETE` aimed at one, so the editor must not offer the
+ * control in the first place (#7731).
+ */
+export type AgentTypeSource = "agent-type" | "agent";
+
 export interface AgentTemplate {
   name: string;
   description: string;
+  provider: string;
+  model: string;
+  source: AgentTypeSource;
+  editable: boolean;
+}
+
+/**
+ * The flat agent-type shape, as a **patch** (#7740).
+ *
+ * Every field is optional and the server treats absent and empty as different
+ * instructions: an omitted key keeps whatever is on disk, an empty string or
+ * empty array clears it. So a partial object is a legitimate save — send only
+ * what the form actually edits and everything else on the manifest survives.
+ */
+export interface AgentTypeSpec {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  provider?: string;
+  model?: string;
+  tools?: string[];
+  skills?: string[];
+}
+
+export interface AgentTypeDetail {
+  name: string;
+  source: AgentTypeSource;
+  editable: boolean;
+  spec: AgentTypeSpec;
+  manifest_toml: string;
 }
 
 export async function listAgentTemplates(): Promise<AgentTemplate[]> {
@@ -1607,6 +1714,60 @@ export async function listAgentTemplates(): Promise<AgentTemplate[]> {
 
 export async function getAgentTemplateToml(name: string): Promise<string> {
   return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
+}
+
+export async function getAgentType(name: string): Promise<AgentTypeDetail> {
+  return get<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+export async function createAgentType(spec: AgentTypeSpec): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>("/api/templates", spec);
+}
+
+export async function updateAgentType(
+  name: string,
+  spec: AgentTypeSpec,
+): Promise<AgentTypeDetail> {
+  return put<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`, spec);
+}
+
+export async function deleteAgentType(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
+}
+
+/**
+ * One ephemeral worker run (#6699).
+ *
+ * `parent` is not a convenience field: an ephemeral worker has no registry entry,
+ * so it has no budget, no `[resources]` quota and no tool allowlist of its own.
+ * The parent supplies all three, is billed for the run, and caps the worker's
+ * tool set — the server refuses a request without one.
+ */
+export interface SpawnEphemeralRequest {
+  parent: string;
+  message: string;
+  label?: string;
+  agent_type?: string;
+  system_prompt?: string;
+  tools?: string[];
+  provider?: string;
+  model?: string;
+  max_iterations?: number;
+}
+
+/** What one ephemeral worker turn produced. The worker itself is already gone. */
+export interface SpawnEphemeralResult {
+  name: string;
+  response: string;
+  iterations: number;
+  cost_usd?: number;
+  tools: string[];
+}
+
+export async function spawnEphemeral(
+  body: SpawnEphemeralRequest,
+): Promise<SpawnEphemeralResult> {
+  return post<SpawnEphemeralResult>("/api/agents/spawn-ephemeral", body);
 }
 
 export async function deleteAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1629,11 +1790,18 @@ export interface CloneAgentPayload {
   include_tools?: boolean;
 }
 
+export interface CloneAgentResult {
+  agent_id: string;
+  name: string;
+  partial: boolean;
+  warnings: string[];
+}
+
 export async function cloneAgent(
   agentId: string,
   payload: CloneAgentPayload
-): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
+): Promise<CloneAgentResult> {
+  return post<CloneAgentResult>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
 }
 
 export async function stopAgent(agentId: string): Promise<ApiActionResponse> {
@@ -1667,6 +1835,19 @@ export async function loadAgentSession(
 export interface SessionContextResponse {
   used_tokens: number;
   max_context_tokens: number;
+  /**
+   * Which layer of the precedence chain produced `max_context_tokens` (refs #7774):
+   * `agent_override`, `model_override`, `catalog`, `session_hint` or `fallback`.
+   */
+  max_context_tokens_source: string;
+  /**
+   * True when `max_context_tokens` is the runtime's own guess rather than a fact
+   * about the model, i.e. the source is `fallback`.
+   *
+   * Render the warning off this flag rather than comparing the source string —
+   * the set of source names can grow, the meaning of "assumed" cannot.
+   */
+  max_context_tokens_assumed: boolean;
   pct: number;
   model: string;
   pressure: string;
@@ -1740,6 +1921,8 @@ export interface ModelItem {
   display_name?: string;
   provider: string;
   tier?: string;
+  // Effective (catalog ∘ operator override). `0` is the catalog's "unknown"
+  // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
   input_cost_per_m?: number;
@@ -1756,6 +1939,12 @@ export interface ModelItem {
     supports_vision?: boolean;
     supports_streaming?: boolean;
     supports_thinking?: boolean;
+  };
+  // Raw catalog capacity limits — the same "Auto = revert target" role for the
+  // limit editors. Refs #7774.
+  limits_catalog?: {
+    context_window?: number;
+    max_output_tokens?: number;
   };
   aliases?: string[];
   available?: boolean;
@@ -1813,6 +2002,13 @@ export interface ModelOverrides {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Refs #7774: operator corrections to the model's capacity limits —
+  // undefined = use the catalog value, a positive number = force it. These are
+  // facts about the model, not per-request parameters: `max_tokens` above is the
+  // output cap sent on the wire, `max_output_tokens` here is what the model can
+  // produce at most.
+  context_window?: number;
+  max_output_tokens?: number;
 }
 
 export async function getModelOverrides(modelKey: string): Promise<ModelOverrides> {
@@ -2551,6 +2747,9 @@ export interface DryRunStepPreview {
   resolved_prompt: string;
   skipped: boolean;
   skip_reason?: string;
+  /** Why the resolved agent cannot satisfy the step's `required_skills` (#7721).
+   *  Present only for a mismatch, and it is a step-level failure: the run stops here, so the dry run reports `valid: false` even though `agent_found` is true. */
+  skill_error?: string | null;
 }
 
 /** Response from the dry-run endpoint. */
@@ -2842,8 +3041,15 @@ export async function shutdownServer(): Promise<{ status: string }> {
   return post<{ status: string }>("/api/shutdown", {});
 }
 
-export async function reloadConfig(): Promise<{ status: string; restart_required?: boolean; restart_reasons?: string[] }> {
-  return post<{ status: string; restart_required?: boolean; restart_reasons?: string[] }>("/api/config/reload", {});
+export type ReloadConfigResult = {
+  status: string;
+  restart_required?: boolean;
+  restart_reasons?: string[];
+  warnings?: string[];
+};
+
+export async function reloadConfig(): Promise<ReloadConfigResult> {
+  return post<ReloadConfigResult>("/api/config/reload", {});
 }
 
 export interface HealthDetailResponse {
@@ -2946,15 +3152,52 @@ export async function getHealth(): Promise<{ status?: string }> {
 }
 
 export interface MemoryConfigResponse {
-  embedding_provider?: string;
+  embedding_provider?: string | null;
   embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
+    /** The raw setting. Empty or absent means "inherit the kernel default",
+     *  which is why it cannot be shown on its own — see the two fields
+     *  below. */
     extraction_model?: string;
+    /** The model extraction actually runs on, whether or not anyone chose
+     *  it — split out of any `provider/model` spec and with the prefix
+     *  stripped, as the daemon resolved it at boot.
+     *
+     *  `null` whenever no model runs at all: extraction switched off, an
+     *  `extractor_sidecar` doing the work, or the driver having failed to
+     *  build so extraction fell back to substring matching. Check
+     *  `extraction_llm_active` before presenting this as what is running. */
+    effective_extraction_model?: string | null;
+    /** Provider the model above is called on. `null` under the same
+     *  conditions. */
+    effective_extraction_provider?: string | null;
+    /** `"configured"` when `extraction_model` is set, `"inherited_default"`
+     *  when it fell through to `[default_model]`. */
+    extraction_model_source?: "configured" | "inherited_default" | null;
+    /** What actually extracts memories, as resolved at boot. */
+    extraction_status?:
+      | "llm"
+      | "sidecar"
+      | "degraded_substring"
+      | "inactive"
+      | "unknown";
+    /** Whether an LLM performs extraction at all. `false` for the substring
+     *  fallback after a failed driver build — memory quality is degraded and
+     *  no model is involved. */
+    extraction_llm_active?: boolean | null;
+    /** Why extraction has no LLM, naming the provider and model that failed
+     *  to build. */
+    extraction_degraded_reason?: string | null;
+    /** The out-of-process extractor command, when one is what runs. */
+    extraction_sidecar_command?: string | null;
+    /** Whether an auto-memorized memory is recallable only from the session that produced it (#7605).
+     *  `false` restores the agent-wide pool, where one visitor's turn on a shared agent can be retrieved into another visitor's turn. */
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
   /**
@@ -2971,15 +3214,16 @@ export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
 }
 
 export async function updateMemoryConfig(payload: {
-  embedding_provider?: string;
-  embedding_model?: string;
-  embedding_api_key_env?: string;
+  embedding_provider?: string | null;
+  embedding_model?: string | null;
+  embedding_api_key_env?: string | null;
   decay_rate?: number;
   proactive_memory?: {
     enabled?: boolean;
     auto_memorize?: boolean;
     auto_retrieve?: boolean;
     extraction_model?: string;
+    session_scoped_recall?: boolean;
     max_retrieve?: number;
   };
 }): Promise<MemoryConfigResponse> {
@@ -2994,6 +3238,31 @@ export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
 
 export async function getFullConfig(): Promise<Record<string, unknown>> {
   return get<Record<string, unknown>>("/api/config");
+}
+
+/**
+ * Provenance of the effective configuration — where it was loaded from, and
+ * whether this daemon will accept a write to it (#6695).
+ *
+ * `writable` is the field to branch on. It is equivalent to
+ * `mode === "mutable"`, exposed separately by the server so a client uses a
+ * boolean rather than string-matching a mode name.
+ */
+export interface ConfigStatus {
+  /** `"mutable"` or `"managed"`. Widened to `string` so an unknown future mode does not break parsing — branch on `writable`, not on this. */
+  mode: string;
+  /** Absolute path the effective configuration was loaded from. */
+  source: string;
+  /** Whether the API will accept a write. */
+  writable: boolean;
+  /** `sha256:<hex>` over the file's raw bytes, or `null` when the file does not exist. */
+  checksum?: string | null;
+  /** RFC 3339 timestamp of the file's last modification, or `null` when unavailable. */
+  modified_at?: string | null;
+}
+
+export async function getConfigStatus(): Promise<ConfigStatus> {
+  return get<ConfigStatus>("/api/config/status");
 }
 
 /* ------------------------------------------------------------------ */
@@ -3117,8 +3386,19 @@ export async function createBackup(): Promise<{ filename?: string; path?: string
   return post<{ filename?: string; path?: string; size_bytes?: number; components?: string[]; created_at?: string }>("/api/backup", {});
 }
 
-export async function restoreBackup(filename: string): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
-  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", { filename });
+// An empty component checklist means "restore everything", which the API spells
+// as an absent `components` field — it rejects `[]` rather than guess between
+// "everything" and "nothing". Dropping the field here is what keeps the
+// checklist's default state a full restore instead of a 400.
+export async function restoreBackup(
+  filename: string,
+  options?: { keepConfig?: boolean; components?: string[] },
+): Promise<{ restored_files?: number; errors?: string[]; message?: string }> {
+  return post<{ restored_files?: number; errors?: string[]; message?: string }>("/api/restore", {
+    filename,
+    keep_config: options?.keepConfig,
+    components: options?.components?.length ? options.components : undefined,
+  });
 }
 
 export async function deleteBackup(filename: string): Promise<{ deleted?: string }> {
@@ -3487,6 +3767,7 @@ export async function listMemories(params?: {
   offset?: number;
   limit?: number;
   category?: string;
+  level?: string;
 }): Promise<MemoryListResponse> {
   const offset = Number.isFinite(params?.offset) ? Math.max(0, Math.floor(params?.offset ?? 0)) : 0;
   const limit = Number.isFinite(params?.limit) ? Math.max(1, Math.floor(params?.limit ?? 20)) : 20;
@@ -3494,6 +3775,7 @@ export async function listMemories(params?: {
   query.set("offset", String(offset));
   query.set("limit", String(limit));
   if (params?.category) query.set("category", params.category);
+  if (params?.level) query.set("level", params.level);
 
   const path = params?.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}?${query.toString()}`
@@ -3504,12 +3786,14 @@ export async function listMemories(params?: {
 export async function searchMemories(params: {
   query: string;
   agentId?: string;
+  level?: string;
   limit?: number;
 }): Promise<MemoryItem[]> {
   const limit = Number.isFinite(params.limit) ? Math.max(1, Math.floor(params.limit ?? 20)) : 20;
   const query = new URLSearchParams();
   query.set("q", params.query);
   query.set("limit", String(limit));
+  if (params.level) query.set("level", params.level);
 
   const path = params.agentId
     ? `/api/memory/agents/${encodeURIComponent(params.agentId)}/search?${query.toString()}`
@@ -5003,6 +5287,88 @@ export async function importUsers(
     rows,
     dry_run: options.dryRun ?? false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// User groups (#7745)
+//
+// Shape mirrors `routes/groups.rs::GroupView` / `GroupUpsert`. Membership is
+// FLAT — a group has members and no parent or child; see the doc-comment on
+// `GroupConfig` in `librefang-types` for why.
+// ---------------------------------------------------------------------------
+
+export interface GroupItem {
+  name: string;
+  description: string;
+  members: string[];
+  roles: string[];
+  member_count: number;
+  // Members with no matching `[[users]]` entry. Not an error: membership can
+  // be synced from an external identity provider before the person has ever
+  // authenticated here. Surfaced so the UI can badge the row.
+  unknown_members: string[];
+}
+
+export interface GroupUpsertPayload {
+  name: string;
+  description?: string;
+  members?: string[];
+  roles?: string[];
+}
+
+export interface UserGroupsResult {
+  name: string;
+  groups: string[];
+  roles: string[];
+}
+
+export async function listGroups(): Promise<GroupItem[]> {
+  return get<GroupItem[]>("/api/groups");
+}
+
+export async function getGroup(name: string): Promise<GroupItem> {
+  return get<GroupItem>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function createGroup(payload: GroupUpsertPayload): Promise<GroupItem> {
+  return post<GroupItem>("/api/groups", payload);
+}
+
+export async function updateGroup(
+  originalName: string,
+  payload: GroupUpsertPayload,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(originalName)}`,
+    payload,
+  );
+}
+
+export async function deleteGroup(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function addGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+    {},
+  );
+}
+
+export async function removeGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return del<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+  );
+}
+
+export async function getUserGroups(name: string): Promise<UserGroupsResult> {
+  return get<UserGroupsResult>(`/api/users/${encodeURIComponent(name)}/groups`);
 }
 
 // ---------------------------------------------------------------------------

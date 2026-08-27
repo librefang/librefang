@@ -110,6 +110,33 @@ pub struct IdTokenClaims {
     /// Roles (from custom claims).
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Groups the identity provider asserts this user belongs to (#7746).
+    ///
+    /// The standard-ish flat spelling, emitted by Okta, Authentik, Google
+    /// Workspace and Entra (as object GUIDs rather than display names). It is a
+    /// named field rather than being left to `extra` because it is one of the
+    /// two default entries in `[external_auth] claim_paths` and typing it here
+    /// keeps the common case out of the generic path resolver.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// OAuth2 `scope`, space-delimited per RFC 6749 (#7746).
+    ///
+    /// Parsed but not consulted by default: `scope` reaches `role_map` /
+    /// `group_map` only when an operator names it in `[external_auth]
+    /// claim_paths`. See that field for why it is held to a different
+    /// standard than `roles` and `groups`.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Every other claim the token carried, kept so a dotted
+    /// `[external_auth] claim_paths` entry can address a nested one — Keycloak's
+    /// `realm_access.roles` and `resource_access.<client>.roles` have no flat
+    /// spelling and cannot be reached any other way (#7746).
+    ///
+    /// Nothing serializes `IdTokenClaims` wholesale: `auth_userinfo` and
+    /// `auth_introspect` both build their response objects field by field, so
+    /// flattening the passthrough here does not widen either response.
+    #[serde(flatten, default)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
     /// Issuer.
     #[serde(default)]
     pub iss: String,
@@ -649,11 +676,18 @@ fn build_login_redirect(provider: &ResolvedProvider) -> impl IntoResponse {
             );
             Redirect::temporary(auth_url.as_str()).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to build auth URL: {e}")})),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::error!(
+                provider = %provider.id,
+                %error,
+                "failed to build OAuth authorization URL"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to build authorization URL"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1060,7 +1094,14 @@ async fn handle_code_exchange(
                             .as_str()
                             .or(info["avatar_url"].as_str())
                             .map(|s| s.to_string()),
-                        roles: Vec::new(),
+                        // #7746: the userinfo document is the only identity
+                        // statement a pure-OAuth2 provider makes, and hardcoding
+                        // these empty meant an operator's `role_map` / `group_map`
+                        // silently never matched for exactly those providers.
+                        roles: string_list_claim(&info["roles"]),
+                        groups: string_list_claim(&info["groups"]),
+                        scope: info["scope"].as_str().map(|s| s.to_string()),
+                        extra: userinfo_passthrough(&info),
                         iss: provider.id.clone(),
                         aud: OidcAudience::Single(provider.client_id.clone()),
                         iat: None,
@@ -1582,6 +1623,15 @@ pub async fn auth_refresh(
 /// If enabled, attempts to validate the Bearer token against configured providers
 /// and injects `IdTokenClaims` into request extensions for downstream handlers.
 /// Does NOT block requests — the existing api_key middleware handles access control.
+///
+/// # The `roles` claim (#7744)
+///
+/// `IdTokenClaims` has parsed a `roles: Vec<String>` claim since the type was written, and until now every downstream handler ignored the extension entirely, so a validated claim about what the caller is allowed to do reached no authorization decision at all.
+/// This middleware now also resolves those claims through `[external_auth.role_map]` and injects a [`crate::middleware::OidcRoleGrant`] when they map to a LibreFang role.
+/// Resolution happens here rather than in [`crate::middleware::auth`] because this is the layer that holds both the validated claims and the `ResolvedProvider` the token authenticated against — the provider is what decides whether the token was audience-bound and whether its email was verified, and neither fact survives into the claims struct.
+///
+/// The grant is strictly additive. It is injected only when an operator wrote a `role_map`, and [`crate::middleware::auth`] consults it only where it was about to reject the request, so no request that succeeds today changes outcome or role.
+/// Axum runs the last-added layer first, and `server.rs` adds `middleware::auth` after this one, which is what puts the grant in extensions before the credential path looks for it.
 pub async fn oidc_auth_middleware(
     State(state): State<Arc<AppState>>,
     mut request: axum::http::Request<axum::body::Body>,
@@ -1638,6 +1688,28 @@ pub async fn oidc_auth_middleware(
                             .into_response();
                     }
                 }
+                // Resolve `[external_auth]` claim mappings before the claims are
+                // moved into extensions. See `provider_grant_gates_pass` for the
+                // two provider-level gates that have no representation in the
+                // claims struct and therefore cannot be checked downstream, and
+                // `identity_claim_values` for why one resolved set of claim
+                // values feeds both maps (#7746).
+                let claim_values =
+                    identity_claim_values(&claims, &config.claim_paths, &provider.client_id);
+                if let Some(grant) =
+                    role_grant_from_claims(&claims, provider, &config.role_map, &claim_values)
+                {
+                    request.extensions_mut().insert(grant);
+                }
+                if let Some(membership) = group_membership_from_claims(
+                    &claims,
+                    provider,
+                    &config.group_map,
+                    &kcfg.groups,
+                    &claim_values,
+                ) {
+                    request.extensions_mut().insert(membership);
+                }
                 // Inject claims into request extensions.
                 request.extensions_mut().insert(claims);
                 break;
@@ -1649,6 +1721,222 @@ pub async fn oidc_auth_middleware(
     }
 
     next.run(request).await
+}
+
+/// The two provider-level conditions a validated token must also satisfy before any of its claims become a LibreFang grant (#7744, extended to group membership in #7746).
+///
+/// Neither has a representation in [`IdTokenClaims`], which is why the check lives at the provider loop and not anywhere downstream.
+///
+/// **The provider must be audience-bound.** `validate_jwt_cached` sets `validation.validate_aud = false` when `expected_audience` is empty, so with no audience configured *any* token signed by that issuer's JWKS validates — including one minted for an unrelated OAuth client in the same tenant.
+/// That is tolerable while the claims are inert and not tolerable as a grant of privilege or membership, so an unbound provider grants nothing.
+/// `resolve_single_provider` falls back to `client_id` when `audience` is unset, so this only bites a provider configured with neither.
+///
+/// **The email must be verified when the provider requires it.** `require_email_verified` is the #3703 mitigation, and the callback route enforces it before minting anything; the middleware path never did, because it had nothing to mint.
+///
+/// Neither condition rejects the request. An unverified or audience-unbound token is simply not a credential, and the caller falls through to whatever the rest of the auth chain makes of it; turning either into a 403 here would change the outcome of requests that authenticate by some *other* means and merely happen to carry a JWT.
+fn provider_grant_gates_pass(
+    claims: &IdTokenClaims,
+    provider: &ResolvedProvider,
+    what: &'static str,
+) -> bool {
+    if provider.audience.is_empty() {
+        debug!(
+            provider = %provider.id,
+            grant = what,
+            "external_auth claim mapping is configured but this provider has no audience \
+             to bind tokens to; refusing to derive a grant from an unbound token"
+        );
+        return false;
+    }
+    if provider.require_email_verified && claims.email_verified != Some(true) {
+        debug!(
+            provider = %provider.id,
+            grant = what,
+            "refusing to derive a grant from a token whose email is unverified"
+        );
+        return false;
+    }
+    true
+}
+
+/// Every string value at `path` in `claims`, where `path` is a dotted path into the token (#7746).
+///
+/// The first segment is matched against the typed fields first (`roles`, `groups`, `scope`) and then against the flattened passthrough, so the common flat claims cost no JSON traversal and a provider that also emits them nested still resolves.
+/// A path resolving to an array contributes each string element; a path resolving to a single string contributes its whitespace-separated words, which is what makes a space-delimited `scope` work without a second config knob.
+/// Anything else — a missing key, a number, an object — contributes nothing and is not an error: providers differ in which claims they emit, and a claim this deployment does not use is the normal case.
+fn resolve_claim_path(claims: &IdTokenClaims, path: &str) -> Vec<String> {
+    let mut segments = path.split('.');
+    let Some(head) = segments.next() else {
+        return Vec::new();
+    };
+    let rest: Vec<&str> = segments.collect();
+    if rest.is_empty() {
+        match head {
+            "roles" => return claims.roles.clone(),
+            "groups" => return claims.groups.clone(),
+            "scope" => {
+                return claims
+                    .scope
+                    .as_deref()
+                    .map(|s| s.split_whitespace().map(str::to_string).collect())
+                    .unwrap_or_default()
+            }
+            _ => {}
+        }
+    }
+    let Some(mut value) = claims.extra.get(head) else {
+        return Vec::new();
+    };
+    for segment in rest {
+        match value.get(segment) {
+            Some(next) => value = next,
+            None => return Vec::new(),
+        }
+    }
+    flatten_claim_value(value)
+}
+
+/// Array of strings → its elements; single string → its whitespace-separated words; anything else → nothing.
+fn flatten_claim_value(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_string)
+            .collect(),
+        serde_json::Value::String(s) => s.split_whitespace().map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The identity attributes this token asserts, as one de-duplicated ordered set of claim values, resolved through `[external_auth] claim_paths` (#7746).
+///
+/// One vocabulary for both maps, deliberately. `[external_auth.role_map]` has always documented its key as a "role/group claim value" and only ever read `claims.roles`, so an operator who wrote a group name into it got silence; drawing both maps from the same resolved set makes the documented behaviour the real one and means an operator maps a claim value once, in whichever map confers the thing they want.
+///
+/// The literal `<client>` in a path is substituted with the provider's `client_id`, so `resource_access.<client>.roles` — Keycloak's per-client role location — is one config entry rather than one per provider.
+///
+/// `BTreeSet` so the result does not depend on claim ordering (the IdP's business, and not stable between logins) or on `claim_paths` ordering, which is the #3298 rule applied at the point where these values become a grant.
+fn identity_claim_values(
+    claims: &IdTokenClaims,
+    claim_paths: &[String],
+    client_id: &str,
+) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for path in claim_paths {
+        let path = if path.contains("<client>") {
+            path.replace("<client>", client_id)
+        } else {
+            path.clone()
+        };
+        out.extend(resolve_claim_path(claims, &path));
+    }
+    out.into_iter().collect()
+}
+
+/// Resolve a validated token's claim values into the local `[[groups]]` the caller belongs to for this request, or `None` when they belong to none (#7746).
+///
+/// Independent of [`role_grant_from_claims`] rather than a field on it, because the two grants answer different questions and an operator may want either alone: `group_map` with no `role_map` is a deployment that uses SSO identity for ownership and channel-binding roles while keeping API privilege on local keys, and it must not be silently disabled by the absence of the other map.
+///
+/// The membership is inserted into request extensions and dies with the request. Nothing writes it to `[[groups]]` — see `ExternalAuthConfig::group_map` for why persisting IdP state into operator-owned config would make a revocation unremovable rather than propagating it.
+fn group_membership_from_claims(
+    claims: &IdTokenClaims,
+    provider: &ResolvedProvider,
+    group_map: &std::collections::BTreeMap<String, String>,
+    declared: &[librefang_types::config::GroupConfig],
+    claim_values: &[String],
+) -> Option<crate::middleware::IdpGroupMembership> {
+    if group_map.is_empty() {
+        return None;
+    }
+    if !provider_grant_gates_pass(claims, provider, "group") {
+        return None;
+    }
+    let groups = librefang_kernel::auth::translate_oidc_groups(group_map, declared, claim_values);
+    if groups.is_empty() {
+        return None;
+    }
+    debug!(
+        provider = %provider.id,
+        count = groups.len(),
+        "OIDC claims resolved to local group membership via external_auth.group_map"
+    );
+    Some(crate::middleware::IdpGroupMembership { groups })
+}
+
+/// Every string in a userinfo field that is an array of strings, or the whitespace-separated words of one that is a string.
+fn string_list_claim(value: &serde_json::Value) -> Vec<String> {
+    flatten_claim_value(value)
+}
+
+/// The userinfo document minus the keys [`IdTokenClaims`] types explicitly, so `extra` carries the same passthrough set a flattened ID token would and a dotted `claim_paths` entry resolves identically on both paths.
+fn userinfo_passthrough(
+    info: &serde_json::Value,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    const TYPED: &[&str] = &[
+        "sub",
+        "email",
+        "email_verified",
+        "name",
+        "picture",
+        "roles",
+        "groups",
+        "scope",
+        "iss",
+        "aud",
+        "iat",
+        "exp",
+        "nonce",
+    ];
+    info.as_object()
+        .map(|map| {
+            map.iter()
+                .filter(|(k, _)| !TYPED.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve a validated ID token into a [`crate::middleware::OidcRoleGrant`], or `None` when the token authorizes nothing (#7744).
+///
+/// The two provider-level conditions that must also hold — audience binding and email verification — live in [`provider_grant_gates_pass`], which #7746 shares with the group-membership resolver so the two grants can never disagree about which tokens are trustworthy.
+///
+/// `claim_values` is the resolved identity-attribute set from [`identity_claim_values`], not `claims.roles`.
+/// #7906 read `roles` alone while `role_map`'s documentation described its key as a "role/group claim value", so an operator who wrote a group name into the map got silence; drawing from the resolved set makes the documented behaviour real without widening what an identity provider can assert, since every value still has to appear in a map the operator wrote.
+fn role_grant_from_claims(
+    claims: &IdTokenClaims,
+    provider: &ResolvedProvider,
+    role_map: &std::collections::BTreeMap<String, String>,
+    claim_values: &[String],
+) -> Option<crate::middleware::OidcRoleGrant> {
+    if role_map.is_empty() {
+        return None;
+    }
+    if !provider_grant_gates_pass(claims, provider, "role") {
+        return None;
+    }
+    let role = librefang_kernel::auth::translate_oidc_roles(role_map, claim_values)?;
+    // `email` is the operator-recognisable identity and the one `[[users]]`
+    // entries are normally named after; `sub` is the fallback for providers
+    // that issue no email claim. Either way the id is `UserId::from_name`, the
+    // same derivation every other credential path uses, so an OIDC caller and
+    // a declared user of the same name are one principal rather than two.
+    let name = claims
+        .email
+        .clone()
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| claims.sub.clone());
+    let user_id = librefang_types::agent::UserId::from_name(&name);
+    debug!(
+        provider = %provider.id,
+        role = %role,
+        "OIDC role claim resolved to a LibreFang role"
+    );
+    Some(crate::middleware::OidcRoleGrant {
+        name,
+        role,
+        user_id,
+    })
 }
 
 // ── Provider Resolution ─────────────────────────────────────────────────
@@ -2101,7 +2389,35 @@ fn email_domain(email: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use base64::Engine;
+
+    #[tokio::test]
+    async fn login_redirect_scrubs_authorization_url_parse_errors() {
+        let provider = ResolvedProvider {
+            id: "broken-provider".to_string(),
+            display_name: "Broken".to_string(),
+            auth_url: "https://[invalid-host".to_string(),
+            token_url: "https://idp.example/token".to_string(),
+            userinfo_url: String::new(),
+            jwks_uri: String::new(),
+            client_id: "client".to_string(),
+            client_secret_env: "TEST_SECRET".to_string(),
+            redirect_url: "https://app.example/callback".to_string(),
+            scopes: vec!["openid".to_string()],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: false,
+        };
+
+        let response = build_login_redirect(&provider).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Failed to build authorization URL"));
+        assert!(!body.contains("invalid-host"));
+        assert!(!body.contains("IPv6"));
+    }
 
     #[test]
     fn email_domain_redacts_local_part_and_handles_malformed_input() {
@@ -2781,5 +3097,166 @@ mod tests {
 
         assert!(JWKS_CACHE.inner.read().await.is_empty());
         assert!(DISCOVERY_CACHE.inner.read().await.is_empty());
+    }
+
+    // ── claim-path resolution (#7746) ───────────────────────────────────
+
+    fn claims_from(json: serde_json::Value) -> IdTokenClaims {
+        serde_json::from_value(json).expect("claims deserialize")
+    }
+
+    #[test]
+    fn flat_claim_paths_read_the_typed_fields() {
+        let claims = claims_from(serde_json::json!({
+            "sub": "s",
+            "roles": ["librefang-admins"],
+            "groups": ["platform-oncall"],
+        }));
+        assert_eq!(
+            identity_claim_values(
+                &claims,
+                &["roles".to_string(), "groups".to_string()],
+                "client-a"
+            ),
+            vec![
+                "librefang-admins".to_string(),
+                "platform-oncall".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn nested_claim_paths_reach_keycloaks_realm_and_client_roles() {
+        // The reason paths exist at all: neither of these has a flat spelling,
+        // and Keycloak is the named conformance target on #7746.
+        let claims = claims_from(serde_json::json!({
+            "sub": "s",
+            "realm_access": { "roles": ["librefang-operators"] },
+            "resource_access": {
+                "librefang": { "roles": ["workflow-author"] },
+                "some-other-client": { "roles": ["not-ours"] },
+            },
+        }));
+        let values = identity_claim_values(
+            &claims,
+            &[
+                "realm_access.roles".to_string(),
+                "resource_access.<client>.roles".to_string(),
+            ],
+            "librefang",
+        );
+        assert_eq!(
+            values,
+            vec![
+                "librefang-operators".to_string(),
+                "workflow-author".to_string()
+            ],
+        );
+        // `<client>` is substituted with *this* provider's client id, so another
+        // client's roles in the same token are not picked up.
+        assert!(!values.contains(&"not-ours".to_string()));
+    }
+
+    #[test]
+    fn scope_is_split_on_whitespace_and_only_when_asked_for() {
+        let claims = claims_from(serde_json::json!({
+            "sub": "s",
+            "scope": "openid email librefang:oncall",
+        }));
+        // Default paths do not include `scope` — see `claim_paths` for why the
+        // "what a client app was granted" assertion is held to a different
+        // standard than "who the user is".
+        assert!(identity_claim_values(
+            &claims,
+            &["roles".to_string(), "groups".to_string()],
+            "client-a"
+        )
+        .is_empty());
+        assert_eq!(
+            identity_claim_values(&claims, &["scope".to_string()], "client-a"),
+            vec![
+                "email".to_string(),
+                "librefang:oncall".to_string(),
+                "openid".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_missing_or_wrongly_shaped_claim_contributes_nothing() {
+        let claims = claims_from(serde_json::json!({
+            "sub": "s",
+            "department_id": 42,
+            "realm_access": { "roles": "single-role" },
+        }));
+        assert!(identity_claim_values(
+            &claims,
+            &[
+                "groups".to_string(),
+                "absent".to_string(),
+                "absent.nested.deeply".to_string(),
+                "department_id".to_string(),
+            ],
+            "client-a"
+        )
+        .is_empty());
+        // A single string resolves to its words, so a provider that emits one
+        // role as a bare string still works.
+        assert_eq!(
+            identity_claim_values(&claims, &["realm_access.roles".to_string()], "client-a"),
+            vec!["single-role".to_string()],
+        );
+    }
+
+    #[test]
+    fn claim_values_are_deduplicated_and_ordered_independently_of_the_token() {
+        // #3298 at the point where claims become a grant: the IdP's claim
+        // ordering is not stable between logins and must not reach anything
+        // downstream.
+        let a = claims_from(serde_json::json!({
+            "sub": "s",
+            "roles": ["zulu", "alpha"],
+            "groups": ["alpha", "mike"],
+        }));
+        let b = claims_from(serde_json::json!({
+            "sub": "s",
+            "roles": ["alpha", "zulu"],
+            "groups": ["mike", "alpha"],
+        }));
+        let paths = ["roles".to_string(), "groups".to_string()];
+        assert_eq!(
+            identity_claim_values(&a, &paths, "c"),
+            vec!["alpha".to_string(), "mike".to_string(), "zulu".to_string()],
+        );
+        assert_eq!(
+            identity_claim_values(&a, &paths, "c"),
+            identity_claim_values(&b, &paths, "c"),
+        );
+    }
+
+    #[test]
+    fn userinfo_fallback_carries_roles_groups_and_nested_claims() {
+        // Before #7746 this path hardcoded `roles: Vec::new()`, so an operator's
+        // maps silently never matched for a provider that issues no ID token.
+        let info = serde_json::json!({
+            "sub": "s",
+            "email": "a@corp.example",
+            "roles": ["librefang-admins"],
+            "groups": ["platform-oncall"],
+            "scope": "openid librefang:oncall",
+            "realm_access": { "roles": ["librefang-operators"] },
+        });
+        assert_eq!(string_list_claim(&info["roles"]), vec!["librefang-admins"]);
+        assert_eq!(string_list_claim(&info["groups"]), vec!["platform-oncall"]);
+        let passthrough = userinfo_passthrough(&info);
+        assert!(
+            passthrough.contains_key("realm_access"),
+            "a nested claim must survive into `extra` so a dotted claim path resolves on the userinfo path too"
+        );
+        // Typed keys are not duplicated into the passthrough, so `extra` holds
+        // the same set a flattened ID token would.
+        for typed in ["sub", "email", "roles", "groups", "scope"] {
+            assert!(!passthrough.contains_key(typed), "`{typed}` is typed");
+        }
     }
 }

@@ -252,6 +252,7 @@ fn redacted_config_json(
         "vector_store_url": config.memory.vector_store_url,
         "soft_delete_retention_days": config.memory.soft_delete_retention_days,
         "pool_size": config.memory.pool_size,
+        "max_episodic_chars": config.memory.max_episodic_chars,
     });
 
     // ── Proactive Memory ──
@@ -271,6 +272,8 @@ fn redacted_config_json(
         "update_threshold_same_category": config.proactive_memory.update_threshold_same_category,
         "update_threshold_cross_category": config.proactive_memory.update_threshold_cross_category,
         "extractor_sidecar": serde_json::to_value(&config.proactive_memory.extractor_sidecar).unwrap_or_default(),
+        "session_scoped_recall": config.proactive_memory.session_scoped_recall,
+        "min_similarity": config.proactive_memory.min_similarity,
     });
 
     // ── Auto-Dream (background memory consolidation) ──
@@ -361,6 +364,8 @@ fn redacted_config_json(
         "audio_transcription": config.media.audio_transcription,
         "video_description": config.media.video_description,
         "max_concurrency": config.media.max_concurrency,
+        "transcription_timeout_secs": config.media.transcription_timeout_secs,
+        "ffmpeg_timeout_secs": config.media.ffmpeg_timeout_secs,
         "image_provider": config.media.image_provider,
         "image_model": config.media.image_model,
         "audio_provider": config.media.audio_provider,
@@ -565,7 +570,11 @@ fn redacted_config_json(
         "token_expiry_secs": config.pairing.token_expiry_secs,
         "public_base_url": config.pairing.public_base_url,
         "push_provider": config.pairing.push_provider,
-        "ntfy_url": config.pairing.ntfy_url,
+        "ntfy_url": config
+            .pairing
+            .ntfy_url
+            .as_deref()
+            .map(redact_url_credentials),
         "ntfy_topic": config.pairing.ntfy_topic,
     });
 
@@ -643,6 +652,10 @@ fn redacted_config_json(
         );
     }
 
+    set!("usage", {
+        "retention_days": config.usage.retention_days,
+    });
+
     set!("external_auth", {
         "enabled": config.external_auth.enabled,
         "issuer_url": config.external_auth.issuer_url,
@@ -678,6 +691,24 @@ fn redacted_config_json(
         ea.insert(
             "require_email_verified".into(),
             serde_json::json!(config.external_auth.require_email_verified),
+        );
+        // Read-only for the same reason as `require_email_verified`, and readable for the same reason too (#7744).
+        // `role_map` is what turns a signed ID token into an API credential, so a caller who could write it could grant themselves Owner by naming a claim they already hold; it stays out of the writable sets.
+        // Reading it back is how an operator confirms which IdP groups currently carry privilege — the values are group names the operator chose, never secrets.
+        ea.insert(
+            "role_map".into(),
+            serde_json::json!(config.external_auth.role_map),
+        );
+        // #7746: read-only and readable for exactly the same pair of reasons.
+        // `group_map` decides which local `[[groups]]` an IdP claim confers, and a group confers ownership and the role strings channel binding matches on, so a caller who could write it could join themselves to any team; `claim_paths` decides *where* the claim values both maps are matched against come from, and pointing it at an attacker-controlled claim would be the same escalation one level up.
+        // Both are group and claim names an operator chose, never secrets, and reading them back is how an operator confirms which IdP groups currently confer membership and which part of the token is being trusted.
+        ea.insert(
+            "group_map".into(),
+            serde_json::json!(config.external_auth.group_map),
+        );
+        ea.insert(
+            "claim_paths".into(),
+            serde_json::json!(config.external_auth.claim_paths),
         );
     }
 
@@ -942,6 +973,20 @@ fn redacted_config_json(
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
+fn config_reload_status(
+    restart_required: bool,
+    has_changes: bool,
+    channel_reload_failed: bool,
+) -> &'static str {
+    if restart_required || channel_reload_failed {
+        "partial"
+    } else if has_changes {
+        "applied"
+    } else {
+        "no_changes"
+    }
+}
+
 /// POST /api/config/reload — Reload configuration from disk and apply hot-reloadable changes.
 ///
 /// Reads the config file, diffs against current config, validates the new config,
@@ -959,16 +1004,7 @@ pub async fn config_reload(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
-    // SECURITY: Record config reload in audit trail with caller attribution.
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
-    state.kernel.audit().record_with_context(
-        "system",
-        librefang_kernel::audit::AuditAction::ConfigChange,
-        "config reload requested via API",
-        "pending",
-        user_id,
-        Some("api".to_string()),
-    );
     match state.kernel.reload_config().await {
         Ok(plan) => {
             // `api_key` / `api_key_hash` are classified as read-live in
@@ -986,6 +1022,7 @@ pub async fn config_reload(
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
             // restart adapters from the new config.
+            let mut warnings = Vec::new();
             if plan.hot_actions.contains(&HotAction::ReloadChannels) {
                 match crate::channel_bridge::reload_channels_from_disk(&state).await {
                     Ok(names) => {
@@ -997,33 +1034,54 @@ pub async fn config_reload(
                     }
                     Err(e) => {
                         tracing::error!("Hot-reload: failed to restart channel bridge: {e}");
+                        warnings.push(
+                            "Channel adapters could not be restarted; see server logs".to_string(),
+                        );
                     }
                 }
             }
 
-            let status = if plan.restart_required {
-                "partial"
-            } else if plan.has_changes() {
-                "applied"
-            } else {
-                "no_changes"
-            };
+            let status = config_reload_status(
+                plan.restart_required,
+                plan.has_changes(),
+                !warnings.is_empty(),
+            );
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_kernel::audit::AuditAction::ConfigChange,
+                "config reload requested via API",
+                status,
+                user_id,
+                Some("api".to_string()),
+            );
 
+            let mut body = serde_json::json!({
+                "status": status,
+                "restart_required": plan.restart_required,
+                "restart_reasons": plan.restart_reasons,
+                "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                "noop_changes": plan.noop_changes,
+            });
+            if !warnings.is_empty() {
+                body["warnings"] = serde_json::json!(warnings);
+            }
+
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_kernel::audit::AuditAction::ConfigChange,
+                "config reload requested via API",
+                "failed",
+                user_id,
+                Some("api".to_string()),
+            );
             (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": status,
-                    "restart_required": plan.restart_required,
-                    "restart_reasons": plan.restart_reasons,
-                    "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
-                    "noop_changes": plan.noop_changes,
-                })),
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": e})),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"status": "error", "error": e})),
-        ),
     }
 }
 
@@ -1045,7 +1103,7 @@ pub async fn config_reload(
 pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use axum::body::Body;
 
-    let config_path = state.kernel.home_dir().join("config.toml");
+    let config_path = state.kernel.config_path().to_path_buf();
 
     let toml_content = match tokio::fs::read_to_string(&config_path).await {
         Ok(content) => content,
@@ -1113,8 +1171,11 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
         (status = 200, description = "Configuration provenance and writability", body = crate::types::JsonObject)
     )
 )]
-pub async fn config_status() -> impl IntoResponse {
-    axum::Json(librefang_kernel::config::config_provenance(None))
+pub async fn config_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // The kernel's resolved path, not a second resolution: `source` is the file an operator will go and edit, and a status endpoint that names a different one is worse than no status endpoint (#6695).
+    axum::Json(librefang_kernel::config::config_provenance(Some(
+        state.kernel.config_path(),
+    )))
 }
 
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
@@ -1342,21 +1403,12 @@ pub async fn config_set(
         );
     }
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    // Block path-traversal (`..`) but allow Windows drive-letter prefixes
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"status":"error","error":"invalid config file path"})),
-        );
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Serialize concurrent writes to prevent read-modify-write races
-    if let Some(locked) = crate::routes::guard_config_write() {
+    if let Some(locked) = crate::routes::guard_config_write(state.kernel.config_path()) {
         return locked;
     }
     let _config_guard = state.config_write_lock.lock().await;
@@ -1562,7 +1614,7 @@ pub async fn config_set(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
-        "completed",
+        reload_status,
         user_id,
         Some("api".to_string()),
     );
@@ -1572,6 +1624,24 @@ pub async fn config_set(
         body["reload_error"] = serde_json::Value::String(err);
     }
     (StatusCode::OK, Json(body))
+}
+
+#[cfg(test)]
+mod config_reload_outcome_tests {
+    use super::config_reload_status;
+
+    #[test]
+    fn channel_restart_failure_forces_partial_reload_status() {
+        assert_eq!(config_reload_status(false, true, true), "partial");
+        assert_eq!(config_reload_status(false, false, true), "partial");
+    }
+
+    #[test]
+    fn reload_status_preserves_existing_success_states() {
+        assert_eq!(config_reload_status(true, true, false), "partial");
+        assert_eq!(config_reload_status(false, true, false), "applied");
+        assert_eq!(config_reload_status(false, false, false), "no_changes");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1701,6 +1771,41 @@ mod config_read_write_parity_tests {
         }
     }
 
+    #[test]
+    fn pairing_ntfy_url_hides_embedded_credentials() {
+        let mut config = KernelConfig::default();
+        config.pairing.ntfy_url =
+            Some("https://notify-user:notify-password@ntfy.example.test/topic".to_string());
+
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        let rendered = lookup(&payload, "pairing.ntfy_url")
+            .and_then(|value| value.as_str())
+            .expect("configured ntfy URL remains visible in redacted form");
+
+        assert_eq!(rendered, "https://***@ntfy.example.test/topic");
+        assert!(!rendered.contains("notify-user"));
+        assert!(!rendered.contains("notify-password"));
+    }
+
+    #[test]
+    fn pairing_ntfy_url_preserves_at_signs_outside_the_authority() {
+        for url in [
+            "https://ntfy.example.test/topic@tenant",
+            "https://ntfy.example.test/topic?contact=ops@example.test",
+            "https://ntfy.example.test/topic#owner@tenant",
+        ] {
+            let mut config = KernelConfig::default();
+            config.pairing.ntfy_url = Some(url.to_string());
+
+            let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+            let rendered = lookup(&payload, "pairing.ntfy_url")
+                .and_then(|value| value.as_str())
+                .expect("configured ntfy URL remains visible");
+
+            assert_eq!(rendered, url);
+        }
+    }
+
     /// The specific paths the #6596 report listed as writable-but-unreadable, pinned by name so a regression names the issue rather than surfacing as one entry in the bulk diff above.
     #[test]
     fn reported_missing_paths_are_present() {
@@ -1712,6 +1817,8 @@ mod config_read_write_parity_tests {
             "browser.cdp_endpoint",
             "media.image_model",
             "media.custom_stt",
+            "media.transcription_timeout_secs",
+            "media.ffmpeg_timeout_secs",
             "tts.custom",
             "channels.file_download_dir",
             "terminal.enabled",

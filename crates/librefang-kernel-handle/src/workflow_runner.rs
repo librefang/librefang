@@ -24,6 +24,9 @@ pub struct WorkflowSummary {
     /// has neither an explicit `input_schema` nor any `{{var}}` placeholder
     /// in its step templates (i.e. nothing parametric to discover).
     pub has_input_schema: bool,
+    /// The principal the workflow was recorded as belonging to (#7744), or
+    /// `None` when the creating turn resolved none.
+    pub owner: Option<librefang_types::principal::Principal>,
 }
 
 /// One parameter advertised by a workflow's input schema (#4982 — gap 2).
@@ -132,6 +135,7 @@ impl WorkflowSummary {
         description: String,
         step_count: usize,
         has_input_schema: bool,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Self {
         Self {
             id,
@@ -139,6 +143,7 @@ impl WorkflowSummary {
             description,
             step_count,
             has_input_schema,
+            owner,
         }
     }
 }
@@ -228,6 +233,30 @@ pub trait WorkflowRunner: Send + Sync {
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 
+    /// Owner-aware variant of [`Self::run_workflow`] (#7714).
+    ///
+    /// `caller_agent_id` is the agent that invoked the `workflow_run` tool.
+    /// The kernel records it on the run as the run's owner, which is what lets
+    /// two owners drive the same shared step-agent type and still keep their
+    /// attribution apart.
+    ///
+    /// `&str` rather than `AgentId` for trait-object compatibility, matching
+    /// [`Self::start_workflow_async_tracked`]; the kernel parses it and treats
+    /// an unparseable or absent value as an ownerless run.
+    ///
+    /// The default impl forwards to [`Self::run_workflow`] and drops the
+    /// owner, so an implementor that has not adopted ownership keeps its
+    /// current behaviour.
+    async fn run_workflow_owned(
+        &self,
+        workflow_id: &str,
+        input: &str,
+        caller_agent_id: Option<&str>,
+    ) -> Result<(String, String), KernelOpError> {
+        let _ = caller_agent_id;
+        self.run_workflow(workflow_id, input).await
+    }
+
     /// List all registered workflow definitions, sorted by name for determinism.
     async fn list_workflows(&self) -> Vec<WorkflowSummary> {
         Vec::new()
@@ -288,6 +317,35 @@ pub trait WorkflowRunner: Send + Sync {
         caller_session_id: Option<&str>,
     ) -> Result<String, KernelOpError> {
         let _ = (workflow_id, input, caller_agent_id, caller_session_id);
+        Err(KernelOpError::unavailable("Workflow engine"))
+    }
+
+    /// Create and register a new workflow from an agent-authored spec (#6934).
+    ///
+    /// `spec` is the tool payload as received — `{ name, description, steps[], input_schema?, total_timeout_secs? }`.
+    /// It is passed through as JSON rather than as a typed struct because the workflow types live in `librefang-kernel`, which the runtime cannot depend on; the kernel deserializes it into its own `Workflow` so the wire shape can never drift from the struct the engine executes.
+    ///
+    /// Note that this is **not** the `POST /api/workflows` body: that endpoint has its own hand-written parser over different field names (`agent_id` / `agent_name` / `prompt`), while this path deserializes the canonical workflow shape (`agent` / `prompt_template`) — the same one `*.workflow.toml` files use.
+    ///
+    /// Every check lives on the kernel side of this boundary — name legality, resource caps, `Workflow::validate()`, and the uniqueness of the name — because the caller is an LLM and a JSON-schema constraint is advice it is free to ignore.
+    ///
+    /// `caller_agent_id` is the *executor* — the agent whose turn assembled the spec — and stays a trace on the registration log line.
+    ///
+    /// `owner` is the *principal that turn was acting for*, and it is a different thing (#7744): the agent is who typed it, the principal is who it belongs to.
+    /// It is recorded on the `Workflow` itself rather than only in a log, because a log rotates and the workflow outlives it — which is the concrete gap this parameter closes.
+    /// It is still not an authorization gate: nothing consults it to decide who may run, edit or delete the workflow, and an agent-authored workflow remains executable by any agent the moment it is registered.
+    /// `None` records the workflow as unowned, which is what a turn with no authenticated caller, no manifest `owner` and no `default_owner` produces.
+    ///
+    /// It is passed separately from `spec` because `spec` is forwarded to the deserializer verbatim, and an owner the model could put in its own tool input would be an owner the model could choose.
+    ///
+    /// Errors: `InvalidInput` for a spec that cannot become a valid workflow, `Conflict` when the name is already registered, `Unavailable` when no workflow engine is wired.
+    async fn create_workflow(
+        &self,
+        spec: &serde_json::Value,
+        caller_agent_id: Option<&str>,
+        owner: Option<librefang_types::principal::Principal>,
+    ) -> Result<WorkflowSummary, KernelOpError> {
+        let _ = (spec, caller_agent_id, owner);
         Err(KernelOpError::unavailable("Workflow engine"))
     }
 

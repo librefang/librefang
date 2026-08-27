@@ -16,6 +16,8 @@ use librefang_types::config::{SanitizeConfig, SanitizeMode};
 use regex_lite::Regex;
 use tracing::warn;
 
+const REPETITION_THRESHOLD: usize = 100;
+
 /// A compiled set of prompt-injection detection patterns.
 pub struct InputSanitizer {
     mode: SanitizeMode,
@@ -29,6 +31,20 @@ struct CompiledPattern {
     regex: Regex,
     label: &'static str,
 }
+
+const BUILT_IN_PATTERNS: &[(&str, &str)] = &[
+    (r"(?im)^(System|Assistant|Human):\s", "role_impersonation"),
+    (
+        r"(?i)ignore\s+(all\s+)?(previous|above|prior)\s+instructions",
+        "instruction_override",
+    ),
+    (r"(^|\n)---\s*\n[\s\S]*?\n---($|\n)", "delimiter_injection"),
+    (r"(^|\n)###\s*\n", "delimiter_injection"),
+    (
+        r"(?i)(you are now|from now on you|act as|pretend to be)\s",
+        "role_reassignment",
+    ),
+];
 
 /// Result of running the sanitizer on a message.
 #[derive(Debug)]
@@ -47,48 +63,18 @@ impl InputSanitizer {
     pub fn from_config(config: &SanitizeConfig) -> Self {
         let mut patterns = Vec::new();
 
-        // Built-in patterns -------------------------------------------------
-
-        // Role impersonation: lines starting with "System:", "Assistant:", "Human:"
-        if let Ok(re) = Regex::new(r"(?im)^(System|Assistant|Human):\s") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "role_impersonation",
+        // Built-in patterns are developer-authored invariants. A compile
+        // failure must stop startup instead of silently removing a security
+        // rule while leaving the sanitizer apparently enabled.
+        for &(pattern, label) in BUILT_IN_PATTERNS {
+            let regex = Regex::new(pattern).unwrap_or_else(|error| {
+                panic!("built-in sanitizer regex '{label}' must compile: {error}")
             });
-        }
-
-        // Instruction override: "ignore all previous instructions" and variants
-        if let Ok(re) = Regex::new(r"(?i)ignore\s+(all\s+)?(previous|above|prior)\s+instructions") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "instruction_override",
-            });
-        }
-
-        // Delimiter injection: triple-dash or triple-hash fences
-        if let Ok(re) = Regex::new(r"(^|\n)---\s*\n[\s\S]*?\n---($|\n)") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "delimiter_injection",
-            });
-        }
-        if let Ok(re) = Regex::new(r"(^|\n)###\s*\n") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "delimiter_injection",
-            });
+            patterns.push(CompiledPattern { regex, label });
         }
 
         // Excessive repetition is checked directly in `check()` because
         // regex_lite does not support backreferences like `(.)\1{99,}`.
-
-        // "You are now" / "Act as" role reassignment
-        if let Ok(re) = Regex::new(r"(?i)(you are now|from now on you|act as|pretend to be)\s") {
-            patterns.push(CompiledPattern {
-                regex: re,
-                label: "role_reassignment",
-            });
-        }
 
         // Custom block patterns from config ----------------------------------
         for pat_str in &config.custom_block_patterns {
@@ -134,7 +120,7 @@ impl InputSanitizer {
 
         // Excessive repetition check (done without regex because regex_lite
         // does not support backreferences).
-        if has_excessive_repetition(text, 100) {
+        if has_excessive_repetition(text, REPETITION_THRESHOLD) {
             let reason = "Prompt injection detected (excessive_repetition)".to_string();
             return self.verdict(&reason);
         }
@@ -152,8 +138,12 @@ impl InputSanitizer {
 
     /// Convert a reason string into Warned or Blocked depending on mode.
     fn verdict(&self, reason: &str) -> SanitizeResult {
+        debug_assert!(
+            self.mode != SanitizeMode::Off,
+            "Off mode returns before verdict"
+        );
         match self.mode {
-            SanitizeMode::Off => SanitizeResult::Clean,
+            SanitizeMode::Off => unreachable!("Off mode returns before verdict"),
             SanitizeMode::Warn => SanitizeResult::Warned(reason.to_string()),
             SanitizeMode::Block => SanitizeResult::Blocked(reason.to_string()),
         }
@@ -165,12 +155,20 @@ impl InputSanitizer {
     }
 }
 
-/// Returns `true` if `text` contains any single character repeated `threshold`
-/// or more times consecutively.
+/// Returns `true` if `text` contains any non-whitespace character repeated `threshold` or more times consecutively.
+/// A zero threshold disables the check.
 fn has_excessive_repetition(text: &str, threshold: usize) -> bool {
+    if threshold == 0 {
+        return false;
+    }
     let mut run_len = 0usize;
     let mut prev: Option<char> = None;
     for ch in text.chars() {
+        if ch.is_whitespace() {
+            run_len = 0;
+            prev = None;
+            continue;
+        }
         if Some(ch) == prev {
             run_len += 1;
         } else {
@@ -244,6 +242,24 @@ mod tests {
     }
 
     #[test]
+    fn installs_every_built_in_pattern() {
+        let sanitizer = InputSanitizer::from_config(&config_block());
+        let installed = sanitizer
+            .patterns
+            .iter()
+            .map(|pattern| pattern.label)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            installed,
+            BUILT_IN_PATTERNS
+                .iter()
+                .map(|(_, label)| *label)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn detects_instruction_override() {
         let san = InputSanitizer::from_config(&config_block());
         assert!(matches!(
@@ -268,6 +284,15 @@ mod tests {
         let san = InputSanitizer::from_config(&config_block());
         let msg = "A".repeat(200);
         assert!(matches!(san.check(&msg), SanitizeResult::Blocked(_)));
+    }
+
+    #[test]
+    fn repetition_policy_ignores_whitespace_and_handles_zero_threshold() {
+        assert!(!has_excessive_repetition(&" ".repeat(200), 4));
+        assert!(!has_excessive_repetition(&"\n".repeat(200), 4));
+        assert!(!has_excessive_repetition("aaa", 4));
+        assert!(has_excessive_repetition("aaaa", 4));
+        assert!(!has_excessive_repetition(&"A".repeat(200), 0));
     }
 
     #[test]

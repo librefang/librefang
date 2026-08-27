@@ -408,6 +408,43 @@ impl ClaudeCodeDriver {
         Ok(path)
     }
 
+    /// Prepare prompt-owned files away from the async runtime worker.
+    async fn prepare_prompt(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<PreparedPrompt, LlmError> {
+        let request = request.clone();
+        let bridge = if request.tools.is_empty() {
+            None
+        } else {
+            self.mcp_bridge.clone()
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut prepared = Self::build_prompt(&request);
+            if let Some(ref bridge) = bridge {
+                match Self::write_mcp_config(
+                    bridge,
+                    request.agent_id.as_deref(),
+                    request.sender_user_id.as_deref(),
+                    request.sender_channel.as_deref(),
+                    request.sender_chat_id.as_deref(),
+                    request.sender_account_id.as_deref(),
+                ) {
+                    Ok(path) => prepared.mcp_config_path = Some(path),
+                    Err(e) => {
+                        prepared.cleanup_blocking();
+                        return Err(LlmError::Http(format!(
+                            "Failed to write Claude Code MCP bridge config: {e}"
+                        )));
+                    }
+                }
+            }
+            Ok(prepared)
+        })
+        .await
+        .map_err(|e| LlmError::Http(format!("Claude prompt staging task failed: {e}")))?
+    }
+
     /// Map a model ID like "claude-code/opus" to CLI --model flag value.
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("claude-code/").unwrap_or(model).trim();
@@ -781,7 +818,7 @@ impl PreparedPrompt {
     /// Clean up temporary image files and MCP config, if any. Only removes
     /// driver-owned artifacts; `extra_image_dirs` are intentionally left
     /// alone because they belong to the bridge or the caller.
-    fn cleanup(&self) {
+    fn cleanup_blocking(&self) {
         if let Some(ref dir) = self.image_dir {
             if let Err(e) = std::fs::remove_dir_all(dir) {
                 debug!(error = %e, dir = %dir.display(), "Failed to clean up image temp dir");
@@ -791,6 +828,25 @@ impl PreparedPrompt {
             if let Err(e) = std::fs::remove_file(path) {
                 debug!(error = %e, path = %path.display(), "Failed to clean up MCP config temp file");
             }
+        }
+    }
+
+    /// Remove driver-owned temporary files without blocking a Tokio worker.
+    async fn cleanup(&self) {
+        let image_dir = self.image_dir.clone();
+        let mcp_config_path = self.mcp_config_path.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let prepared = PreparedPrompt {
+                text: String::new(),
+                image_dir,
+                extra_image_dirs: std::collections::BTreeSet::new(),
+                mcp_config_path,
+            };
+            prepared.cleanup_blocking();
+        })
+        .await
+        {
+            warn!(error = %e, "Claude temporary-file cleanup task failed");
         }
     }
 }
@@ -900,34 +956,15 @@ impl LlmDriver for ClaudeCodeDriver {
         // endpoint and pass it to `claude -p`. Claude CLI handles the full
         // tool_use / tool_result round-trip natively — no stream parsing,
         // no session plumbing on our side.
-        let mut prepared = Self::build_prompt(&request);
+        let prepared = self.prepare_prompt(&request).await?;
         let model_flag = Self::model_flag(&request.model);
 
-        if !request.tools.is_empty() {
-            if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(
-                    bridge,
-                    request.agent_id.as_deref(),
-                    request.sender_user_id.as_deref(),
-                    request.sender_channel.as_deref(),
-                    request.sender_chat_id.as_deref(),
-                    request.sender_account_id.as_deref(),
-                ) {
-                    Ok(path) => prepared.mcp_config_path = Some(path),
-                    Err(e) => {
-                        prepared.cleanup();
-                        return Err(LlmError::Http(format!(
-                            "Failed to write Claude Code MCP bridge config: {e}"
-                        )));
-                    }
-                }
-            } else {
-                warn!(
-                    tool_count = request.tools.len(),
-                    "claude_code driver received tools but no MCP bridge is configured; \
+        if !request.tools.is_empty() && self.mcp_bridge.is_none() {
+            warn!(
+                tool_count = request.tools.len(),
+                "claude_code driver received tools but no MCP bridge is configured; \
                      tools will not be available inside the spawned CLI"
-                );
-            }
+            );
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
@@ -969,14 +1006,17 @@ impl LlmDriver for ClaudeCodeDriver {
         );
 
         // Spawn child process instead of cmd.output() so we can track PID and timeout
-        let mut child = cmd.spawn().map_err(|e| {
-            prepared.cleanup();
-            LlmError::Http(format!(
-                "Claude Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @anthropic-ai/claude-code && claude auth",
-                e
-            ))
-        })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                prepared.cleanup().await;
+                return Err(LlmError::Http(format!(
+                    "Claude Code CLI not found or failed to start ({}). \
+                     Install: npm install -g @anthropic-ai/claude-code && claude auth",
+                    e
+                )));
+            }
+        };
 
         // Write the prompt to stdin and close it so the CLI sees EOF and
         // begins processing. tokio::io::AsyncWriteExt::write_all chunks
@@ -986,7 +1026,7 @@ impl LlmDriver for ClaudeCodeDriver {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
                 let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
-                prepared.cleanup();
+                prepared.cleanup().await;
                 return Err(LlmError::Http(diag));
             }
             // Drop closes stdin; CLI proceeds with the full prompt.
@@ -1036,7 +1076,7 @@ impl LlmDriver for ClaudeCodeDriver {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
                 warn!(error = %e, model = %pid_label, "Claude Code CLI subprocess failed");
-                prepared.cleanup();
+                prepared.cleanup().await;
                 return Err(LlmError::Http(format!(
                     "Claude Code CLI subprocess failed: {e}"
                 )));
@@ -1049,7 +1089,7 @@ impl LlmDriver for ClaudeCodeDriver {
                     "Claude Code CLI subprocess timed out, killing process"
                 );
                 let _ = child.kill().await;
-                prepared.cleanup();
+                prepared.cleanup().await;
                 return Err(LlmError::Http(format!(
                     "Claude Code CLI subprocess timed out after {effective_timeout_secs}s — process killed"
                 )));
@@ -1080,7 +1120,7 @@ impl LlmDriver for ClaudeCodeDriver {
             // Detect rate-limit and auth error messages so token rotation
             // can kick in.  Use the shared helper for consistent detection.
             if let Some(err) = detect_cli_error_in_text(detail) {
-                prepared.cleanup();
+                prepared.cleanup().await;
                 return Err(err);
             }
 
@@ -1096,7 +1136,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 format!("Claude Code CLI exited with code {code}: {detail}")
             };
 
-            prepared.cleanup();
+            prepared.cleanup().await;
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
@@ -1105,7 +1145,7 @@ impl LlmDriver for ClaudeCodeDriver {
         }
 
         // Clean up temp images now that the CLI has finished
-        prepared.cleanup();
+        prepared.cleanup().await;
 
         info!(model = %pid_label, "Claude Code CLI subprocess completed successfully");
 
@@ -1192,34 +1232,15 @@ impl LlmDriver for ClaudeCodeDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let mut prepared = Self::build_prompt(&request);
+        let prepared = self.prepare_prompt(&request).await?;
         let model_flag = Self::model_flag(&request.model);
 
-        if !request.tools.is_empty() {
-            if let Some(ref bridge) = self.mcp_bridge {
-                match Self::write_mcp_config(
-                    bridge,
-                    request.agent_id.as_deref(),
-                    request.sender_user_id.as_deref(),
-                    request.sender_channel.as_deref(),
-                    request.sender_chat_id.as_deref(),
-                    request.sender_account_id.as_deref(),
-                ) {
-                    Ok(path) => prepared.mcp_config_path = Some(path),
-                    Err(e) => {
-                        prepared.cleanup();
-                        return Err(LlmError::Http(format!(
-                            "Failed to write Claude Code MCP bridge config: {e}"
-                        )));
-                    }
-                }
-            } else {
-                warn!(
-                    tool_count = request.tools.len(),
-                    "claude_code driver received tools but no MCP bridge is configured; \
+        if !request.tools.is_empty() && self.mcp_bridge.is_none() {
+            warn!(
+                tool_count = request.tools.len(),
+                "claude_code driver received tools but no MCP bridge is configured; \
                      tools will not be available inside the spawned CLI"
-                );
-            }
+            );
         }
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
@@ -1258,20 +1279,23 @@ impl LlmDriver for ClaudeCodeDriver {
             "Spawning Claude Code CLI (streaming)"
         );
 
-        let mut child = cmd.spawn().map_err(|e| {
-            prepared.cleanup();
-            LlmError::Http(format!(
-                "Claude Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @anthropic-ai/claude-code && claude auth",
-                e
-            ))
-        })?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                prepared.cleanup().await;
+                return Err(LlmError::Http(format!(
+                    "Claude Code CLI not found or failed to start ({}). \
+                     Install: npm install -g @anthropic-ai/claude-code && claude auth",
+                    e
+                )));
+            }
+        };
 
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             if let Err(e) = stdin.write_all(prepared.text.as_bytes()).await {
                 let diag = Self::diagnose_stdin_write_failure(&mut child, &e).await;
-                prepared.cleanup();
+                prepared.cleanup().await;
                 return Err(LlmError::Http(diag));
             }
             drop(stdin);
@@ -1284,11 +1308,14 @@ impl LlmDriver for ClaudeCodeDriver {
             debug!(pid = pid, label = %pid_label, "Claude Code CLI streaming subprocess started");
         }
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            self.active_pids.remove(&pid_label);
-            prepared.cleanup();
-            LlmError::Http("No stdout from claude CLI".to_string())
-        })?;
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                self.active_pids.remove(&pid_label);
+                prepared.cleanup().await;
+                return Err(LlmError::Http("No stdout from claude CLI".to_string()));
+            }
+        };
 
         // Drain stderr in a background task to prevent deadlock
         let child_stderr = child.stderr.take();
@@ -1561,12 +1588,12 @@ impl LlmDriver for ClaudeCodeDriver {
         self.active_pids.remove(&pid_label);
 
         if let Some(err) = stream_err {
-            prepared.cleanup();
+            prepared.cleanup().await;
             return Err(err);
         }
 
         // Clean up temp images now that the CLI has finished reading them
-        prepared.cleanup();
+        prepared.cleanup().await;
 
         // Wait for process to finish
         let status = child
@@ -1932,8 +1959,53 @@ mod tests {
         assert!(dir.join("image-1.png").exists());
 
         // Cleanup
-        prompt.cleanup();
+        prompt.cleanup_blocking();
         assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn prepare_prompt_stages_and_cleans_owned_files_off_runtime_workers() {
+        use librefang_types::message::{Message, MessageContent};
+
+        let driver = ClaudeCodeDriver::new(None, false).with_mcp_bridge(McpBridgeConfig {
+            base_url: "http://127.0.0.1:4545".to_string(),
+            api_key: Some("test-key".to_string()),
+        });
+        let request = CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==".to_string(),
+                }]),
+                pinned: false,
+                timestamp: None,
+            }]),
+            tools: std::sync::Arc::new(vec![librefang_types::tool::ToolDefinition {
+                name: "test_tool".to_string(),
+                description: "test".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]),
+            agent_id: Some("agent-1234".to_string()),
+            ..Default::default()
+        };
+
+        let prepared = driver
+            .prepare_prompt(&request)
+            .await
+            .expect("prompt staging");
+        let image_dir = prepared.image_dir.clone().expect("image temp dir");
+        let mcp_path = prepared
+            .mcp_config_path
+            .clone()
+            .expect("MCP config temp file");
+        assert!(image_dir.join("image-1.png").exists());
+        assert!(mcp_path.exists());
+
+        prepared.cleanup().await;
+        assert!(!image_dir.exists(), "owned image directory must be removed");
+        assert!(!mcp_path.exists(), "owned MCP config must be removed");
     }
 
     #[test]
@@ -2011,7 +2083,7 @@ mod tests {
         assert_eq!(dirs[0], &bridge_dir);
 
         // Cleanup must NOT touch externally-owned dirs.
-        prompt.cleanup();
+        prompt.cleanup_blocking();
         assert!(
             bridge_dir.exists(),
             "cleanup must leave bridge-owned dir in place"
@@ -2080,7 +2152,7 @@ mod tests {
         assert!(dirs.contains(&owned));
         assert!(dirs.contains(&bridge_dir));
 
-        prompt.cleanup();
+        prompt.cleanup_blocking();
         assert!(!owned.exists(), "owned dir removed");
         assert!(bridge_dir.exists(), "external dir preserved");
 

@@ -40,6 +40,31 @@ interface FormState {
   alert_threshold: string;
 }
 
+const BUDGET_NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+export function parseBudgetNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!BUDGET_NUMBER_PATTERN.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+function budgetValuesEqual(left: string, right: string): boolean {
+  const leftValue = parseBudgetNumber(left);
+  const rightValue = parseBudgetNumber(right);
+  return leftValue !== null && rightValue !== null && leftValue === rightValue;
+}
+
+export function isBudgetFormDirty(
+  form: FormState,
+  serverForm: FormState | null,
+): boolean {
+  if (!serverForm) return false;
+  return (Object.keys(form) as Array<keyof FormState>).some(
+    (key) => !budgetValuesEqual(form[key], serverForm[key]),
+  );
+}
+
 const ZERO_FORM: FormState = {
   max_hourly_usd: "0",
   max_daily_usd: "0",
@@ -65,17 +90,17 @@ export function UserBudgetPage() {
   // Bumped after a successful save / clear so the next `query.data`
   // delivery is allowed to reseed (so the form reflects the normalized
   // server state, not the raw input we just sent).
-  const [lastSavedAt, setLastSavedAt] = useState(0);
-  const lastSeededSavedAt = useRef(0);
+  const [saveRevision, setSaveRevision] = useState(0);
+  const lastSeededSaveRevision = useRef(0);
 
   // Seed once on first successful load; reseed only after a save we
-  // initiated (tracked via `lastSavedAt`). All other refetches —
+  // initiated (tracked via `saveRevision`). All other refetches —
   // window-focus revalidations, sibling-mutation invalidations — leave
   // the form alone so the operator's edits survive.
   useEffect(() => {
     if (!query.data) return;
     const justSaved =
-      lastSavedAt > 0 && lastSavedAt !== lastSeededSavedAt.current;
+      saveRevision > 0 && saveRevision !== lastSeededSaveRevision.current;
     if (hasSeeded.current && !justSaved) return;
     setForm({
       max_hourly_usd: String(query.data.hourly.limit),
@@ -84,8 +109,8 @@ export function UserBudgetPage() {
       alert_threshold: String(query.data.alert_threshold),
     });
     hasSeeded.current = true;
-    lastSeededSavedAt.current = lastSavedAt;
-  }, [query.data, lastSavedAt]);
+    lastSeededSaveRevision.current = saveRevision;
+  }, [query.data, saveRevision]);
 
   // Server-truth snapshot for the dirty flag. Stringified so a refetch
   // that returns identical numbers doesn't flicker the Save button.
@@ -97,12 +122,7 @@ export function UserBudgetPage() {
         alert_threshold: String(query.data.alert_threshold),
       }
     : null;
-  const dirty =
-    serverForm !== null &&
-    (form.max_hourly_usd !== serverForm.max_hourly_usd ||
-      form.max_daily_usd !== serverForm.max_daily_usd ||
-      form.max_monthly_usd !== serverForm.max_monthly_usd ||
-      form.alert_threshold !== serverForm.alert_threshold);
+  const dirty = isBudgetFormDirty(form, serverForm);
 
   const isLoading = query.isLoading;
   const fetchError = query.error;
@@ -121,15 +141,15 @@ export function UserBudgetPage() {
     e.preventDefault();
     setError(null);
 
-    const payload = {
-      max_hourly_usd: parseFloat(form.max_hourly_usd),
-      max_daily_usd: parseFloat(form.max_daily_usd),
-      max_monthly_usd: parseFloat(form.max_monthly_usd),
-      alert_threshold: parseFloat(form.alert_threshold),
+    const parsed = {
+      max_hourly_usd: parseBudgetNumber(form.max_hourly_usd),
+      max_daily_usd: parseBudgetNumber(form.max_daily_usd),
+      max_monthly_usd: parseBudgetNumber(form.max_monthly_usd),
+      alert_threshold: parseBudgetNumber(form.alert_threshold),
     };
 
-    for (const [k, v] of Object.entries(payload)) {
-      if (Number.isNaN(v) || !Number.isFinite(v) || v < 0) {
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v === null || v < 0) {
         setError(
           t(
             "userBudget.errors.non_negative",
@@ -140,11 +160,12 @@ export function UserBudgetPage() {
         return;
       }
     }
-    if (payload.alert_threshold > 1) {
+    const payload = parsed as Record<keyof FormState, number>;
+    if (payload.alert_threshold <= 0 || payload.alert_threshold > 1) {
       setError(
         t(
           "userBudget.errors.threshold_range",
-          "alert_threshold must be in 0.0..=1.0",
+          "alert_threshold must be greater than 0 and at most 1",
         ),
       );
       return;
@@ -153,7 +174,7 @@ export function UserBudgetPage() {
     try {
       await updateMut.mutateAsync({ name, payload });
       // Allow the next `query.data` delivery to reseed the form.
-      setLastSavedAt(Date.now());
+      setSaveRevision((revision) => revision + 1);
       addToast(t("userBudget.toast.saved", "Spend cap saved"), "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -167,7 +188,7 @@ export function UserBudgetPage() {
       setForm(ZERO_FORM);
       // Clearing is also a save; trip the reseed gate so refetched
       // (now-zeroed) limits replace ZERO_FORM cleanly.
-      setLastSavedAt(Date.now());
+      setSaveRevision((revision) => revision + 1);
       addToast(t("userBudget.toast.saved", "Spend cap saved"), "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

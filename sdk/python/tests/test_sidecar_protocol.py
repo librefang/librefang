@@ -246,3 +246,53 @@ def test_message_carries_platform_message_id():
     # Absent → omitted (server generates a UUID).
     p2 = protocol.message("u", "n", text="hi")["params"]
     assert "message_id" not in p2
+
+
+def test_default_adapter_declares_the_protocol_version():
+    """An adapter that overrides nothing must still announce a version.
+
+    Until #7140 ``SidecarAdapter.protocol_version`` defaulted to ``None`` and
+    no first-party adapter overrode it, so every ``ready`` frame on every
+    deployment carried ``"protocol_version": null`` while the docs, the shared
+    conformance corpus, and both conformance suites all said ``1``.
+    """
+    from librefang.sidecar.protocol import PROTOCOL_VERSION
+    from librefang.sidecar.runtime import SidecarAdapter
+
+    class Bare(SidecarAdapter):
+        async def on_send(self, cmd):  # pragma: no cover - never invoked
+            raise AssertionError("not reachable")
+
+    assert Bare.protocol_version == PROTOCOL_VERSION
+    assert Bare().ready_event()["params"]["protocol_version"] == PROTOCOL_VERSION
+
+
+def test_every_first_party_adapter_announces_the_protocol_version():
+    """No adapter may silently opt out of declaring a version.
+
+    Checked on the class attribute rather than by instantiating each adapter:
+    most first-party ``__init__``s raise ``SystemExit`` without their
+    credentials in the environment, and the attribute is what ``ready_event``
+    reads.
+    """
+    import importlib
+    import pkgutil
+
+    from librefang.sidecar import adapters
+    from librefang.sidecar.protocol import PROTOCOL_VERSION
+    from librefang.sidecar.runtime import SidecarAdapter
+
+    seen = 0
+    for mod in pkgutil.iter_modules(adapters.__path__):
+        module = importlib.import_module(
+            f"librefang.sidecar.adapters.{mod.name}")
+        for obj in vars(module).values():
+            if (isinstance(obj, type) and issubclass(obj, SidecarAdapter)
+                    and obj is not SidecarAdapter
+                    and obj.__module__ == module.__name__):
+                assert obj.protocol_version == PROTOCOL_VERSION, (
+                    f"{obj.__module__}.{obj.__name__} declares "
+                    f"protocol_version={obj.protocol_version!r}"
+                )
+                seen += 1
+    assert seen >= 20, f"expected the full first-party adapter set, saw {seen}"

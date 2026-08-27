@@ -29,7 +29,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::UserId;
-use librefang_types::config::UserConfig;
+use librefang_types::config::{GroupConfig, UserConfig};
 use librefang_types::user_policy::{
     ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
 };
@@ -203,6 +203,9 @@ fn validate_name(name: &str) -> Result<(), String> {
     if trimmed.len() > 128 {
         return Err("name too long (max 128 chars)".to_string());
     }
+    if trimmed.chars().any(char::is_control) {
+        return Err("name must not contain control characters".to_string());
+    }
     Ok(())
 }
 
@@ -242,6 +245,13 @@ fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::R
         Json(serde_json::json!({ "status": "error", "error": msg.into() })),
     )
         .into_response()
+}
+
+/// Preserve the full operational error in server logs without exposing
+/// config paths, serializer details, or credential-store internals to API
+/// clients.
+fn internal_err_response(error: impl std::fmt::Display) -> axum::response::Response {
+    crate::types::ApiErrorResponse::internal_scrub(error).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -368,8 +378,10 @@ pub async fn create_user(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -419,10 +431,11 @@ pub async fn update_user(
     // can serialize the post-merge view (incl. preserved RBAC M3 policy
     // fields). `persist_users` is generic over the closure's `Ok` type,
     // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
-    match persist_users(
+    match persist_identity_sections(
         &state,
         caller_uid,
-        move |users| -> Result<UserConfig, PersistError> {
+        "users updated",
+        move |users, groups| -> Result<UserConfig, PersistError> {
             let idx = users
                 .iter()
                 .position(|u| u.name == target_existing)
@@ -459,6 +472,24 @@ pub async fn update_user(
                 memory_access: preserved.memory_access,
                 channel_tool_rules: preserved.channel_tool_rules,
             };
+            // Carry a rename into `[[groups]]` (#7745). Group membership names
+            // users by string, so without this a rename reads as "this person
+            // left every group they were on" — the old name lingers as a
+            // dangling member and the new one belongs to nothing, which is the
+            // silent loss of exactly the roles the rename was not supposed to
+            // touch. Done in the same config write as the user row so the two
+            // can never disagree.
+            if renamed_to_for_closure != target_existing {
+                for group in groups.iter_mut() {
+                    if group.has_member(&target_existing) {
+                        group.members.retain(|m| m != &target_existing);
+                        if !group.has_member(&renamed_to_for_closure) {
+                            group.members.push(renamed_to_for_closure.clone());
+                        }
+                        group.members.sort();
+                    }
+                }
+            }
             Ok(users[idx].clone())
         },
     )
@@ -468,8 +499,10 @@ pub async fn update_user(
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -479,7 +512,7 @@ pub async fn update_user(
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
     responses(
-        (status = 200, description = "User deleted"),
+        (status = 204, description = "User deleted"),
         (status = 404, description = "Not found"),
     )
 )]
@@ -490,14 +523,23 @@ pub async fn delete_user(
 ) -> impl IntoResponse {
     let target = name.clone();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
-    match persist_users(&state, caller_uid, move |users| {
+    // Deleting a user also strips the name from every `[[groups]]` membership
+    // list (#7745). Without the cascade the deleted name keeps conferring
+    // whatever roles those groups grant, and the only thing that would have
+    // stopped it is that nothing consumes group roles *yet* — which stops
+    // being true the moment #7746 lands. Both sections are rewritten inside a
+    // single `persist_identity_sections` call so there is no window where the
+    // user is gone from `[[users]]` but still listed in a group.
+    match persist_identity_sections(&state, caller_uid, "users updated", move |users, groups| {
         let before = users.len();
         users.retain(|u| u.name != target);
         if users.len() == before {
-            Err(PersistError::NotFound(format!("user '{target}' not found")))
-        } else {
-            Ok(())
+            return Err(PersistError::NotFound(format!("user '{target}' not found")));
         }
+        for group in groups.iter_mut() {
+            group.members.retain(|m| m != &target);
+        }
+        Ok(())
     })
     .await
     {
@@ -505,8 +547,10 @@ pub async fn delete_user(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -577,7 +621,7 @@ pub async fn import_users(
     if req.dry_run {
         // Compute the would-be counts without writing.
         let cfg = state.kernel.config_ref();
-        let existing_names: std::collections::HashSet<&str> =
+        let mut existing_names: std::collections::HashSet<&str> =
             cfg.users.iter().map(|u| u.name.as_str()).collect();
         // `prepared.len() == req.rows.len()` (every row is pushed once
         // above, success or fail), so this allocation is bounded by the
@@ -594,6 +638,7 @@ pub async fn import_users(
                         "updated"
                     } else {
                         created += 1;
+                        existing_names.insert(u.name.as_str());
                         "created"
                     };
                     rows_out.push(BulkImportRow {
@@ -624,22 +669,11 @@ pub async fn import_users(
         .into_response();
     }
 
-    // Commit phase. Snapshot existing names BEFORE persisting so we can
-    // classify each applied row as created vs updated. Failed rows already
-    // have entries in `rows_out`; valid rows are appended after persist
-    // succeeds (so the order in `rows_out` matches the input).
+    // Commit phase. Failed rows already have entries in `rows_out`; valid rows are appended after persist succeeds so the output can retain input order.
     let mut rows_out: Vec<BulkImportRow> = Vec::new();
     let mut created = 0usize;
     let mut updated = 0usize;
     let mut failed = 0usize;
-
-    let pre_existing: std::collections::HashSet<String> = state
-        .kernel
-        .config_ref()
-        .users
-        .iter()
-        .map(|u| u.name.clone())
-        .collect();
 
     let mut to_apply: Vec<(usize, UserConfig)> = Vec::new();
     for (i, prepared_row) in prepared.into_iter() {
@@ -660,8 +694,10 @@ pub async fn import_users(
     let payload: Vec<UserConfig> = to_apply.iter().map(|(_, u)| u.clone()).collect();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
     let result = persist_users(&state, caller_uid, move |users| {
+        let mut existed_before_row = Vec::with_capacity(payload.len());
         for new_u in &payload {
             if let Some(idx) = users.iter().position(|u| u.name == new_u.name) {
+                existed_before_row.push(true);
                 // RBAC M3 (#3205) + M5 (#3203): preserve existing per-
                 // user policy and budget when a CSV row updates an
                 // existing user — same reasoning as `update_user`.
@@ -675,17 +711,18 @@ pub async fn import_users(
                     ..new_u.clone()
                 };
             } else {
+                existed_before_row.push(false);
                 users.push(new_u.clone());
             }
         }
-        Ok(())
+        Ok(existed_before_row)
     })
     .await;
 
     match result {
-        Ok(()) => {
-            for (i, u) in to_apply {
-                let status = if pre_existing.contains(&u.name) {
+        Ok(existed_before_row) => {
+            for ((i, u), existed) in to_apply.into_iter().zip(existed_before_row) {
+                let status = if existed {
                     updated += 1;
                     "updated"
                 } else {
@@ -714,8 +751,10 @@ pub async fn import_users(
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -768,10 +807,7 @@ pub async fn rotate_user_key(
     let new_hash = match crate::password_hash::hash_password(&new_plaintext) {
         Ok(h) => h,
         Err(e) => {
-            return err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("hash failed: {e}"),
-            );
+            return internal_err_response(format!("hash failed: {e}"));
         }
     };
 
@@ -814,8 +850,10 @@ pub async fn rotate_user_key(
                 PersistError::NotFound(m) => err_response(StatusCode::NOT_FOUND, m),
                 PersistError::BadRequest(m) => err_response(StatusCode::BAD_REQUEST, m),
                 PersistError::Conflict(m) => err_response(StatusCode::CONFLICT, m),
-                PersistError::Internal(m) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-                PersistError::Managed => crate::routes::managed_config_response(),
+                PersistError::Internal(m) => internal_err_response(m),
+                PersistError::Managed => {
+                    crate::routes::managed_config_response(state.kernel.config_path())
+                }
             };
         }
     };
@@ -990,7 +1028,7 @@ pub async fn set_user_provider_key(
         .kernel
         .set_user_provider_key(user_id, &provider, &req.api_key)
     {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
+        return internal_err_response(e);
     }
 
     // Audit the credential write. Detail names the actor and the target
@@ -1042,7 +1080,7 @@ pub async fn delete_user_provider_key(
 
     let removed = match state.kernel.remove_user_provider_key(user_id, &provider) {
         Ok(removed) => removed,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => return internal_err_response(e),
     };
 
     let actor = caller
@@ -1128,15 +1166,10 @@ fn api_key_hash_fingerprint(api_key_hash: &str) -> String {
     s
 }
 
-/// Rebuild the `ApiUserAuth` records from the kernel's current `[[users]]`
-/// table. Mirrors `server.rs::configured_user_api_keys`, kept private to
-/// `users.rs` so the persistence path can call it without exposing
-/// `server.rs` internals across the route boundary.
-fn rebuild_api_user_records(state: &AppState) -> Vec<ApiUserAuth> {
-    state
-        .kernel
-        .config_ref()
-        .users
+/// Build the `ApiUserAuth` records that middleware reads from a validated `[[users]]` table.
+/// This deliberately accepts the just-persisted table instead of reading kernel config, because a reload failure leaves kernel config stale even though the file and revocation have moved forward.
+fn build_api_user_records(users: &[UserConfig]) -> Vec<ApiUserAuth> {
+    users
         .iter()
         .filter_map(|user| {
             let api_key_hash = user.api_key_hash.as_deref()?.trim();
@@ -1173,6 +1206,9 @@ pub(crate) enum PersistError {
 /// `update_user` uses this to surface the post-merge `UserConfig`
 /// (including preserved RBAC M3 policy fields) without an out-of-band
 /// `Arc<Mutex>` capture.
+///
+/// Thin wrapper over [`persist_identity_sections`] for the callers that
+/// only touch `[[users]]`.
 pub(crate) async fn persist_users<F, R>(
     state: &Arc<AppState>,
     caller: Option<UserId>,
@@ -1181,24 +1217,52 @@ pub(crate) async fn persist_users<F, R>(
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
-    if crate::routes::guard_config_write().is_some() {
+    persist_identity_sections(state, caller, "users updated", |users, _groups| {
+        mutate(users)
+    })
+    .await
+}
+
+/// Read `config.toml`, run `mutate` on clones of the current `users` **and**
+/// `groups` vectors, rewrite both array-of-tables, and reload the kernel.
+///
+/// Both sections go through one write because they are one identity model and
+/// a mutation of one can require a mutation of the other in the same
+/// transaction: deleting a user has to strip that name from every group it
+/// appears in, and doing that as two sequential writes would leave a window in
+/// which the deleted user still confers group-derived roles (#7745). Sharing
+/// the path also means one config backup, one `validate_config_for_reload`,
+/// one kernel reload, and one refresh of the `ApiUserAuth` snapshot the auth
+/// middleware reads from — the ordering guarantees documented below are stated
+/// once and hold for every identity mutation rather than being re-derived per
+/// endpoint.
+///
+/// `audit_detail` is the text recorded against the `ConfigChange` audit action,
+/// so an operator reading the hash-chained log can tell a user edit from a
+/// group edit without diffing `config.toml`.
+pub(crate) async fn persist_identity_sections<F, R>(
+    state: &Arc<AppState>,
+    caller: Option<UserId>,
+    audit_detail: &str,
+    mutate: F,
+) -> Result<R, PersistError>
+where
+    F: FnOnce(&mut Vec<UserConfig>, &mut Vec<GroupConfig>) -> Result<R, PersistError>,
+{
+    if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistError::Managed);
     }
     let _guard = state.config_write_lock.lock().await;
 
-    let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
-    let captured = mutate(&mut users)?;
+    let (mut users, mut groups) = {
+        let cfg = state.kernel.config_ref();
+        (cfg.users.clone(), cfg.groups.clone())
+    };
+    let captured = mutate(&mut users, &mut groups)?;
 
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(PersistError::BadRequest(
-            "invalid config file path".to_string(),
-        ));
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Read the existing file. A read failure on an existing file (permission
     // denied, hardware fault, …) MUST abort — falling back to "" would
@@ -1233,6 +1297,7 @@ where
     } else {
         let mut aot = toml_edit::ArrayOfTables::new();
         for u in &users {
+            // Replacing the whole users array intentionally discards comments and custom key ordering inside individual user tables; unrelated config sections retain their formatting.
             // Serialize the whole UserConfig via serde so RBAC M3 (#3205)
             // fields (`tool_policy` / `tool_categories` / `memory_access`
             // / `channel_tool_rules`) survive the round-trip. Earlier
@@ -1251,6 +1316,23 @@ where
             aot.push(single.as_table().clone());
         }
         doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
+    }
+
+    // Same treatment for `[[groups]]` (#7745). Written on every identity
+    // mutation, not only on group edits: the vector is re-serialized from the
+    // config the kernel already parsed, so a users-only edit round-trips the
+    // groups section byte-identically and the write stays idempotent.
+    if groups.is_empty() {
+        doc.remove("groups");
+    } else {
+        let mut aot = toml_edit::ArrayOfTables::new();
+        for g in &groups {
+            let single = toml_edit::ser::to_document(g).map_err(|e| {
+                PersistError::Internal(format!("serialize group '{}': {e}", g.name))
+            })?;
+            aot.push(single.as_table().clone());
+        }
+        doc.insert("groups", toml_edit::Item::ArrayOfTables(aot));
     }
 
     let new_toml = doc.to_string();
@@ -1275,23 +1357,7 @@ where
         }
     }
 
-    // Acquire the auth-snapshot write lock BEFORE the disk write so the
-    // middleware can never observe an intermediate state where the new
-    // hash is already on disk (and reachable through `kernel.config_ref()`)
-    // but the `state.user_api_keys` Vec the middleware actually verifies
-    // against still holds the OLD record. Earlier ordering was
-    // `write file → reload → acquire lock → swap`, which left a small
-    // race window: any request landing between the file write and the
-    // snapshot swap would hit the stale `Vec<ApiUserAuth>` and pass auth
-    // with the just-rotated plaintext — bounded by `reload_config`
-    // latency (a few ms under load) but exploitable. Holding the lock
-    // across persist + reload + swap means every concurrent auth check
-    // either sees the pre-rotation snapshot OR blocks on this writer
-    // until the swap completes; never an in-between read where the
-    // on-disk hash and the live `Vec` disagree. Auth blocking during
-    // rotation is the correct behavior (the operator just rotated;
-    // concurrent requests with the old key SHOULD fail).
-    let mut user_keys_guard = state.user_api_keys.write().await;
+    let new_user_records = build_api_user_records(&users);
 
     let write_path = config_path.clone();
     let write_bytes = new_toml.into_bytes();
@@ -1300,34 +1366,22 @@ where
         .map_err(|error| PersistError::Internal(format!("write task failed: {error}")))?
         .map_err(|error| PersistError::Internal(format!("write failed: {error}")))?;
 
-    if let Err(e) = state.kernel.reload_config().await {
-        // The file is on disk; surface a soft error so the dashboard can
-        // show the reason without rolling back. The next manual reload (or
-        // restart) will pick it up. Drop the guard so subsequent reads
-        // aren't blocked on a failed-write path — the on-disk state has
-        // moved forward, and a stale `Vec<ApiUserAuth>` is no worse than
-        // pre-fix behaviour for this failure mode.
-        drop(user_keys_guard);
+    // Authentication consults only this snapshot, not config.toml or the kernel config.
+    // Keep the lock to the brief atomic replacement, and publish immediately after the durable write so reload failure or request cancellation while awaiting reload can never preserve a credential that the file has revoked.
+    *state.user_api_keys.write().await = new_user_records;
+
+    let reload_error = state.kernel.reload_config().await.err();
+    if let Some(e) = reload_error {
         tracing::warn!(error = %e, "user config reload failed after write");
         return Err(PersistError::Internal(format!("reload failed: {e}")));
     }
-
-    // Refresh the in-memory `ApiUserAuth` snapshot the auth middleware
-    // reads from. Without this swap, mutations to `users[].api_key_hash`
-    // (rotate-key, update_user, import_users) only become effective after
-    // a daemon restart — the bug rotate-key exists to fix. Done in the
-    // shared helper so every user-mutation path benefits, not only the
-    // rotation endpoint. Still holding `user_keys_guard` here so the swap
-    // is atomic with the persist + reload above.
-    *user_keys_guard = rebuild_api_user_records(state.as_ref());
-    drop(user_keys_guard);
 
     // Attribute the mutation to the caller that reached the user-management
     // endpoint (RBAC #3054). `None` for loopback / no-auth deployments.
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
-        "users updated".to_string(),
+        audit_detail.to_string(),
         "completed",
         caller,
         Some("api".to_string()),
@@ -1682,7 +1736,28 @@ pub async fn update_user_policy(
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
-        Err(PersistError::Internal(m)) => err_response(StatusCode::INTERNAL_SERVER_ERROR, m),
-        Err(PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(PersistError::Internal(m)) => internal_err_response(m),
+        Err(PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn internal_user_errors_are_scrubbed_from_http_body() {
+        let secret = "write failed: /srv/librefang/config.toml: permission denied";
+        let response = internal_err_response(secret);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains(secret));
+        assert!(!body.contains("config.toml"));
     }
 }

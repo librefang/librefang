@@ -78,20 +78,27 @@ fn current_branch(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
-fn is_worktree_clean(root: &Path) -> bool {
-    let diff_ok = Command::new("git")
-        .args(["diff", "--quiet"])
-        .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let cached_ok = Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    diff_ok && cached_ok
+fn is_worktree_clean(root: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(git(root, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty())
+}
+
+fn git_diff_has_changes(root: &Path, cached: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut command = Command::new("git");
+    command.arg("diff");
+    if cached {
+        command.arg("--cached");
+    }
+    let output = command.arg("--quiet").current_dir(root).output()?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "git diff{} --quiet failed: {}",
+            if cached { " --cached" } else { "" },
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into()),
+    }
 }
 
 /// Paths the release commit stages, on top of a generated Dev.to article.
@@ -130,19 +137,16 @@ const RELEASE_STAGED_PATHS: &[&str] = &[
 
 /// Stage the release commit's file set, skipping paths this repo does not have.
 ///
-/// A per-path `git add` failure is swallowed because the commit step downstream
-/// reports the real outcome: an empty index there is already handled, and a
-/// half-staged index shows up in the release PR's diff before anything ships.
-fn stage_release_files(root: &Path) {
+/// Any staging failure aborts the release before it can create an incomplete
+/// commit or PR.
+fn stage_release_files(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for file in RELEASE_STAGED_PATHS {
         let path = root.join(file);
         if path.exists() {
-            let _ = Command::new("git")
-                .args(["add", "-f", file])
-                .current_dir(root)
-                .status();
+            git(root, &["add", "-f", file])?;
         }
     }
+    Ok(())
 }
 
 fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -155,36 +159,140 @@ fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Err
     Ok(version)
 }
 
-/// Find the latest tag, optionally including pre-releases (rc, beta).
-fn find_latest_tag(root: &Path, include_prerelease: bool) -> Option<String> {
-    let output = Command::new("git")
-        .args(["tag", "--sort=-creatordate"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let tag = line.trim();
-        if tag.starts_with('v') && tag.len() > 1 && tag.as_bytes()[1].is_ascii_digit() {
-            if include_prerelease {
-                // Skip alpha but include rc and beta
-                if !tag.contains("alpha") {
-                    return Some(tag.to_string());
-                }
-            } else if !tag.contains("alpha") && !tag.contains("beta") && !tag.contains("rc") {
-                return Some(tag.to_string());
-            }
-        }
+fn eligible_release_tag(tag: &str, include_prerelease: bool) -> bool {
+    let Some(version) = tag.strip_prefix('v') else {
+        return false;
+    };
+    if version.is_empty() || !version.as_bytes()[0].is_ascii_digit() || version.contains("alpha") {
+        return false;
     }
-    None
+    include_prerelease || (!version.contains("-beta") && !version.contains("-rc"))
 }
 
-fn prompt(message: &str) -> String {
+/// Find the latest release tag using Git's version-aware ordering.
+fn find_latest_tag(
+    root: &Path,
+    include_prerelease: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let tags = git(root, &["tag", "--sort=-v:refname"])?;
+    Ok(tags
+        .lines()
+        .map(str::trim)
+        .find(|tag| eligible_release_tag(tag, include_prerelease))
+        .map(str::to_string))
+}
+
+fn find_previous_tag(
+    root: &Path,
+    current: &str,
+    include_prerelease: bool,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let tags = git(root, &["tag", "--sort=-v:refname"])?;
+    let mut found_current = false;
+    for tag in tags.lines().map(str::trim) {
+        if tag == current {
+            found_current = true;
+        } else if found_current && eligible_release_tag(tag, include_prerelease) {
+            return Ok(Some(tag.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn tag_exists(root: &Path, tag: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(!git(root, &["tag", "--list", tag])?.is_empty())
+}
+
+fn delete_github_release_if_present(
+    root: &Path,
+    tag: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("gh")
+        .args([
+            "release",
+            "delete",
+            tag,
+            "--repo",
+            "librefang/librefang",
+            "--yes",
+        ])
+        .current_dir(root)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let normalized = stderr.to_ascii_lowercase();
+    if normalized.contains("release not found") || normalized.contains("http 404") {
+        return Ok(());
+    }
+    Err(format!("gh release delete {} failed: {}", tag, stderr.trim()).into())
+}
+
+fn next_lts_patch(tags: &str, series: &str) -> u64 {
+    let pattern = Regex::new(&format!(
+        r"^v{}\.(\d+)-lts(?:\.\d+)?$",
+        regex::escape(series)
+    ))
+    .expect("escaped LTS series must compile");
+    tags.lines()
+        .filter_map(|tag| pattern.captures(tag.trim()))
+        .filter_map(|captures| captures.get(1)?.as_str().parse::<u64>().ok())
+        .max()
+        .map_or(0, |patch| patch + 1)
+}
+
+fn validate_calver(version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let calver_re =
+        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)\.?[0-9]+|-lts(\.[0-9]+)?)?$")
+            .expect("static CalVer regex must compile");
+    if calver_re.is_match(version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{}' is not a valid CalVer (expected: YYYY.M.DD, YYYY.M-lts, etc.)",
+            version
+        )
+        .into())
+    }
+}
+
+fn print_dry_run(current: &str, version: &str) {
+    let tag = format!("v{}", version);
+    let is_lts = version.contains("-lts");
+    let is_prerelease = version.contains("-beta") || version.contains("-rc");
+    println!();
+    println!("=== Dry Run ===");
+    println!("  Version: {} -> {}", current, version);
+    println!("  Tag:     {}", tag);
+    if is_lts {
+        let lts_version = version.split("-lts").next().unwrap_or(version);
+        let parts: Vec<&str> = lts_version.split('.').collect();
+        let branch = if parts.len() >= 2 {
+            format!("release/{}.{}", parts[0], parts[1])
+        } else {
+            format!("release/{}", lts_version)
+        };
+        println!("  Type:    LTS");
+        println!("  Branch:  {} (auto-created by CI)", branch);
+    } else if is_prerelease {
+        println!("  Type:    pre-release");
+    } else {
+        println!("  Type:    stable");
+    }
+    println!();
+    println!("No changes made.");
+}
+
+fn prompt(message: &str) -> Result<String, Box<dyn std::error::Error>> {
     print!("{}", message);
-    io::stdout().flush().unwrap();
+    io::stdout().flush()?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
+    if io::stdin().read_line(&mut input)? == 0 {
+        return Err("input closed".into());
+    }
+    Ok(input.trim().to_string())
 }
 
 /// Best-effort GitHub `<owner>/<repo>` lookup from the `origin` remote
@@ -331,13 +439,16 @@ fn build_release_pr_body(
         body.push_str("\n\n");
         body.push_str(changelog_section);
     }
-    let mut body = truncate_pr_body(&body, max_chars);
-    if let Some(pt) = prev_tag {
-        body.push_str(&format!(
-            "\n\n---\n**Full diff:** https://github.com/librefang/librefang/compare/{}...{}",
-            pt, tag
-        ));
-    }
+    let suffix = prev_tag
+        .map(|pt| {
+            format!(
+                "\n\n---\n**Full diff:** https://github.com/librefang/librefang/compare/{}...{}",
+                pt, tag
+            )
+        })
+        .unwrap_or_default();
+    let mut body = truncate_pr_body(&body, max_chars.saturating_sub(suffix.chars().count()));
+    body.push_str(&suffix);
     body
 }
 
@@ -353,7 +464,7 @@ fn run_current(
     no_confirm: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let tag = find_latest_tag(root, true)
+    let tag = find_latest_tag(root, true)?
         .ok_or("no existing release tag found; nothing to re-publish")?;
 
     // Resolve the tag's current commit and main HEAD locally so the
@@ -425,7 +536,7 @@ fn run_current(
     }
 
     if !no_confirm {
-        let answer = prompt(&format!("Dispatch Release workflow for {}? [y/N]: ", tag));
+        let answer = prompt(&format!("Dispatch Release workflow for {}? [y/N]: ", tag))?;
         if answer.to_lowercase() != "y" && answer.to_lowercase() != "yes" {
             return Err("Aborted".into());
         }
@@ -476,31 +587,9 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     // --- Dry run with explicit version: skip all preflight ---
     if args.dry_run {
         if let Some(ref v) = args.version {
+            validate_calver(v)?;
             let current = read_workspace_version(&root).unwrap_or_default();
-            let tag = format!("v{}", v);
-            let is_lts = v.contains("-lts");
-            let is_pre = v.contains("-beta") || v.contains("-rc");
-            println!();
-            println!("=== Dry Run ===");
-            println!("  Version: {} -> {}", current, v);
-            println!("  Tag:     {}", tag);
-            if is_lts {
-                let lts_ver = v.split("-lts").next().unwrap_or(v);
-                let parts: Vec<&str> = lts_ver.split('.').collect();
-                let branch = if parts.len() >= 2 {
-                    format!("release/{}.{}", parts[0], parts[1])
-                } else {
-                    format!("release/{}", lts_ver)
-                };
-                println!("  Type:    LTS");
-                println!("  Branch:  {} (auto-created by CI)", branch);
-            } else if is_pre {
-                println!("  Type:    pre-release");
-            } else {
-                println!("  Type:    stable");
-            }
-            println!();
-            println!("No changes made.");
+            print_dry_run(&current, v);
             return Ok(());
         }
     }
@@ -513,7 +602,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("must be on 'main' branch (currently on '{}')", branch).into());
     }
 
-    if !is_worktree_clean(&root) {
+    if !is_worktree_clean(&root)? {
         let status = Command::new("git")
             .args(["status", "--short"])
             .current_dir(&root)
@@ -527,12 +616,14 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    println!("Pulling latest main...");
-    git(&root, &["pull", "--rebase", "origin", "main"])?;
+    if !args.dry_run {
+        println!("Pulling latest main...");
+        git(&root, &["pull", "--rebase", "origin", "main"])?;
+    }
 
     let current = read_workspace_version(&root)?;
     // Include prerelease tags so rc/beta compare against previous rc/beta
-    let mut prev_tag = find_latest_tag(&root, true);
+    let mut prev_tag = find_latest_tag(&root, true)?;
 
     // --- Determine version ---
     let version = if let Some(v) = args.version {
@@ -601,19 +692,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             let now = chrono::Local::now();
             format!("{}.{}", now.format("%Y"), now.format("%-m"))
         };
-        // Count existing LTS tags to auto-increment patch
-        let lts_count = Command::new("git")
-            .args(["tag", "-l", &format!("v{}.*-lts", lts_base)])
-            .current_dir(&root)
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .count()
-            })
-            .unwrap_or(0);
-        let next_lts_patch = lts_count;
+        let lts_tags = git(&root, &["tag", "-l", &format!("v{}.*-lts*", lts_base)])?;
+        let next_lts_patch = next_lts_patch(&lts_tags, &lts_base);
 
         // Canonical pre-release form is `-beta.N` / `-rc.N` (SemVer
         // pre-release identifier), unified in #3310. The dot is required
@@ -660,7 +740,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
             println!();
 
-            let choice = prompt("Choose [1/2/3/4/5]: ");
+            let choice = prompt("Choose [1/2/3/4/5]: ")?;
             match choice.as_str() {
                 "1" => version_for(Channel::Stable),
                 "2" => version_for(Channel::Beta),
@@ -677,28 +757,25 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     // the legacy `-betaN`; the generator only emits the canonical form, but
     // operators may still pass `--version 2026.5.4-beta1` against an old
     // workflow snippet and we don't want that to abort the release.
-    let calver_re =
-        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)\.?[0-9]+|-lts(\.[0-9]+)?)?$")
-            .unwrap();
-    if !calver_re.is_match(&version) {
-        return Err(format!(
-            "'{}' is not a valid CalVer (expected: YYYY.M.DD, YYYY.M-lts, etc.)",
-            version
-        )
-        .into());
-    }
+    validate_calver(&version)?;
 
     let tag = format!("v{}", version);
     let is_prerelease = version.contains("-beta") || version.contains("-rc");
     let is_lts = version.contains("-lts");
 
     // --- Check if tag already exists ---
-    let tag_exists = Command::new("git")
-        .args(["rev-parse", &tag])
-        .current_dir(&root)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let tag_exists = tag_exists(&root, &tag)?;
+    if tag_exists {
+        // The latest tag is the one being replaced. Resolve its predecessor
+        // before confirmation so both the preview and changelog use the same
+        // version-aware, channel-appropriate base.
+        prev_tag = find_previous_tag(&root, &tag, is_prerelease)?;
+    }
+
+    if args.dry_run {
+        print_dry_run(&current, &version);
+        return Ok(());
+    }
 
     // --- Confirmation ---
     if !args.no_confirm {
@@ -731,7 +808,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         println!();
 
-        let confirm = prompt("Release? [Y/n]: ");
+        let confirm = prompt("Release? [Y/n]: ")?;
         if confirm.starts_with('n') || confirm.starts_with('N') {
             println!("Aborted.");
             return Ok(());
@@ -742,81 +819,33 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Save prev_tag BEFORE deletion so changelog range stays correct.
     // If we're overwriting the current tag, find the tag before it for changelog.
     if tag_exists {
-        // Find the tag that precedes the one we're about to delete
-        let output = Command::new("git")
-            .args(["tag", "--sort=-creatordate"])
-            .current_dir(&root)
-            .output()
-            .ok();
-        if let Some(output) = output {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut found_current = false;
-            for line in stdout.lines() {
-                let t = line.trim();
-                if t == tag {
-                    found_current = true;
-                    continue;
-                }
-                if found_current
-                    && t.starts_with('v')
-                    && t.len() > 1
-                    && t.as_bytes()[1].is_ascii_digit()
-                    && !t.contains("alpha")
-                {
-                    prev_tag = Some(t.to_string());
-                    break;
-                }
-            }
-        }
-
         println!();
         println!("Cleaning up existing tag '{}'...", tag);
-        let _ = git(&root, &["tag", "-d", &tag]);
-        let _ = Command::new("git")
-            .args(["push", "origin", "--delete", &tag])
-            .current_dir(&root)
-            .status();
+        git(&root, &["tag", "-d", &tag])?;
+        let remote_tag_ref = format!("refs/tags/{}", tag);
+        if !git(&root, &["ls-remote", "--tags", "origin", &remote_tag_ref])?.is_empty() {
+            git(&root, &["push", "origin", "--delete", &tag])?;
+        }
 
         let release_branch_check = format!("chore/bump-version-{}", version);
-        let branch_exists = Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{}", release_branch_check),
-            ])
-            .current_dir(&root)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if branch_exists {
-            let _ = git(&root, &["branch", "-D", &release_branch_check]);
+        if !git(&root, &["branch", "--list", &release_branch_check])?.is_empty() {
+            git(&root, &["branch", "-D", &release_branch_check])?;
         }
         // Only delete remote branch if it exists
-        let remote_branch_exists = Command::new("git")
-            .args(["ls-remote", "--heads", "origin", &release_branch_check])
-            .current_dir(&root)
-            .output()
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
-        if remote_branch_exists {
-            let _ = Command::new("git")
-                .args(["push", "origin", "--delete", &release_branch_check])
-                .current_dir(&root)
-                .status();
+        if !git(
+            &root,
+            &["ls-remote", "--heads", "origin", &release_branch_check],
+        )?
+        .is_empty()
+        {
+            git(
+                &root,
+                &["push", "origin", "--delete", &release_branch_check],
+            )?;
         }
 
         // Delete existing GitHub Release so CI can recreate it
-        let _ = Command::new("gh")
-            .args([
-                "release",
-                "delete",
-                &tag,
-                "--repo",
-                "librefang/librefang",
-                "--yes",
-            ])
-            .current_dir(&root)
-            .status();
+        delete_github_release_if_present(&root, &tag)?;
         println!("✓ Cleaned up {}", tag);
     }
 
@@ -958,7 +987,7 @@ pip install librefang-sdk
                     fs::write(&article, article_content)?;
 
                     // Polish with Claude CLI if available
-                    if let Ok(output) = Command::new("claude")
+                    match Command::new("claude")
                         .args([
                             "-p",
                             "--model", "claude-haiku-4-5-20251001",
@@ -977,14 +1006,21 @@ pip install librefang-sdk
                         .env_remove("CLAUDECODE")
                         .output()
                     {
-                        if output.status.success() {
+                        Ok(output) if output.status.success() => {
                             let polished = String::from_utf8_lossy(&output.stdout).to_string();
                             if !polished.trim().is_empty() {
                                 fs::write(&article, polished)?;
                                 println!("  AI polished");
+                            } else {
+                                println!("  AI polish returned no content, using raw changelog");
                             }
-                        } else {
-                            println!("  AI polish failed, using raw changelog");
+                        }
+                        Ok(output) => println!(
+                            "  AI polish failed (exit {}), using raw changelog",
+                            output.status.code().unwrap_or(-1)
+                        ),
+                        Err(error) => {
+                            println!("  AI polish unavailable ({error}), using raw changelog")
                         }
                     }
 
@@ -1012,25 +1048,17 @@ pip install librefang-sdk
     println!();
     println!("Committing version bump...");
 
-    stage_release_files(&root);
+    stage_release_files(&root)?;
 
     // Add article if generated
     if let Some(ref article) = article_path {
         if article.exists() {
-            let _ = Command::new("git")
-                .args(["add", &article.display().to_string()])
-                .current_dir(&root)
-                .status();
+            git(&root, &["add", &article.display().to_string()])?;
         }
     }
 
     // Check if there are staged changes
-    let has_changes = !Command::new("git")
-        .args(["diff", "--cached", "--quiet"])
-        .current_dir(&root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true);
+    let has_changes = git_diff_has_changes(&root, true)?;
 
     // --- Create release branch BEFORE committing ---
     // This avoids committing on main (which has branch protection).
@@ -1160,30 +1188,24 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
         .into());
     }
 
-    if !is_worktree_clean(root) {
+    if !is_worktree_clean(root)? {
         return Err("working tree is dirty. Commit cherry-picked fixes first.".into());
     }
 
     // release/2026.3 -> 2026.3
     let series = branch.strip_prefix("release/").unwrap();
 
-    // Find next patch number
-    let pattern = format!("v{}.*-lts", series);
-    let existing = Command::new("git")
-        .args(["tag", "-l", &pattern])
-        .current_dir(root)
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count()
-        })
-        .unwrap_or(0);
-
-    let patch = existing; // 0-lts exists → next is 1
+    // Find the highest existing patch. Counting tags would reuse a version
+    // whenever an earlier tag was deleted or the sequence had a gap.
+    let pattern = format!("v{}.*-lts*", series);
+    let existing = git(root, &["tag", "-l", &pattern])?;
+    let patch = next_lts_patch(&existing, series);
     let version = format!("{}.{}-lts", series, patch);
+    validate_calver(&version)?;
     let tag = format!("v{}", version);
+    if tag_exists(root, &tag)? {
+        return Err(format!("refusing to overwrite existing LTS tag {}", tag).into());
+    }
 
     println!();
     println!("=== LTS Patch Release ===");
@@ -1199,7 +1221,7 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     }
 
     if !args.no_confirm {
-        let confirm = prompt("Release? [Y/n]: ");
+        let confirm = prompt("Release? [Y/n]: ")?;
         if confirm.starts_with('n') || confirm.starts_with('N') {
             println!("Aborted.");
             return Ok(());
@@ -1246,16 +1268,12 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     }
 
     // Commit version bump if there are changes
-    let has_changes = !Command::new("git")
-        .args(["diff", "--quiet"])
-        .current_dir(root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true);
+    let has_changes = git_diff_has_changes(root, false)?;
 
     if has_changes {
-        let _ = Command::new("git")
-            .args([
+        git(
+            root,
+            &[
                 "add",
                 "Cargo.toml",
                 "Cargo.lock",
@@ -1264,15 +1282,11 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
                 "sdk/python/librefang/librefang_client.py",
                 "sdk/rust/src/lib.rs",
                 "sdk/go/librefang.go",
-            ])
-            .current_dir(root)
-            .status();
+            ],
+        )?;
         let lts_msg = format!("chore: bump to {}", tag);
         if git(root, &["commit", "-m", &lts_msg]).is_err() {
-            let _ = Command::new("git")
-                .args(["add", "-A"])
-                .current_dir(root)
-                .status();
+            git(root, &["add", "-A"])?;
             git(root, &["commit", "-m", &lts_msg])?;
         }
     }
@@ -1295,6 +1309,84 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A filesystem-safe stand-in for the current thread's name, for tests that need a scratch directory of their own.
+    ///
+    /// Under the test harness the thread name is the test's full path — `release::tests::git_diff_change_detection_distinguishes_changes_from_errors`.
+    /// `:` is an ordinary character in a POSIX filename but is reserved on Windows, where it separates a drive letter or an NTFS alternate data stream, so joining the raw name into a temp path succeeds on Linux and macOS and fails on Windows with `InvalidFilename` (OS error 123).
+    /// That asymmetry is why the two tests using it were red on the Windows lane alone while every other lane stayed green.
+    ///
+    /// Process id still distinguishes concurrent runs; this only has to keep sibling tests in one process apart.
+    fn thread_scratch_slug() -> String {
+        scratch_slug(std::thread::current().name().unwrap_or("unnamed"))
+    }
+
+    /// The pure half of [`thread_scratch_slug`], split out so the rule can be asserted against inputs the running test does not happen to have.
+    fn scratch_slug(raw: &str) -> String {
+        raw.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    /// Windows rejects these outright in a path component; a directory name containing one fails to create with `InvalidFilename` (OS error 123).
+    /// POSIX accepts all nine, which is why a scratch path built from an unsanitised thread name is green on Linux and macOS and red on Windows.
+    const WINDOWS_RESERVED: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+    /// Guards the fix for the Windows-only `InvalidFilename` failures in
+    /// `tag_selection_uses_version_order_and_channel_filtering` and
+    /// `git_diff_change_detection_distinguishes_changes_from_errors`.
+    ///
+    /// Those two build a scratch directory out of the thread name, which under the test harness is the test's full path and therefore contains `::`.
+    /// The Windows lane is the only place the bug reproduces, and `changes`-gated PRs that touch `xtask` do not run that lane — so this asserts the rule directly instead, on every platform.
+    #[test]
+    fn scratch_slug_strips_every_character_windows_reserves() {
+        // The exact name that produced OS error 123 on the Windows lane.
+        let offender =
+            "release::tests::git_diff_change_detection_distinguishes_changes_from_errors";
+        assert!(
+            offender.contains(':'),
+            "the regression premise is that harness thread names carry `::`"
+        );
+        let slug = scratch_slug(offender);
+        for reserved in WINDOWS_RESERVED {
+            assert!(
+                !slug.contains(reserved),
+                "slug {slug:?} still contains {reserved:?}, which Windows rejects in a path component"
+            );
+        }
+
+        // Every reserved character, not just the `:` we happened to hit.
+        let all_reserved: String = WINDOWS_RESERVED.iter().collect();
+        let slug = scratch_slug(&all_reserved);
+        assert_eq!(
+            slug,
+            "_".repeat(WINDOWS_RESERVED.len()),
+            "each reserved character must map to a single safe placeholder"
+        );
+
+        // The slug still has to separate sibling tests sharing one process,
+        // or the directories it names would collide instead of failing.
+        assert_ne!(
+            scratch_slug("release::tests::alpha"),
+            scratch_slug("release::tests::beta"),
+            "distinct test names must keep distinct scratch directories"
+        );
+
+        // And the live thread name — whatever the harness calls this test — has to satisfy the same rule.
+        let live = thread_scratch_slug();
+        for reserved in WINDOWS_RESERVED {
+            assert!(
+                !live.contains(reserved),
+                "live thread slug {live:?} contains {reserved:?}"
+            );
+        }
+    }
 
     /// The seam between the fold and the release commit: `collect_fragments_in`
     /// deletes the fragments it consumed, and only `stage_release_files` can get
@@ -1340,7 +1432,7 @@ mod tests {
         git(&root, &["commit", "-qm", "seed"]).unwrap();
 
         assert_eq!(changelog::collect_fragments_in(&root).unwrap(), 1);
-        stage_release_files(&root);
+        stage_release_files(&root).unwrap();
         let staged = git(&root, &["diff", "--cached", "--name-status"]).unwrap();
 
         // Clean up before asserting so a failure cannot leave the tree behind.
@@ -1378,6 +1470,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn release_staging_surfaces_git_add_failures() {
+        let root =
+            std::env::temp_dir().join(format!("lf-release-stage-error-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Cargo.toml"), "[workspace]").unwrap();
+
+        let error = stage_release_files(&root).unwrap_err().to_string();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("git add -f Cargo.toml failed"), "{error}");
+    }
+
     fn body_of(len: usize) -> String {
         (0..len).map(|i| format!("- bullet {i}\n")).collect()
     }
@@ -1394,7 +1500,10 @@ mod tests {
         let section = body_of(20_000);
         let body = build_release_pr_body("v1.0.0", &section, Some("v0.9.0"), MAX_PR_BODY_CHARS);
 
-        assert!(body.chars().count() < 65_536, "still over GitHub's cap");
+        assert!(
+            body.chars().count() <= MAX_PR_BODY_CHARS,
+            "body exceeded its configured budget"
+        );
         assert!(body.starts_with("<!-- release-tag:v1.0.0 -->"));
         assert!(body.contains("_Changelog truncated"));
         assert!(
@@ -1596,5 +1705,125 @@ mod tests {
         assert!(re.is_match("2026.5.0-lts.1"));
         assert!(!re.is_match("2026.5.4-beta"));
         assert!(!re.is_match("v2026.5.4-beta.1"));
+    }
+
+    #[test]
+    fn calver_validation_is_shared_by_dry_run_and_real_release() {
+        assert!(validate_calver("2026.5.4-beta.1").is_ok());
+        assert!(validate_calver("2026.5.4-beta").is_err());
+        assert!(validate_calver("v2026.5.4").is_err());
+        assert!(validate_calver("foo.0-lts").is_err());
+    }
+
+    #[test]
+    fn lts_patch_advances_past_the_highest_existing_patch() {
+        let tags = "v2026.5.0-lts\nv2026.5.2-lts\nv2026.5.7-lts\ninvalid";
+        assert_eq!(next_lts_patch(tags, "2026.5"), 8);
+        assert_eq!(next_lts_patch("", "2026.5"), 0);
+    }
+
+    #[test]
+    fn stable_tag_filter_excludes_all_prerelease_channels() {
+        assert!(eligible_release_tag("v2026.5.4", false));
+        assert!(eligible_release_tag("v2026.5.4-lts", false));
+        assert!(!eligible_release_tag("v2026.5.4-beta.1", false));
+        assert!(!eligible_release_tag("v2026.5.4-rc.1", false));
+        assert!(!eligible_release_tag("v2026.5.4-alpha.1", true));
+        assert!(eligible_release_tag("v2026.5.4-beta.1", true));
+    }
+
+    #[test]
+    fn tag_selection_uses_version_order_and_channel_filtering() {
+        let root = std::env::temp_dir().join(format!(
+            "lf-release-tags-{}-{}",
+            std::process::id(),
+            thread_scratch_slug()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "."]).unwrap();
+        git(&root, &["config", "user.email", "release@example.invalid"]).unwrap();
+        git(&root, &["config", "user.name", "release test"]).unwrap();
+        fs::write(root.join("seed"), "seed").unwrap();
+        git(&root, &["add", "seed"]).unwrap();
+        git(&root, &["commit", "-qm", "seed"]).unwrap();
+        for tag in [
+            "v2026.7.9",
+            "v2026.7.10",
+            "v2026.7.10-alpha.9",
+            "v2026.7.10-beta.2",
+            "v2026.7.10-rc.1",
+        ] {
+            git(&root, &["tag", tag]).unwrap();
+        }
+
+        assert_eq!(
+            find_latest_tag(&root, true).unwrap().as_deref(),
+            Some("v2026.7.10-rc.1")
+        );
+        assert_eq!(
+            find_latest_tag(&root, false).unwrap().as_deref(),
+            Some("v2026.7.10")
+        );
+        assert_eq!(
+            find_previous_tag(&root, "v2026.7.10", false)
+                .unwrap()
+                .as_deref(),
+            Some("v2026.7.9")
+        );
+        assert!(tag_exists(&root, "v2026.7.10").unwrap());
+        assert!(!tag_exists(&root, "v2026.7.11").unwrap());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_cleanliness_includes_untracked_files() {
+        let root = std::env::temp_dir().join(format!("lf-release-clean-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "."]).unwrap();
+
+        assert!(is_worktree_clean(&root).unwrap());
+        fs::write(root.join("untracked.tmp"), "stray release artifact").unwrap();
+        assert!(!is_worktree_clean(&root).unwrap());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_diff_change_detection_distinguishes_changes_from_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "lf-release-diff-{}-{}",
+            std::process::id(),
+            thread_scratch_slug()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "."]).unwrap();
+        git(&root, &["config", "user.email", "release@example.invalid"]).unwrap();
+        git(&root, &["config", "user.name", "release test"]).unwrap();
+        fs::write(root.join("seed"), "before").unwrap();
+        git(&root, &["add", "seed"]).unwrap();
+        git(&root, &["commit", "-qm", "seed"]).unwrap();
+
+        assert!(!git_diff_has_changes(&root, false).unwrap());
+        assert!(!git_diff_has_changes(&root, true).unwrap());
+
+        fs::write(root.join("seed"), "after").unwrap();
+        assert!(git_diff_has_changes(&root, false).unwrap());
+        assert!(!git_diff_has_changes(&root, true).unwrap());
+
+        git(&root, &["add", "seed"]).unwrap();
+        assert!(!git_diff_has_changes(&root, false).unwrap());
+        assert!(git_diff_has_changes(&root, true).unwrap());
+
+        let non_repository = root.with_extension("not-a-repository");
+        let _ = fs::remove_dir_all(&non_repository);
+        fs::create_dir_all(&non_repository).unwrap();
+        assert!(git_diff_has_changes(&non_repository, false).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&non_repository);
     }
 }

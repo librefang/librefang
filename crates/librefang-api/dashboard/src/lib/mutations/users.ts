@@ -5,11 +5,11 @@
 // subtree because the import can touch arbitrary rows; that's the exact
 // "bulk reset" case AGENTS.md calls out as a legitimate `all` invalidation.
 //
-// `authzKeys.effective(name)` is also invalidated on every user-touching
-// write because the permission simulator's snapshot is derived from the
-// same `UserConfig` row (#3228 follow-up). Without these invalidations the
-// simulator pane shows stale data for up to `STALE_MS` (30s) after an
-// admin saves a policy / role / channel-binding / budget edit.
+// Writes that change user configuration also reconcile
+// `authzKeys.effective(name)` because the permission simulator derives its
+// snapshot from the same `UserConfig` row (#3228 follow-up). API-key rotation
+// is the intentional exception: it changes authentication credentials, not
+// role, policy, bindings, or any simulator input.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -28,6 +28,7 @@ import {
   userKeys,
   permissionPolicyKeys,
   authzKeys,
+  groupKeys,
 } from "../queries/keys";
 
 export function useCreateUser() {
@@ -38,7 +39,11 @@ export function useCreateUser() {
       qc.invalidateQueries({ queryKey: userKeys.lists() });
       // The new user is immediately simulatable — drop any cached
       // "user not found" 404 from a prior lookup of the same name.
+      qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
       qc.invalidateQueries({ queryKey: authzKeys.effective(variables.name) });
+      // A group can list a member before that member has a user row; creating
+      // the row flips `unknown_members` on every group that named them.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }
@@ -50,19 +55,26 @@ export function useUpdateUser() {
       updateUser(vars.originalName, vars.payload),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: userKeys.lists() });
-      qc.invalidateQueries({ queryKey: userKeys.detail(variables.originalName) });
+      const renamed = variables.payload.name !== variables.originalName;
       // `updateUser` can change `role` and `channel_bindings`, both of
-      // which feed the effective-permissions snapshot; invalidate the
-      // simulator cache for both old and (renamed) new identities.
-      qc.invalidateQueries({
-        queryKey: authzKeys.effective(variables.originalName),
-      });
-      // If the user renamed, also invalidate the new-name detail cache so
-      // any open detail view falls through to a fresh fetch.
-      if (variables.payload.name !== variables.originalName) {
+      // which feed the effective-permissions snapshot. A rename ends the old
+      // identity, so evict its detail/simulator entries rather than refetching
+      // endpoints that now return 404.
+      if (renamed) {
+        qc.removeQueries({ queryKey: userKeys.detail(variables.originalName) });
+        qc.removeQueries({ queryKey: authzKeys.effective(variables.originalName) });
         qc.invalidateQueries({ queryKey: userKeys.detail(variables.payload.name) });
         qc.invalidateQueries({
           queryKey: authzKeys.effective(variables.payload.name),
+        });
+        // The daemon carries a rename through every group's membership list
+        // in the same config write, so the cached group rows still name the
+        // old member.
+        qc.invalidateQueries({ queryKey: groupKeys.all });
+      } else {
+        qc.invalidateQueries({ queryKey: userKeys.detail(variables.originalName) });
+        qc.invalidateQueries({
+          queryKey: authzKeys.effective(variables.originalName),
         });
       }
     },
@@ -80,6 +92,10 @@ export function useDeleteUser() {
       // remove the snapshot rather than invalidate so a refetch doesn't
       // race a now-404 endpoint.
       qc.removeQueries({ queryKey: authzKeys.effective(name) });
+      // The daemon strips a deleted user from every group in the same config
+      // write (#7745), so the cached group rows and the per-user reverse
+      // lookups are both stale the moment this resolves.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }
@@ -99,6 +115,9 @@ export function useImportUsers() {
       // Bulk import can rewrite roles, policies, and channel bindings on
       // arbitrary users — sweep the entire effective-permissions subtree.
       qc.invalidateQueries({ queryKey: authzKeys.all });
+      // Import can create rows for names that groups already list, which
+      // clears their `unknown_members` flag.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }

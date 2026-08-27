@@ -1,6 +1,7 @@
 import {
   useMutation,
   useQueryClient,
+  type QueryClient,
   type UseMutationOptions,
 } from "@tanstack/react-query";
 import {
@@ -16,25 +17,48 @@ import {
   type CreateTaskPayload,
   type CreateTaskResult,
 } from "../../api";
-import { runtimeKeys, sessionKeys } from "../queries/keys";
+import { overviewKeys, runtimeKeys, sessionKeys } from "../queries/keys";
 
 type ShutdownResult = { status: string };
+type MutationOptions<TData, TVariables> = Partial<
+  Omit<UseMutationOptions<TData, Error, TVariables>, "mutationFn">
+>;
+
+function invalidateTaskQueries(qc: QueryClient) {
+  qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
+  qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+  qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+}
 
 export function useShutdownServer(
-  options?: Partial<UseMutationOptions<ShutdownResult, Error, void>>,
+  options?: MutationOptions<ShutdownResult, void>,
 ) {
+  const qc = useQueryClient();
   return useMutation<ShutdownResult, Error, void>({
     ...options,
     mutationFn: shutdownServer,
+    onSuccess: async (...args) => {
+      await Promise.all([
+        qc.cancelQueries({ queryKey: runtimeKeys.all }),
+        qc.cancelQueries({ queryKey: overviewKeys.snapshot() }),
+      ]);
+      qc.removeQueries({ queryKey: runtimeKeys.all });
+      qc.removeQueries({ queryKey: overviewKeys.snapshot() });
+      await options?.onSuccess?.(...args);
+    },
   });
 }
 
-export function useCreateBackup() {
+export function useCreateBackup(
+  options?: MutationOptions<Awaited<ReturnType<typeof createBackup>>, void>,
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: createBackup,
-    onSuccess: () => {
+    ...options,
+    onSuccess: (...args) => {
       qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
+      options?.onSuccess?.(...args);
     },
   });
 }
@@ -52,86 +76,107 @@ export function useCreateBackup() {
 // AGENTS.md, not the narrow per-id default. Without this, every page
 // navigated after a restore shows pre-restore state until a manual
 // refresh (#5140).
-export function useRestoreBackup() {
+export type RestoreBackupVars = {
+  filename: string;
+  keepConfig?: boolean;
+  components?: string[];
+};
+
+export function useRestoreBackup(
+  options?: MutationOptions<Awaited<ReturnType<typeof restoreBackup>>, RestoreBackupVars>,
+) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: restoreBackup,
-    onSuccess: () => {
+    mutationFn: (vars: RestoreBackupVars) =>
+      restoreBackup(vars.filename, { keepConfig: vars.keepConfig, components: vars.components }),
+    ...options,
+    onSuccess: (...args) => {
       qc.invalidateQueries();
+      options?.onSuccess?.(...args);
     },
   });
 }
 
-export function useDeleteBackup() {
+export function useDeleteBackup(
+  options?: MutationOptions<Awaited<ReturnType<typeof deleteBackup>>, string>,
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteBackup,
-    onSuccess: () => {
+    ...options,
+    onSuccess: (...args) => {
       qc.invalidateQueries({ queryKey: runtimeKeys.backups() });
+      options?.onSuccess?.(...args);
     },
   });
 }
 
-export function useDeleteTask() {
+export function useDeleteTask(
+  options?: MutationOptions<Awaited<ReturnType<typeof deleteTaskFromQueue>>, string>,
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteTaskFromQueue,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+    ...options,
+    onSuccess: (...args) => {
+      invalidateTaskQueries(qc);
+      options?.onSuccess?.(...args);
     },
   });
 }
 
-export function useRetryTask() {
+export function useRetryTask(
+  options?: MutationOptions<Awaited<ReturnType<typeof retryTask>>, string>,
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: retryTask,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.queueStatus() });
+    ...options,
+    onSuccess: (...args) => {
+      invalidateTaskQueries(qc);
+      options?.onSuccess?.(...args);
     },
   });
 }
 
 export function useCreateTask(
-  options?: Partial<UseMutationOptions<CreateTaskResult, Error, CreateTaskPayload>>,
+  options?: MutationOptions<CreateTaskResult, CreateTaskPayload>,
 ) {
   const qc = useQueryClient();
   return useMutation<CreateTaskResult, Error, CreateTaskPayload>({
     ...options,
     mutationFn: createTask,
     onSuccess: (...args) => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      invalidateTaskQueries(qc);
       options?.onSuccess?.(...args);
     },
   });
 }
 
 export function useUpdateTaskStatus(
-  options?: Partial<UseMutationOptions<{ status?: string; id?: string }, Error, { id: string; status: "pending" | "cancelled" }>>,
+  options?: MutationOptions<{ status?: string; id?: string }, { id: string; status: "pending" | "cancelled" }>,
 ) {
   const qc = useQueryClient();
   return useMutation<{ status?: string; id?: string }, Error, { id: string; status: "pending" | "cancelled" }>({
     ...options,
     mutationFn: ({ id, status }) => updateTaskStatus(id, status),
     onSuccess: (...args) => {
-      qc.invalidateQueries({ queryKey: runtimeKeys.tasks() });
-      qc.invalidateQueries({ queryKey: runtimeKeys.taskStatus() });
+      invalidateTaskQueries(qc);
       options?.onSuccess?.(...args);
     },
   });
 }
 
-export function useCleanupSessions() {
+export function useCleanupSessions(
+  options?: MutationOptions<Awaited<ReturnType<typeof cleanupSessions>>, void>,
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: cleanupSessions,
-    onSuccess: () => {
+    ...options,
+    onSuccess: (...args) => {
       qc.invalidateQueries({ queryKey: sessionKeys.all });
+      options?.onSuccess?.(...args);
     },
   });
 }

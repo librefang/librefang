@@ -42,6 +42,10 @@ For talking to other agents **inside the same LibreFang daemon** (no A2A protoco
 | `agent_find` | `query` | Search agents by name, ID, or tag. |
 | `agent_kill` | `agent_id` | Terminate a running agent. Forbidden in sub-agent context by default. |
 | `goal_update` | `goal` | Update **this** agent's goal/objective mid-turn. The new goal is written into the agent's manifest and surfaces in subsequent prompts. |
+| `agent_type_create` | `name`, optional `description`, `system_prompt`, `provider`, `model`, `tools`, `skills` | Author a new **agent type** — a reusable manifest stored on the daemon that `agent_spawn`, the dashboard and the TUI can all spawn from afterwards. Only those seven fields are settable here; everything else in a manifest starts at its default and is edited later. A name already used by an agent type or a live agent is rejected rather than overwritten. |
+
+`agent_type_create` writes through the same `AgentTypeSpec` validation and the same store as `POST /api/templates`, so a type an agent authors is indistinguishable from one an operator authored in the dashboard.
+"Agent type" is the term used by the tool, the dashboard and the TUI; the HTTP path is and stays `/api/templates`, with no second alias for the same resource.
 
 `max_agent_call_depth` in `[kernel]` (default `5`) caps how deep an `agent_send` chain can recurse — prevents A→B→A loops from ever reaching production.
 A nested `workflow_run` (below) whose step targets an agent that runs a workflow again is charged to this same budget, since each step nests a whole agent turn exactly as an `agent_send` hop does.
@@ -50,13 +54,30 @@ A nested `workflow_run` (below) whose step targets an agent that runs a workflow
 
 ## Memory Tools (per-agent)
 
-Direct access to the agent's proactive-memory store from inside the loop. Distinct from the auto-recall machinery — these are the tools the agent can call explicitly.
+There are **two memory stores**, with two separate tool families, and the names are close enough to be worth reading carefully.
+
+`memory_store` / `memory_recall` / `memory_list` are a **key/value store**. `memory_recall` takes an exact key and does no matching of any kind — it is not a search.
 
 | Tool | Arguments | Purpose |
 |---|---|---|
-| `memory_store` | `content`, optional `category`, `scope` | Persist a custom memory entry. `scope` ∈ `user_memory` / `session_memory` / `agent_memory`. |
-| `memory_recall` | `query`, optional `limit`, `scope` | Semantic search over the agent's memories. |
-| `memory_list` | optional `category`, `scope`, `limit` | Enumerate memories without a search query. |
+| `memory_store` | `key`, `value` | Persist a value under an exact key. Retrievable only by passing that same key back. |
+| `memory_recall` | `key` | Look up one value by its exact key. Returns "not found" unless the key matches character for character. |
+| `memory_list` | optional `limit`, `offset` | Enumerate key names (not values) in the key/value store. |
+
+`memory_semantic_*` are the **semantic store** — the embedding-backed one the auto-recall machinery reads from before each turn. These are the tools that let an agent query it deliberately instead of only receiving whatever was injected for it.
+
+| Tool | Arguments | Purpose |
+|---|---|---|
+| `memory_semantic_search` | `query`, optional `limit`, `min_confidence` | Search remembered fragments by meaning. Returns each fragment with the id needed to retract it. `min_confidence` drops fragments whose confidence has decayed, so a caller can ask for nothing rather than stale noise. |
+| `memory_semantic_add` | `content` | Deliberately record a durable fact. The content goes through the memory extractor, which may distil it, merge it into an existing memory, or decline it as redundant — the result reports exactly what was stored, including "nothing". |
+| `memory_semantic_forget` | `memory_id` | Retract one memory so it stops being recalled. This is the remedy for a stale memory that keeps contradicting what the agent can observe directly. |
+| `memory_semantic_stats` | — | Counts per level and per category, plus whether auto-memorize, auto-recall and LLM extraction are on. Distinguishes "the store is empty" from "the store is switched off". |
+
+Only `memory_semantic_search` ships its schema on every turn; the other three are reachable through `tool_search` / `tool_load`.
+
+The semantic tools need both a `capabilities.tools` entry that admits them (a bare `memory_*` glob does) **and** memory scopes that cover the agent's own memory: `capabilities.memory_read` for `search` / `stats`, `capabilities.memory_write` for `add` / `forget`. Undeclared scopes stay open; declaring scopes that cover only the key/value store (`memory_read = ["kv:*"]`) withholds the semantic tools while leaving the key/value ones intact.
+The same two scopes gate **automatic** memory as of #7605, with one difference: there a declared-but-empty list (`memory_read = []`) denies, where the tool gate treats it as undeclared.
+They are also withheld entirely when `[proactive_memory] enabled = false`, since the store is then never built.
 
 See [Memory System](/agent/memory#proactive-memory) for the entry schema, scopes, decay formula, and consolidation trigger.
 
@@ -83,8 +104,41 @@ The claim TTL exists to recover from worker crashes — if the claimer doesn't `
 | Tool | Arguments | Purpose |
 |---|---|---|
 | `channel_send` | `channel`, `target`, `content` (text / image / file / poll) | Send a message, image, file, or poll to a channel user — **without going through the agent loop**. Useful for pushing alerts, async results, or out-of-band notifications. |
+| `channel_dm` | `user_id`, `message` | Deliver a message privately to one member of the group conversation the current turn arrived on, instead of posting where everyone can read it. |
+| `channel_members` | optional `channel`, `chat_id` | List the known members of a group conversation — `user_id`, `display_name`, `username` and `source` for each. Read-only. |
 
 `channel_send` is what `[deliver_only]` webhook mode uses internally; agents can also call it directly. Capability: `channel.*`.
+
+`channel_members` reads the roster the channel bridge builds as it observes group messages, and — on adapters configured to supply a platform member list — everyone that list names.
+Each member carries a `source`, and the reply carries `observed_count` and `enumerated_count` alongside it.
+
+- `observed` — this person has spoken in the conversation. `channel_dm` can reach them.
+- `enumerated` — the platform lists them as a member and they have never addressed the agent. They are reported here and `channel_dm` refuses them.
+
+The split is a security boundary rather than a label.
+Bulk-filling the roster from a platform's member list would have widened `channel_dm`'s authorization set from "people this agent has interacted with" to "everyone the workspace lists", letting an agent privately message someone who has never spoken to it.
+Speaking promotes an enumerated member to observed; a later enumeration sweep never demotes them back.
+
+Only the Slack adapter enumerates today, and only with `SLACK_ENUMERATE_MEMBERS = "true"` — see [Slack](/integrations/channels/core#channel-member-enumeration).
+Both arguments default to the conversation the current message arrived on, so during message handling it can be called with no arguments at all; a direct message has no roster.
+Naming a different conversation on the channel the turn arrived on is refused, for the same reason `channel_send` refuses a cross-chat dispatch — one group must not be able to enumerate another's membership.
+Use it to attribute a request to the person who made it, and to obtain the platform `user_id` an external system needs in order to notify them.
+
+### Reaching one person in a group
+
+In a group conversation `channel_send` may only address the group itself — re-targeting it at an individual is refused by the cross-chat dispatch guard, which exists because an agent that can name any recipient can be talked into naming the wrong one.
+`channel_dm` is the narrow exception: it takes a `user_id` and a `message` and nothing else.
+The channel, the conversation and the bot account all come from the turn being handled, and the recipient must be someone the daemon has seen speak in that conversation — a `channel_members` entry whose `source` is `observed`.
+A member listed as `enumerated` is known to the platform but has never addressed the agent, and is refused.
+An agent therefore cannot address a platform id it has not met, and cannot use one conversation to reach into another.
+
+Out of band — from a cron job, a trigger, or an API-driven run — there is no conversation and so no roster to authorize anyone; `channel_dm` is unavailable there by design, and `channel_send` with an explicit recipient is the tool for that case.
+
+What "privately" means is not identical across platforms, and the tool does not pretend otherwise.
+Slack lets a bot open a DM with any workspace member, so a `U…` id always works.
+Telegram and Discord bots cannot start a conversation with someone who has never messaged them, and that send fails — it never quietly falls back to posting in the group, because a private notice that silently becomes public is worse than an error.
+
+`notify_owner` is not an alternative to this: it produces an operator-facing notice delivered out of band on the operator's own surface, and no channel adapter routes it to a participant.
 
 ---
 
@@ -234,6 +288,10 @@ The margin is absolute rather than a share of the length, so on a long recording
 Lower `max_secs` if a call times out.
 How much media fits in one request depends on provider speed, and a self-hosted endpoint can be an order of magnitude slower than a hosted one.
 
+Lower it as well if a call is rejected for being over the post-extraction audio budget.
+Two size limits apply, and they measure different things: the input container is checked against the 50 MB video limit before anything is read, and the audio track extracted from it is checked against the 20 MB audio limit before it is sent to a provider.
+The second is the one a long recording reaches, because the extracted track is what actually leaves the process — the rejection names the measured size and the cap, so the window can be scaled down from those two numbers rather than guessed at.
+
 ---
 
 ## Owner Notifications
@@ -284,10 +342,10 @@ The companion tools `skill_evolve_write_file` and `skill_evolve_remove_file` man
 
 ## Where to Look in Code
 
-- **Tool registry** — `crates/librefang-runtime/src/tools/` — every `register_tool!` call.
-- **Schema serialisation** — `librefang-runtime::tools::schema` — JSON schemas the LLM sees.
-- **Capability gating** — `librefang-runtime::capability` — which agents can call which tools.
-- **Browser pool** — `crates/librefang-runtime/src/tools/browser/`.
-- **Schedule / cron runtime tools** — `crates/librefang-runtime/src/tools/scheduler/`.
+- **Tool registry and schemas** — `crates/librefang-runtime/src/tool_runner/definitions.rs` — `builtin_tool_definitions()` returns the name, description and JSON schema the LLM sees for every builtin.
+- **Dispatch** — `crates/librefang-runtime/src/tool_runner/dispatch.rs` — the arm that routes a tool name to its handler; the handlers themselves sit in per-domain siblings (`agent.rs`, `workflow.rs`, `memory.rs`, …).
+- **Capability gating** — `crates/librefang-types/src/capability.rs` plus the `allowed_tools` check in `execute_tool` — which agents can call which tools.
+- **Browser pool** — `crates/librefang-runtime/src/browser.rs` and `browser_tools.rs`.
+- **Schedule / cron runtime tools** — `crates/librefang-runtime/src/tool_runner/schedule.rs` and `cron.rs`.
 
 When in doubt, the rustdoc on the tool struct is the canonical specification. The dashboard's "Tools" inspector also renders the live, agent-resolved tool set with current capability grants applied.

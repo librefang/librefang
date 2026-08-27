@@ -13,14 +13,16 @@ name: Kubernetes
 #   kind   — builds the image and actually boots it in a throwaway cluster with
 #            `pod-security.kubernetes.io/enforce=restricted`, then kills the pod
 #            and proves /data survived. ~40 min because of the Rust release
-#            build, so it follows docker-build.yml's precedent and runs on
-#            push-to-main plus manual dispatch rather than on every PR push.
+#            build, so it runs on push-to-main, manual dispatch, and only PRs
+#            that change the image runtime or this workflow.
 on:
   pull_request:
     paths:
       - 'deploy/kubernetes/**'
       - 'deploy/docker-entrypoint.sh'
+      - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
+      - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   push:
     branches: [main]
@@ -29,6 +31,7 @@ on:
       - 'deploy/docker-entrypoint.sh'
       - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
+      - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   workflow_dispatch:
 
@@ -37,9 +40,44 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  # Each main commit is a published integration state. Preserve its full gate;
+  # PR runs remain replaceable when a newer revision supersedes them.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: detect image-runtime changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image_runtime: ${{ steps.diff.outputs.image_runtime }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Detect Docker runtime changes
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "$EVENT_NAME" = pull_request ]; then
+            set +e
+            git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+              Dockerfile deploy/docker-entrypoint.sh .github/workflows/kubernetes.yml
+            diff_rc=$?
+            set -e
+            case "$diff_rc" in
+              0) changed=false ;;
+              1) changed=true ;;
+              *) echo "::error::could not compare Kubernetes runtime inputs"; exit "$diff_rc" ;;
+            esac
+          fi
+          echo "image_runtime=$changed" >> "$GITHUB_OUTPUT"
+
   render:
     name: render + validate manifests
     runs-on: ubuntu-latest
@@ -49,6 +87,9 @@ jobs:
 
       - name: Install PyYAML
         run: python3 -m pip install --user pyyaml
+
+      - name: Test manifest validator
+        run: python3 -m unittest scripts/tests/test_check_k8s_manifests.py
 
       # `kubectl kustomize` rather than a standalone kustomize binary: it is
       # preinstalled on the runner and is what the README tells operators to
@@ -60,8 +101,20 @@ jobs:
           echo "--- rendered ---"
           cat rendered-base.yaml
 
+      # The managed-config overlay (#6695) is checked by the same script and against the same assertions as the base — it is an increment on the deployment baseline, not a parallel one with its own rules.
+      # The script additionally recomputes sha256 over the rendered ConfigMap and compares it to the pod template's checksum annotation, so a config edit that forgets the annotation — and would therefore apply cleanly while rolling nothing — fails here.
+      - name: Render managed-config overlay
+        run: |
+          set -euo pipefail
+          kubectl kustomize deploy/kubernetes/overlays/managed-config > rendered-managed.yaml
+          echo "--- rendered ---"
+          cat rendered-managed.yaml
+
       - name: Validate rendered manifests
-        run: python3 scripts/check-k8s-manifests.py rendered-base.yaml
+        run: |
+          set -euo pipefail
+          python3 scripts/check-k8s-manifests.py rendered-base.yaml
+          python3 scripts/check-k8s-manifests.py rendered-managed.yaml
 
       # Server-side dry-run against the real API-server schema, catching typos
       # in field names that a YAML-shape validator cannot see. `--validate=true`
@@ -80,6 +133,7 @@ jobs:
           # a dry-run apply is the correct scope here — it validates schema and
           # admission, not runtime resolution of secretKeyRefs.
           kubectl -n librefang apply --dry-run=server -f rendered-base.yaml
+          kubectl -n librefang apply --dry-run=server -f rendered-managed.yaml
 
       - name: Accepted by an API server enforcing restricted Pod Security
         run: |
@@ -93,17 +147,23 @@ jobs:
             pod-security.kubernetes.io/enforce=restricted \
             pod-security.kubernetes.io/enforce-version=latest
           kubectl -n psa-restricted apply --dry-run=server -f rendered-base.yaml
+          kubectl -n psa-restricted apply --dry-run=server -f rendered-managed.yaml
 
   kind:
     name: boot in kind (restricted PSS)
-    # Skip on PRs — the Rust release build dominates the runtime. The push-to-main
-    # run is the gate; use workflow_dispatch when a PR needs it pre-merge.
-    if: github.event_name != 'pull_request'
+    # The Rust release build dominates runtime. Run it for every main/manual
+    # invocation and only for PRs that change Dockerfile, the entrypoint, or
+    # this workflow's boot contract.
+    needs: changes
+    if: needs.changes.outputs.image_runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       CLUSTER: librefang-ci
       NS: librefang
+      # The managed-config scenario (#6695) gets its own namespace and its own PVC rather than reusing the one above.
+      # It asserts that /data/config.toml was never created, which is only meaningful on a volume that has not already had `librefang init` run against it.
+      MNS: librefang-managed
       IMAGE: librefang:ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -178,6 +238,10 @@ jobs:
               newName: librefang
               newTag: ci
           EOF
+          kubectl kustomize deploy/kubernetes/ci-overlay >/dev/null || {
+            echo "::error::generated ci-overlay failed to render"
+            exit 1
+          }
           kubectl apply -k deploy/kubernetes/ci-overlay
 
       - name: Wait for rollout
@@ -207,10 +271,18 @@ jobs:
           kubectl -n "$NS" port-forward svc/librefang 4545:4545 &
           pf=$!
           trap 'kill $pf 2>/dev/null || true' EXIT
+          ready=false
           for _ in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:4545/api/ready >/dev/null 2>&1; then break; fi
+            if curl -fsS http://127.0.0.1:4545/api/ready >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
             sleep 2
           done
+          [ "$ready" = true ] || {
+            echo "::error::pod never became ready through the Service within 40s"
+            exit 1
+          }
           echo "--- /api/ready ---"
           curl -fsS http://127.0.0.1:4545/api/ready
           echo
@@ -232,6 +304,7 @@ jobs:
           # config.toml is written by first boot; capture its inode so we can
           # tell "the volume came back" from "init re-ran on a fresh volume".
           before="$(kubectl -n "$NS" exec statefulset/librefang -- stat -c '%i' /data/config.toml | tr -d '\r')"
+          before_uid="$(kubectl -n "$NS" get pod librefang-0 -o jsonpath='{.metadata.uid}')"
 
           rm -f /tmp/rollout-done /tmp/too-many
           kubectl -n "$NS" delete pod librefang-0 --wait=false
@@ -243,24 +316,64 @@ jobs:
           (
             while [ ! -f /tmp/rollout-done ]; do
               running="$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=librefang \
-                --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+                --field-selector=status.phase=Running --no-headers | wc -l | tr -d ' ')"
               if [ "${running:-0}" -gt 1 ]; then
                 kubectl -n "$NS" get pods -o wide
                 echo "$running" > /tmp/too-many
-                break
+                exit 2
               fi
-              sleep 1
+              sleep 0.1
             done
           ) &
           watcher=$!
+          cleanup_watcher() {
+            touch /tmp/rollout-done
+            kill "$watcher" 2>/dev/null || true
+            wait "$watcher" 2>/dev/null || true
+          }
+          trap cleanup_watcher EXIT
 
-          kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+          replacement_seen=false
+          for _ in $(seq 1 600); do
+            # A dead watcher means observation already failed. Stop waiting so
+            # its concrete error is surfaced immediately below.
+            kill -0 "$watcher" 2>/dev/null || break
+            current_uid="$(kubectl -n "$NS" get pod librefang-0 \
+              --ignore-not-found -o jsonpath='{.metadata.uid}')"
+            if [ -n "$current_uid" ] && [ "$current_uid" != "$before_uid" ]; then
+              replacement_seen=true
+              break
+            fi
+            sleep 0.5
+          done
+
+          rollout_rc=0
+          if [ "$replacement_seen" = true ]; then
+            set +e
+            kubectl -n "$NS" rollout status statefulset/librefang --timeout=300s
+            rollout_rc=$?
+            set -e
+          fi
           touch /tmp/rollout-done
-          wait "$watcher" || true
+          watcher_rc=0
+          wait "$watcher" || watcher_rc=$?
+          trap - EXIT
           if [ -f /tmp/too-many ]; then
             echo "::error::$(cat /tmp/too-many) daemons Running simultaneously against one RWO volume"
             exit 1
           fi
+          [ "$watcher_rc" -eq 0 ] || {
+            echo "::error::pod-overlap watcher failed (rc=$watcher_rc)"
+            exit 1
+          }
+          [ "$replacement_seen" = true ] || {
+            echo "::error::replacement pod did not appear within 300s"
+            exit 1
+          }
+          [ "$rollout_rc" -eq 0 ] || {
+            echo "::error::StatefulSet rollout failed (rc=$rollout_rc)"
+            exit "$rollout_rc"
+          }
 
           sentinel="$(kubectl -n "$NS" exec statefulset/librefang -- cat /data/ci-sentinel | tr -d '\r')"
           [ "$sentinel" = "persisted" ] || {
@@ -272,6 +385,114 @@ jobs:
             echo "::error::config.toml was recreated ($before -> $after) — the pod came up on a fresh volume instead of reattaching the PVC"; exit 1; }
           echo "✓ /data survived pod replacement (config.toml inode $after unchanged)"
 
+
+      # ── Managed configuration (#6695) ──────────────────────────────────
+      #
+      # The acceptance criterion is that a new installation mounts config.toml read-only from a ConfigMap, outside /data, and boots with no init-container copy step.
+      # Everything below either establishes that or establishes that the lock it implies is actually in force.
+      - name: Managed mode — namespace, credentials, and rollout
+        run: |
+          set -euo pipefail
+          kubectl create namespace "$MNS"
+          kubectl label namespace "$MNS" \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/enforce-version=latest
+          kubectl -n "$MNS" create secret generic librefang-auth \
+            --from-literal=api-key="$(openssl rand -hex 32)" \
+            --from-literal=vault-key="$(openssl rand -base64 32)" \
+            --from-literal=dashboard-user=ci \
+            --from-literal=dashboard-pass="$(openssl rand -hex 24)"
+
+          # Same composition path as the base scenario: a CI-only overlay on top of the committed one, retargeting the image and nothing else.
+          mkdir -p deploy/kubernetes/ci-overlay-managed
+          cat > deploy/kubernetes/ci-overlay-managed/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          namespace: ${MNS}
+          resources:
+            - ../overlays/managed-config
+          images:
+            - name: ghcr.io/librefang/librefang
+              newName: librefang
+              newTag: ci
+          EOF
+          kubectl apply -k deploy/kubernetes/ci-overlay-managed
+
+          # No `librefang init` runs here — the config already exists at the mount — so this is a shorter first boot than the base scenario's, not a longer one.
+          # 300s is the same budget regardless.
+          kubectl -n "$MNS" rollout status statefulset/librefang --timeout=300s
+
+      - name: Managed mode — booted off the read-only mount, with no copy into /data
+        run: |
+          set -euo pipefail
+          # The whole point of the criterion: nothing copied the config onto the PVC, and nothing generated one there either.
+          # If `librefang init` had run, or an init container had staged a writable duplicate, this file would exist and the deployment would have a second source of truth the manifest does not control.
+          if kubectl -n "$MNS" exec statefulset/librefang -- test -e /data/config.toml; then
+            echo "::error::/data/config.toml exists — the daemon did not boot off the ConfigMap mount"
+            kubectl -n "$MNS" exec statefulset/librefang -- ls -la /data || true
+            exit 1
+          fi
+          kubectl -n "$MNS" exec statefulset/librefang -- test -f /etc/librefang/config.toml
+          # Read-only is defence in depth, not the enforcement mechanism, but a mount that turned out writable would mean the manifest and the cluster disagree about who owns the file.
+          if kubectl -n "$MNS" exec statefulset/librefang -- test -w /etc/librefang/config.toml; then
+            echo "::error::/etc/librefang/config.toml is writable — the ConfigMap mount is not read-only"
+            exit 1
+          fi
+
+      - name: Managed mode — status reports the mount, and a write is refused with 423
+        run: |
+          set -euo pipefail
+          api_key="$(kubectl -n "$MNS" get secret librefang-auth -o jsonpath='{.data.api-key}' | base64 -d)"
+          echo "::add-mask::$api_key"
+
+          kubectl -n "$MNS" port-forward svc/librefang 4546:4545 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:4546/api/ready >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+
+          status="$(curl -fsS -H "Authorization: Bearer $api_key" http://127.0.0.1:4546/api/config/status)"
+          echo "--- /api/config/status ---"
+          echo "$status"
+          echo "$status" | jq -e '.mode == "managed"' >/dev/null \
+            || { echo "::error::mode is not managed"; exit 1; }
+          echo "$status" | jq -e '.writable == false' >/dev/null \
+            || { echo "::error::writable is not false"; exit 1; }
+          echo "$status" | jq -e '.source == "/etc/librefang/config.toml"' >/dev/null \
+            || { echo "::error::source does not name the mount"; exit 1; }
+
+          # The annotation that triggers the rollout and the checksum the daemon reports must be the same string, or "did my config change land?" has no single answer.
+          # The render job asserts the annotation matches the manifest; this asserts the running daemon agrees with both.
+          want="$(kubectl -n "$MNS" get statefulset librefang -o json \
+            | jq -r '.spec.template.metadata.annotations["checksum/config"]')"
+          got="$(echo "$status" | jq -r '.checksum')"
+          echo "annotation=$want reported=$got"
+          [ "$want" = "$got" ] || {
+            echo "::error::checksum annotation and GET /api/config/status disagree"; exit 1; }
+
+          # `log_level` is on WRITABLE_EXACT_PATHS, so a 403 here would mean the allowlist rejected the path before the managed guard ever ran and this would be testing the wrong refusal.
+          code="$(curl -s -o /tmp/set.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $api_key" \
+            -H 'Content-Type: application/json' \
+            -d '{"path":"log_level","value":"debug"}' \
+            http://127.0.0.1:4546/api/config/set)"
+          echo "--- POST /api/config/set -> $code ---"
+          cat /tmp/set.json; echo
+          [ "$code" = "423" ] || { echo "::error::expected 423 Locked, got $code"; exit 1; }
+          jq -e '.code == "config_managed"' /tmp/set.json >/dev/null \
+            || { echo "::error::423 body does not carry code=config_managed"; exit 1; }
+          jq -e '.source == "/etc/librefang/config.toml"' /tmp/set.json >/dev/null \
+            || { echo "::error::423 body does not name the managed file"; exit 1; }
+
+          # The guard runs before the handler opens the file, so the refusal must not have truncated or rewritten anything.
+          after="$(curl -fsS -H "Authorization: Bearer $api_key" \
+            http://127.0.0.1:4546/api/config/status | jq -r '.checksum')"
+          [ "$after" = "$got" ] || {
+            echo "::error::config checksum changed across a refused write ($got -> $after)"; exit 1; }
+          echo "✓ managed mode: mounted read-only, reported as managed, writes refused with 423"
+
       - name: Diagnostics (always)
         if: always()
         run: |
@@ -280,3 +501,7 @@ jobs:
           kubectl -n "$NS" describe pod librefang-0 || true
           kubectl -n "$NS" logs statefulset/librefang --tail=200 || true
           kubectl -n "$NS" get events --sort-by=.lastTimestamp || true
+          kubectl -n "$MNS" get pods -o wide || true
+          kubectl -n "$MNS" describe pod librefang-0 || true
+          kubectl -n "$MNS" logs statefulset/librefang --tail=200 || true
+          kubectl -n "$MNS" get events --sort-by=.lastTimestamp || true

@@ -218,7 +218,7 @@ pub async fn start_local(
 
     // Store the ServerHandle for shutdown
     if let Some(holder) = app.try_state::<crate::ServerHandleHolder>() {
-        let mut guard = holder.0.lock().expect("ServerHandleHolder lock poisoned");
+        let mut guard = crate::lock_server_handle(&holder.0);
         *guard = Some(handle);
     }
 

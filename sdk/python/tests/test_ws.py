@@ -21,12 +21,18 @@ sufficient.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import struct
+
 import pytest
 
+from librefang.sidecar import ws as ws_mod
 from librefang.sidecar.ws import (
     DEFAULT_HANDSHAKE_TIMEOUT_SECS,
     MAX_FRAME_PAYLOAD,
     OP_CLOSE,
+    OP_BIN,
     OP_CONT,
     OP_PING,
     OP_PONG,
@@ -132,3 +138,185 @@ def test_init_custom_handshake_timeout():
         "wss://example.com/", handshake_timeout=5.0,
     )
     assert ws._handshake_timeout == 5.0
+
+
+# ---- wire-frame parsing ---------------------------------------------
+
+
+def _server_frame(opcode, payload=b"", *, fin=True):
+    first = (0x80 if fin else 0) | opcode
+    length = len(payload)
+    if length < 126:
+        return bytes([first, length]) + payload
+    if length < 65536:
+        return bytes([first, 126]) + struct.pack(">H", length) + payload
+    return bytes([first, 127]) + struct.pack(">Q", length) + payload
+
+
+class _FakeSocket:
+    def __init__(self, incoming=b""):
+        self.incoming = bytearray(incoming)
+        self.sent = []
+        self.timeouts = []
+        self.closed = False
+
+    def recv(self, count):
+        chunk = bytes(self.incoming[:count])
+        del self.incoming[:count]
+        return chunk
+
+    def sendall(self, payload):
+        self.sent.append(payload)
+
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("any_frame", [False, True])
+def test_ping_between_fragments_is_ponged_and_reassembly_continues(any_frame):
+    incoming = b"".join([
+        _server_frame(OP_TEXT, b"hel", fin=False),
+        _server_frame(OP_PING, b"beat"),
+        _server_frame(OP_PONG, b"ignored"),
+        _server_frame(OP_CONT, b"lo"),
+    ])
+    sock = _FakeSocket(incoming)
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = sock
+
+    if any_frame:
+        assert ws.recv_any_frame() == ("hello", None, None)
+    else:
+        assert ws.recv_frame() == ("hello", None)
+
+    assert len(sock.sent) == 1
+    assert sock.sent[0][0] & 0x0F == OP_PONG
+
+
+def test_recv_any_frame_reassembles_fragmented_binary_with_ping():
+    incoming = b"".join([
+        _server_frame(OP_BIN, b"\x01", fin=False),
+        _server_frame(OP_PING, b"beat"),
+        _server_frame(OP_CONT, b"\x02"),
+    ])
+    sock = _FakeSocket(incoming)
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = sock
+
+    assert ws.recv_any_frame() == (None, b"\x01\x02", None)
+    assert sock.sent[0][0] & 0x0F == OP_PONG
+
+
+def test_recv_frame_drains_ignored_fragmented_binary_before_next_message():
+    incoming = b"".join([
+        _server_frame(OP_BIN, b"\x01", fin=False),
+        _server_frame(OP_PING, b"beat"),
+        _server_frame(OP_CONT, b"\x02"),
+        _server_frame(OP_TEXT, b"next"),
+    ])
+    sock = _FakeSocket(incoming)
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = sock
+
+    assert ws.recv_frame() == (None, None)
+    assert ws.recv_frame() == ("next", None)
+    assert sock.sent[0][0] & 0x0F == OP_PONG
+
+
+def test_recv_frame_caps_ignored_fragmented_binary(monkeypatch):
+    monkeypatch.setattr(ws_mod, "MAX_FRAME_PAYLOAD", 5)
+    incoming = b"".join([
+        _server_frame(OP_BIN, b"abc", fin=False),
+        _server_frame(OP_CONT, b"def"),
+    ])
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = _FakeSocket(incoming)
+
+    with pytest.raises(RuntimeError, match="reassembled message exceeds cap"):
+        ws.recv_frame()
+
+
+@pytest.mark.parametrize("any_frame", [False, True])
+def test_close_between_fragments_surfaces_close(any_frame):
+    incoming = b"".join([
+        _server_frame(OP_TEXT, b"partial", fin=False),
+        _server_frame(OP_CLOSE, struct.pack(">H", 1001) + b"bye"),
+    ])
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = _FakeSocket(incoming)
+
+    if any_frame:
+        assert ws.recv_any_frame() == (None, None, (1001, b"bye"))
+    else:
+        assert ws.recv_frame() == (None, (1001, b"bye"))
+
+
+@pytest.mark.parametrize("any_frame", [False, True])
+def test_reassembled_message_is_capped(monkeypatch, any_frame):
+    monkeypatch.setattr(ws_mod, "MAX_FRAME_PAYLOAD", 5)
+    incoming = b"".join([
+        _server_frame(OP_TEXT, b"abc", fin=False),
+        _server_frame(OP_CONT, b"def"),
+    ])
+    ws = WebSocketClient("ws://example.test")
+    ws._sock = _FakeSocket(incoming)
+
+    recv = ws.recv_any_frame if any_frame else ws.recv_frame
+    with pytest.raises(RuntimeError, match="reassembled message exceeds cap"):
+        recv()
+
+
+def test_disconnected_send_and_receive_raise_runtime_error():
+    ws = WebSocketClient("ws://example.test")
+    with pytest.raises(RuntimeError, match="not connected"):
+        ws.send_text("hello")
+    with pytest.raises(RuntimeError, match="not connected"):
+        ws._recv_exact(1)
+
+
+# ---- handshake resource lifecycle ----------------------------------
+
+
+def test_successful_handshake_restores_blocking_socket(monkeypatch):
+    key_bytes = b"0123456789abcdef"
+    key = base64.b64encode(key_bytes).decode("ascii")
+    accept = base64.b64encode(
+        hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+    )
+    response = (
+        b"HTTP/1.1 101 Switching Protocols\r\n"
+        b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+    )
+    sock = _FakeSocket(response)
+    monkeypatch.setattr(ws_mod.os, "urandom", lambda _count: key_bytes)
+    monkeypatch.setattr(
+        ws_mod.socket, "create_connection", lambda *_args, **_kwargs: sock,
+    )
+
+    with WebSocketClient("ws://example.test") as ws:
+        assert ws._sock is sock
+        assert sock.timeouts == [None]
+
+
+def test_tls_wrap_failure_closes_raw_socket(monkeypatch):
+    raw_sock = _FakeSocket()
+
+    class _BrokenContext:
+        def wrap_socket(self, _sock, *, server_hostname):
+            assert server_hostname == "example.test"
+            raise OSError("TLS setup failed")
+
+    monkeypatch.setattr(
+        ws_mod.socket, "create_connection",
+        lambda *_args, **_kwargs: raw_sock,
+    )
+    monkeypatch.setattr(
+        ws_mod.ssl, "create_default_context", lambda: _BrokenContext(),
+    )
+
+    with pytest.raises(OSError, match="TLS setup failed"):
+        WebSocketClient("wss://example.test").__enter__()
+    assert raw_sock.closed is True

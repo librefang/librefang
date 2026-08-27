@@ -64,6 +64,7 @@ fn api_v1_routes(webhook_body_limit: usize) -> Router<Arc<AppState>> {
         .merge(routes::budget::router())
         .merge(routes::auto_dream::router())
         .merge(routes::goals::router())
+        .merge(routes::groups::router())
         .merge(routes::inbox::router())
         .merge(routes::media::router())
         .merge(routes::prompts::router())
@@ -1049,11 +1050,51 @@ pub(crate) struct ChangePasswordRequest {
     pub new_username: Option<String>,
 }
 
+fn change_password_internal_error(
+    operation: &'static str,
+    error: &impl std::fmt::Display,
+) -> axum::response::Response {
+    tracing::error!(%error, operation, "dashboard credential update failed");
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "Internal server error"
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod change_password_error_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn internal_change_password_errors_are_scrubbed_from_http_body() {
+        let sensitive_error = "permission denied: /srv/librefang/config.toml";
+        let response = change_password_internal_error("write config", &sensitive_error);
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains("/srv/librefang/config.toml"));
+        assert!(!body.contains("permission denied"));
+    }
+}
+
 /// Change the dashboard password and/or username.
 ///
 /// Verifies the current password, then updates whichever credentials are
 /// provided in the request body. At least one of `new_password` or
 /// `new_username` must be non-empty. All existing sessions are invalidated on success.
+///
+/// Refused with `423 Locked` in managed mode (#6695): the new username and password hash are persisted as top-level `dashboard_user` / `dashboard_pass_hash` keys in `config.toml`, so a deployment that owns the file owns the dashboard credential too.
+/// In such a deployment the credential is rotated by changing the manifest and rolling, which is also the only way the change survives the next rollout.
 #[utoipa::path(
     post,
     path = "/api/auth/change-password",
@@ -1062,13 +1103,27 @@ pub(crate) struct ChangePasswordRequest {
     responses(
         (status = 200, description = "Credentials updated and existing sessions invalidated", body = crate::types::JsonObject),
         (status = 400, description = "Missing required fields or password too short"),
-        (status = 401, description = "Current password is incorrect")
+        (status = 401, description = "Current password is incorrect"),
+        (status = 423, description = "Configuration is managed by the deployment; rotate the credential in the manifest", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
 ) -> axum::response::Response {
+    // Ahead of the current-password verification, not after it.
+    // The write cannot succeed under any branch below, so verifying first would only spend an Argon2 hash and hand back a password-correctness oracle in exchange for the same `423`.
+    // The caller is already Owner-authenticated (`is_owner_only_write` in `middleware.rs`) and can read the same fact from `GET /api/config/status`, so answering early discloses nothing new.
+    if let Some(locked) = routes::guard_config_write(state.kernel.config_path()) {
+        return locked.into_response();
+    }
+
+    // Serialize credential verification together with the read-modify-write
+    // transaction. Otherwise two concurrent requests can both verify the old
+    // password before either acquires the write lock, allowing the later one
+    // to overwrite the first change with credentials that are already stale.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let cfg = state.kernel.config_snapshot();
 
     let cfg_user = resolve_credential(
@@ -1083,7 +1138,7 @@ pub(crate) async fn change_password(
         &cfg.home_dir,
     );
     let cfg_pass = cfg_pass.trim().to_string();
-    let pass_hash = cfg.dashboard_pass_hash.trim();
+    let pass_hash = cfg.dashboard_pass_hash.trim().to_string();
 
     // Must have credential-based auth configured
     let has_password = !pass_hash.is_empty() || !cfg_pass.is_empty();
@@ -1099,13 +1154,24 @@ pub(crate) async fn change_password(
     }
 
     // Verify current password
-    let verify = crate::password_hash::verify_dashboard_password(
-        &cfg_user,
-        &body.current_password,
-        &cfg_user,
-        &cfg_pass,
-        pass_hash,
-    );
+    let verify_user = cfg_user.clone();
+    let verify_pass = cfg_pass.clone();
+    let verify_hash = pass_hash.clone();
+    let current_password = body.current_password.clone();
+    let verify = match tokio::task::spawn_blocking(move || {
+        crate::password_hash::verify_dashboard_password(
+            &verify_user,
+            &current_password,
+            &verify_user,
+            &verify_pass,
+            &verify_hash,
+        )
+    })
+    .await
+    {
+        Ok(verify) => verify,
+        Err(error) => return change_password_internal_error("verify current password", &error),
+    };
     if matches!(verify, crate::password_hash::VerifyResult::Denied) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -1168,15 +1234,21 @@ pub(crate) async fn change_password(
         }
     }
 
-    // Load config.toml for writing
-    let config_path = state.kernel.home_dir().join("config.toml");
-    let mut table: toml::value::Table = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => toml::from_str(&content).unwrap_or_default(),
-            Err(_) => toml::value::Table::new(),
-        }
-    } else {
-        toml::value::Table::new()
+    // Load config.toml off the async worker. Invalid or unreadable existing
+    // configuration must fail closed instead of being replaced with a new,
+    // mostly-empty document.
+    let config_path = state.kernel.config_path().to_path_buf();
+    let read_path = config_path.clone();
+    let existing =
+        match tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path)).await {
+            Ok(Ok(content)) => content,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Ok(Err(error)) => return change_password_internal_error("read config", &error),
+            Err(error) => return change_password_internal_error("join config read task", &error),
+        };
+    let mut table: toml::value::Table = match toml::from_str(&existing) {
+        Ok(table) => table,
+        Err(error) => return change_password_internal_error("parse config", &error),
     };
 
     // Update username if requested
@@ -1189,19 +1261,15 @@ pub(crate) async fn change_password(
 
     // Update password if requested
     if let Some(np) = new_pass_trimmed {
-        let new_hash = match crate::password_hash::hash_password(np) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!("Failed to hash new password: {e}");
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::response::Json(serde_json::json!({
-                        "ok": false,
-                        "error": "Failed to hash new password"
-                    })),
-                )
-                    .into_response();
-            }
+        let password = np.to_string();
+        let new_hash = match tokio::task::spawn_blocking(move || {
+            crate::password_hash::hash_password(&password)
+        })
+        .await
+        {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => return change_password_internal_error("hash new password", &error),
+            Err(error) => return change_password_internal_error("join password hash task", &error),
         };
         table.insert(
             "dashboard_pass_hash".to_string(),
@@ -1213,26 +1281,17 @@ pub(crate) async fn change_password(
 
     let toml_string = match toml::to_string_pretty(&table) {
         Ok(s) => s,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::response::Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("Failed to serialize config: {e}")
-                })),
-            )
-                .into_response();
-        }
+        Err(error) => return change_password_internal_error("serialize config", &error),
     };
-    if let Err(e) = std::fs::write(&config_path, &toml_string) {
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": format!("Failed to write config: {e}")
-            })),
-        )
-            .into_response();
+    let write_path = config_path.clone();
+    let write_result = tokio::task::spawn_blocking(move || {
+        crate::atomic_write(&write_path, toml_string.as_bytes())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return change_password_internal_error("write config", &error),
+        Err(error) => return change_password_internal_error("join config write task", &error),
     }
 
     // Trigger config reload so the kernel picks up the new credentials
@@ -1658,6 +1717,7 @@ pub async fn build_router(
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
         gcra_limiter: gcra_limiter_arc.clone(),
+        gcra_tokens_per_minute: rl_cfg_early.api_requests_per_minute.max(1),
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
         idempotency_store,
@@ -2277,7 +2337,7 @@ pub async fn run_daemon(
     {
         let k = kernel.clone();
         let st = state.clone();
-        let config_path = kernel.home_dir().join("config.toml");
+        let config_path = kernel.config_path().to_path_buf();
         let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             // Helper: async stat → mtime, swallowing all errors (file may not
@@ -2515,13 +2575,25 @@ pub async fn run_daemon(
                 st.gcra_limiter.retain_recent();
                 let gcra_removed = gcra_before.saturating_sub(st.gcra_limiter.len());
 
+                // Bound route-owned caches that receive attacker-controlled keys.
+                // Manual provider results expire with their existing ten-minute
+                // read TTL. Unapproved A2A discoveries get a 24-hour lease that a
+                // repeat discovery refreshes, so abandoned entries cannot occupy
+                // the fixed pending registry forever.
+                let route_cache_removed = crate::routes::prune_route_caches(
+                    &st.provider_test_cache,
+                    &st.pending_a2a_agents,
+                );
+
                 let claw_removed = before_claw - st.clawhub_cache.len();
                 let skill_removed = before_skill - st.skillhub_cache.len();
                 let total = claw_removed
                     + skill_removed
                     + expired_sessions
                     + auth_rl_removed
-                    + gcra_removed;
+                    + gcra_removed
+                    + route_cache_removed.provider_tests
+                    + route_cache_removed.pending_a2a_agents;
                 if total > 0 {
                     tracing::info!(
                         clawhub = claw_removed,
@@ -2529,6 +2601,8 @@ pub async fn run_daemon(
                         sessions = expired_sessions,
                         auth_rate_limit_entries = auth_rl_removed,
                         gcra_ips = gcra_removed,
+                        provider_tests = route_cache_removed.provider_tests,
+                        pending_a2a_agents = route_cache_removed.pending_a2a_agents,
                         "API cache GC sweep completed"
                     );
                 }
@@ -3942,26 +4016,14 @@ mod dashboard_login_totp_lockout_tests {
     const DASH_USER: &str = "admin";
     const DASH_PASS: &str = "correct horse battery staple";
 
-    /// Syntactically-valid master key: base64 of exactly 32 bytes, so it decodes to the `[u8; 32]` the vault expects rather than failing key resolution.
-    const TEST_VAULT_KEY: &str = "dGVzdC12YXVsdC1rZXktZm9yLXRvdHAtbG9ja291dHM=";
-
     /// Pin the vault master key for this process before any test boots a kernel.
     ///
     /// Both tests below call `LibreFangKernel::boot_with_config`, which initialises the credential vault.
-    /// Each gets its own `home_dir` tempdir, but the *key* does not come from there: `resolve_master_key` (crates/librefang-extensions/src/vault.rs:703) reads `LIBREFANG_VAULT_KEY` and otherwise falls back to a store that is shared beyond the test's tempdir.
+    /// Each gets its own `home_dir` tempdir, but the *key* does not come from there: `resolve_master_key` (crates/librefang-extensions/src/vault.rs) reads `LIBREFANG_VAULT_KEY` and otherwise falls back to a store that is shared beyond the test's tempdir.
     /// With neither pinned, `init()` and a later `resolve_master_key()` can settle on different keys and the freshly written vault fails to decrypt — the failure is which test loses the race, not which test is wrong, which is why CI showed a different one failing on each lane (`Test / Unit (lib+bin)` blamed the new test, `Test / Ubuntu (shard 1/4)` the pre-existing one).
     ///
-    /// Setting the env var takes the documented env-first branch of `resolve_master_key`, so `init()` and every later resolution agree by construction.
-    /// It is set once and never removed: unsetting it on drop would reopen the same race for whichever test is still running.
-    fn pin_vault_key() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            // SAFETY: a `Once` makes this the only writer of this variable in the process, and it runs before either test constructs a kernel, so no other thread can observe a torn value.
-            unsafe {
-                std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY);
-            }
-        });
-    }
+    /// The key and the `Once` live in `librefang-testing` rather than here, so API tests and `MockKernelBuilder` cannot become competing writers with different values — which is exactly the bug that made `routes::mcp_auth::tests::flow_vault_cleanup_removes_all_per_flow_keys_on_drop` fail under `cargo test`. See that module's doc-comment.
+    use librefang_testing::ensure_test_vault_key;
 
     /// Produce `count` 6-digit codes that are guaranteed NOT to match the
     /// enrolled secret in the current TOTP window (or the adjacent windows a
@@ -4031,7 +4093,7 @@ mod dashboard_login_totp_lockout_tests {
     /// keep returning "Invalid TOTP code" forever.
     #[tokio::test(flavor = "multi_thread")]
     async fn dashboard_login_locks_out_after_repeated_wrong_totp_codes() {
-        pin_vault_key();
+        ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("temp dir");
         librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
         let mut config = KernelConfig {
@@ -4111,7 +4173,7 @@ mod dashboard_login_totp_lockout_tests {
     async fn dashboard_login_fails_closed_when_totp_claim_persistence_fails() {
         use totp_rs::{Algorithm, Builder as TotpBuilder, Secret};
 
-        pin_vault_key();
+        ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("temp dir");
         librefang_kernel::registry_sync::seed_registry_fixture_for_tests(tmp.path());
         let mut config = KernelConfig {

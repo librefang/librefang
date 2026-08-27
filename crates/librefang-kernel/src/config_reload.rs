@@ -162,9 +162,10 @@ impl ReloadPlan {
 /// `serde_json::to_string` serializes a `HashMap` in its per-instance iteration order, so two content-identical maps built from separate deserializations (the live config vs the reload candidate) produce different strings and `field_changed` fired spuriously — emitting a needless `ReloadAuth` / `restart_required` on every reload for any multi-entry deployment.
 /// `to_value` normalizes every (possibly nested) map to a `BTreeMap`-backed `Value::Object` (the workspace does not enable serde_json's `preserve_order`), so semantically-equal configs compare equal regardless of map iteration order.
 fn field_changed<T: serde::Serialize>(old: &T, new: &T) -> bool {
-    let old_val = serde_json::to_value(old).ok();
-    let new_val = serde_json::to_value(new).ok();
-    old_val != new_val
+    match (serde_json::to_value(old), serde_json::to_value(new)) {
+        (Ok(old_val), Ok(new_val)) => old_val != new_val,
+        _ => true,
+    }
 }
 
 /// Decide whether two `[external_auth]` snapshots disagree on a field
@@ -434,6 +435,13 @@ pub fn build_reload_plan_with_caps(
         );
     }
 
+    if field_changed(&old.media, &new.media) {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "media config changed (MediaEngine is boot-captured; restart required)".to_string(),
+        );
+    }
+
     if field_changed(&old.approval, &new.approval) {
         plan.hot_actions.push(HotAction::UpdateApprovalPolicy);
     }
@@ -505,6 +513,40 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadAuth);
     }
 
+    // `[[groups]]` (#7745). Every reader — the `/api/groups` handlers, the
+    // per-user reverse lookup, `KernelConfig::roles_for_user` — resolves from
+    // `config_ref()` on each call, so the bare config swap is the whole of what
+    // "reloading" means here: no cache to evict, no subsystem holding a
+    // boot-time copy. It still has to be *declared*, because `should_store_config`
+    // gates the swap on the plan carrying an effective change; a groups-only edit
+    // that classified as nothing at all would be written to disk and then silently
+    // discarded on reload, which is exactly what happened before this branch existed.
+    if field_changed(&old.groups, &new.groups) {
+        plan.noop_changes.push(
+            "groups config changed (effective immediately — group membership and roles are \
+             resolved from the live config on every lookup)"
+                .to_string(),
+        );
+    }
+
+    // `default_owner` (#7744). Read live, once per artifact creation, through
+    // `KernelConfig::default_owner_principal()` on the current config snapshot —
+    // nothing caches the parsed principal, so a swap is immediately in effect for
+    // the next workflow or cron an ownerless turn creates. Declared for the same
+    // `should_store_config` reason as `[[groups]]` above: an edit that classified
+    // as nothing at all would be persisted and then discarded.
+    //
+    // Note that this does **not** retroactively re-own anything: artifacts already
+    // recorded keep the principal stamped at creation, because an owner that moved
+    // when a config key changed would not be an audit answer.
+    if field_changed(&old.default_owner, &new.default_owner) {
+        plan.noop_changes.push(
+            "default_owner changed (effective immediately for newly created artifacts — \
+             already-recorded owners are not rewritten)"
+                .to_string(),
+        );
+    }
+
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
@@ -543,7 +585,7 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::ReloadExternalAuth);
     } else if field_changed(&old.external_auth, &new.external_auth) {
         // Non-IdP edits only (session_ttl_secs, allowed_domains, redirect_url,
-        // scopes, audience, require_email_verified). The OAuth layer reads
+        // scopes, audience, require_email_verified, role_map). The OAuth layer reads
         // these live from the ArcSwap config on every request (`oauth.rs`:
         // `config_ref()` / `config_snapshot()`), so the bare config swap makes
         // them effective on the next request — no restart, and no cache
@@ -839,6 +881,11 @@ pub fn build_reload_plan_with_caps(
             old.max_history_messages != new.max_history_messages,
             "max_history_messages",
         );
+        // Read live per turn: the kernel copies it into `LoopOptions` from `self.config.load()` at every `send_message_full` / spawn site, so the ArcSwap swap is the whole reapply action.
+        noop_if_changed(
+            old.memory_fact_budget_percent != new.memory_fact_budget_percent,
+            "memory_fact_budget_percent",
+        );
         noop_if_changed(
             old.max_agent_call_depth != new.max_agent_call_depth,
             "max_agent_call_depth",
@@ -858,7 +905,6 @@ pub fn build_reload_plan_with_caps(
             "notification",
         );
         noop_if_changed(field_changed(&old.tts, &new.tts), "tts");
-        noop_if_changed(field_changed(&old.media, &new.media), "media");
         // The hands marketplace install handler reads `hands.registry_allowed_hosts`
         // live from `config_snapshot()` on every request, so a swap is effective
         // on the next install with no explicit reapply action.
@@ -869,6 +915,10 @@ pub fn build_reload_plan_with_caps(
             old.registry.auto_sync != new.registry.auto_sync,
             "registry.auto_sync",
         );
+        // #7891 — the daily metering sweep reads `usage.retention_days` from
+        // `config_ref()` at the top of each tick, so a swapped value is in
+        // force on the next sweep with no reapply action.
+        noop_if_changed(field_changed(&old.usage, &new.usage), "usage");
         noop_if_changed(field_changed(&old.links, &new.links), "links");
         noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
         noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
@@ -1006,8 +1056,11 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "provider_regions",
         "tool_policy",
         "users",
+        "groups",
+        "default_owner",
         "proactive_memory",
         "queue",
+        "usage",
         "budget",
         "sanitize",
         "provider_api_keys",
@@ -1075,6 +1128,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         // -- backfilled NOOP branches --
         "agent_max_iterations",
         "max_history_messages",
+        "memory_fact_budget_percent",
         "max_agent_call_depth",
         "tool_timeout_secs",
         "tool_timeouts",
@@ -1194,6 +1248,25 @@ pub fn should_store_config(mode: ReloadMode, plan: &ReloadPlan) -> bool {
 mod tests {
     use super::*;
     use librefang_types::config::KernelConfig;
+
+    struct SerializationFailure;
+
+    impl serde::Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn field_changed_fails_closed_when_both_values_fail_to_serialize() {
+        assert!(
+            field_changed(&SerializationFailure, &SerializationFailure),
+            "serialization failures must be treated as a change"
+        );
+    }
 
     /// Regression (#6441 follow-up): `field_changed` must not report a change
     /// for two content-identical `HashMap`s that merely iterate in different
@@ -1849,6 +1922,24 @@ mod tests {
         assert_eq!(plan.noop_changes.len(), 2);
         assert!(plan.noop_changes.iter().any(|c| c.contains("language")));
         assert!(plan.noop_changes.iter().any(|c| c.contains("mode")));
+    }
+
+    #[test]
+    fn media_config_change_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.media.audio_provider = Some("openai".to_string());
+
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|reason| reason.contains("media config changed")));
+        assert!(!plan
+            .noop_changes
+            .iter()
+            .any(|change| change.contains("media")));
     }
 
     #[test]
