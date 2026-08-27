@@ -131,7 +131,7 @@ const CATEGORY_SECTIONS: Record<string, string[]> = {
   ],
   network: ["network", "a2a", "pairing"],
   infra: [
-    "docker", "extensions", "session", "queue",
+    "docker", "extensions", "session", "queue", "usage",
     "compaction", "registry", "context_engine", "prompt_intelligence",
     "task_board", "rate_limit", "health_check", "heartbeat",
     "telemetry", "notification", "background",

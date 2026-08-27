@@ -106,6 +106,7 @@ classified differently — the row note spells out which is which.
 | `passkey_rp_id` | R | WebAuthn Relying Party ID — the `Webauthn` instance is built once at boot. |
 | `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
+| `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
@@ -148,6 +149,7 @@ classified differently — the row note spells out which is which.
 | `context_engine` | R | Pluggable context-engine config. |
 | `tool_results` | N | Tool-result context budget + artifact spill config. |
 | `max_history_messages` | N | Global message-history trim cap (see arch doc). |
+| `memory_fact_budget_percent` | N | Share of the prompt memory section budget reserved for extracted facts (#7920). |
 | `agent_max_iterations` | N | Operator override for the agent-loop iteration cap. |
 | `max_agent_call_depth` | N | Maximum inter-agent call depth. |
 
@@ -236,6 +238,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `notification` | N | Notification-engine config for alerts and task state. |
 | `usage_footer` | H | Usage footer mode (what to show after each response). |
+| `usage` | N | Retention horizon for the `usage_events` table; the daily metering sweep reads it live, so a change is in force on the next sweep. |
 | `inbox` | R | File-based input inbox config. |
 | `audit` | R | Audit log config. |
 | `telemetry` | R | OpenTelemetry + Prometheus config. |
