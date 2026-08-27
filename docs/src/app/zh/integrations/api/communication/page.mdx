@@ -387,6 +387,19 @@ LibreFang 维护一条 Merkle 哈希链审计轨迹，记录所有安全相关�
 }
 ```
 
+### 日期范围过滤
+
+所有 `/api/usage*` 端点都接受可选的 `start_date` 和 `end_date` 查询参数，格式为 `YYYY-MM-DD`，按 UTC 日历日解释，且两端均为闭区间。
+省略这两个参数时，端点的行为与以往完全一致——汇总类端点返回全时段总计，每日明细返回最近 7 天。
+
+```bash
+curl "http://127.0.0.1:4545/api/usage/by-model?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY"
+```
+
+若某个边界不是合法的 `YYYY-MM-DD` 日期，或 `end_date` 早于 `start_date`，端点返回 `400 Bad Request` 并指明出错的参数。
+这些端点刻意不把写错的日期当作「没有数据」：静默返回空结果会被读成「这段时间没有花钱」，而这是交给财务复核的错误答案。
+
 ### GET /api/usage/summary
 
 获取包含配额信息的高级用量摘要。
@@ -433,6 +446,42 @@ LibreFang 维护一条 Merkle 哈希链审计轨迹，记录所有安全相关�
 ### GET /api/usage/daily
 
 获取按天的用量明细，适用于图表和报告。
+
+与其他用量端点一样接受 `start_date` / `end_date`，此外还接受 `days`，表示从当前时刻向前回溯的滚动窗口。
+`days` 默认为 `7`（保持原有行为），上限为 `366`；超过上限时端点会提示改用导出接口。
+`days` 与显式日期范围互斥——同时提供两者会返回 `400`，而不是静默地只采用其中之一。
+
+```bash
+# 最近 90 天的滚动窗口
+curl "http://127.0.0.1:4545/api/usage/daily?days=90" -H "Authorization: Bearer $LIBREFANG_API_KEY"
+
+# 指定的某个自然月
+curl "http://127.0.0.1:4545/api/usage/daily?start_date=2026-01-01&end_date=2026-01-31" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY"
+```
+
+能够回溯多久受 `config.toml` 中 `[usage] retention_days` 的限制（默认 90）。
+每日清理任务会硬删除早于该期限的 `usage_events` 行，因此请在需要这些历史数据之前就调高它，而不是事后。
+
+### GET /api/usage/export
+
+以 CSV 流式导出某个日期范围内的原始用量事件，用于归档或在 Excel / BI 工具中分析。
+
+**查询参数**：`start_date`、`end_date`（同上，均为可选），以及 `format`（目前仅支持 `csv`，省略时即为 `csv`）。
+
+```bash
+curl "http://127.0.0.1:4545/api/usage/export?start_date=2026-01-01&end_date=2026-01-31&format=csv" \
+  -H "Authorization: Bearer $LIBREFANG_API_KEY" -o usage-2026-01.csv
+```
+
+响应为 `text/csv; charset=utf-8`，并带有依据日期范围生成的 `Content-Disposition` 附件文件名。
+数据行按时间从旧到新输出，并直接从 SQLite 游标流式发送，因此导出整个保留窗口也不会在守护进程内存中构建完整文件。
+
+列顺序为：`timestamp`、`agent_id`、`agent_name`、`billed_agent_id`、`provider`、`model`、`input_tokens`、`output_tokens`、`cost_usd`、`tool_calls`、`latency_ms`、`user_id`、`channel`、`session_id`。
+追加新列视为向后兼容，重新排列现有列则不是。
+
+文本列按 RFC 4180 加引号转义；任何原本以 `=`、`+`、`-`、`@`、制表符或 CR 开头的值都会被加上单引号前缀。
+该前缀是刻意设置的公式注入防护：电子表格会把这类单元格当作公式求值，而智能体名、模型名和提供商名都是可能进入该文件的自由文本。
 
 ---
 

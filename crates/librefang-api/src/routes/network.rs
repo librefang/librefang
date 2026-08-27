@@ -1582,6 +1582,13 @@ pub async fn mcp_http(
             cfg.tool_results.max_artifact_bytes,
             current_account_id.as_deref(), // sender_account_id (X-LibreFang-Current-Account-Id, #6443)
             false, // system_call: MCP HTTP bridge is an external call path, not a system-internal fork (#6463)
+            // #7744: the MCP bridge authenticates the *agent* (via
+            // `X-LibreFang-Agent-Id`) and rehydrates the platform sender from
+            // headers, neither of which is a LibreFang principal. Promoting a
+            // header-supplied peer jid to an owner would attribute artifacts
+            // to an identity nothing verified, so a tool run through this
+            // bridge records what it creates as unowned.
+            None,
         )
         .await;
 

@@ -245,6 +245,7 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
+        acting_principal: None,
     }
 }
 
@@ -320,6 +321,7 @@ async fn test_workflow_list_returns_sorted_by_name() {
             "Last alphabetically".to_string(),
             1,
             false,
+            None,
         ),
         WorkflowSummary::new(
             "a".to_string(),
@@ -327,6 +329,7 @@ async fn test_workflow_list_returns_sorted_by_name() {
             "First alphabetically".to_string(),
             5,
             false,
+            None,
         ),
         WorkflowSummary::new(
             "b".to_string(),
@@ -334,6 +337,7 @@ async fn test_workflow_list_returns_sorted_by_name() {
             "Middle".to_string(),
             3,
             false,
+            None,
         ),
     ];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
@@ -360,6 +364,7 @@ async fn test_workflow_list_fields_present() {
         "Automated code review pipeline".to_string(),
         4,
         true,
+        None,
     )];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
     let ctx = make_ctx(&kernel);
@@ -401,6 +406,7 @@ async fn test_workflow_list_output_is_deterministic() {
             "d1".to_string(),
             1,
             false,
+            None,
         ),
         WorkflowSummary::new(
             "2".to_string(),
@@ -408,6 +414,7 @@ async fn test_workflow_list_output_is_deterministic() {
             "d2".to_string(),
             2,
             false,
+            None,
         ),
     ];
     let kernel: Arc<dyn KernelHandle> = Arc::new(WorkflowStubKernel::new(workflows, None));
