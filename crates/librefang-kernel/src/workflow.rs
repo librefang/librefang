@@ -179,6 +179,13 @@ pub struct Workflow {
     pub description: String,
     /// The steps in execution order.
     pub steps: Vec<WorkflowStep>,
+    /// The principal this workflow belongs to — the identity the turn that created it was acting for (#7744).
+    ///
+    /// Recorded, not enforced. Nothing in this increment consults it to decide who may read, run, edit or delete; it exists so the question "who is accountable for this, and who should be throttled or notified when it misbehaves" has an answer that outlives the log line that used to be the only trace.
+    ///
+    /// `None` means **unowned, visible to all** — the stated meaning, not an accident of `#[serde(default)]`. Every workflow that pre-dates this field deserializes to it, and so does one created by a turn with no authenticated caller, no manifest `owner` and no `default_owner`. Because ownership restricts nothing yet, an unowned workflow behaves exactly as it did before, which is what makes the field safe to add without a migration or a backfill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<librefang_types::principal::Principal>,
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -6335,6 +6342,11 @@ struct WorkflowFile {
     /// `{{var}}` placeholders.
     #[serde(default)]
     input_schema: Option<Vec<WorkflowInputParam>>,
+    /// Owner declared in the file, if any (#7744). Operator-authored
+    /// `*.workflow.toml` may name one; the JSON definitions the engine
+    /// persists carry whichever principal the creating turn resolved.
+    #[serde(default)]
+    owner: Option<librefang_types::principal::Principal>,
 }
 
 impl From<WorkflowFile> for Workflow {
@@ -6344,6 +6356,7 @@ impl From<WorkflowFile> for Workflow {
             name: f.name,
             description: f.description,
             steps: f.steps,
+            owner: f.owner,
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
             total_timeout_secs: None,
@@ -7008,6 +7021,9 @@ impl WorkflowTemplateRegistry {
             name: template.name.clone(),
             description: template.description.clone(),
             steps,
+            // A template is a shape, not an instance: whoever instantiates it
+            // owns the result, and the template itself names nobody (#7744).
+            owner: None,
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
@@ -7285,6 +7301,7 @@ mod tests {
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -7336,6 +7353,7 @@ mod tests {
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -7635,6 +7653,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -7972,6 +7991,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -8070,6 +8090,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -8134,6 +8155,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8180,6 +8202,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -8233,6 +8256,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8291,6 +8315,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8348,6 +8373,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8431,6 +8457,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -8515,6 +8542,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -8684,6 +8712,7 @@ prompt_template = "go"
                     description: None,
                 },
             ]),
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -8781,6 +8810,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let input_json = serde_json::json!({
@@ -9126,6 +9156,7 @@ prompt_template = "go"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -9926,6 +9957,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -10073,6 +10105,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -10443,6 +10476,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -10499,6 +10533,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -11469,6 +11504,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -11926,6 +11962,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12038,6 +12075,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12196,6 +12234,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -12284,6 +12323,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -12338,6 +12378,7 @@ prompt_template = "do {{x}}"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -13005,6 +13046,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -13472,6 +13514,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -13942,6 +13985,7 @@ name = "topic"
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "topic".to_string()).await.unwrap();

@@ -404,6 +404,11 @@ impl LibreFangKernel {
         substrate
             .set_consolidation_duplicate_threshold(config.proactive_memory.duplicate_threshold);
 
+        // #7911: bound the per-turn episodic memory row.
+        // The runtime's per-turn writer reads this off the substrate it already holds, so the value does not have to be threaded through `LoopOptions` at every construction site.
+        // `[memory]` is restart-required in `build_reload_plan`, so a value read once here cannot go stale relative to the config on disk.
+        substrate.set_max_episodic_chars(config.memory.max_episodic_chars);
+
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {
@@ -1111,6 +1116,15 @@ impl LibreFangKernel {
             warn!(
                 "external_auth.role_map: {oidc_typo_count} entr(ies) reference an unrecognized \
                  LibreFang role and grant nothing — see WARN lines above"
+            );
+        }
+        // And for `[external_auth.group_map]` (#7746): a target that names no `[[groups]]` entry — a rename that missed the map, or a typo — confers no membership, with the same silent symptom.
+        let oidc_group_dangling =
+            crate::auth::validate_oidc_group_map(&config.external_auth.group_map, &config.groups);
+        if oidc_group_dangling > 0 {
+            warn!(
+                "external_auth.group_map: {oidc_group_dangling} entr(ies) point at a group that \
+                 does not exist in [[groups]] and confer no membership — see WARN lines above"
             );
         }
 

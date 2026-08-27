@@ -22,6 +22,7 @@ on:
       - 'deploy/docker-entrypoint.sh'
       - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
+      - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   push:
     branches: [main]
@@ -30,6 +31,7 @@ on:
       - 'deploy/docker-entrypoint.sh'
       - 'Dockerfile'
       - 'scripts/check-k8s-manifests.py'
+      - 'scripts/tests/test_check_k8s_manifests.py'
       - '.github/workflows/kubernetes.yml'
   workflow_dispatch:
 
@@ -85,6 +87,9 @@ jobs:
 
       - name: Install PyYAML
         run: python3 -m pip install --user pyyaml
+
+      - name: Test manifest validator
+        run: python3 -m unittest scripts/tests/test_check_k8s_manifests.py
 
       # `kubectl kustomize` rather than a standalone kustomize binary: it is
       # preinstalled on the runner and is what the README tells operators to
