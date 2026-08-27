@@ -376,7 +376,12 @@ export interface AgentItem {
   /** Raw serde field from `AgentEntry::parent` — present on endpoints that
    *  serialize the kernel struct directly. */
   parent?: string | null;
-  /** UUIDs of child agents spawned by this agent (fork tree). */
+  /** Disambiguates a null `parent_agent_id` (#7930).
+   *  `false` means the agent genuinely has no parent; `true` means the row predates the schema that started persisting lineage, so its parent was never recorded and is unrecoverable.
+   *  Render the latter as unknown, not as a root agent. */
+  parent_unknown?: boolean;
+  /** UUIDs of child agents spawned by this agent (fork tree).
+   *  Derived server-side from the stored parent links rather than persisted, so it cannot drift out of step with `parent_agent_id`. */
   children?: string[];
   /** Active session UUID. */
   session_id?: string;
@@ -5282,6 +5287,88 @@ export async function importUsers(
     rows,
     dry_run: options.dryRun ?? false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// User groups (#7745)
+//
+// Shape mirrors `routes/groups.rs::GroupView` / `GroupUpsert`. Membership is
+// FLAT — a group has members and no parent or child; see the doc-comment on
+// `GroupConfig` in `librefang-types` for why.
+// ---------------------------------------------------------------------------
+
+export interface GroupItem {
+  name: string;
+  description: string;
+  members: string[];
+  roles: string[];
+  member_count: number;
+  // Members with no matching `[[users]]` entry. Not an error: membership can
+  // be synced from an external identity provider before the person has ever
+  // authenticated here. Surfaced so the UI can badge the row.
+  unknown_members: string[];
+}
+
+export interface GroupUpsertPayload {
+  name: string;
+  description?: string;
+  members?: string[];
+  roles?: string[];
+}
+
+export interface UserGroupsResult {
+  name: string;
+  groups: string[];
+  roles: string[];
+}
+
+export async function listGroups(): Promise<GroupItem[]> {
+  return get<GroupItem[]>("/api/groups");
+}
+
+export async function getGroup(name: string): Promise<GroupItem> {
+  return get<GroupItem>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function createGroup(payload: GroupUpsertPayload): Promise<GroupItem> {
+  return post<GroupItem>("/api/groups", payload);
+}
+
+export async function updateGroup(
+  originalName: string,
+  payload: GroupUpsertPayload,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(originalName)}`,
+    payload,
+  );
+}
+
+export async function deleteGroup(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function addGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+    {},
+  );
+}
+
+export async function removeGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return del<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+  );
+}
+
+export async function getUserGroups(name: string): Promise<UserGroupsResult> {
+  return get<UserGroupsResult>(`/api/users/${encodeURIComponent(name)}/groups`);
 }
 
 // ---------------------------------------------------------------------------
