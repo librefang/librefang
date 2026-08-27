@@ -692,6 +692,7 @@
       }
     },
     "clone_failed": "Nie udało się sklonować agenta",
+    "clone_partial": "Agent został sklonowany, ale inicjalizacja jest niekompletna: {{warnings}}",
     "clone_succeeded": "Agent sklonowany",
     "clone_title": "Sklonuj agenta",
     "clone_desc": "Kopiuje manifest agenta {{name}} do nowego agenta. Nazwa musi być unikalna.",
