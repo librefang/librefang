@@ -5,6 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
+  type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
 } from "../api";
@@ -132,6 +133,17 @@ function safeStringify(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+export function cloneResultNotice(result: CloneAgentResult): {
+  partial: boolean;
+  warnings: string;
+} {
+  const warnings = result.warnings.filter(Boolean);
+  return {
+    partial: result.partial || warnings.length > 0,
+    warnings: warnings.join(", ") || "unknown",
+  };
 }
 
 /** Two-column row used inside the detail modal's value cards. */
@@ -931,28 +943,14 @@ export function AgentsPage() {
   const drawerStatusColor = isDetailDrawerSuspended ? "bg-warning" : isDetailDrawerCrashed ? "bg-error" : "bg-success";
   const lockRename = !!detailAgent?.is_hand;
   const activeConfigMutation = patchAgentRuntimeConfigMutation;
-  // Save enables when the draft is both valid AND differs from the persisted
-  // model in any field — Provider, Model, Max tokens, or Temperature. Earlier
-  // this gate checked validity only; combined with the provider-switch model
-  // reset that produced the #5917 symptom where Max-token / Temperature edits
-  // never lit Save. draftMaxTokens / draftTemperature mirror saveModelEdit's
-  // coercion so the dirty comparison matches what would actually be PATCHed.
-  const draftMaxTokens = parseInt(modelDraft.max_tokens, 10);
-  const draftTemperature = parseFloat(modelDraft.temperature);
-  const modelValid =
-    !!modelDraft.provider.trim()
-    && !!modelDraft.model.trim()
-    && !isNaN(draftMaxTokens)
-    && draftMaxTokens > 0
-    && !isNaN(draftTemperature)
-    && draftTemperature >= 0
-    && draftTemperature <= 2;
+  // Save enables when the draft is both valid AND differs from the persisted model in any field — Provider, Model, Max tokens, or Temperature.
+  // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
+  // Deriving the two separately is what produced #5917 — the gate checked validity only, and combined with the provider-switch model reset, Max-token / Temperature edits never lit Save.
+  // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
-  const modelDirty =
-    modelDraft.provider.trim() !== (currentModel?.provider ?? "")
-    || modelDraft.model.trim() !== (currentModel?.model ?? "")
-    || draftMaxTokens !== (currentModel?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT)
-    || draftTemperature !== (currentModel?.temperature ?? MODEL_TEMPERATURE_DEFAULT);
+  const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
+  const modelValid = modelPatchPreview !== null;
+  const modelDirty = modelPatchPreview !== null && Object.keys(modelPatchPreview).length > 0;
   const saveModelDisabled =
     activeConfigMutation.isPending || !modelValid || !modelDirty;
 
@@ -3435,7 +3433,7 @@ export function AgentsPage() {
             const newName = cloneNameDraft.trim();
             if (!newName) return;
             try {
-              await cloneMutation.mutateAsync({
+              const result = await cloneMutation.mutateAsync({
                 agentId: cloneDialog.agentId,
                 payload: {
                   new_name: newName,
@@ -3443,7 +3441,15 @@ export function AgentsPage() {
                   include_tools: cloneIncludeTools,
                 },
               });
-              addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              const notice = cloneResultNotice(result);
+              if (notice.partial) {
+                addToast(t("agents.clone_partial", {
+                  defaultValue: "Agent cloned with incomplete initialization: {{warnings}}",
+                  warnings: notice.warnings,
+                }), "info");
+              } else {
+                addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              }
               setCloneDialog(null);
             } catch (err) {
               addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");

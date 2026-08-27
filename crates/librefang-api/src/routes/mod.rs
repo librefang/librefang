@@ -26,6 +26,7 @@ pub mod channels;
 pub mod commands;
 pub mod config;
 pub mod goals;
+pub mod groups;
 pub mod inbox;
 pub mod logs;
 pub mod mcp_auth;

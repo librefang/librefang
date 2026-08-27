@@ -114,6 +114,23 @@ pub struct ToolExecContext<'a> {
     /// is preserved across tool calls so previously-approved patterns are not re-blocked.
     pub dangerous_command_checker:
         Option<&'a Arc<tokio::sync::RwLock<crate::dangerous_command::DangerousCommandChecker>>>,
+    /// The principal this turn is acting *for* — the authenticated caller, or
+    /// the agent's configured owner when nothing human started the turn (#7744).
+    ///
+    /// Deliberately separate from `sender_id`, which sits three fields up and
+    /// answers a different question. `sender_id` is a *platform* identifier
+    /// (`telegram:12345`, an `api:<name>` binding key) that steers per-sender
+    /// tool authorization and `peer:{user_id}:KEY` memory scoping; this is a
+    /// LibreFang identity, resolved kernel-side by
+    /// [`librefang_types::principal::resolve_acting_principal`], and it steers
+    /// nothing — the `*_create` tools stamp it on what they persist and no
+    /// branch of the dispatch table reads it as a permission.
+    ///
+    /// Owned rather than borrowed because `Principal` is `Copy` and 20 bytes.
+    ///
+    /// `None` on the deferred-approval resume path, and that is a decision
+    /// rather than an omission: see `Kernel::build_deferred_tool_exec_context`.
+    pub acting_principal: Option<librefang_types::principal::Principal>,
 }
 
 /// Execute a tool without running the approval / capability / taint gate.
@@ -218,6 +235,7 @@ pub async fn execute_tool_raw(
         checkpoint_manager,
         interrupt,
         dangerous_command_checker,
+        acting_principal,
     } = ctx;
 
     // ACL-gated, `ToolError`-native tools (memory_* + wiki_*) are dispatched
@@ -1030,7 +1048,14 @@ pub async fn execute_tool_raw(
 
         // Scheduling tools (delegate to CronScheduler via kernel handle).
         "schedule_create" => {
-            tool_schedule_create(input, *kernel, *caller_agent_id, *sender_id).await
+            tool_schedule_create(
+                input,
+                *kernel,
+                *caller_agent_id,
+                *sender_id,
+                *acting_principal,
+            )
+            .await
         }
         "schedule_list" => tool_schedule_list(*kernel, *caller_agent_id).await,
         "schedule_delete" => tool_schedule_delete(input, *kernel, *caller_agent_id).await,
@@ -1151,7 +1176,16 @@ pub async fn execute_tool_raw(
         "skill_evolve_remove_file" => tool_skill_evolve_remove_file(input, *skill_registry).await,
 
         // Cron scheduling tools.
-        "cron_create" => tool_cron_create(input, *kernel, *caller_agent_id, *sender_id).await,
+        "cron_create" => {
+            tool_cron_create(
+                input,
+                *kernel,
+                *caller_agent_id,
+                *sender_id,
+                *acting_principal,
+            )
+            .await
+        }
         "cron_list" => tool_cron_list(*kernel, *caller_agent_id).await,
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
         "cron_enable" => tool_cron_enable(input, *kernel, *caller_agent_id).await,
@@ -1246,7 +1280,9 @@ pub async fn execute_tool_raw(
             tool_workflow_start(input, *kernel, *caller_agent_id, *session_id).await
         }
         "workflow_cancel" => tool_workflow_cancel(input, *kernel).await,
-        "workflow_create" => tool_workflow_create(input, *kernel, *caller_agent_id).await,
+        "workflow_create" => {
+            tool_workflow_create(input, *kernel, *caller_agent_id, *acting_principal).await
+        }
 
         // Browser automation tools
         #[cfg(feature = "browser")]
@@ -1595,6 +1631,10 @@ pub async fn execute_tool(
         // Out-of-band callers of the positional shim are user-facing / MCP
         // bridge calls, never system-internal forks (#6463).
         false,
+        // #7744: the shim has no turn context to resolve a principal from, so
+        // what these callers create is recorded unowned rather than attributed
+        // to whichever agent happened to run the tool.
+        None,
     )
     .await
 }
@@ -1645,6 +1685,10 @@ pub async fn execute_tool_with_sender_account(
     // guest gate once `[[users]]` is configured (#6463). Every user-facing
     // caller passes `false`.
     system_call: bool,
+    // #7744: the principal this turn acts for, resolved kernel-side. Stamped
+    // onto the artifacts the `*_create` tools persist; never read as a
+    // permission by this layer.
+    acting_principal: Option<librefang_types::principal::Principal>,
 ) -> ToolResult {
     // Normalize the tool name through compat mappings so LLM-hallucinated aliases
     // (e.g. "fs-write" → "file_write") resolve to the canonical LibreFang name.
@@ -1896,6 +1940,7 @@ pub async fn execute_tool_with_sender_account(
         checkpoint_manager,
         interrupt,
         dangerous_command_checker,
+        acting_principal,
     };
     execute_tool_raw(tool_use_id, tool_name, input, &ctx).await
 }

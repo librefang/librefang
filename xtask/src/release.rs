@@ -1310,6 +1310,84 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
 mod tests {
     use super::*;
 
+    /// A filesystem-safe stand-in for the current thread's name, for tests that need a scratch directory of their own.
+    ///
+    /// Under the test harness the thread name is the test's full path — `release::tests::git_diff_change_detection_distinguishes_changes_from_errors`.
+    /// `:` is an ordinary character in a POSIX filename but is reserved on Windows, where it separates a drive letter or an NTFS alternate data stream, so joining the raw name into a temp path succeeds on Linux and macOS and fails on Windows with `InvalidFilename` (OS error 123).
+    /// That asymmetry is why the two tests using it were red on the Windows lane alone while every other lane stayed green.
+    ///
+    /// Process id still distinguishes concurrent runs; this only has to keep sibling tests in one process apart.
+    fn thread_scratch_slug() -> String {
+        scratch_slug(std::thread::current().name().unwrap_or("unnamed"))
+    }
+
+    /// The pure half of [`thread_scratch_slug`], split out so the rule can be asserted against inputs the running test does not happen to have.
+    fn scratch_slug(raw: &str) -> String {
+        raw.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    /// Windows rejects these outright in a path component; a directory name containing one fails to create with `InvalidFilename` (OS error 123).
+    /// POSIX accepts all nine, which is why a scratch path built from an unsanitised thread name is green on Linux and macOS and red on Windows.
+    const WINDOWS_RESERVED: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+    /// Guards the fix for the Windows-only `InvalidFilename` failures in
+    /// `tag_selection_uses_version_order_and_channel_filtering` and
+    /// `git_diff_change_detection_distinguishes_changes_from_errors`.
+    ///
+    /// Those two build a scratch directory out of the thread name, which under the test harness is the test's full path and therefore contains `::`.
+    /// The Windows lane is the only place the bug reproduces, and `changes`-gated PRs that touch `xtask` do not run that lane — so this asserts the rule directly instead, on every platform.
+    #[test]
+    fn scratch_slug_strips_every_character_windows_reserves() {
+        // The exact name that produced OS error 123 on the Windows lane.
+        let offender =
+            "release::tests::git_diff_change_detection_distinguishes_changes_from_errors";
+        assert!(
+            offender.contains(':'),
+            "the regression premise is that harness thread names carry `::`"
+        );
+        let slug = scratch_slug(offender);
+        for reserved in WINDOWS_RESERVED {
+            assert!(
+                !slug.contains(reserved),
+                "slug {slug:?} still contains {reserved:?}, which Windows rejects in a path component"
+            );
+        }
+
+        // Every reserved character, not just the `:` we happened to hit.
+        let all_reserved: String = WINDOWS_RESERVED.iter().collect();
+        let slug = scratch_slug(&all_reserved);
+        assert_eq!(
+            slug,
+            "_".repeat(WINDOWS_RESERVED.len()),
+            "each reserved character must map to a single safe placeholder"
+        );
+
+        // The slug still has to separate sibling tests sharing one process,
+        // or the directories it names would collide instead of failing.
+        assert_ne!(
+            scratch_slug("release::tests::alpha"),
+            scratch_slug("release::tests::beta"),
+            "distinct test names must keep distinct scratch directories"
+        );
+
+        // And the live thread name — whatever the harness calls this test — has to satisfy the same rule.
+        let live = thread_scratch_slug();
+        for reserved in WINDOWS_RESERVED {
+            assert!(
+                !live.contains(reserved),
+                "live thread slug {live:?} contains {reserved:?}"
+            );
+        }
+    }
+
     /// The seam between the fold and the release commit: `collect_fragments_in`
     /// deletes the fragments it consumed, and only `stage_release_files` can get
     /// those deletions into the commit.
@@ -1659,7 +1737,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "lf-release-tags-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
+            thread_scratch_slug()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -1718,7 +1796,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "lf-release-diff-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
+            thread_scratch_slug()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();

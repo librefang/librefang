@@ -182,7 +182,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 /// entity in the same shape the dashboard already consumes for GET, letting
 /// the caller patch caches in place via `setQueryData` instead of a follow-up
 /// refetch (#3832).
-fn workflow_to_json(w: &Workflow) -> serde_json::Value {
+/// `cfg` is the live kernel config, consulted only to turn a recorded principal id back into the name an operator declared.
+fn workflow_to_json(
+    w: &Workflow,
+    cfg: &librefang_types::config::KernelConfig,
+) -> serde_json::Value {
     serde_json::json!({
         "id": w.id.to_string(),
         "name": w.name,
@@ -209,6 +213,16 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
         "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
+        // #7744. Two shapes on purpose. `owner` is the machine-readable
+        // tagged struct — `{"kind":"user","id":"…"}` — and `null` for an
+        // unowned workflow, which means "visible to all". `owner_name` is the
+        // display name resolved back out of `[[users]]` / `[[groups]]`, and is
+        // `null` both when the workflow is unowned and when the principal it
+        // names has since been deleted or renamed; a client that finds
+        // `owner` set and `owner_name` null should render the canonical
+        // `kind:uuid` string rather than claiming the workflow is unowned.
+        "owner": w.owner,
+        "owner_name": w.owner.and_then(|p| cfg.principal_name(&p).map(|s| s.to_string())),
     })
 }
 

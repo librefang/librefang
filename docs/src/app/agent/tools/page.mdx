@@ -105,11 +105,21 @@ The claim TTL exists to recover from worker crashes — if the claimer doesn't `
 |---|---|---|
 | `channel_send` | `channel`, `target`, `content` (text / image / file / poll) | Send a message, image, file, or poll to a channel user — **without going through the agent loop**. Useful for pushing alerts, async results, or out-of-band notifications. |
 | `channel_dm` | `user_id`, `message` | Deliver a message privately to one member of the group conversation the current turn arrived on, instead of posting where everyone can read it. |
-| `channel_members` | optional `channel`, `chat_id` | List the known members of a group conversation — `user_id`, `display_name`, `username` for everyone the daemon has seen speak there. Read-only. |
+| `channel_members` | optional `channel`, `chat_id` | List the known members of a group conversation — `user_id`, `display_name`, `username` and `source` for each. Read-only. |
 
 `channel_send` is what `[deliver_only]` webhook mode uses internally; agents can also call it directly. Capability: `channel.*`.
 
-`channel_members` reads the roster the channel bridge builds as it observes group messages, so it lists the people who have spoken in a conversation rather than the platform's full membership list.
+`channel_members` reads the roster the channel bridge builds as it observes group messages, and — on adapters configured to supply a platform member list — everyone that list names.
+Each member carries a `source`, and the reply carries `observed_count` and `enumerated_count` alongside it.
+
+- `observed` — this person has spoken in the conversation. `channel_dm` can reach them.
+- `enumerated` — the platform lists them as a member and they have never addressed the agent. They are reported here and `channel_dm` refuses them.
+
+The split is a security boundary rather than a label.
+Bulk-filling the roster from a platform's member list would have widened `channel_dm`'s authorization set from "people this agent has interacted with" to "everyone the workspace lists", letting an agent privately message someone who has never spoken to it.
+Speaking promotes an enumerated member to observed; a later enumeration sweep never demotes them back.
+
+Only the Slack adapter enumerates today, and only with `SLACK_ENUMERATE_MEMBERS = "true"` — see [Slack](/integrations/channels/core#channel-member-enumeration).
 Both arguments default to the conversation the current message arrived on, so during message handling it can be called with no arguments at all; a direct message has no roster.
 Naming a different conversation on the channel the turn arrived on is refused, for the same reason `channel_send` refuses a cross-chat dispatch — one group must not be able to enumerate another's membership.
 Use it to attribute a request to the person who made it, and to obtain the platform `user_id` an external system needs in order to notify them.
@@ -118,7 +128,8 @@ Use it to attribute a request to the person who made it, and to obtain the platf
 
 In a group conversation `channel_send` may only address the group itself — re-targeting it at an individual is refused by the cross-chat dispatch guard, which exists because an agent that can name any recipient can be talked into naming the wrong one.
 `channel_dm` is the narrow exception: it takes a `user_id` and a `message` and nothing else.
-The channel, the conversation and the bot account all come from the turn being handled, and the recipient must already appear in that conversation's roster — someone the daemon has seen speak there, as listed by `channel_members`.
+The channel, the conversation and the bot account all come from the turn being handled, and the recipient must be someone the daemon has seen speak in that conversation — a `channel_members` entry whose `source` is `observed`.
+A member listed as `enumerated` is known to the platform but has never addressed the agent, and is refused.
 An agent therefore cannot address a platform id it has not met, and cannot use one conversation to reach into another.
 
 Out of band — from a cron job, a trigger, or an API-driven run — there is no conversation and so no roster to authorize anyone; `channel_dm` is unavailable there by design, and `channel_send` with an explicit recipient is the tool for that case.

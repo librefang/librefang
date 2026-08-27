@@ -5,7 +5,18 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 type TaskPostCalls = Arc<Mutex<Vec<Option<String>>>>;
-type CronCreateCalls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+/// `(agent_id, job_json, owner)` — the owner is captured alongside the payload
+/// so a test can assert the principal reached the kernel *and* that it did not
+/// arrive inside `job_json`, where the model could have written it (#7744).
+type CronCreateCalls = Arc<
+    Mutex<
+        Vec<(
+            String,
+            serde_json::Value,
+            Option<librefang_types::principal::Principal>,
+        )>,
+    >,
+>;
 type CronListCalls = Arc<Mutex<Vec<String>>>;
 type CronCancelCalls = Arc<Mutex<Vec<String>>>;
 type CronSetEnabledCalls = Arc<Mutex<Vec<(String, bool)>>>;
@@ -235,11 +246,12 @@ impl CronControl for CapturingKernel {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         self.cron_create_calls
             .lock()
             .unwrap()
-            .push((agent_id.to_string(), job_json));
+            .push((agent_id.to_string(), job_json, owner));
         Ok("cron-id-1".to_string())
     }
 
@@ -310,6 +322,15 @@ fn make_ctx<'a>(
     sender_id: Option<&'a str>,
     caller_agent_id: Option<&'a str>,
 ) -> ToolExecContext<'a> {
+    make_ctx_owned(kernel, sender_id, caller_agent_id, None)
+}
+
+fn make_ctx_owned<'a>(
+    kernel: &'a Arc<dyn KernelHandle>,
+    sender_id: Option<&'a str>,
+    caller_agent_id: Option<&'a str>,
+    acting_principal: Option<librefang_types::principal::Principal>,
+) -> ToolExecContext<'a> {
     ToolExecContext {
         kernel: Some(kernel),
         allowed_tools: None,
@@ -339,6 +360,7 @@ fn make_ctx<'a>(
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
+        acting_principal,
     }
 }
 
@@ -839,5 +861,79 @@ async fn test_schedule_delete_missing_id_renders_as_missing_parameter() {
         result.content.contains("Missing required parameter 'id'"),
         "expected MissingParameter display, got: {}",
         result.content
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ownership (#7744)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cron_create_forwards_the_acting_principal_to_the_kernel() {
+    // The end of the thread this PR adds: a principal set on `ToolExecContext`
+    // has to arrive at the kernel handle as a typed argument, or nothing gets
+    // stamped and every other test here would still pass.
+    let (kernel, calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let principal = librefang_types::principal::Principal::group_named("oncall");
+    let ctx = make_ctx_owned(&kernel, Some("peer-xyz"), Some("agent-1"), Some(principal));
+    let input = json!({"schedule": "0 * * * *", "payload": "tick"});
+    let result = execute_tool_raw("own1", "cron_create", &input, &ctx).await;
+    assert!(!result.is_error, "cron_create failed: {}", result.content);
+
+    let cron_calls = calls.cron_create.lock().unwrap();
+    assert_eq!(cron_calls.len(), 1);
+    assert_eq!(
+        cron_calls[0].2,
+        Some(principal),
+        "the acting principal must reach `cron_create` as a typed argument"
+    );
+    assert!(
+        cron_calls[0].1.get("owner").is_none(),
+        "the owner must not travel inside `job_json` — that is the model's own tool input"
+    );
+}
+
+#[tokio::test]
+async fn cron_create_forwards_no_principal_when_the_turn_resolved_none() {
+    // Unowned is a supported state, not an error: a turn with no authenticated
+    // caller, no manifest `owner` and no `default_owner` still creates the job.
+    let (kernel, calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, Some("peer-xyz"), Some("agent-1"));
+    let input = json!({"schedule": "0 * * * *", "payload": "tick"});
+    let result = execute_tool_raw("own2", "cron_create", &input, &ctx).await;
+    assert!(!result.is_error, "cron_create failed: {}", result.content);
+
+    let cron_calls = calls.cron_create.lock().unwrap();
+    assert_eq!(cron_calls.len(), 1);
+    assert_eq!(cron_calls[0].2, None);
+}
+
+#[tokio::test]
+async fn a_model_supplied_owner_in_the_tool_input_cannot_choose_the_principal() {
+    // The security property. `cron_create`'s input is forwarded to the kernel
+    // whole, so a model that writes `"owner"` into it must not be able to
+    // decide who its job belongs to.
+    let (kernel, calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let real = librefang_types::principal::Principal::user_named("alice");
+    let ctx = make_ctx_owned(&kernel, Some("peer-xyz"), Some("agent-1"), Some(real));
+    let input = json!({
+        "schedule": "0 * * * *",
+        "payload": "tick",
+        "owner": { "kind": "group", "id": "00000000-0000-0000-0000-000000000000" },
+    });
+    let result = execute_tool_raw("own3", "cron_create", &input, &ctx).await;
+    assert!(!result.is_error, "cron_create failed: {}", result.content);
+
+    let cron_calls = calls.cron_create.lock().unwrap();
+    assert_eq!(
+        cron_calls[0].2,
+        Some(real),
+        "the typed argument decides the owner, not the model's payload"
     );
 }

@@ -41,6 +41,7 @@ type Client struct {
 	Channels *ChannelsResource
 	Extensions *ExtensionsResource
 	Goals *GoalsResource
+	Groups *GroupsResource
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
@@ -76,6 +77,7 @@ func New(baseURL string) *Client {
 		c.Channels = &ChannelsResource{client: c}
 		c.Extensions = &ExtensionsResource{client: c}
 		c.Goals = &GoalsResource{client: c}
+		c.Groups = &GroupsResource{client: c}
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
@@ -354,6 +356,10 @@ func (r *AgentsResource) PatchAgentConfig(id string, data map[string]interface{}
 
 func (r *AgentsResource) GetAgentDeliveries(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/deliveries", id), nil, nil)
+}
+
+func (r *AgentsResource) ListAgentEphemeralRuns(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/ephemeral-runs", id), nil, query)
 }
 
 func (r *AgentsResource) ListAgentEvents(id string, query map[string]string) (interface{}, error) {
@@ -732,24 +738,28 @@ func (r *BudgetResource) DeleteUserBudget(user_id string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
 }
 
-func (r *BudgetResource) UsageStats() (interface{}, error) {
-	return r.client.request("GET", "/api/usage", nil, nil)
+func (r *BudgetResource) UsageStats(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage", nil, query)
 }
 
-func (r *BudgetResource) UsageByModel() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/by-model", nil, nil)
+func (r *BudgetResource) UsageByModel(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/by-model", nil, query)
 }
 
-func (r *BudgetResource) UsageByModelPerformance() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/by-model/performance", nil, nil)
+func (r *BudgetResource) UsageByModelPerformance(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/by-model/performance", nil, query)
 }
 
-func (r *BudgetResource) UsageDaily() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/daily", nil, nil)
+func (r *BudgetResource) UsageDaily(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/daily", nil, query)
 }
 
-func (r *BudgetResource) UsageSummary() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/summary", nil, nil)
+func (r *BudgetResource) UsageExport(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/export", nil, query)
+}
+
+func (r *BudgetResource) UsageSummary(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/summary", nil, query)
 }
 
 // ── Channels Resource
@@ -806,6 +816,42 @@ type GoalsResource struct{ client *Client }
 
 func (r *GoalsResource) ListGoalTemplates() (interface{}, error) {
 	return r.client.request("GET", "/api/goals/templates", nil, nil)
+}
+
+// ── Groups Resource
+
+type GroupsResource struct{ client *Client }
+
+func (r *GroupsResource) ListGroups() (interface{}, error) {
+	return r.client.request("GET", "/api/groups", nil, nil)
+}
+
+func (r *GroupsResource) CreateGroup(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/groups", data, nil)
+}
+
+func (r *GroupsResource) GetGroup(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+}
+
+func (r *GroupsResource) UpdateGroup(name string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s", name), data, nil)
+}
+
+func (r *GroupsResource) DeleteGroup(name string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s", name), nil, nil)
+}
+
+func (r *GroupsResource) AddGroupMember(name string, user string) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+}
+
+func (r *GroupsResource) RemoveGroupMember(name string, user string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/groups/%s/members/%s", name, user), nil, nil)
+}
+
+func (r *GroupsResource) UserGroups(name string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/users/%s/groups", name), nil, nil)
 }
 
 // ── Hands Resource
@@ -1542,6 +1588,10 @@ func (r *SystemResource) Check(query map[string]string) (interface{}, error) {
 
 func (r *SystemResource) EffectivePermissions(user_id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/authz/effective/%s", user_id), nil, nil)
+}
+
+func (r *SystemResource) Whoami() (interface{}, error) {
+	return r.client.request("GET", "/api/authz/whoami", nil, nil)
 }
 
 func (r *SystemResource) CreateBackup() (interface{}, error) {

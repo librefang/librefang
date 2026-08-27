@@ -123,18 +123,29 @@ impl LibreFangKernel {
             let refreshed_raw = load_raw_config_toml(&config_path);
             self.raw_config_toml
                 .store(std::sync::Arc::new(refreshed_raw));
-            // Re-validate `[external_auth.role_map]` target roles on every
-            // reload that actually changed them (#7744). This edit carries no
-            // `HotAction` of its own — the OAuth layer reads `external_auth`
-            // live from the config swap — so without an explicit check here an
-            // operator who introduces a typo at reload time gets no signal at
-            // all, only SSO callers silently falling back to 401.
+            // Re-validate `[external_auth.role_map]` target roles on every reload that actually changed them (#7744).
+            // This edit carries no `HotAction` of its own — the OAuth layer reads `external_auth` live from the config swap — so without an explicit check here an operator who introduces a typo at reload time gets no signal at all, only SSO callers silently falling back to 401.
             if old_cfg.external_auth.role_map != new_config.external_auth.role_map {
                 let typos = crate::auth::validate_oidc_role_map(&new_config.external_auth.role_map);
                 if typos > 0 {
                     warn!(
                         "Hot-reload: external_auth.role_map has {typos} unrecognized \
                          LibreFang role string(s) — see WARN lines above"
+                    );
+                }
+            }
+            // Same for `[external_auth.group_map]` (#7746), and additionally when `[[groups]]` itself moved: deleting or renaming a group is the most likely way a previously valid map target becomes dangling, and that edit does not touch `group_map` at all.
+            if old_cfg.external_auth.group_map != new_config.external_auth.group_map
+                || old_cfg.groups != new_config.groups
+            {
+                let dangling = crate::auth::validate_oidc_group_map(
+                    &new_config.external_auth.group_map,
+                    &new_config.groups,
+                );
+                if dangling > 0 {
+                    warn!(
+                        "Hot-reload: external_auth.group_map has {dangling} target(s) that name \
+                         no [[groups]] entry — see WARN lines above"
                     );
                 }
             }
