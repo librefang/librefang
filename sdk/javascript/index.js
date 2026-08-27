@@ -222,6 +222,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/deliveries`);
   }
 
+  async listAgentEphemeralRuns(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/ephemeral-runs`, undefined, query);
+  }
+
   async listAgentEvents(id, query) {
     return this._c._request("GET", `/api/agents/${id}/events`, undefined, query);
   }
@@ -606,24 +610,28 @@ class BudgetResource {
     return this._c._request("DELETE", `/api/budget/users/${user_id}`);
   }
 
-  async usageStats() {
-    return this._c._request("GET", "/api/usage");
+  async usageStats(query) {
+    return this._c._request("GET", "/api/usage", undefined, query);
   }
 
-  async usageByModel() {
-    return this._c._request("GET", "/api/usage/by-model");
+  async usageByModel(query) {
+    return this._c._request("GET", "/api/usage/by-model", undefined, query);
   }
 
-  async usageByModelPerformance() {
-    return this._c._request("GET", "/api/usage/by-model/performance");
+  async usageByModelPerformance(query) {
+    return this._c._request("GET", "/api/usage/by-model/performance", undefined, query);
   }
 
-  async usageDaily() {
-    return this._c._request("GET", "/api/usage/daily");
+  async usageDaily(query) {
+    return this._c._request("GET", "/api/usage/daily", undefined, query);
   }
 
-  async usageSummary() {
-    return this._c._request("GET", "/api/usage/summary");
+  async usageExport(query) {
+    return this._c._request("GET", "/api/usage/export", undefined, query);
+  }
+
+  async usageSummary(query) {
+    return this._c._request("GET", "/api/usage/summary", undefined, query);
   }
 }
 

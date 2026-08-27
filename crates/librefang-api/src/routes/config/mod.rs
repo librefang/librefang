@@ -400,6 +400,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "links", "struct_field": "links"},
         {"key": "reload", "struct_field": "reload"},
         {"key": "budget", "struct_field": "budget"},
+        {"key": "usage", "struct_field": "usage"},
         {"key": "thinking", "struct_field": "thinking"},
         {"key": "pairing", "struct_field": "pairing"},
         {"key": "broadcast", "struct_field": "broadcast"},
@@ -1516,9 +1517,7 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path(
             "external_auth.require_email_verified"
         ));
-        // #7744: `role_map` is what turns a signed ID token into an API
-        // credential, so a caller who could write it could grant themselves
-        // Owner by naming an IdP group they already hold.
+        // #7744: `role_map` is what turns a signed ID token into an API credential, so a caller who could write it could grant themselves Owner by naming an IdP group they already hold.
         assert!(!super::is_writable_config_path("external_auth.role_map"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));

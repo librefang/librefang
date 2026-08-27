@@ -3,7 +3,7 @@
 //! triggers, route the success path through proactive-memory writes, and
 //! periodically fold stale tool results to keep the context window viable.
 
-use super::message::sanitize_for_memory;
+use super::message::{budget_interaction_halves, sanitize_for_memory};
 use super::prompt::{remember_interaction_best_effort, reply_directives_from_parsed};
 use super::text_recovery::{looks_like_hallucinated_action, user_message_has_action_intent};
 use super::*;
@@ -265,6 +265,13 @@ pub(super) async fn finalize_successful_end_turn(
             sanitize_for_memory(ctx.user_message),
             sanitize_for_memory(&end_turn.final_response),
         ) {
+            // Bound the row before it is composed, so the cap applies to what gets embedded as well as to what gets stored (#7911).
+            // A channel adapter that renders an attachment into the user message used to land here verbatim — the issue reports a single 201 765-character row that had been retrieved 63 times.
+            let (user_clean, resp_clean) = budget_interaction_halves(
+                &user_clean,
+                &resp_clean,
+                ctx.memory.max_episodic_chars(),
+            );
             let interaction_text =
                 format!("[Past exchange]\nThem: {user_clean}\nYou: {resp_clean}");
             // `sender_user_id` (SenderContext.user_id) is the platform user

@@ -57,6 +57,7 @@ use crate::types;
         routes::list_agents,
         routes::get_agent_stats,
         routes::list_agent_events,
+        routes::list_agent_ephemeral_runs,
         routes::spawn_agent,
         routes::spawn_ephemeral_agent,
         routes::get_agent,
@@ -312,6 +313,7 @@ use crate::types;
         routes::usage_by_model,
         routes::usage_by_model_performance,
         routes::usage_daily,
+        routes::usage_export,
 
         // ── Auto-Dream (background memory consolidation) ──
         routes::auto_dream_status,
@@ -543,6 +545,9 @@ use crate::types;
         routes::agents::AgentStatsPrevView,
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
+        routes::agents::EphemeralRunsResponse,
+        routes::agents::EphemeralRunView,
+        routes::agents::EphemeralRunRollupView,
         routes::agents::SessionContextResponse,
         routes::groups::GroupView,
         routes::groups::GroupUpsert,

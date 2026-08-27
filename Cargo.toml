@@ -43,6 +43,10 @@ rust-version = "1.94.1"
 
 [workspace.dependencies]
 # Async runtime
+# Workspace applications collectively use Tokio's filesystem, process,
+# signal, networking, synchronization, timing, and test utilities. Features
+# unify across the workspace, so keep one explicit full runtime contract here;
+# a future split must audit every member rather than narrowing this line alone.
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
@@ -108,6 +112,8 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 webauthn-rs = "0.5.5"
 
 # Database
+# r2d2_sqlite 0.34 is coupled to rusqlite 0.39. Bump them together to avoid
+# compiling two rusqlite/libsqlite3-sys versions and two bundled SQLite copies.
 rusqlite = { version = "0.39.0", features = ["bundled", "serde_json"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"
@@ -117,6 +123,8 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
 # HTTP client (for LLM drivers)
+# reqwest 0.13's `rustls` feature explicitly selects aws-lc-rs. Keep it aligned
+# with jsonwebtoken and the process-wide provider installed by application code.
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query", "socks"] }
 
 # TLS fallback — bundled Mozilla CA roots for systems without system certs (musl, Termux, minimal containers)
@@ -140,6 +148,9 @@ bytes = "1"
 futures = "0.3"
 
 # MCP SDK
+# The transport feature activates rmcp's optional reqwest dependency but no TLS
+# backend. The separate `reqwest` feature is required to add rustls/aws-lc-rs;
+# keep both when upgrading rmcp, which currently tracks reqwest 0.13.
 rmcp = { version = "3.1", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # ACP (Agent Client Protocol) SDK — official Zed-maintained crates for IDE integration (#3313)
