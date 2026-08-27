@@ -2296,3 +2296,35 @@ status-mb = { $mb } MB
 status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
 status-uptime-format = { $hours }h { $mins }m
 # --- Brand/proper names ---
+
+# ── 用户组 (#7745) ──────────────────────────────────────────────────────────
+group-none = 未配置任何用户组。
+group-section-detail = 用户组
+group-label-name = 名称
+group-label-description = 描述
+group-label-roles = 角色
+group-label-members = 成员
+group-label-groups = 用户组
+group-label-unregistered = 未注册成员
+group-header-members = 成员数
+group-header-roles = 角色
+group-header-description = 描述
+group-created = 用户组 { $name } 已创建。
+group-create-failed = 创建用户组失败：{ $error }
+group-deleted = 用户组 { $name } 已删除。
+group-delete-failed = 删除用户组失败：{ $error }
+group-show-failed = 读取用户组失败：{ $error }
+group-member-added = 已将 { $user } 加入 { $group }。
+group-member-removed = 已将 { $user } 从 { $group } 移除。
+group-member-failed = 修改成员失败：{ $error }
+group-user-none = { $user } 不属于任何用户组。
+tui-tab-groups = 用户组
+tui-groups-title = 用户组
+tui-groups-count = { $count } 个用户组
+tui-groups-header-name = 名称
+tui-groups-header-members = 成员数
+tui-groups-header-roles = 角色
+tui-groups-header-description = 描述
+tui-groups-loading = 正在加载用户组…
+tui-groups-empty = 未配置任何用户组。使用 `librefang group create <name>` 创建。
+tui-groups-hints = ↑/↓ 导航 · r 刷新

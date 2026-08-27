@@ -316,6 +316,19 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     if path == "/api/users" || path.starts_with("/api/users/") {
         return true;
     }
+    // Group management (#7745) sits on the same side of the line as user
+    // management, and for a sharper reason: a group's `roles` list confers role
+    // strings on every member. An Admin per-user API key that could reach
+    // `POST /api/groups` would create a group carrying whatever role it likes,
+    // add itself as a member, and self-promote — the same escalation the
+    // `/api/users*` gate above exists to close, one indirection further out.
+    // Prefix-matched because the path can be `/api/groups`,
+    // `/api/groups/{name}`, or `/api/groups/{name}/members/{user}`. GET is left
+    // to the generic Admin-or-above gate so the dashboard's group list and the
+    // `/api/users/{name}/groups` reverse lookup stay usable for an Admin.
+    if path == "/api/groups" || path.starts_with("/api/groups/") {
+        return true;
+    }
     // Adding / updating / deleting an MCP server persists a config entry that
     // `connect_mcp_servers()` immediately spawns — a stdio transport is a raw
     // `command` + `args` executed under the daemon UID. That is process spawn,
@@ -3203,6 +3216,50 @@ mod tests {
                     "Owner must be allowed to {method} {path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_user_role_admin_cannot_mutate_groups_endpoints() {
+        // #7745: a group's `roles` list confers role strings on its members, so
+        // an Admin that could write groups could grant itself whatever role it
+        // wanted and self-promote — the same escalation the `/api/users*` gate
+        // above closes, one indirection further out.
+        for method in [
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ] {
+            for path in [
+                "/api/groups",
+                "/api/groups/oncall",
+                "/api/groups/oncall/members/alice",
+            ] {
+                assert!(
+                    !user_role_allows_request(UserRole::Admin, &method, path),
+                    "Admin must NOT be allowed to {method} {path}"
+                );
+                assert!(
+                    user_role_allows_request(UserRole::Owner, &method, path),
+                    "Owner must be allowed to {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_group_reads_stay_at_the_generic_admin_gate() {
+        // The dashboard's group list and the `/api/users/{name}/groups` reverse
+        // lookup are reads, and locking them to Owner would make the surface
+        // unusable for the Admin who is expected to operate it.
+        let get = axum::http::Method::GET;
+        for path in [
+            "/api/groups",
+            "/api/groups/oncall",
+            "/api/users/alice/groups",
+        ] {
+            assert!(user_role_allows_request(UserRole::Admin, &get, path));
+            assert!(user_role_allows_request(UserRole::Owner, &get, path));
         }
     }
 

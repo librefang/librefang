@@ -438,6 +438,60 @@ fn default_role() -> String {
     "user".to_string()
 }
 
+/// A named collection of users, declared as `[[groups]]` in `config.toml`.
+///
+/// A group exists so a permission or an ownership decision can name a team instead of a person.
+/// The support rota, the on-call shift, the project team and the department all outlive the individuals filling them, and every one of them is currently expressible only by enumerating names (#7745).
+///
+/// # Membership is flat — groups do not nest
+///
+/// This is a deliberate decision, not an omission.
+/// A `GroupConfig` has `members` (user names) and no parent or child pointer, so the set of principals a group denotes is exactly its `members` list and resolving it is a single lookup that cannot cycle, cannot fan out, and cannot change cost as the deployment grows.
+/// Nesting would buy expressiveness that the two consumers of this type do not ask for: #7744 needs `Principal::Group(name)` to answer "does this user belong", and #7746 maps an external identity provider's group claim onto a local group — and every IdP hands us the *flattened* effective membership on each login precisely because it has already resolved its own hierarchy.
+/// Re-deriving a hierarchy locally from flattened claims would be guesswork, and maintaining a second one by hand would drift from the IdP's.
+/// The cost of the decision is that an operator who wants `platform-oncall ⊂ platform` lists the members in both groups, or grants both groups the same entry in `roles`; the benefit is that membership resolution stays O(members), is trivially deterministic, and has no cycle-detection code to get wrong.
+/// If a deployment ever produces a concrete case that flat membership cannot express, adding a `parent` field is a backwards-compatible change — a group that names no parent behaves exactly as it does today.
+///
+/// # Relationship to roles
+///
+/// `roles` is not a new vocabulary.
+/// It holds the same role strings that [`BindingContext::roles`](../../librefang_channels/router/struct.BindingContext.html) already carries through channel-binding resolution and that [`ChannelRoleMapping`] already produces from platform-native roles, so a group can confer a role on its members without a third parallel notion of identity growing beside the two that exist.
+/// [`KernelConfig::roles_for_user`] is the resolver: it returns each group the user belongs to *by name* plus every string in that group's `roles`, so a binding rule can gate on the group directly (`roles = ["oncall"]` matches membership in the `oncall` group) without the operator restating the group name inside its own `roles` list.
+///
+/// # Dangling members are tolerated
+///
+/// A name in `members` need not resolve to a `[[users]]` entry.
+/// #7746 syncs membership from an IdP on every login, and the claim can name a person before that person has ever authenticated here and therefore before any local user row exists; rejecting the write would make the group the thing that has to be repaired by hand, which is the failure mode groups exist to remove.
+/// Deleting a user does strip that name from every group it appears in, so a *removed* member never lingers — the tolerance is for names that have not arrived yet, not for names that have left.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GroupConfig {
+    /// Group name. Unique across `[[groups]]`, and the string a
+    /// `Principal::Group` / a binding `match_rule.roles` entry names.
+    pub name: String,
+    /// Free-text description of what the group is for. Operator-facing
+    /// only; nothing branches on it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// User names belonging to this group. Stored sorted and de-duplicated
+    /// so the on-disk `config.toml` and every prompt-facing stringification
+    /// are byte-identical across writes (#3298).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// Role strings conferred on every member, in the same vocabulary as
+    /// [`ChannelRoleMapping`] and `BindingContext.roles`. Stored sorted and
+    /// de-duplicated for the same determinism reason as `members`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+}
+
+impl GroupConfig {
+    /// True when `user` is a member of this group. Case-sensitive, matching
+    /// how `UserConfig.name` is compared everywhere else in the codebase.
+    pub fn has_member(&self, user: &str) -> bool {
+        self.members.iter().any(|m| m == user)
+    }
+}
+
 impl Default for UserConfig {
     fn default() -> Self {
         // Mirrors the per-field `#[serde(default)]` attributes above so a
@@ -2945,6 +2999,53 @@ impl Default for QueueConfig {
     }
 }
 
+/// Usage/metering retention (#7891).
+///
+/// The daemon runs a daily sweep that hard-deletes `usage_events` rows older
+/// than `retention_days`. Before #7891 that horizon was a literal `90` in
+/// `background_lifecycle.rs`, so an operator who needed a longer window for
+/// quarterly or annual cost reporting had no way to ask for one, and one who
+/// wanted a shorter window for data-minimisation reasons had no way to shorten
+/// it either.
+///
+/// This is the retention of the underlying event table, so it bounds every
+/// `/api/usage*` endpoint at once — not just the daily breakdown. Raising it
+/// grows the table roughly linearly with call volume; the rows are small
+/// (a dozen scalar columns) but they are the highest-cardinality table in the
+/// substrate, so treat a multi-year horizon as a storage decision rather than a
+/// free one.
+///
+/// Configure in config.toml:
+///
+/// ```toml
+/// [usage]
+/// retention_days = 365
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// How many days of `usage_events` the daily retention sweep keeps.
+    ///
+    /// Default: 90, which is the horizon the sweep has always enforced.
+    /// Set to 0 to disable pruning entirely — the table then grows without
+    /// bound, which is the right call only when an external archival job
+    /// (for example a scheduled `GET /api/usage/export`) owns the lifecycle.
+    #[serde(default = "default_usage_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_usage_retention_days() -> u32 {
+    90
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_usage_retention_days(),
+        }
+    }
+}
+
 /// Per-lane concurrency limits for the command queue.
 ///
 /// Configure in config.toml:
@@ -3358,6 +3459,17 @@ pub struct KernelConfig {
     /// emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
+    /// Share of the prompt memory section's character budget reserved for extracted facts, as a percentage; the remainder goes to raw dialogue.
+    ///
+    /// The two classes differ by roughly nine to one in row size, so a single ranked list spends the section on dialogue by size alone and leaves a large fraction of turns with no extracted fact in the prompt at all (#7920).
+    /// Neither share is wasted: whatever one class does not use spills to the other, so a turn with only one class still fills the whole budget.
+    ///
+    /// `None` means "use the compiled-in default" (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the measurement, which could not separate 30/50/70 from run-to-run noise).
+    /// Values above 100 are clamped down.
+    /// Lower it when raw dialogue carries narrative continuity your agents depend on; raise it when the store is dominated by per-turn dialogue rows.
+    /// The section's total character budget is unaffected either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_fact_budget_percent: Option<u8>,
     /// Kernel-wide Smart Model Router defaults applied to any agent whose
     /// `agent.toml` does not set its own `[routing]` block. The `init` wizard
     /// writes user-selected tier models here under `[default_routing]` so the
@@ -3535,6 +3647,11 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<UserConfig>,
+    /// Named user groups (#7745). See [`GroupConfig`] for why membership is
+    /// flat and how `roles` lines up with the role strings the channel layer
+    /// already carries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupConfig>,
     /// Maps platform-native channel roles (Telegram admin, Discord guild
     /// roles, Slack workspace roles) to LibreFang `UserRole`. Used by
     /// `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role`
@@ -3897,6 +4014,9 @@ pub struct KernelConfig {
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
+    /// Usage/metering retention for the `usage_events` table (#7891).
+    #[serde(default)]
+    pub usage: UsageConfig,
     /// Task-board (shared task queue) safety knobs — see [`TaskBoardConfig`].
     #[serde(default)]
     pub task_board: TaskBoardConfig,
@@ -6535,6 +6655,7 @@ impl Default for KernelConfig {
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
             agent_max_iterations: None,
+            memory_fact_budget_percent: None,
             max_history_messages: None,
             default_routing: None,
             default_model: DefaultModelConfig::default(),
@@ -6556,6 +6677,7 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            groups: Vec::new(),
             channel_role_mapping: ChannelRoleMapping::default(),
             mcp_servers: Vec::new(),
             mcp_runtime_store: McpRuntimeStore::default(),
@@ -6619,6 +6741,7 @@ impl Default for KernelConfig {
             compaction: CompactionTomlConfig::default(),
             gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
+            usage: UsageConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
@@ -6664,6 +6787,51 @@ impl Default for KernelConfig {
 }
 
 impl KernelConfig {
+    /// Every group `user` belongs to, ordered by group name.
+    ///
+    /// Ordering is by name rather than by declaration order in `config.toml` so that
+    /// two deployments with the same groups declared in a different order produce the
+    /// same list — the same determinism rule the prompt boundary is held to (#3298),
+    /// applied here because a group list is one edit away from being stringified into
+    /// an agent's context by #7744's ownership surface.
+    pub fn groups_for_user(&self, user: &str) -> Vec<&GroupConfig> {
+        let mut out: Vec<&GroupConfig> =
+            self.groups.iter().filter(|g| g.has_member(user)).collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// The role strings `user` holds by virtue of group membership.
+    ///
+    /// Each group contributes its own **name** plus every entry in its `roles` list.
+    /// Including the name means an operator who creates the `oncall` group can write a
+    /// binding `match_rule.roles = ["oncall"]` immediately, without also restating
+    /// `roles = ["oncall"]` inside the group — the two would otherwise have to be kept
+    /// in sync by hand for no gain.
+    ///
+    /// This does NOT include `UserConfig.role`. That field is the RBAC privilege level
+    /// (`owner` / `admin` / `user` / `viewer`) resolved by `AuthManager`, a different
+    /// question from "which teams is this person on"; conflating them here would let a
+    /// group named `owner` silently confer owner privilege. #7746 is where the two
+    /// ladders are deliberately connected, under an operator-defined mapping.
+    ///
+    /// `BTreeSet` rather than `Vec` because the result is a set by nature (two groups
+    /// may confer the same role) and because the ordering must not depend on which
+    /// group happened to be declared first.
+    pub fn roles_for_user(&self, user: &str) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for group in self.groups.iter().filter(|g| g.has_member(user)) {
+            out.insert(group.name.clone());
+            out.extend(group.roles.iter().cloned());
+        }
+        out
+    }
+
+    /// Look up a group by exact name.
+    pub fn group(&self, name: &str) -> Option<&GroupConfig> {
+        self.groups.iter().find(|g| g.name == name)
+    }
+
     /// Resolved workspaces root directory.
     pub fn effective_workspaces_dir(&self) -> PathBuf {
         self.workspaces_dir
@@ -6992,10 +7160,21 @@ pub struct MemoryConfig {
     /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
     #[serde(default = "default_memory_pool_size")]
     pub pool_size: u32,
+    /// Upper bound, in characters, on the text of a single episodic memory row written by the agent loop's per-turn writer (#7911).
+    /// Zero disables the cap.
+    ///
+    /// The per-turn writer composes `[Past exchange]\nThem: …\nYou: …` from the raw turn, so an inbound attachment that the channel adapter rendered into the user message — a transcribed PDF, a pasted log — was previously stored verbatim and embedded verbatim.
+    /// The cap is applied before the embedding call, so it bounds embedding cost as well as row size, and it is split across the two halves of the exchange so a large user message can never truncate the agent's reply away entirely.
+    #[serde(default = "default_max_episodic_chars")]
+    pub max_episodic_chars: usize,
 }
 
 fn default_soft_delete_retention_days() -> u64 {
     30
+}
+
+fn default_max_episodic_chars() -> usize {
+    8_000
 }
 
 fn default_memory_pool_size() -> u32 {
@@ -7046,6 +7225,7 @@ impl Default for MemoryConfig {
             vector_store_url: None,
             soft_delete_retention_days: default_soft_delete_retention_days(),
             pool_size: default_memory_pool_size(),
+            max_episodic_chars: default_max_episodic_chars(),
         }
     }
 }
@@ -7183,6 +7363,11 @@ pub struct MemoryDecayConfig {
     pub session_ttl_days: u32,
     /// AGENT-scope memories expire after this many days of no access. Zero disables expiry.
     pub agent_ttl_days: u32,
+    /// EPISODIC-scope memories expire after this many days of no access. Zero disables expiry.
+    ///
+    /// `episodic` is the default scope of the `memories` table and the scope the agent loop writes one row into on every non-fork, non-incognito turn, so before #7911 it was the only scope with no exit at all: never decayed, never distilled, never deleted.
+    /// The TTL is deliberately longer than the AGENT default because an episodic row is the only record that a conversation happened, and `accessed_at` is refreshed by recall — a row that keeps being retrieved keeps living.
+    pub episodic_ttl_days: u32,
     /// How often to run the decay sweep (hours).
     pub decay_interval_hours: u32,
 }
@@ -7193,6 +7378,7 @@ impl Default for MemoryDecayConfig {
             enabled: false,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 90,
             decay_interval_hours: 1,
         }
     }
