@@ -2341,3 +2341,35 @@ tui-wizard-status-continuing = 계속하는 중...
 
 
 
+
+# ── 사용자 그룹 (#7745) ─────────────────────────────────────────────────────
+group-none = 구성된 그룹이 없습니다.
+group-section-detail = 그룹
+group-label-name = 이름
+group-label-description = 설명
+group-label-roles = 역할
+group-label-members = 구성원
+group-label-groups = 그룹
+group-label-unregistered = 미등록 구성원
+group-header-members = 구성원
+group-header-roles = 역할
+group-header-description = 설명
+group-created = 그룹 { $name }이(가) 생성되었습니다.
+group-create-failed = 그룹 생성에 실패했습니다: { $error }
+group-deleted = 그룹 { $name }이(가) 삭제되었습니다.
+group-delete-failed = 그룹 삭제에 실패했습니다: { $error }
+group-show-failed = 그룹을 읽지 못했습니다: { $error }
+group-member-added = { $user }을(를) { $group }에 추가했습니다.
+group-member-removed = { $user }을(를) { $group }에서 제거했습니다.
+group-member-failed = 구성원 변경에 실패했습니다: { $error }
+group-user-none = { $user }은(는) 어떤 그룹에도 속해 있지 않습니다.
+tui-tab-groups = 그룹
+tui-groups-title = 그룹
+tui-groups-count = 그룹 { $count }개
+tui-groups-header-name = 이름
+tui-groups-header-members = 구성원
+tui-groups-header-roles = 역할
+tui-groups-header-description = 설명
+tui-groups-loading = 그룹을 불러오는 중…
+tui-groups-empty = 구성된 그룹이 없습니다. `librefang group create <name>`으로 만드세요.
+tui-groups-hints = ↑/↓ 이동 · r 새로고침

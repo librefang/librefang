@@ -10,7 +10,7 @@
 //! Every field, set to a value distinct from its default, comes back unchanged through
 //! serialize-then-parse.
 //! And a manifest whose optional free-form JSON is absent still serializes at all — the failure
-//! mode is not one lost field but a `to_string_pretty` error that aborts the write for all 58.
+//! mode is not one lost field but a `to_string_pretty` error that aborts the write for all 59.
 
 use librefang_types::agent::{
     AgentManifest, AsyncTasksConfig, AutonomousConfig, CompactionOverrides, FallbackModel,
@@ -37,6 +37,7 @@ fn fully_populated_manifest() -> AgentManifest {
         version: "9.9.9".into(),
         description: "a manifest with nothing left at its default".into(),
         author: "houko".into(),
+        owner: Some("group:platform".into()),
         module: "builtin:chat".into(),
         schedule: ScheduleMode::Periodic {
             cron: "0 9 * * *".into(),
@@ -194,6 +195,7 @@ fn every_manifest_field_survives_a_toml_round_trip() {
     compare_field!(dropped, before, after, version);
     compare_field!(dropped, before, after, description);
     compare_field!(dropped, before, after, author);
+    compare_field!(dropped, before, after, owner);
     compare_field!(dropped, before, after, module);
     compare_field!(dropped, before, after, schedule);
     compare_field!(dropped, before, after, session_mode);
@@ -268,8 +270,8 @@ fn the_populated_fixture_covers_every_serialized_manifest_key() {
     let table: toml::Table = toml::from_str(&toml_text).expect("parses as a table");
     assert_eq!(
         table.len(),
-        58,
-        "AgentManifest emitted {} top-level keys, not the 58 this parity sweep enumerated. \
+        59,
+        "AgentManifest emitted {} top-level keys, not the 59 this parity sweep enumerated. \
          Add the new field to fully_populated_manifest() and to the round-trip assertions, \
          then update docs/architecture/agent-manifest-field-parity.md.",
         table.len()

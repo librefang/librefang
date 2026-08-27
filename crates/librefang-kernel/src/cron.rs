@@ -1452,6 +1452,7 @@ mod tests {
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
+            owner: None,
         }
     }
 

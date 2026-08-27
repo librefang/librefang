@@ -252,6 +252,7 @@ fn redacted_config_json(
         "vector_store_url": config.memory.vector_store_url,
         "soft_delete_retention_days": config.memory.soft_delete_retention_days,
         "pool_size": config.memory.pool_size,
+        "max_episodic_chars": config.memory.max_episodic_chars,
     });
 
     // ── Proactive Memory ──
@@ -651,6 +652,10 @@ fn redacted_config_json(
         );
     }
 
+    set!("usage", {
+        "retention_days": config.usage.retention_days,
+    });
+
     set!("external_auth", {
         "enabled": config.external_auth.enabled,
         "issuer_url": config.external_auth.issuer_url,
@@ -693,6 +698,17 @@ fn redacted_config_json(
         ea.insert(
             "role_map".into(),
             serde_json::json!(config.external_auth.role_map),
+        );
+        // #7746: read-only and readable for exactly the same pair of reasons.
+        // `group_map` decides which local `[[groups]]` an IdP claim confers, and a group confers ownership and the role strings channel binding matches on, so a caller who could write it could join themselves to any team; `claim_paths` decides *where* the claim values both maps are matched against come from, and pointing it at an attacker-controlled claim would be the same escalation one level up.
+        // Both are group and claim names an operator chose, never secrets, and reading them back is how an operator confirms which IdP groups currently confer membership and which part of the token is being trusted.
+        ea.insert(
+            "group_map".into(),
+            serde_json::json!(config.external_auth.group_map),
+        );
+        ea.insert(
+            "claim_paths".into(),
+            serde_json::json!(config.external_auth.claim_paths),
         );
     }
 

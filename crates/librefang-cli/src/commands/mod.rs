@@ -14,6 +14,7 @@ pub(crate) mod config;
 pub(crate) mod daemon;
 pub(crate) mod doctor_cmd;
 pub(crate) mod everyapi;
+pub(crate) mod group;
 pub(crate) mod hand;
 pub(crate) mod init;
 pub(crate) mod maintenance;
