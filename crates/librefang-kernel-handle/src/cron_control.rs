@@ -9,12 +9,17 @@ use super::*;
 #[async_trait]
 pub trait CronControl: Send + Sync {
     /// Create a cron job for the calling agent.
+    ///
+    /// `owner` is the principal the creating turn was acting for (#7744) — recorded on the job, never read as an authorization.
+    /// It is a typed parameter rather than a key inside `job_json` because `job_json` is the model's own tool input: a field the model can write is a field the model can choose, and an owner the creating turn can name is not an owner.
+    /// `None` records the job as unowned, which is what a turn with no authenticated caller, no manifest `owner` and no `default_owner` produces.
     async fn cron_create(
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<String, KernelOpError> {
-        let _ = (agent_id, job_json);
+        let _ = (agent_id, job_json, owner);
         Err(KernelOpError::unavailable("Cron scheduler"))
     }
 

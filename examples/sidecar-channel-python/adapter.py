@@ -31,9 +31,16 @@ def send_event(method, params=None):
 
 def handle_command(cmd):
     """Handle a command from LibreFang."""
+    if not isinstance(cmd, dict) or not isinstance(cmd.get("method"), str):
+        send_event("error", {"message": "Invalid command: expected an object with a string method"})
+        return
+
     method = cmd.get("method")
     if method == "send":
         params = cmd.get("params", {})
+        if not isinstance(params, dict):
+            send_event("error", {"message": "Invalid send params: expected an object"})
+            return
         # Echo: pretend we sent it and got a reply
         send_event("message", {
             "user_id": "echo-user",
@@ -43,6 +50,8 @@ def handle_command(cmd):
         })
     elif method == "shutdown":
         sys.exit(0)
+    else:
+        send_event("error", {"message": f"Unsupported command: {method}"})
 
 
 def main():

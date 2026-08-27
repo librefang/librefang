@@ -496,7 +496,10 @@ export function AgentManifestForm({
       <CollapsibleSection
         title={t("agents.form.scheduling")}
         defaultOpen={false}
-        invalid={invalidFields.has("schedule.cron")}
+        invalid={
+          invalidFields.has("schedule.cron") ||
+          invalidFields.has("schedule.check_interval_secs")
+        }
       >
         <Field label={t("agents.form.schedule_mode")} hint={t("agents.form.schedule_mode_hint")}>
           <select
@@ -553,8 +556,15 @@ export function AgentManifestForm({
           </Field>
         )}
         {value.schedule.mode === "continuous" && (
-          <Field label={t("agents.form.check_interval_secs")}>
+          <Field
+            label={t("agents.form.check_interval_secs")}
+            required
+            invalid={invalidFields.has("schedule.check_interval_secs")}
+            error={t("agents.detail.schedule_invalid_interval")}
+            errorId="agent-manifest-schedule-interval-error"
+          >
             <input
+              id="agent-manifest-schedule-interval"
               type="number"
               min="1"
               value={value.schedule.check_interval_secs}
@@ -565,6 +575,16 @@ export function AgentManifestForm({
               }
               placeholder={t("agents.form.check_interval_placeholder")}
               className={inputClass}
+              aria-label={t("agents.form.check_interval_secs")}
+              aria-invalid={
+                invalidFields.has("schedule.check_interval_secs") || undefined
+              }
+              aria-required="true"
+              aria-describedby={
+                invalidFields.has("schedule.check_interval_secs")
+                  ? "agent-manifest-schedule-interval-error"
+                  : undefined
+              }
             />
           </Field>
         )}

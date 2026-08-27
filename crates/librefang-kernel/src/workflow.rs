@@ -179,6 +179,13 @@ pub struct Workflow {
     pub description: String,
     /// The steps in execution order.
     pub steps: Vec<WorkflowStep>,
+    /// The principal this workflow belongs to — the identity the turn that created it was acting for (#7744).
+    ///
+    /// Recorded, not enforced. Nothing in this increment consults it to decide who may read, run, edit or delete; it exists so the question "who is accountable for this, and who should be throttled or notified when it misbehaves" has an answer that outlives the log line that used to be the only trace.
+    ///
+    /// `None` means **unowned, visible to all** — the stated meaning, not an accident of `#[serde(default)]`. Every workflow that pre-dates this field deserializes to it, and so does one created by a turn with no authenticated caller, no manifest `owner` and no `default_owner`. Because ownership restricts nothing yet, an unowned workflow behaves exactly as it did before, which is what makes the field safe to add without a migration or a backfill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<librefang_types::principal::Principal>,
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -289,6 +296,15 @@ pub struct WorkflowStep {
     /// (those modules don't use the session abstraction).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<librefang_types::agent::SessionMode>,
+    /// Skills this step's agent must actually be able to use (#7721).
+    ///
+    /// Checked against the resolved agent right after agent resolution and before the step is dispatched, so a workflow that needs `browser-automation` fails with a named, actionable error instead of failing deep inside the agent loop with a generic tool error.
+    /// Empty (the default) means the step imposes no skill requirement — the pre-#7721 behaviour.
+    ///
+    /// Enforcement lives behind [`StepSkillGate`], which the kernel installs post-boot; each required name is resolved against the loaded skill registry *independently* of the agent's allowlist mode, so `skills = []` and `skills = ["*"]` do not silently satisfy a requirement for a skill that is not installed.
+    /// See [`RequiredSkillReport`] for the three failure classes the error text distinguishes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_skills: Vec<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -313,19 +329,23 @@ fn clamp_timeout_duration(timeout_secs: u64) -> std::time::Duration {
 
 /// How to identify the agent for a step.
 ///
-/// Deserialization accepts THREE on-wire shapes for operator ergonomics
+/// Deserialization accepts these on-wire shapes for operator ergonomics
 /// (the issue / PR docs use the bare-string form; the kernel and HTTP
 /// payloads use the tagged forms):
 ///
-/// 1. Bare string: `agent = "researcher"` → [`StepAgent::ByName`].
-/// 2. Tagged object: `{ name = "researcher" }` → [`StepAgent::ByName`].
-/// 3. Tagged object: `{ id = "<uuid>" }` → [`StepAgent::ById`].
+/// 1. Bare string: `agent = "researcher"` -> [`StepAgent::ByName`].
+/// 2. Tagged object: `{ name = "researcher" }` -> [`StepAgent::ByName`].
+/// 3. Tagged object: `{ id = "<uuid>" }` -> [`StepAgent::ById`].
+/// 4. Tagged object: `{ type = "researcher" }` -> [`StepAgent::ByType`].
 ///
-/// Exactly one of `id` / `name` must be present in the tagged form;
-/// supplying both or neither is a deserialization error.
+/// Exactly one of `id` / `name` / `type` must be present in the tagged
+/// form; supplying none, or more than one, is a deserialization error.
+/// Ambiguity is rejected rather than resolved by key precedence because a
+/// silently-preferred key binds the step to a different agent than the one
+/// the author is looking at, and nothing in the run output says so.
 ///
-/// Serialization continues to emit the tagged-object form (`Serialize`
-/// derive on the untagged-style enum picks the matching variant cleanly).
+/// Serialization emits the tagged-object form (`Serialize` derive on the
+/// untagged-style enum picks the matching variant cleanly).
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum StepAgent {
@@ -333,6 +353,87 @@ pub enum StepAgent {
     ById { id: String },
     /// Reference an agent by name (first match).
     ByName { name: String },
+    /// Reference an agent *type* — a template name resolved find-or-spawn.
+    ///
+    /// The registered agent with this name is reused when one exists;
+    /// otherwise the template manifest of the same name is loaded from the
+    /// agent-template directories and spawned top-level under the canonical
+    /// name-derived UUID (#4614), so a workflow can express "use the
+    /// researcher agent type" without the operator pre-registering one.
+    ///
+    /// **There is deliberately no `fresh` variant** that would spawn a
+    /// throwaway instance per run (#7714).
+    /// To isolate a step from the type's prior context, set
+    /// [`WorkflowStep::session_mode`] to `New` — that mints a fresh session
+    /// for the invocation without minting a second agent, workspace and
+    /// registry entry per run.
+    /// To keep two owners' spend apart on a shared type, that is what
+    /// `WorkflowRun::owner_agent_id` and `UsageRecord::billed_agent_id` are
+    /// for. See `docs/architecture/workflow-run-attribution.md`.
+    ByType {
+        #[serde(rename = "type")]
+        template: String,
+    },
+}
+
+/// The tagged-object keys that select a [`StepAgent`] variant.
+///
+/// Ordered as they are reported in the "exactly one of" error so the
+/// message reads the same on every host.
+pub(crate) const STEP_AGENT_ROUTING_KEYS: [&str; 3] = ["id", "name", "type"];
+
+/// Select the [`StepAgent`] variant for one tagged-object payload.
+///
+/// Split out of the `Deserialize` impl so the exactly-one-of rule is
+/// expressible without threading `D::Error` through every branch; the caller
+/// wraps the returned message with `serde::de::Error::custom`.
+fn step_agent_from_object(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<StepAgent, String> {
+    // Presence is decided on the key, not on "the key holds a string":
+    // `{ id = 7, name = "x" }` is an ambiguous payload whose `id` happens to
+    // be mistyped, and answering it with `ByName` would bind the step to the
+    // agent the author did not write down. An explicit JSON `null` is treated
+    // as absent so a serializer that emits unset keys as null still
+    // round-trips (TOML has no null at all).
+    let present: Vec<&str> = STEP_AGENT_ROUTING_KEYS
+        .iter()
+        .copied()
+        .filter(|k| map.get(*k).is_some_and(|v| !v.is_null()))
+        .collect();
+
+    let key = match present.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(
+                "StepAgent: object form must set exactly one of `id`, `name` or `type`".to_string(),
+            )
+        }
+        many => {
+            return Err(format!(
+                "StepAgent: object form must set exactly one of `id`, `name` or `type`, but {} \
+                 were supplied ({})",
+                many.len(),
+                many.join(", ")
+            ))
+        }
+    };
+
+    let value = map[key]
+        .as_str()
+        .ok_or_else(|| format!("StepAgent: `{key}` must be a string"))?;
+
+    Ok(match key {
+        "id" => StepAgent::ById {
+            id: value.to_string(),
+        },
+        "name" => StepAgent::ByName {
+            name: value.to_string(),
+        },
+        _ => StepAgent::ByType {
+            template: value.to_string(),
+        },
+    })
 }
 
 impl<'de> Deserialize<'de> for StepAgent {
@@ -342,28 +443,16 @@ impl<'de> Deserialize<'de> for StepAgent {
     {
         use serde::de::Error;
 
-        // Accept either a bare string (treated as `ByName`) or an object
-        // with exactly one of `id` / `name`. Going through `serde_json::Value`
-        // keeps the impl format-agnostic — TOML, JSON, and YAML deserializers
-        // all feed through serde's data model and produce a `Value` here.
+        // Accept either a bare string (treated as `ByName`) or an object with
+        // exactly one of `id` / `name` / `type`. Going through
+        // `serde_json::Value` keeps the impl format-agnostic — TOML, JSON, and
+        // YAML deserializers all feed through serde's data model and produce a
+        // `Value` here.
         let v = serde_json::Value::deserialize(deserializer)?;
         match v {
             serde_json::Value::String(s) => Ok(StepAgent::ByName { name: s }),
             serde_json::Value::Object(map) => {
-                let id = map.get("id").and_then(|x| x.as_str());
-                let name = map.get("name").and_then(|x| x.as_str());
-                match (id, name) {
-                    (Some(_), Some(_)) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`, not both",
-                    )),
-                    (Some(id), None) => Ok(StepAgent::ById { id: id.to_string() }),
-                    (None, Some(name)) => Ok(StepAgent::ByName {
-                        name: name.to_string(),
-                    }),
-                    (None, None) => Err(D::Error::custom(
-                        "StepAgent: object form must set exactly one of `id` or `name`",
-                    )),
-                }
+                step_agent_from_object(&map).map_err(D::Error::custom)
             }
             other => Err(D::Error::custom(format!(
                 "StepAgent: expected string or object, got {}",
@@ -601,6 +690,111 @@ pub struct OperatorPause {
     /// Actions the workflow author authorised at this step. The resolve
     /// path rejects any action not present here.
     pub actions: Vec<OperatorAction>,
+}
+
+/// Why one required skill on a workflow step is not usable by the resolved agent (#7721).
+///
+/// The three classes are deliberately separate because each one has a different fix, and an operator reading a failed run needs to know which fix applies without going spelunking.
+/// Classification is registry-first: whether the skill exists on this instance is established before the agent's allowlist is consulted, so an unrestricted agent (`skills = []`, which grants every *loaded* skill) cannot mask a requirement for a skill that is not installed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequiredSkillReport {
+    /// The agent has `skills_disabled = true`, so no requirement can be met regardless of the registry.
+    /// When set, `undeclared` holds every required name and the other two lists are empty — the fix is to re-enable skills, and further classification would just bury it.
+    pub skills_disabled: bool,
+    /// Loaded in the skill registry, but the agent's `skills` allowlist does not admit it.
+    /// Fix: widen the agent's allowlist.
+    pub undeclared: Vec<String>,
+    /// The agent declares it, but the registry has no skill by that name — installed nowhere, or it failed to load.
+    /// Fix: install the skill and reload the registry. This is the same gap `pending_skill_and_mcp_declarations` (#7713) surfaces on the agents API.
+    pub unavailable: Vec<String>,
+    /// No skill by that name is loaded and the agent does not declare it either — most often a typo in the workflow.
+    /// Fix: correct the name, or install and declare the skill.
+    pub unknown: Vec<String>,
+}
+
+impl RequiredSkillReport {
+    /// Whether every required skill is usable by the agent.
+    pub fn is_satisfied(&self) -> bool {
+        !self.skills_disabled
+            && self.undeclared.is_empty()
+            && self.unavailable.is_empty()
+            && self.unknown.is_empty()
+    }
+}
+
+/// Kernel-side gate that answers "can this agent actually use these skills right now?" for [`WorkflowStep::required_skills`].
+///
+/// Defined here and implemented on the concrete kernel so `WorkflowEngine` stays decoupled from the agent registry and the skill registry — the same trait-injection shape as [`OperatorNotifier`] and [`OperatorResumeDriver`].
+/// The gate answers only about the agent; the step name and the human-readable error text are the engine's job ([`format_required_skill_error`]), which keeps the failure message identical across the sequential, DAG and dry-run paths.
+#[async_trait::async_trait]
+pub trait StepSkillGate: Send + Sync {
+    /// Classify each name in `required` against the loaded skill registry and `agent_id`'s manifest.
+    ///
+    /// Returns a report whose lists are sorted and deduplicated so the resulting error text is stable across runs.
+    /// An `agent_id` that is not registered yields every required name as `unknown` — the caller has already resolved the agent, so this only happens if it was deleted in between.
+    async fn check_required_skills(
+        &self,
+        agent_id: AgentId,
+        required: &[String],
+    ) -> RequiredSkillReport;
+}
+
+/// Render `report` as the operator-facing failure for a workflow step, naming the step, the agent, and every skill in each failure class along with the fix for that class (#7721).
+///
+/// The precision is the deliverable: "step 'summarize' requires a skill" told an operator nothing about which of "declare it", "install it" or "you typoed it" they were looking at.
+fn format_required_skill_error(
+    step_name: &str,
+    agent_name: &str,
+    agent_id: AgentId,
+    report: &RequiredSkillReport,
+) -> String {
+    let agent_label = if agent_name.is_empty() {
+        format!("{agent_id}")
+    } else {
+        format!("'{agent_name}' ({agent_id})")
+    };
+
+    if report.skills_disabled {
+        return format!(
+            "Workflow step '{step_name}' requires skills {}, but agent {agent_label} has skills disabled \
+             (`skills_disabled = true` in its agent.toml) — no skill requirement can be met until that is turned off",
+            quote_list(&report.undeclared),
+        );
+    }
+
+    let mut clauses: Vec<String> = Vec::new();
+    if !report.undeclared.is_empty() {
+        clauses.push(format!(
+            "not declared by the agent: {} (add them to `skills` in the agent's agent.toml, or empty that list — `skills = []` grants every loaded skill; `[\"*\"]` is NOT a wildcard for skills and grants none)",
+            quote_list(&report.undeclared),
+        ));
+    }
+    if !report.unavailable.is_empty() {
+        clauses.push(format!(
+            "declared by the agent but not loaded: {} (install the skill, then reload the registry via POST /api/skills/reload)",
+            quote_list(&report.unavailable),
+        ));
+    }
+    if !report.unknown.is_empty() {
+        clauses.push(format!(
+            "no skill by that name is loaded on this instance: {} (check the spelling — `librefang skill list` shows the loaded names)",
+            quote_list(&report.unknown),
+        ));
+    }
+
+    format!(
+        "Workflow step '{step_name}' requires skills that agent {agent_label} cannot use: {}",
+        clauses.join("; ")
+    )
+}
+
+/// `["a", "b"]` → `` `a`, `b` ``. Used only by [`format_required_skill_error`].
+fn quote_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Channel-bridge sink for delivering operator-step notifications. Defined
@@ -1123,6 +1317,18 @@ pub struct WorkflowRun {
     /// same `{{input}}` it would have seen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_current_input: Option<String>,
+    /// The agent that asked for this run (#7714).
+    ///
+    /// Set from the caller of the `workflow_run` / `workflow_start` tools, from the agent bound to the channel that issued a `/workflow` command, or from an API caller that named one.
+    /// `None` for an operator-initiated run with no calling agent.
+    ///
+    /// This is a property of the *run*, deliberately not of the agent that executes a step.
+    /// A `ByType` step resolves find-or-spawn to one shared canonical instance (`kernel::step_agent::find_or_spawn_agent_type`), so that agent is the same object for every owner that references the type; hanging ownership off it would make the second owner's runs report the first owner's.
+    /// Keeping the owner on the run is what lets two owners drive the same agent type and still keep their attribution apart.
+    ///
+    /// Set once at creation and never reassigned: resume and operator-action paths carry the original run's owner forward rather than re-deriving it from whoever resumed the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<AgentId>,
 }
 
 impl WorkflowRun {
@@ -1206,7 +1412,36 @@ pub struct DryRunStep {
     pub skipped: bool,
     /// Human-readable reason for skipping, if applicable.
     pub skip_reason: Option<String>,
+    /// The rendered [`WorkflowStep::required_skills`] mismatch for this step (#7721), when the resolved agent cannot use every skill the step requires.
+    ///
+    /// `None` for steps that declare no requirement, for steps whose requirements are satisfied, and for operator nodes (which never dispatch to an agent).
+    /// A dry run is the point at which an operator can still fix the workflow cheaply, so the same text a real run would fail with is surfaced here instead of only after the run has burned its earlier steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_error: Option<String>,
 }
+
+/// Rejection returned by [`WorkflowEngine::register_unique_name`] when another registered workflow already carries the proposed name.
+///
+/// Carries the id of the incumbent so callers can point the operator (or the agent that proposed the name) at the workflow they collided with instead of only telling them the name is taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowNameTaken {
+    /// The proposed name, as supplied — not lowercased.
+    pub name: String,
+    /// The workflow that already holds the name.
+    pub existing_id: WorkflowId,
+}
+
+impl std::fmt::Display for WorkflowNameTaken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "a workflow named '{}' already exists (id {})",
+            self.name, self.existing_id
+        )
+    }
+}
+
+impl std::error::Error for WorkflowNameTaken {}
 
 /// The workflow engine — manages definitions and executes pipeline runs.
 ///
@@ -1267,13 +1502,22 @@ pub struct WorkflowEngine {
     /// operator response cancels the watchdog before it applies
     /// `timeout_action`. `Arc` so the engine stays `Clone`.
     operator_resume_notify: Arc<DashMap<WorkflowRunId, Arc<tokio::sync::Notify>>>,
+    /// Kernel-side gate for [`WorkflowStep::required_skills`] (#7721), installed post-boot via [`Self::set_step_skill_gate`].
+    /// Empty in tests and until the kernel installs it — steps that declare no `required_skills` are unaffected either way, and a step that does declare them while the gate is absent logs a `warn!` and proceeds rather than failing a run on a wiring gap the workflow author cannot fix.
+    /// Same `Arc<OnceLock<_>>` reasoning as `operator_notifier`: the engine is already behind `Arc<Kernel>` when the kernel installs it, so a `&mut` setter is impossible.
+    step_skill_gate: Arc<std::sync::OnceLock<Arc<dyn StepSkillGate>>>,
 }
 
 fn lock_workflow_persistence(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
-    lock.lock().unwrap_or_else(|poisoned| {
-        warn!("workflow persistence lock poisoned; recovering write serialization");
-        poisoned.into_inner()
-    })
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("workflow persistence lock poisoned; recovering write serialization");
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        }
+    }
 }
 
 /// Format the error returned when a workflow step's `agent_resolver` returns
@@ -1294,6 +1538,12 @@ fn format_missing_agent_error(step_name: &str, agent: &StepAgent) -> String {
         StepAgent::ById { id } => format!(
             "Registry agent with id '{id}' not found for workflow step '{step_name}' \
              (referenced by id; check the agent exists and the id is well-formed)"
+        ),
+        StepAgent::ByType { template } => format!(
+            "Agent type '{template}' could not be resolved for workflow step '{step_name}' \
+             (referenced by type; no registered agent is named '{template}' and no spawnable \
+             template of that name was loaded — the daemon log carries the specific \
+             missing / unreadable / malformed / name-mismatch reason)"
         ),
     }
 }
@@ -1543,6 +1793,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1562,6 +1813,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1583,6 +1835,7 @@ impl WorkflowEngine {
             cancel_notify: Arc::new(DashMap::new()),
             operator_notifier: Arc::new(std::sync::OnceLock::new()),
             operator_resume_driver: Arc::new(std::sync::OnceLock::new()),
+            step_skill_gate: Arc::new(std::sync::OnceLock::new()),
             operator_resume_notify: Arc::new(DashMap::new()),
         }
     }
@@ -1604,6 +1857,68 @@ impl WorkflowEngine {
     ) {
         let _ = self.operator_notifier.set(notifier);
         let _ = self.operator_resume_driver.set(resume_driver);
+    }
+
+    /// Install the kernel-backed gate that enforces [`WorkflowStep::required_skills`] (#7721).
+    ///
+    /// Called once by the kernel alongside [`Self::set_operator_hooks`], for the same reason and with the same `OnceLock` no-op-on-second-call semantics.
+    pub fn set_step_skill_gate(&self, gate: Arc<dyn StepSkillGate>) {
+        let _ = self.step_skill_gate.set(gate);
+    }
+
+    /// Classify `step.required_skills` against the resolved agent, returning the rendered operator error when any requirement is unmet (#7721).
+    ///
+    /// `None` means the step may proceed: it declared no requirement, or every requirement is satisfied, or no gate is installed.
+    /// Kept separate from the `Err`-returning wrapper so `dry_run` can report the same text as a preview annotation instead of failing.
+    async fn classify_required_skills(
+        &self,
+        step: &WorkflowStep,
+        agent_id: AgentId,
+        agent_name: &str,
+    ) -> Option<String> {
+        if step.required_skills.is_empty() {
+            return None;
+        }
+        let Some(gate) = self.step_skill_gate.get() else {
+            warn!(
+                step = %step.name,
+                required = ?step.required_skills,
+                "Workflow step declares required_skills but no skill gate is installed — skipping the check"
+            );
+            return None;
+        };
+        let report = gate
+            .check_required_skills(agent_id, &step.required_skills)
+            .await;
+        if report.is_satisfied() {
+            return None;
+        }
+        Some(format_required_skill_error(
+            &step.name, agent_name, agent_id, &report,
+        ))
+    }
+
+    /// Fail the run when `step`'s required skills are not usable by the resolved agent (#7721).
+    ///
+    /// Called from every agent-dispatching path immediately after agent resolution and before the prompt is built, so the failure lands before any LLM call is billed.
+    /// Marks the run `Failed` with the same message it returns, mirroring how `format_missing_agent_error` is handled one line above each call site.
+    async fn enforce_required_skills(
+        &self,
+        run_id: &WorkflowRunId,
+        step: &WorkflowStep,
+        agent_id: AgentId,
+        agent_name: &str,
+    ) -> Result<(), String> {
+        match self
+            .classify_required_skills(step, agent_id, agent_name)
+            .await
+        {
+            None => Ok(()),
+            Some(e) => {
+                mark_run_failed(&self.runs, run_id, &e);
+                Err(e)
+            }
+        }
     }
 
     // -- Token hashing --------------------------------------------------------
@@ -1859,41 +2174,85 @@ impl WorkflowEngine {
         }
     }
 
-    /// Register a new workflow definition and persist it to disk.
+    /// Write one workflow definition to `workflows_dir`.
     ///
     /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
     /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
     /// side-file (ignored by `load_from_dir_sync`'s extension filter) but
     /// never a half-written `<id>.workflow.json` that would later refuse to
     /// parse and stall startup.
-    pub async fn register(&self, workflow: Workflow) -> WorkflowId {
+    ///
+    /// Every failure path is a `warn!` rather than an error return: refusing the registration because the disk write failed leaves the caller worse off than a workflow that is live now and does not survive a restart.
+    async fn persist_definition(&self, workflow: &Workflow) {
+        let Some(ref dir) = self.workflows_dir else {
+            return;
+        };
         let id = workflow.id;
-        if let Some(ref dir) = self.workflows_dir {
-            let path = dir.join(format!("{id}.workflow.json"));
-            let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
-            match serde_json::to_string_pretty(&workflow) {
-                Ok(json) => {
-                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
-                    } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
-                    } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
-                        warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
-                        // Best-effort cleanup so the next register attempt isn't
-                        // blocked by a stale tmp file.
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
-                    } else {
-                        debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
-                    }
-                }
-                Err(e) => {
-                    warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+        let path = dir.join(format!("{id}.workflow.json"));
+        let tmp_path = dir.join(format!("{id}.workflow.json.tmp"));
+        match serde_json::to_string_pretty(workflow) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to create workflows dir");
+                } else if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (tmp write)");
+                } else if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+                    warn!(workflow_id = %id, error = %e, "Failed to persist workflow definition (atomic rename)");
+                    // Best-effort cleanup so the next register attempt isn't
+                    // blocked by a stale tmp file.
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                } else {
+                    debug!(workflow_id = %id, path = %path.display(), "Persisted workflow definition");
                 }
             }
+            Err(e) => {
+                warn!(workflow_id = %id, error = %e, "Failed to serialize workflow definition");
+            }
         }
+    }
+
+    /// Register a new workflow definition and persist it to disk.
+    ///
+    /// Last writer wins on the *name*: this overwrites nothing keyed by id, but two workflows may end up sharing a name.
+    /// Callers that need the name to be unique must use [`Self::register_unique_name`] instead — checking [`Self::list_workflows`] first and calling this afterwards is a check-then-act race, because the read lock is released before the insert takes the write lock.
+    pub async fn register(&self, workflow: Workflow) -> WorkflowId {
+        let id = workflow.id;
+        self.persist_definition(&workflow).await;
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
+    }
+
+    /// Register a workflow only if no registered workflow already carries its name, as one atomic operation.
+    ///
+    /// The name comparison and the insert happen under a single acquisition of the registry write lock, so two concurrent callers proposing the same name cannot both observe it as free: whichever takes the lock second sees the first one's entry and loses.
+    /// This is the property `list_workflows()`-then-`register()` cannot provide, and it matters because workflow lookup by name (`run_workflow`, `describe_workflow`) resolves to whichever duplicate the `HashMap` iterator reaches first — a same-named second workflow silently shadows the original for some fraction of calls.
+    ///
+    /// The comparison is case-insensitive to match that name-based lookup, which lowercases both sides; a `Deploy` registered next to an existing `deploy` would be unreachable by name half the time.
+    ///
+    /// Persistence deliberately runs *after* the lock is released. Holding the registry write lock across a `tokio::fs` round-trip would block every reader on disk IO, and the reservation is already in force the moment the entry is in the map.
+    pub async fn register_unique_name(
+        &self,
+        workflow: Workflow,
+    ) -> Result<WorkflowId, WorkflowNameTaken> {
+        let id = workflow.id;
+        let name_lower = workflow.name.to_lowercase();
+        {
+            let mut registry = self.workflows.write().await;
+            if let Some(existing) = registry
+                .values()
+                .find(|w| w.name.to_lowercase() == name_lower)
+            {
+                return Err(WorkflowNameTaken {
+                    name: workflow.name.clone(),
+                    existing_id: existing.id,
+                });
+            }
+            registry.insert(id, workflow.clone());
+        }
+        self.persist_definition(&workflow).await;
+        info!(workflow_id = %id, name = %workflow.name, "Workflow registered with a reserved name");
+        Ok(id)
     }
 
     /// Load and register all workflow definitions from a directory (sync version for boot).
@@ -2077,6 +2436,26 @@ impl WorkflowEngine {
         workflow_id: WorkflowId,
         input: String,
     ) -> Option<WorkflowRunId> {
+        self.create_run_owned(workflow_id, input, None).await
+    }
+
+    /// Start a workflow run owned by a specific agent (#7714).
+    ///
+    /// `owner` is the agent that asked for the run — the caller of the
+    /// `workflow_run` / `workflow_start` tools, the agent bound to the channel
+    /// that issued the command, or an agent an API caller named. It is
+    /// recorded on the run and never reassigned, so the resume and
+    /// operator-action paths carry it forward instead of re-deriving it from
+    /// whoever happened to resume.
+    ///
+    /// [`Self::create_run`] is the ownerless form and is what an
+    /// operator-initiated run uses.
+    pub async fn create_run_owned(
+        &self,
+        workflow_id: WorkflowId,
+        input: String,
+        owner: Option<AgentId>,
+    ) -> Option<WorkflowRunId> {
         let workflow = self.workflows.read().await.get(&workflow_id)?.clone();
         let run_id = WorkflowRunId::new();
 
@@ -2095,6 +2474,7 @@ impl WorkflowEngine {
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: owner,
         };
 
         // Persist the freshly-created Pending row before it goes into
@@ -3966,6 +4346,13 @@ impl WorkflowEngine {
                         }
                     };
 
+                    // #7721: the step's declared skill requirements are a
+                    // property of the resolved agent, so they can only be
+                    // checked here — after resolution, before any prompt is
+                    // built or billed.
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
+
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
 
@@ -4081,6 +4468,8 @@ impl WorkflowEngine {
                                     return Err(e);
                                 }
                             };
+                        self.enforce_required_skills(&run_id, fan_step, agent_id, &agent_name)
+                            .await?;
                         let raw_prompt = Self::expand_variables(
                             &fan_step.prompt_template,
                             &current_input,
@@ -4238,6 +4627,8 @@ impl WorkflowEngine {
                             return Err(e);
                         }
                     };
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
 
                     let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
@@ -4316,6 +4707,8 @@ impl WorkflowEngine {
                             return Err(e);
                         }
                     };
+                    self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                        .await?;
 
                     let until_lower = until.to_lowercase();
 
@@ -5294,6 +5687,8 @@ impl WorkflowEngine {
                         return Err(e);
                     }
                 };
+                self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                    .await?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let prompt_sent = prompt.clone();
@@ -5381,6 +5776,13 @@ impl WorkflowEngine {
                             }
                         }
                     };
+                    // Same short-circuit as the resolution above: a step whose
+                    // dependency already failed never dispatches, so its skill
+                    // requirements are moot and must not hard-error the DAG.
+                    if !dep_failed {
+                        self.enforce_required_skills(&run_id, step, agent_id, &agent_name)
+                            .await?;
+                    }
 
                     step_metas.push((
                         step_idx,
@@ -5569,15 +5971,27 @@ impl WorkflowEngine {
                 StepMode::Conditional { condition } => {
                     let prev_lower = current_input.to_lowercase();
                     let condition_met = evaluate_condition(&prev_lower, condition);
-                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                    let (agent_id, agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((id, name, _)) => (Some(id), Some(name), true),
+                        None => (None, None, false),
+                    };
+                    let skill_error = match agent_id {
+                        Some(id) => {
+                            self.classify_required_skills(
+                                step,
+                                id,
+                                agent_name.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                        }
+                        None => None,
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
                         agent_name,
                         agent_found,
                         resolved_prompt: raw_prompt,
+                        skill_error,
                         skipped: !condition_met,
                         skip_reason: if !condition_met {
                             Some(format!(
@@ -5618,6 +6032,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Gate { .. } => {
@@ -5634,6 +6049,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Approval { .. } => {
@@ -5646,6 +6062,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Transform { code } => {
@@ -5668,6 +6085,7 @@ impl WorkflowEngine {
                         resolved_prompt: format!("transform: {code}"),
                         skipped,
                         skip_reason,
+                        skill_error: None,
                     });
                     // Advance `current_input` with the rendered output
                     // so downstream steps' `{{input}}` previews reflect
@@ -5723,6 +6141,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 StepMode::Operator { .. } => {
@@ -5740,12 +6159,24 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt,
                         skipped: false,
                         skip_reason: None,
+                        skill_error: None,
                     });
                 }
                 _ => {
-                    let (agent_name, agent_found) = match agent_resolver(&step.agent) {
-                        Some((_, name, _)) => (Some(name), true),
-                        None => (None, false),
+                    let (agent_id, agent_name, agent_found) = match agent_resolver(&step.agent) {
+                        Some((id, name, _)) => (Some(id), Some(name), true),
+                        None => (None, None, false),
+                    };
+                    let skill_error = match agent_id {
+                        Some(id) => {
+                            self.classify_required_skills(
+                                step,
+                                id,
+                                agent_name.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                        }
+                        None => None,
                     };
                     preview.push(DryRunStep {
                         step_name: step.name.clone(),
@@ -5754,6 +6185,7 @@ impl WorkflowEngine {
                         resolved_prompt: raw_prompt.clone(),
                         skipped: false,
                         skip_reason: None,
+                        skill_error,
                     });
                     // Advance with a placeholder so later steps can expand {{input}}
                     if let Some(ref var) = step.output_var {
@@ -5910,6 +6342,11 @@ struct WorkflowFile {
     /// `{{var}}` placeholders.
     #[serde(default)]
     input_schema: Option<Vec<WorkflowInputParam>>,
+    /// Owner declared in the file, if any (#7744). Operator-authored
+    /// `*.workflow.toml` may name one; the JSON definitions the engine
+    /// persists carry whichever principal the creating turn resolved.
+    #[serde(default)]
+    owner: Option<librefang_types::principal::Principal>,
 }
 
 impl From<WorkflowFile> for Workflow {
@@ -5919,6 +6356,7 @@ impl From<WorkflowFile> for Workflow {
             name: f.name,
             description: f.description,
             steps: f.steps,
+            owner: f.owner,
             created_at: f.created_at.unwrap_or_else(Utc::now),
             layout: None,
             total_timeout_secs: None,
@@ -6018,21 +6456,31 @@ use std::collections::HashSet;
 impl WorkflowEngine {
     /// Convert an existing workflow into a reusable [`WorkflowTemplate`].
     ///
-    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. The method
-    /// auto-detects parameters by scanning `prompt_template` fields for
-    /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
-    /// unique variable found.
+    /// Thin forwarder to [`Workflow::to_template`], which honours an authored `input_schema` and falls back to scanning `prompt_template` fields for `{{var}}` placeholders.
     pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
         workflow.to_template()
+    }
+}
+
+/// Map a [`WorkflowInputParam::param_type`] string onto the template's typed enum.
+///
+/// [`ParameterType`] has no `file` / `image` variant, so those authored types degrade to `String` — which is the shape the caller actually passes, an artifact-handle string.
+/// An unrecognised type degrades the same way rather than dropping the parameter, because losing a declared parameter is worse than widening its type.
+fn template_parameter_type(param_type: &str) -> ParameterType {
+    match param_type {
+        "number" => ParameterType::Number,
+        "boolean" => ParameterType::Boolean,
+        "agent_id" => ParameterType::AgentId,
+        _ => ParameterType::String,
     }
 }
 
 impl Workflow {
     /// Convert this workflow into a reusable [`WorkflowTemplate`].
     ///
-    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. Parameters
-    /// are auto-detected by scanning `prompt_template` fields for `{{var}}`
-    /// placeholders, with one [`TemplateParameter`] created per unique name.
+    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`.
+    /// Parameters come from the authored [`Workflow::input_schema`] first, in the order the author declared them, and only then from a scan of the `prompt_template` fields for `{{var}}` placeholders.
+    /// The scan can say no more than "this name appears in a prompt", so running it over a parameter the author already described used to overwrite the declared type, optionality and description with `string` / `required` / a generated sentence — see the `to_template_keeps_the_authored_input_schema` regression test.
     ///
     /// Exposed as an inherent method so callers outside the kernel (e.g. the
     /// API crate) can perform the conversion without importing
@@ -6047,11 +6495,27 @@ impl Workflow {
             .trim_matches('-')
             .to_string();
 
-        // Collect all {{var}} placeholders across all steps
         let re = Regex::new(r"\{\{(\w+)\}\}").expect("valid regex");
         let mut seen_params = HashSet::new();
         let mut parameters = Vec::new();
 
+        // An authored `input_schema` wins over the placeholder scan below.
+        // Seeding `seen_params` with the declared names is what stops the scan from re-deriving a parameter the author already described and flattening it back to string / required / a generated description.
+        // Names the schema does not declare are still collected by the scan, so a partial schema never loses a variable the steps actually substitute.
+        for declared in workflow.input_schema.iter().flatten() {
+            if !seen_params.insert(declared.name.clone()) {
+                continue;
+            }
+            parameters.push(TemplateParameter {
+                name: declared.name.clone(),
+                description: declared.description.clone(),
+                param_type: template_parameter_type(&declared.param_type),
+                default: None,
+                required: declared.required,
+            });
+        }
+
+        // Collect the remaining {{var}} placeholders across all steps
         let steps: Vec<WorkflowTemplateStep> = workflow
             .steps
             .iter()
@@ -6077,6 +6541,17 @@ impl Workflow {
                 let agent = match &step.agent {
                     StepAgent::ByName { name } => Some(name.clone()),
                     StepAgent::ById { id } => Some(id.clone()),
+                    // `WorkflowTemplateStep::agent` is a single `Option<String>`
+                    // that cannot say *how* the step addresses its agent, so a
+                    // saved template records the type name and `instantiate`
+                    // reads it back as `ByName` — the same flattening `ById`
+                    // has always had here. The name still points at the right
+                    // agent once the type has been spawned; what is lost is
+                    // find-or-spawn on a workflow instantiated from the saved
+                    // template into a daemon that has never run the type.
+                    // Fixing it means widening the persisted template format in
+                    // `librefang-types`, which is a separate change.
+                    StepAgent::ByType { template } => Some(template.clone()),
                 };
 
                 WorkflowTemplateStep {
@@ -6152,6 +6627,18 @@ impl Workflow {
     pub fn validate(&self) -> Vec<(String, String)> {
         let mut errs = Vec::new();
         for step in &self.steps {
+            // #7721: a blank or whitespace-only entry can never match a
+            // loaded skill, so it would fail every run of the workflow with
+            // a confusing "no skill by that name" message. Reject it where
+            // the operator can still see which step they typed it into.
+            // TOML- and JSON-authored workflows both land here, so this also
+            // covers the file-based authoring path the HTTP parser cannot.
+            if step.required_skills.iter().any(|s| s.trim().is_empty()) {
+                errs.push((
+                    step.name.clone(),
+                    "`required_skills` contains an empty skill name".to_string(),
+                ));
+            }
             // Fail-closed: operator-node variants don't have DAG
             // semantics today. `execute_run_dag` calls `agent_resolver`
             // for every step in every layer, so an operator node in a
@@ -6524,6 +7011,7 @@ impl WorkflowTemplateRegistry {
                     inherit_context: None,
                     depends_on: ts.depends_on.clone(),
                     session_mode: None,
+                    required_skills: Vec::new(),
                 }
             })
             .collect();
@@ -6533,6 +7021,9 @@ impl WorkflowTemplateRegistry {
             name: template.name.clone(),
             description: template.description.clone(),
             steps,
+            // A template is a shape, not an instance: whoever instantiates it
+            // owns the result, and the template itself names nobody (#7744).
+            owner: None,
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
@@ -6601,6 +7092,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         started_at: run.started_at.to_rfc3339(),
         completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
         created_at: run.started_at.to_rfc3339(),
+        owner_agent_id: run.owner_agent_id.map(|a| a.to_string()),
     }
 }
 
@@ -6721,6 +7213,24 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         paused_step_index: row.paused_step_index.map(|i| i as usize),
         paused_variables,
         paused_current_input: row.paused_current_input.clone(),
+        // #7714: a malformed owner is dropped rather than failing the whole
+        // reload. Recovering a run without its attribution is a strictly
+        // better outcome than refusing to recover it at all, and the run is
+        // then indistinguishable from a legitimately ownerless one.
+        owner_agent_id: row.owner_agent_id.as_deref().and_then(|raw| {
+            match raw.parse::<AgentId>() {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    warn!(
+                        run_id = %row.id,
+                        owner = %raw,
+                        error = %e,
+                        "row_to_workflow_run: owner_agent_id failed to parse; reloading run as ownerless"
+                    );
+                    None
+                }
+            }
+        }),
     })
 }
 
@@ -6741,11 +7251,13 @@ mod tests {
         });
 
         assert!(poison.is_err());
+        assert!(lock.is_poisoned());
         let recovered = lock_workflow_persistence(&lock);
         assert!(lock.try_lock().is_err());
         drop(recovered);
-        let recovered_again = lock_workflow_persistence(&lock);
-        drop(recovered_again);
+        assert!(!lock.is_poisoned());
+        let ordinary_guard = lock.lock().unwrap();
+        drop(ordinary_guard);
     }
 
     fn test_workflow() -> Workflow {
@@ -6767,6 +7279,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -6781,13 +7294,312 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
+    }
+
+    // ── required_skills (#7721) ──────────────────────────────────────────
+
+    /// A `StepSkillGate` that hands back a canned report, so the engine-side
+    /// wiring (enforcement point, run state, error text) is testable without
+    /// booting a kernel and a skill registry. The kernel-side classification
+    /// this stands in for is covered by
+    /// `kernel::tools_and_skills::tests::required_skill_*`.
+    struct StubSkillGate(RequiredSkillReport);
+
+    #[async_trait::async_trait]
+    impl StepSkillGate for StubSkillGate {
+        async fn check_required_skills(
+            &self,
+            _agent_id: AgentId,
+            _required: &[String],
+        ) -> RequiredSkillReport {
+            self.0.clone()
+        }
+    }
+
+    fn skill_step(name: &str, required: &[&str]) -> WorkflowStep {
+        WorkflowStep {
+            name: name.to_string(),
+            agent: StepAgent::ByName {
+                name: "researcher".to_string(),
+            },
+            prompt_template: "go".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+            required_skills: required.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn skill_workflow(step: WorkflowStep) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: "needs-skills".to_string(),
+            description: String::new(),
+            steps: vec![step],
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+            owner: None,
+        }
+    }
+
+    /// The whole point of the gate: an unmet requirement fails the run at the
+    /// step, before the agent is ever sent a prompt.
+    #[tokio::test]
+    async fn unmet_required_skill_fails_the_run_before_dispatch() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport {
+            unknown: vec!["reserch-notes".to_string()],
+            ..Default::default()
+        })));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["reserch-notes"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let dispatched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&dispatched);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((msg, 0u64, 0u64))
+            }
+        };
+
+        let err = engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect_err("an unmet skill requirement must fail the run");
+        assert!(
+            err.contains("summarize") && err.contains("reserch-notes"),
+            "the error must name the step and the skill; got: {err}"
+        );
+        assert_eq!(
+            dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the step must fail before any agent dispatch is billed"
+        );
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Failed),
+            "run must be Failed, not stuck Running: {:?}",
+            run.state
+        );
+        assert_eq!(run.error.as_deref(), Some(err.as_str()));
+    }
+
+    /// A satisfied requirement is invisible: the step runs exactly as it would
+    /// with no `required_skills` at all.
+    #[tokio::test]
+    async fn satisfied_required_skill_lets_the_step_run() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport::default())));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("a satisfied requirement must not block the step");
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(matches!(run.state, WorkflowRunState::Completed));
+    }
+
+    /// The dry run is where an operator can still fix the workflow cheaply, so
+    /// it reports the same text a real run would fail with.
+    #[tokio::test]
+    async fn dry_run_reports_the_required_skill_mismatch() {
+        let engine = WorkflowEngine::new();
+        engine.set_step_skill_gate(Arc::new(StubSkillGate(RequiredSkillReport {
+            unavailable: vec!["pdf-extract".to_string()],
+            ..Default::default()
+        })));
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+
+        let preview = engine.dry_run(wf_id, "input", mock_resolver).await.unwrap();
+        let err = preview[0]
+            .skill_error
+            .as_deref()
+            .expect("dry run must surface the mismatch");
+        assert!(
+            err.contains("summarize") && err.contains("pdf-extract"),
+            "{err}"
+        );
+    }
+
+    /// Each failure class gets its own clause and its own fix, and the three
+    /// coexist in one message when a step trips all of them at once. This is
+    /// the deliverable of #7721 — an operator must be able to read the error
+    /// and know which of "declare it", "install it" or "you typoed it" applies.
+    #[test]
+    fn required_skill_error_names_step_agent_and_the_fix_for_each_class() {
+        let report = RequiredSkillReport {
+            skills_disabled: false,
+            undeclared: vec!["browser-automation".to_string()],
+            unavailable: vec!["pdf-extract".to_string()],
+            unknown: vec!["reserch-notes".to_string()],
+        };
+        let agent = AgentId::new();
+        let msg = format_required_skill_error("summarize", "researcher", agent, &report);
+
+        assert!(msg.contains("'summarize'"), "must name the step: {msg}");
+        assert!(msg.contains("'researcher'"), "must name the agent: {msg}");
+        assert!(
+            msg.contains(&agent.to_string()),
+            "must name the agent id: {msg}"
+        );
+
+        assert!(
+            msg.contains("not declared by the agent: `browser-automation`"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("declared by the agent but not loaded: `pdf-extract`"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("no skill by that name is loaded on this instance: `reserch-notes`"),
+            "{msg}"
+        );
+
+        // Each class carries the fix that class needs, and they are different.
+        assert!(
+            msg.contains("agent.toml"),
+            "undeclared needs the allowlist fix: {msg}"
+        );
+        assert!(
+            msg.contains("POST /api/skills/reload"),
+            "unavailable needs the install+reload fix: {msg}"
+        );
+        assert!(
+            msg.contains("librefang skill list"),
+            "unknown needs the spelling fix: {msg}"
+        );
+    }
+
+    /// `skills_disabled` short-circuits everything else: no allowlist edit and
+    /// no install will help until it is turned off, so the message says that
+    /// instead of listing three fixes that cannot work.
+    #[test]
+    fn skills_disabled_error_leads_with_the_only_fix_that_works() {
+        let report = RequiredSkillReport {
+            skills_disabled: true,
+            undeclared: vec!["browser-automation".to_string()],
+            ..Default::default()
+        };
+        let msg = format_required_skill_error("summarize", "researcher", AgentId::new(), &report);
+        assert!(msg.contains("skills_disabled = true"), "{msg}");
+        assert!(msg.contains("`browser-automation`"), "{msg}");
+        assert!(
+            !msg.contains("POST /api/skills/reload"),
+            "must not offer fixes that cannot apply while skills are off: {msg}"
+        );
+    }
+
+    /// `skills = ["*"]` is not a wildcard on the skill path, so the undeclared
+    /// clause must not tell an operator to write it — that advice would leave
+    /// the agent with zero skill tools and the same failure next run.
+    #[test]
+    fn undeclared_clause_does_not_recommend_a_star_allowlist() {
+        let report = RequiredSkillReport {
+            undeclared: vec!["browser-automation".to_string()],
+            ..Default::default()
+        };
+        let msg = format_required_skill_error("summarize", "researcher", AgentId::new(), &report);
+        assert!(
+            msg.contains("`skills = []` grants every loaded skill"),
+            "{msg}"
+        );
+        assert!(msg.contains("is NOT a wildcard for skills"), "{msg}");
+    }
+
+    /// A step with no gate installed (tests, pre-boot) must not fail: the
+    /// workflow author cannot fix a wiring gap, and failing here would break
+    /// every existing `execute_run` call site that never installs one.
+    #[tokio::test]
+    async fn no_gate_installed_leaves_the_step_running() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine
+            .register(skill_workflow(skill_step("summarize", &["pdf-extract"])))
+            .await;
+        let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
+        let sender = |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+            Ok((msg, 0u64, 0u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("an uninstalled gate must not fail runs");
+    }
+
+    /// `required_skills` survives the TOML authoring path and stays off the
+    /// wire when empty, so pre-#7721 workflow JSON round-trips byte-identically.
+    #[test]
+    fn required_skills_round_trips_through_toml_and_omits_the_empty_case() {
+        let toml_src = r#"
+name = "needs-skills"
+description = ""
+
+[[steps]]
+name = "summarize"
+agent = "researcher"
+prompt_template = "go"
+required_skills = ["pdf-extract", "browser-automation"]
+
+[[steps]]
+name = "plain"
+agent = "researcher"
+prompt_template = "go"
+"#;
+        let wf: Workflow = toml::from_str(toml_src).expect("workflow TOML must parse");
+        assert_eq!(
+            wf.steps[0].required_skills,
+            vec!["pdf-extract".to_string(), "browser-automation".to_string()]
+        );
+        assert!(wf.steps[1].required_skills.is_empty());
+
+        let json = serde_json::to_value(&wf.steps[1]).unwrap();
+        assert!(
+            json.get("required_skills").is_none(),
+            "a step with no requirement must not gain a field on the wire: {json}"
+        );
+    }
+
+    /// A blank entry can never match a loaded skill, so it is rejected where
+    /// the operator can still see which step they typed it into.
+    #[test]
+    fn validate_rejects_a_blank_required_skill_name() {
+        let mut wf = skill_workflow(skill_step("summarize", &["  "]));
+        wf.name = "blank-skill".to_string();
+        let errs = wf.validate();
+        assert!(
+            errs.iter()
+                .any(|(step, reason)| step == "summarize" && reason.contains("empty skill name")),
+            "expected a blank-name error naming the step; got {errs:?}"
+        );
     }
 
     fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
@@ -6835,11 +7647,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -6869,6 +7683,166 @@ mod tests {
         let retrieved = engine.get_workflow(id).await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().name, "test-pipeline");
+    }
+
+    /// Build a `Workflow` whose only interesting property is its name.
+    fn named_workflow(name: &str) -> Workflow {
+        Workflow {
+            name: name.to_string(),
+            ..test_workflow()
+        }
+    }
+
+    /// Count registered workflows carrying `name`, compared the way name-based lookup compares (`run_workflow` / `describe_workflow` both lowercase each side before testing equality).
+    async fn count_named(engine: &WorkflowEngine, name: &str) -> usize {
+        let wanted = name.to_lowercase();
+        engine
+            .list_workflows()
+            .await
+            .iter()
+            .filter(|w| w.name.to_lowercase() == wanted)
+            .count()
+    }
+
+    /// Pins the bug [`WorkflowEngine::register_unique_name`] exists to close, as the deterministic sequential replay of the interleaving two concurrent callers can hit (#6934).
+    ///
+    /// `list_workflows()` takes the read lock and drops it before returning, so a caller that decides a name is free on the strength of that snapshot is deciding on stale information by the time it calls `register()`.
+    /// Both callers below see an empty registry, both conclude the name is theirs, and the engine ends up holding two workflows named `deploy` — which name-based lookup then resolves to whichever one the `HashMap` iterator reaches first.
+    ///
+    /// Written out in one task rather than raced across two, so the failure is reproducible on every run instead of on unlucky scheduling.
+    #[tokio::test]
+    async fn check_then_register_admits_a_duplicate_name() {
+        let engine = WorkflowEngine::new();
+
+        let free_for_a = count_named(&engine, "deploy").await == 0;
+        let free_for_b = count_named(&engine, "deploy").await == 0;
+        assert!(
+            free_for_a && free_for_b,
+            "both callers see the name as free"
+        );
+
+        engine.register(named_workflow("deploy")).await;
+        engine.register(named_workflow("deploy")).await;
+
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            2,
+            "check-then-register is expected to admit the duplicate — if this now fails, `register` itself grew a \
+             name check and `register_unique_name`'s reason for existing needs revisiting"
+        );
+    }
+
+    /// The regression for #6934: N callers racing on the same name must produce exactly one registration.
+    ///
+    /// Multi-threaded runtime with more tasks than worker threads so the reservations genuinely interleave.
+    /// Against a check-then-act implementation (read lock, drop, write lock) this fails — several tasks observe the empty registry before any of them inserts.
+    /// Against the single-write-lock reservation it cannot: the losers are looking at a map that already contains the winner's entry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_unique_name_admits_exactly_one() {
+        const CALLERS: usize = 32;
+
+        let engine = WorkflowEngine::new();
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                engine.register_unique_name(named_workflow("deploy")).await
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut losers = 0usize;
+        for h in handles {
+            match h.await.expect("registration task must not panic") {
+                Ok(id) => winners.push(id),
+                Err(taken) => {
+                    assert_eq!(taken.name, "deploy");
+                    losers += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one caller may win the name, got {winners:?}"
+        );
+        assert_eq!(losers, CALLERS - 1, "every other caller must be rejected");
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            1,
+            "the registry must hold one workflow named 'deploy'"
+        );
+        assert_eq!(
+            engine.get_workflow(winners[0]).await.map(|w| w.name),
+            Some("deploy".to_string()),
+            "the winner's id must be the one that resolves"
+        );
+    }
+
+    /// Every rejected caller must be told which workflow it collided with, so the error can name the incumbent rather than only the taken name.
+    #[tokio::test]
+    async fn register_unique_name_reports_the_incumbent_id() {
+        let engine = WorkflowEngine::new();
+        let first = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("first registration wins");
+
+        let err = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect_err("second registration must be rejected");
+        assert_eq!(err.existing_id, first);
+        assert!(
+            err.to_string().contains("already exists"),
+            "rendered error should read as a collision: {err}"
+        );
+    }
+
+    /// Name lookup lowercases both sides, so `Deploy` and `deploy` are the same name as far as `run_workflow` is concerned.
+    /// Reserving one must therefore reserve the other, or the second registration is unreachable by name for an arbitrary fraction of calls.
+    #[tokio::test]
+    async fn register_unique_name_is_case_insensitive() {
+        let engine = WorkflowEngine::new();
+        engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("first registration wins");
+
+        let err = engine
+            .register_unique_name(named_workflow("Deploy"))
+            .await
+            .expect_err("a case variant is the same name to lookup, so it must collide");
+        assert_eq!(
+            err.name, "Deploy",
+            "the rejection echoes the proposed name as supplied"
+        );
+        assert_eq!(count_named(&engine, "deploy").await, 1);
+    }
+
+    /// A workflow reserved through `register_unique_name` must be persisted the same way `register` persists one — the reservation is not allowed to come at the cost of surviving a restart.
+    ///
+    /// Multi-thread flavor, and `load_from_dir_sync` behind `block_in_place`, for the same reason as `register_writes_atomically_and_cleans_tmp` above: the loader takes `blocking_write` on the registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_unique_name_persists_the_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let id = engine
+            .register_unique_name(named_workflow("deploy"))
+            .await
+            .expect("registration wins");
+
+        let reloaded = WorkflowEngine::new_with_persistence(tmp.path());
+        let loaded = tokio::task::block_in_place(|| {
+            reloaded.load_from_dir_sync(&tmp.path().join("workflows"))
+        });
+        assert_eq!(loaded, 1, "expected exactly one workflow loaded back");
+        assert_eq!(
+            reloaded.get_workflow(id).await.map(|w| w.name),
+            Some("deploy".to_string()),
+            "the reserved workflow must be on disk under its own id"
+        );
     }
 
     // Multi-thread flavor because `load_from_dir_sync` uses
@@ -7011,11 +7985,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "input".to_string()).await.unwrap();
@@ -7090,6 +8066,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -7106,12 +8083,14 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -7152,6 +8131,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -7168,12 +8148,14 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7214,11 +8196,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -7266,11 +8250,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7307,6 +8293,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -7321,12 +8308,14 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7378,11 +8367,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7428,6 +8419,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -7442,6 +8434,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -7457,12 +8450,14 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -7510,6 +8505,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -7524,6 +8520,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -7538,12 +8535,14 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -7694,6 +8693,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
@@ -7712,6 +8712,7 @@ mod tests {
                     description: None,
                 },
             ]),
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -7785,6 +8786,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -7801,12 +8803,14 @@ mod tests {
                     // the DAG executor.
                     depends_on: vec!["first".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let input_json = serde_json::json!({
@@ -8118,6 +9122,7 @@ mod tests {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         });
         let errs = wf.validate();
         assert_eq!(errs.len(), 1);
@@ -8145,11 +9150,13 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -8310,6 +9317,7 @@ mod tests {
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             );
             wf.steps[1].depends_on = vec!["producer".to_string()];
@@ -8329,6 +9337,7 @@ mod tests {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             });
 
             let errs = wf.validate();
@@ -8926,6 +9935,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -8940,12 +9950,14 @@ prompt_template = "do {{x}}"
                     inherit_context: Some(false),
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -8992,6 +10004,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9006,6 +10019,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -9020,6 +10034,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ];
 
@@ -9052,6 +10067,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9066,6 +10082,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -9081,12 +10098,14 @@ prompt_template = "do {{x}}"
                     inherit_context: Some(false),
                     depends_on: vec!["A".to_string(), "B".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -9125,6 +10144,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
@@ -9146,6 +10166,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -9187,6 +10208,7 @@ prompt_template = "do {{x}}"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -9246,6 +10268,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9260,6 +10283,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "C".to_string(),
@@ -9274,6 +10298,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string(), "B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ])
         .unwrap();
@@ -9299,6 +10324,7 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["B".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "B".to_string(),
@@ -9313,12 +10339,84 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec!["A".to_string()],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ];
 
         let result = WorkflowEngine::topological_sort(&steps);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cycle detected"));
+    }
+
+    /// `save-as-template` used to re-derive every parameter from a `{{var}}` scan over the prompts.
+    /// A scan cannot see a type, an optionality or a description, so an authored `input_schema` came back out as string / required / a generated sentence and the saved template was wrong for every future instantiation.
+    #[test]
+    fn to_template_keeps_the_authored_input_schema() {
+        let mut workflow = test_workflow();
+        workflow.steps[0].prompt_template = "brief {{city}} about {{topic}}".to_string();
+        workflow.steps[1].prompt_template = "wrap up {{city}}".to_string();
+        workflow.input_schema = Some(vec![
+            WorkflowInputParam {
+                name: "city".to_string(),
+                param_type: "number".to_string(),
+                required: false,
+                description: Some("The target city".to_string()),
+            },
+            WorkflowInputParam {
+                name: "cover".to_string(),
+                param_type: "file".to_string(),
+                required: true,
+                description: None,
+            },
+        ]);
+
+        let template = workflow.to_template();
+
+        let city = template
+            .parameters
+            .iter()
+            .find(|p| p.name == "city")
+            .expect("the declared parameter must survive");
+        assert!(
+            matches!(city.param_type, ParameterType::Number),
+            "the authored type must not be flattened back to String: {:?}",
+            city.param_type
+        );
+        assert!(
+            !city.required,
+            "the authored `required: false` must survive; forcing it back to required makes the template unusable without a value the author said was optional"
+        );
+        assert_eq!(city.description.as_deref(), Some("The target city"));
+
+        let cover = template
+            .parameters
+            .iter()
+            .find(|p| p.name == "cover")
+            .expect("a declared parameter that no prompt substitutes must still be exported");
+        assert!(
+            matches!(cover.param_type, ParameterType::String),
+            "`file` has no template variant, so it must widen to String rather than drop the parameter"
+        );
+
+        assert!(
+            template.parameters.iter().any(|p| p.name == "topic"),
+            "a placeholder the schema does not declare must still be collected: {:?}",
+            template
+                .parameters
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            template
+                .parameters
+                .iter()
+                .filter(|p| p.name == "city")
+                .count(),
+            1,
+            "the scan must not append a second, flattened copy of a declared parameter"
+        );
     }
 
     #[test]
@@ -9341,6 +10439,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9355,6 +10454,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "C".to_string(),
@@ -9369,12 +10469,14 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["A".to_string(), "B".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let template = WorkflowEngine::workflow_to_template(&workflow);
@@ -9409,6 +10511,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "B".to_string(),
@@ -9423,12 +10526,14 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["A".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -9478,6 +10583,7 @@ prompt_template = "do {{x}}"
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: None,
         }
     }
 
@@ -9544,6 +10650,7 @@ prompt_template = "do {{x}}"
             paused_step_index: None,
             paused_variables: BTreeMap::new(),
             paused_current_input: None,
+            owner_agent_id: None,
         };
         let running_id = running.id;
 
@@ -10118,6 +11225,181 @@ prompt_template = "do {{x}}"
         assert_eq!(run.paused_step_index, Some(0));
     }
 
+    /// #7714: the mechanism the "no `fresh` variant" decision leans on.
+    ///
+    /// `fresh = true` was proposed to isolate a `ByType` step from the
+    /// canonical instance's cross-run history. Per-step `session_mode`
+    /// (#7862) already does that, so the flag was declined — see
+    /// `docs/architecture/workflow-run-attribution.md`. That makes the
+    /// forwarding of `session_mode` to the step executor load-bearing for a
+    /// decision, not merely a feature: if it silently stopped reaching the
+    /// executor, the declined alternative would become necessary again.
+    #[tokio::test]
+    async fn per_step_session_mode_reaches_the_executor_for_a_shared_type() {
+        use std::sync::Mutex;
+
+        let engine = WorkflowEngine::new();
+        let mut wf = test_workflow();
+        wf.steps.truncate(1);
+        wf.steps[0].agent = StepAgent::ByType {
+            template: "researcher".to_string(),
+        };
+        // Isolate this step from whatever the shared canonical instance has
+        // been doing for every other run.
+        wf.steps[0].session_mode = Some(SessionMode::New);
+        let wf_id = engine.register(wf).await;
+
+        let run_id = engine
+            .create_run(wf_id, "input".to_string())
+            .await
+            .expect("create_run must succeed");
+
+        let seen: Arc<Mutex<Vec<Option<SessionMode>>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = seen.clone();
+        let sender = move |_id: AgentId, msg: String, sm: Option<SessionMode>| {
+            let seen = seen_for_closure.clone();
+            async move {
+                seen.lock().unwrap().push(sm);
+                Ok((format!("ok: {msg}"), 1u64, 1u64))
+            }
+        };
+
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("run must complete");
+
+        let observed = seen.lock().unwrap().clone();
+        assert_eq!(
+            observed.len(),
+            1,
+            "the single step must have dispatched once"
+        );
+        assert_eq!(
+            observed[0],
+            Some(SessionMode::New),
+            "the per-step session_mode must reach the executor; without it a \
+             `ByType` step cannot be isolated from the shared instance's history \
+             and the declined `fresh = true` flag would be needed after all"
+        );
+    }
+
+    /// #7714: an operator-initiated run has no calling agent, so `create_run`
+    /// must leave the run ownerless rather than inventing an owner.
+    #[tokio::test]
+    async fn create_run_leaves_the_run_ownerless() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine
+            .create_run(wf_id, "data".to_string())
+            .await
+            .expect("create_run must succeed");
+
+        let run = engine.get_run(run_id).await.unwrap();
+        assert_eq!(
+            run.owner_agent_id, None,
+            "the ownerless entry point must not synthesize an owner"
+        );
+    }
+
+    /// #7714: the owner recorded at creation must survive the round trip
+    /// through SQLite, because the paths that read it back (resume, re-run,
+    /// billing rollup) run against a reloaded run after a daemon restart.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn owner_round_trips_through_the_store() {
+        use r2d2::Pool;
+        use r2d2_sqlite::SqliteConnectionManager;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("workflows.db");
+        let make_store = || {
+            let pool = Pool::builder()
+                .max_size(2)
+                .build(SqliteConnectionManager::file(&db_path))
+                .unwrap();
+            librefang_memory::migration::run_migrations(&pool.get().unwrap())
+                .expect("migrations must apply");
+            librefang_memory::WorkflowStore::new(pool)
+        };
+
+        let owner = AgentId::new();
+        let run_id: WorkflowRunId;
+        {
+            let engine = WorkflowEngine::new_with_store(make_store(), tmp.path());
+            let wf_id = engine.register(test_workflow()).await;
+            run_id = engine
+                .create_run_owned(wf_id, "data".to_string(), Some(owner))
+                .await
+                .expect("create_run_owned must succeed");
+            assert_eq!(
+                engine.get_run(run_id).await.unwrap().owner_agent_id,
+                Some(owner),
+                "the owner must be visible on the in-memory run immediately"
+            );
+        }
+
+        let engine = WorkflowEngine::new_with_store(make_store(), tmp.path());
+        tokio::task::block_in_place(|| engine.load_runs()).expect("load_runs must succeed");
+        let reloaded = engine
+            .get_run(run_id)
+            .await
+            .expect("the run must be reloadable");
+        assert_eq!(
+            reloaded.owner_agent_id,
+            Some(owner),
+            "the owner must survive the SQLite round trip"
+        );
+    }
+
+    /// #7714: the core attribution guarantee.
+    ///
+    /// A `ByType` step resolves find-or-spawn to a single canonical instance
+    /// shared by every owner that references the type, so the executing agent
+    /// cannot carry ownership. Two owners running that same type must still
+    /// come back attributed to themselves — which is exactly what keeping the
+    /// owner on the *run* rather than on the agent buys.
+    #[tokio::test]
+    async fn two_owners_running_the_same_agent_type_keep_separate_attribution() {
+        let engine = WorkflowEngine::new();
+        let mut wf = test_workflow();
+        // A shared step-agent type, the case the guarantee is about.
+        wf.steps[0].agent = StepAgent::ByType {
+            template: "researcher".to_string(),
+        };
+        let wf_id = engine.register(wf).await;
+
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let alice_run = engine
+            .create_run_owned(wf_id, "alice input".to_string(), Some(alice))
+            .await
+            .expect("alice run must be created");
+        let bob_run = engine
+            .create_run_owned(wf_id, "bob input".to_string(), Some(bob))
+            .await
+            .expect("bob run must be created");
+
+        assert_ne!(alice_run, bob_run, "each owner gets a distinct run");
+        assert_eq!(
+            engine.get_run(alice_run).await.unwrap().owner_agent_id,
+            Some(alice)
+        );
+        assert_eq!(
+            engine.get_run(bob_run).await.unwrap().owner_agent_id,
+            Some(bob),
+            "the second owner's run must report the second owner, not the first"
+        );
+
+        // The step agent itself is deliberately shared: a canonical instance
+        // per type. If this ever stops holding, ownership-on-the-run is no
+        // longer load-bearing and this test should be revisited alongside it.
+        let step = &engine.get_workflow(wf_id).await.unwrap().steps[0];
+        assert!(
+            matches!(step.agent, StepAgent::ByType { ref template } if template == "researcher"),
+            "the shared-type premise of this test must hold"
+        );
+    }
+
     /// A Pending run created on engine #1 must survive a crash that
     /// happens before any state transition or `persist_runs` call.
     /// This exercises the create_run -> upsert_run_to_store wiring; the
@@ -10202,6 +11484,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "b".into(),
@@ -10214,12 +11497,14 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec!["a".into()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -10640,6 +11925,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "step2".to_string(),
@@ -10654,6 +11940,7 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "step3".to_string(),
@@ -10668,12 +11955,14 @@ prompt_template = "do {{x}}"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -10780,11 +12069,13 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: Some(1), // 1 second total timeout
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -10937,11 +12228,13 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
 
         let wf_id = engine.register(wf).await;
@@ -11024,11 +12317,13 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -11077,11 +12372,13 @@ prompt_template = "do {{x}}"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
 
@@ -11159,6 +12456,81 @@ prompt_template = "do {{x}}"
         );
         // Null is also invalid.
         assert!(serde_json::from_str::<StepAgent>("null").is_err());
+    }
+
+    #[test]
+    fn step_agent_deserializes_object_by_type() {
+        let v: StepAgent =
+            serde_json::from_str(r#"{"type":"researcher"}"#).expect("object by type");
+        match v {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_by_type_serializes_back_to_the_type_key() {
+        let json = serde_json::to_value(StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(json, serde_json::json!({"type": "researcher"}));
+    }
+
+    /// Every ambiguous pair, plus the all-three case (#7712 review).
+    ///
+    /// Ambiguity is the failure mode this contract exists for: a step that
+    /// names two agents is a step whose author cannot tell which one will run.
+    #[test]
+    fn step_agent_rejects_every_ambiguous_routing_key_combination() {
+        for payload in [
+            r#"{"id":"a","name":"b"}"#,
+            r#"{"id":"a","type":"c"}"#,
+            r#"{"name":"b","type":"c"}"#,
+            r#"{"id":"a","name":"b","type":"c"}"#,
+        ] {
+            let err = serde_json::from_str::<StepAgent>(payload)
+                .expect_err(&format!("must reject {payload}"));
+            let rendered = err.to_string();
+            assert!(rendered.contains("exactly one"), "{payload} -> {rendered}");
+        }
+    }
+
+    /// A mistyped routing key must not read as an absent one.
+    ///
+    /// `{"id": 7, "name": "b"}` used to resolve to `ByName` because `id`
+    /// failed the `as_str()` cast and looked unset — binding the step to the
+    /// agent the author had stopped naming.
+    #[test]
+    fn step_agent_rejects_a_non_string_routing_key_rather_than_treating_it_as_absent() {
+        assert!(serde_json::from_str::<StepAgent>(r#"{"id":7,"name":"b"}"#).is_err());
+        assert!(serde_json::from_str::<StepAgent>(r#"{"name":["b"]}"#).is_err());
+    }
+
+    /// An explicit JSON `null` is an unset key, so a client that serializes
+    /// its unset fields still round-trips.
+    #[test]
+    fn step_agent_treats_an_explicit_null_routing_key_as_absent() {
+        let v: StepAgent = serde_json::from_str(r#"{"id":null,"name":"b","type":null}"#)
+            .expect("null keys are absent keys");
+        match v {
+            StepAgent::ByName { name } => assert_eq!(name, "b"),
+            other => panic!("expected ByName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_agent_round_trip_by_type_through_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            agent: StepAgent,
+        }
+        let parsed: Wrap =
+            toml::from_str(r#"agent = { type = "researcher" }"#).expect("toml object by type");
+        match parsed.agent {
+            StepAgent::ByType { template } => assert_eq!(template, "researcher"),
+            other => panic!("expected ByType, got {other:?}"),
+        }
     }
 
     #[test]
@@ -11499,6 +12871,7 @@ name = "topic"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         );
         wf.steps[1].depends_on = vec!["producer".to_string()];
@@ -11631,6 +13004,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "review".to_string(),
@@ -11650,6 +13024,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "consume".to_string(),
@@ -11664,12 +13039,14 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         }
     }
 
@@ -12131,11 +13508,13 @@ name = "topic"
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             }],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -12471,6 +13850,7 @@ name = "topic"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let agent_id = AgentId::default();
         let run_id = WorkflowRunId::new();
@@ -12526,6 +13906,7 @@ name = "topic"
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         };
         let agent_id = AgentId::default();
         let run_id = WorkflowRunId::new();
@@ -12580,6 +13961,7 @@ name = "topic"
                     inherit_context: None,
                     depends_on: vec![],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
                 WorkflowStep {
                     name: "evaluator".to_string(),
@@ -12596,12 +13978,14 @@ name = "topic"
                     // Non-empty depends_on routes the workflow into the DAG executor.
                     depends_on: vec!["ideate".to_string()],
                     session_mode: None,
+                    required_skills: Vec::new(),
                 },
             ],
             created_at: Utc::now(),
             layout: None,
             total_timeout_secs: None,
             input_schema: None,
+            owner: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "topic".to_string()).await.unwrap();

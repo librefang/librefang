@@ -231,7 +231,7 @@ fn run_watch(
     if !has_watch {
         println!("cargo-watch not found, installing...");
         let status = Command::new("cargo")
-            .args(["install", "cargo-watch"])
+            .args(["install", "cargo-watch", "--locked"])
             .status()?;
         if !status.success() {
             return Err("Failed to install cargo-watch".into());

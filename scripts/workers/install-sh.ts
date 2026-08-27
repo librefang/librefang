@@ -1,21 +1,68 @@
-// Cloudflare Pages Function for install.sh redirect
-export const onRequest: PagesFunction = async () => {
-  const response = await fetch("https://api.github.com/repos/librefang/librefang/releases/latest", {
-    headers: {
-      "Accept": "application/vnd.github+json",
-      "User-Agent": "librefang-website"
-    }
-  });
+// Cloudflare Pages Function for install.sh redirect.
+const RELEASE_URL = "https://api.github.com/repos/librefang/librefang/releases/latest";
+const LINUX_ASSET = "librefang-x86_64-unknown-linux-gnu.tar.gz";
 
-  const data = await response.json();
-  const tag = data.tag_name;
+function releaseAssetUrl(data, assetName) {
+  const asset = data.assets.find((candidate) =>
+    candidate !== null &&
+    typeof candidate === "object" &&
+    typeof candidate.name === "string" &&
+    candidate.name === assetName
+  );
+  if (!asset) return undefined;
+  if (typeof asset.browser_download_url !== "string") return null;
+  try {
+    const url = new URL(asset.browser_download_url);
+    const path = url.pathname.split("/");
+    return url.origin === "https://github.com" &&
+      path.length === 7 &&
+      path[1] === "librefang" &&
+      path[2] === "librefang" &&
+      path[3] === "releases" &&
+      path[4] === "download" &&
+      path[5] !== "" &&
+      path[6] === assetName &&
+      url.search === "" &&
+      url.hash === ""
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
 
-  // Find the Linux x86_64 tar.gz asset
-  const asset = data.assets?.find((a: any) => a.name.includes("x86_64-unknown-linux-gnu.tar.gz"));
-
-  if (asset) {
-    return Response.redirect(asset.browser_download_url, 302);
+export const onRequest = async () => {
+  let response;
+  try {
+    response = await fetch(RELEASE_URL, {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "librefang-website"
+      }
+    });
+  } catch {
+    return new Response("Release service unavailable", { status: 502 });
+  }
+  if (!response.ok) {
+    return new Response("Release service unavailable", { status: 502 });
   }
 
-  return new Response("No release found", { status: 404 });
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    return new Response("Invalid release service response", { status: 502 });
+  }
+  if (data === null || typeof data !== "object" || !Array.isArray(data.assets)) {
+    return new Response("Invalid release service response", { status: 502 });
+  }
+  const assetUrl = releaseAssetUrl(data, LINUX_ASSET);
+  if (typeof assetUrl === "string") {
+    return Response.redirect(assetUrl, 302);
+  }
+  if (assetUrl === null) {
+    return new Response("Invalid release service response", { status: 502 });
+  }
+
+  return new Response("No Linux x86_64 release found", { status: 404 });
 };

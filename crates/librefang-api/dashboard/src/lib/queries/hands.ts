@@ -14,6 +14,49 @@ import { handKeys } from "./keys";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 30_000;
+const STATS_BATCH_CONCURRENCY = 6;
+
+export class HandStatsBatchError extends Error {
+  constructor(
+    readonly instanceIds: readonly string[],
+    readonly causes: readonly unknown[],
+  ) {
+    super(`Failed to load stats for ${instanceIds.length} hand instances`);
+    this.name = "HandStatsBatchError";
+  }
+}
+
+async function getHandStatsBatch(instanceIds: readonly string[]) {
+  const results: Record<string, HandStatsResponse> = {};
+  const failedIds: string[] = [];
+  const causes: unknown[] = [];
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < instanceIds.length) {
+      const id = instanceIds[nextIndex++];
+      try {
+        results[id] = await getHandStats(id);
+      } catch (error) {
+        failedIds.push(id);
+        causes.push(error);
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(STATS_BATCH_CONCURRENCY, instanceIds.length) },
+      worker,
+    ),
+  );
+
+  if (failedIds.length === instanceIds.length && instanceIds.length > 0) {
+    throw new HandStatsBatchError(failedIds, causes);
+  }
+
+  return results;
+}
 
 export const handQueries = {
   list: () =>
@@ -58,19 +101,7 @@ export const handQueries = {
   statsBatch: (instanceIds: readonly string[]) =>
     queryOptions({
       queryKey: handKeys.statsBatch(instanceIds),
-      queryFn: async () => {
-        const results: Record<string, HandStatsResponse> = {};
-        await Promise.all(
-          instanceIds.map(async (id) => {
-            try {
-              results[id] = await getHandStats(id);
-            } catch {
-              /* skip */
-            }
-          }),
-        );
-        return results;
-      },
+      queryFn: () => getHandStatsBatch(instanceIds),
       enabled: instanceIds.length > 0,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,

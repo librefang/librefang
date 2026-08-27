@@ -10,6 +10,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: alstr/todo-to-issue-action@37bb7b56e58569ef273b60678048030a7f0c261a # v5

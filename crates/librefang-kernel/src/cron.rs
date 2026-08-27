@@ -20,6 +20,21 @@ use tracing::{debug, info, warn};
 /// Maximum consecutive errors before a job is auto-disabled.
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
+fn lock_cron_serialization<'a>(
+    lock: &'a std::sync::Mutex<()>,
+    operation: &str,
+) -> std::sync::MutexGuard<'a, ()> {
+    match lock.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!(%operation, "cron serialization lock poisoned; recovering");
+            let guard = poisoned.into_inner();
+            lock.clear_poison();
+            guard
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Observability metrics (cron health)
 // ---------------------------------------------------------------------------
@@ -261,7 +276,7 @@ impl CronScheduler {
     /// Serialized through `persist_lock` so concurrent callers can't both
     /// `O_TRUNC` the same `.tmp` path and produce a torn file before rename.
     pub fn persist(&self) -> LibreFangResult<()> {
-        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_cron_serialization(&self.persist_lock, "persist");
         let metas: Vec<JobMeta> = self.jobs.iter().map(|r| r.value().clone()).collect();
         let data = serde_json::to_string_pretty(&metas)
             .map_err(|e| LibreFangError::Internal(format!("Failed to serialize cron jobs: {e}")))?;
@@ -298,7 +313,7 @@ impl CronScheduler {
     /// `one_shot` controls whether the job is removed after a single
     /// successful execution.
     pub fn add_job(&self, mut job: CronJob, one_shot: bool) -> LibreFangResult<CronJobId> {
-        let _add_guard = self.add_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _add_guard = lock_cron_serialization(&self.add_lock, "add job");
 
         // Global limit
         let max_jobs = self.max_total_jobs.load(Ordering::Relaxed);
@@ -1437,6 +1452,7 @@ mod tests {
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
+            owner: None,
         }
     }
 
@@ -1445,6 +1461,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sched = CronScheduler::new(tmp.path(), max_total);
         (sched, tmp)
+    }
+
+    #[test]
+    fn poisoned_cron_serialization_locks_recover_and_clear_poison() {
+        for (lock, operation) in [
+            (std::sync::Mutex::new(()), "persist"),
+            (std::sync::Mutex::new(()), "add job"),
+        ] {
+            let poison = std::panic::catch_unwind(|| {
+                let _guard = lock.lock().unwrap();
+                panic!("poison cron {operation} lock");
+            });
+
+            assert!(poison.is_err());
+            assert!(lock.is_poisoned());
+            let recovered = lock_cron_serialization(&lock, operation);
+            assert!(lock.try_lock().is_err());
+            drop(recovered);
+            assert!(!lock.is_poisoned());
+            let ordinary_guard = lock.lock().unwrap();
+            drop(ordinary_guard);
+        }
     }
 
     // -- test_add_job_and_list ----------------------------------------------

@@ -7,6 +7,8 @@ on:
 permissions:
   pull-requests: read
 
+# The title check is a pure function of the current PR title, so the newest run is the only one whose verdict matters.
+# `pull_request` events always carry a PR number, which is unique per PR and therefore cannot collide across PRs.
 concurrency:
   group: pr-title-${{ github.event.pull_request.number }}
   cancel-in-progress: true

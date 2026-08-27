@@ -17,6 +17,11 @@ api-error-template-invalid-name = 无效的模板名称
 api-error-template-not-found = 未找到模板 '{ $name }'
 api-error-template-parse-failed = 解析模板失败：{ $error }
 api-error-template-required = 必须提供 'manifest_toml' 或 'template'
+api-error-template-invalid-manifest = 无效的模板清单
+api-error-template-read-failed = 读取模板失败
+api-error-agent-type-exists = 名为 '{ $name }' 的智能体类型已存在
+api-error-agent-type-name-taken = '{ $name }' 是某个运行中智能体的名称，请为智能体类型另选名称
+api-error-agent-type-not-editable = 智能体类型 '{ $name }' 来自运行中智能体的工作区，请通过 /api/agents 管理
 
 # Manifest errors
 api-error-manifest-too-large = 清单文件过大（最大 1MB）

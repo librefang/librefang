@@ -1,12 +1,176 @@
 //! Usage tracking store — records LLM usage events for cost monitoring.
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use librefang_types::agent::{AgentId, SessionId, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Date-range filtering (#7891)
+// ---------------------------------------------------------------------------
+
+/// An inclusive calendar-date filter over `usage_events.timestamp`.
+///
+/// Both bounds are optional, and a `DateRange` with neither bound set is the
+/// identity filter: it contributes no SQL predicate at all, so every query
+/// that takes one keeps its pre-#7891 result set byte for byte.
+/// That property is what makes the new query parameters backward compatible
+/// rather than merely defaulted.
+///
+/// # Why the predicate compares the raw column instead of `date(timestamp)`
+///
+/// The obvious spelling is `date(timestamp) BETWEEN ?start AND ?end`, but
+/// wrapping the column in a function makes the predicate non-sargable: SQLite
+/// cannot use `idx_usage_timestamp` and falls back to a full table scan of
+/// `usage_events`, which is the one table in the substrate that grows without
+/// bound in normal operation.
+/// Comparing the raw text column against a bare `YYYY-MM-DD` prefix keeps the
+/// index in play, because the stored values are RFC 3339 strings whose
+/// lexicographic order matches their chronological order.
+///
+/// The upper bound is therefore stored half-open — `end_date + 1 day`,
+/// compared with `<` — so that every instant on `end_date` is included while
+/// `2026-09-01T00:00:00+00:00` is not.
+/// A closed `<=` bound against the bare date would have excluded all but the
+/// midnight instant of the final day, which is the classic off-by-one that
+/// silently drops a day of spend from a monthly report.
+///
+/// # UTC assumption
+///
+/// The only writer of this column is `UsageStore::insert_record`, which
+/// stores `Utc::now().to_rfc3339()`, so every row carries a `+00:00` offset
+/// and the lexicographic comparison is exact.
+/// Dates supplied by a caller are likewise interpreted as UTC calendar days.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DateRange {
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+}
+
+/// Why a [`DateRange`] could not be constructed.
+///
+/// Carries enough detail for the API layer to render an actionable 400 rather
+/// than the caller silently receiving an empty result set for a range they
+/// typed wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DateRangeError {
+    /// A bound did not parse as `YYYY-MM-DD`. Holds the parameter name and the rejected value.
+    Malformed {
+        /// Query-parameter name the bad value came from (`start_date` / `end_date`).
+        field: &'static str,
+        /// The value as the caller supplied it.
+        value: String,
+    },
+    /// `end_date` is chronologically before `start_date`.
+    Inverted {
+        /// The supplied start bound.
+        start: NaiveDate,
+        /// The supplied end bound.
+        end: NaiveDate,
+    },
+}
+
+impl std::fmt::Display for DateRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed { field, value } => write!(
+                f,
+                "`{field}` must be a calendar date in YYYY-MM-DD form (got {value:?})"
+            ),
+            Self::Inverted { start, end } => write!(
+                f,
+                "`end_date` ({end}) is before `start_date` ({start}); supply a range whose end is on or after its start"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DateRangeError {}
+
+impl DateRange {
+    /// The identity filter — matches every row.
+    pub const UNBOUNDED: Self = Self {
+        start: None,
+        end: None,
+    };
+
+    /// Build a range from two already-parsed bounds, rejecting an inverted range.
+    pub fn new(start: Option<NaiveDate>, end: Option<NaiveDate>) -> Result<Self, DateRangeError> {
+        if let (Some(s), Some(e)) = (start, end) {
+            if e < s {
+                return Err(DateRangeError::Inverted { start: s, end: e });
+            }
+        }
+        Ok(Self { start, end })
+    }
+
+    /// Parse two optional `YYYY-MM-DD` strings into a range.
+    ///
+    /// An empty string is treated as an absent bound so that a client
+    /// rendering `?start_date=&end_date=` from a form with cleared inputs gets
+    /// the unfiltered response rather than a 400.
+    pub fn parse(start: Option<&str>, end: Option<&str>) -> Result<Self, DateRangeError> {
+        fn one(
+            field: &'static str,
+            raw: Option<&str>,
+        ) -> Result<Option<NaiveDate>, DateRangeError> {
+            match raw.map(str::trim) {
+                None | Some("") => Ok(None),
+                Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                    .map(Some)
+                    .map_err(|_| DateRangeError::Malformed {
+                        field,
+                        value: v.to_string(),
+                    }),
+            }
+        }
+        Self::new(one("start_date", start)?, one("end_date", end)?)
+    }
+
+    /// Whether this range constrains anything.
+    pub fn is_unbounded(&self) -> bool {
+        self.start.is_none() && self.end.is_none()
+    }
+
+    /// The inclusive start bound, if set.
+    pub fn start(&self) -> Option<NaiveDate> {
+        self.start
+    }
+
+    /// The inclusive end bound, if set.
+    pub fn end(&self) -> Option<NaiveDate> {
+        self.end
+    }
+
+    /// SQL predicates to AND into a `WHERE` clause, plus their bind values in
+    /// positional order.
+    ///
+    /// The fragment is empty for an unbounded range, so callers that splice it
+    /// into a `WHERE 1=1` base emit exactly the pre-filter statement.
+    fn sql_and_binds(&self) -> (String, Vec<String>) {
+        let mut sql = String::new();
+        let mut binds = Vec::new();
+        if let Some(start) = self.start {
+            sql.push_str(" AND timestamp >= ?");
+            binds.push(start.format("%Y-%m-%d").to_string());
+        }
+        // Half-open upper bound: see the type-level note on the off-by-one.
+        //
+        // `succ_opt` is `None` only for `NaiveDate::MAX`, where "the day after
+        // the end bound" does not exist. That bound already includes every
+        // representable timestamp, so the predicate is simply omitted —
+        // emitting `NaiveDate::MAX` as text instead would compare a `+`-prefixed
+        // string against the stored digits and match nothing at all.
+        if let Some(next) = self.end.and_then(|end| end.succ_opt()) {
+            sql.push_str(" AND timestamp < ?");
+            binds.push(next.format("%Y-%m-%d").to_string());
+        }
+        (sql, binds)
+    }
+}
 
 /// A single usage event recording an LLM call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -45,6 +209,29 @@ pub struct UsageRecord {
     /// and for pre-v30 records that pre-date this column.
     #[serde(default)]
     pub session_id: Option<SessionId>,
+    /// #7714: the agent this call's cost rolls up to, when it differs from
+    /// the agent that made it.
+    ///
+    /// A worker spawned by another agent spends on its spawner's behalf, so
+    /// the spawner needs that cost on its own budget line rather than
+    /// scattered across throwaway children it cannot enumerate.
+    /// Call sites set it to `entry.parent.unwrap_or(agent_id)`, so a
+    /// top-level agent bills to itself.
+    ///
+    /// This is deliberately a *separate* column from [`Self::agent_id`]
+    /// rather than a rewrite of it. `agent_id` stays the quota subject: the
+    /// pre-call `check_quota` and the post-call `check_all_and_record` both
+    /// evaluate the executing agent against that agent's own
+    /// `manifest.resources`, so the two checks keep asking the same question
+    /// about the same agent. Re-pointing `agent_id` at the parent would have
+    /// made the pre-call check read the child's spend and the post-call check
+    /// read the parent's, both against the child's ceiling — the attribution
+    /// dimension and the enforcement dimension have to stay independent.
+    ///
+    /// `None` on pre-v49 records, which the read path treats as "bills to
+    /// `agent_id`".
+    #[serde(default)]
+    pub billed_agent_id: Option<AgentId>,
 }
 
 impl UsageRecord {
@@ -80,6 +267,7 @@ impl UsageRecord {
             user_id: None,
             channel: None,
             session_id: None,
+            billed_agent_id: None,
         }
     }
 }
@@ -97,6 +285,43 @@ pub struct UsageSummary {
     pub call_count: u64,
     /// Total tool calls.
     pub total_tool_calls: u64,
+}
+
+/// One `usage_events` row, flattened for bulk export (#7891).
+///
+/// Carries every persisted column rather than the observability subset in
+/// [`AgentEventRow`]: an archival export is the last copy of the data once
+/// retention prunes the table, so dropping attribution columns here would make
+/// the archive unable to answer the per-agent / per-user questions the live
+/// endpoints can.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageExportRow {
+    /// RFC 3339 timestamp of the call, as stored.
+    pub timestamp: String,
+    /// Agent that executed the call.
+    pub agent_id: String,
+    /// Agent whose budget the call bills to, when it differs from `agent_id` (#7714).
+    pub billed_agent_id: Option<String>,
+    /// Provider id.
+    pub provider: String,
+    /// Model id.
+    pub model: String,
+    /// Input tokens consumed.
+    pub input_tokens: u64,
+    /// Output tokens produced.
+    pub output_tokens: u64,
+    /// Estimated cost in USD.
+    pub cost_usd: f64,
+    /// Tool calls made during the interaction.
+    pub tool_calls: u64,
+    /// Round-trip latency in milliseconds.
+    pub latency_ms: u64,
+    /// LibreFang user the call is attributed to, when known.
+    pub user_id: Option<String>,
+    /// Originating channel, when known.
+    pub channel: Option<String>,
+    /// Session the call belonged to, when known.
+    pub session_id: Option<String>,
 }
 
 /// One row of a per-agent recent-events feed. Mirrors the columns on
@@ -238,8 +463,8 @@ impl UsageStore {
         // v30 added session_id — all are NULL-able so missing attribution
         // round-trips as NULL.
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id, billed_agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -254,6 +479,7 @@ impl UsageStore {
                 record.user_id.map(|u| u.to_string()),
                 record.channel.as_deref(),
                 record.session_id.map(|s| s.0.to_string()),
+                record.billed_agent_id.map(|a| a.0.to_string()),
             ],
         )
         .map_err(LibreFangError::memory)?;
@@ -1040,28 +1266,35 @@ impl UsageStore {
 
     /// Query usage summary, optionally filtered by agent.
     pub fn query_summary(&self, agent_id: Option<AgentId>) -> LibreFangResult<UsageSummary> {
+        self.query_summary_ranged(agent_id, &DateRange::UNBOUNDED)
+    }
+
+    /// Query the usage summary, optionally restricted to a calendar-date range (#7891).
+    ///
+    /// Passing [`DateRange::UNBOUNDED`] is exactly equivalent to [`Self::query_summary`].
+    pub fn query_summary_ranged(
+        &self,
+        agent_id: Option<AgentId>,
+        range: &DateRange,
+    ) -> LibreFangResult<UsageSummary> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_id {
-            Some(aid) => (
-                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
-                 FROM usage_events WHERE agent_id = ?1",
-                vec![Box::new(aid.0.to_string())],
-            ),
-            None => (
-                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
-                 FROM usage_events",
-                vec![],
-            ),
-        };
-
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
+        let mut sql = String::from(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
+             FROM usage_events WHERE 1=1",
+        );
+        let mut binds: Vec<String> = Vec::new();
+        if let Some(aid) = agent_id {
+            sql.push_str(" AND agent_id = ?");
+            binds.push(aid.0.to_string());
+        }
+        let (range_sql, range_binds) = range.sql_and_binds();
+        sql.push_str(&range_sql);
+        binds.extend(range_binds);
 
         let summary = conn
-            .query_row(sql, params_refs.as_slice(), |row| {
+            .query_row(&sql, rusqlite::params_from_iter(binds.iter()), |row| {
                 Ok(UsageSummary {
                     total_input_tokens: row.get::<_, i64>(0)? as u64,
                     total_output_tokens: row.get::<_, i64>(1)? as u64,
@@ -1075,20 +1308,56 @@ impl UsageStore {
         Ok(summary)
     }
 
-    /// Query usage grouped by model.
-    pub fn query_by_model(&self) -> LibreFangResult<Vec<ModelUsage>> {
+    /// Query the usage that rolls up to one agent's budget line (#7714).
+    ///
+    /// "Bills to `agent_id`" means `COALESCE(billed_agent_id, agent_id) = agent_id`: a call the agent made for itself (no `billed_agent_id`, or one pointing at itself) plus every call a worker it spawned made on its behalf.
+    /// This is the query that gives a spawner the budget visibility it loses when its children each spend under their own id.
+    ///
+    /// Distinct from [`Self::query_summary`], which answers "what did this agent execute" and stays the right question for quota enforcement.
+    pub fn query_billed_summary(&self, agent_id: AgentId) -> LibreFangResult<UsageSummary> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT model, COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(input_tokens), 0),
-                        COALESCE(SUM(output_tokens), 0), COUNT(*)
-                 FROM usage_events GROUP BY model ORDER BY SUM(cost_usd) DESC",
+        let summary = conn
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0.0), COUNT(*), COALESCE(SUM(tool_calls), 0)
+                 FROM usage_events WHERE COALESCE(billed_agent_id, agent_id) = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| {
+                    Ok(UsageSummary {
+                        total_input_tokens: row.get::<_, i64>(0)? as u64,
+                        total_output_tokens: row.get::<_, i64>(1)? as u64,
+                        total_cost_usd: row.get(2)?,
+                        call_count: row.get::<_, i64>(3)? as u64,
+                        total_tool_calls: row.get::<_, i64>(4)? as u64,
+                    })
+                },
             )
             .map_err(LibreFangError::memory)?;
+        Ok(summary)
+    }
+
+    /// Query usage grouped by model.
+    pub fn query_by_model(&self) -> LibreFangResult<Vec<ModelUsage>> {
+        self.query_by_model_ranged(&DateRange::UNBOUNDED)
+    }
+
+    /// Query usage grouped by model, optionally restricted to a calendar-date range (#7891).
+    ///
+    /// Passing [`DateRange::UNBOUNDED`] is exactly equivalent to [`Self::query_by_model`].
+    pub fn query_by_model_ranged(&self, range: &DateRange) -> LibreFangResult<Vec<ModelUsage>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+
+        let (range_sql, range_binds) = range.sql_and_binds();
+        let sql = format!(
+            "SELECT model, COALESCE(SUM(cost_usd), 0.0), COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0), COUNT(*)
+             FROM usage_events WHERE 1=1{range_sql}
+             GROUP BY model ORDER BY SUM(cost_usd) DESC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(range_binds.iter()), |row| {
                 Ok(ModelUsage {
                     model: row.get(0)?,
                     total_cost_usd: row.get(1)?,
@@ -1108,26 +1377,36 @@ impl UsageStore {
 
     /// Query model performance metrics including latency statistics.
     pub fn query_model_performance(&self) -> LibreFangResult<Vec<ModelPerformance>> {
+        self.query_model_performance_ranged(&DateRange::UNBOUNDED)
+    }
+
+    /// Query model performance metrics, optionally restricted to a calendar-date range (#7891).
+    ///
+    /// Passing [`DateRange::UNBOUNDED`] is exactly equivalent to [`Self::query_model_performance`].
+    pub fn query_model_performance_ranged(
+        &self,
+        range: &DateRange,
+    ) -> LibreFangResult<Vec<ModelPerformance>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT model, 
-                        COALESCE(SUM(cost_usd), 0.0), 
-                        COALESCE(SUM(input_tokens), 0), 
-                        COALESCE(SUM(output_tokens), 0), 
-                        COUNT(*),
-                        COALESCE(AVG(latency_ms), 0),
-                        COALESCE(MIN(latency_ms), 0),
-                        COALESCE(MAX(latency_ms), 0)
-                 FROM usage_events 
-                 GROUP BY model 
-                 ORDER BY SUM(cost_usd) DESC",
-            )
-            .map_err(LibreFangError::memory)?;
+        let (range_sql, range_binds) = range.sql_and_binds();
+        let sql = format!(
+            "SELECT model,
+                    COALESCE(SUM(cost_usd), 0.0),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COUNT(*),
+                    COALESCE(AVG(latency_ms), 0),
+                    COALESCE(MIN(latency_ms), 0),
+                    COALESCE(MAX(latency_ms), 0)
+             FROM usage_events WHERE 1=1{range_sql}
+             GROUP BY model
+             ORDER BY SUM(cost_usd) DESC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(range_binds.iter()), |row| {
                 let call_count: i64 = row.get(4)?;
                 let total_cost_usd: f64 = row.get(1)?;
                 let avg_latency_ms: f64 = row.get(5)?;
@@ -1159,25 +1438,53 @@ impl UsageStore {
     }
 
     /// Query daily usage breakdown for the last N days.
+    ///
+    /// The window is relative to *now*, not to a calendar boundary: `days = 7`
+    /// means "the last 168 hours". Use [`Self::query_daily_breakdown_ranged`]
+    /// for a report pinned to calendar dates.
     pub fn query_daily_breakdown(&self, days: u32) -> LibreFangResult<Vec<DailyBreakdown>> {
+        self.daily_breakdown_where(
+            "datetime(timestamp) > datetime('now', ?)",
+            &[format!("-{days} days")],
+        )
+    }
+
+    /// Query daily usage breakdown across an inclusive calendar-date range (#7891).
+    ///
+    /// Unlike [`Self::query_daily_breakdown`] the bounds are calendar days, which is
+    /// what a monthly or quarterly report is actually asking for — "March" is
+    /// `2026-03-01`..=`2026-03-31`, not "the last 31 days".
+    pub fn query_daily_breakdown_ranged(
+        &self,
+        range: &DateRange,
+    ) -> LibreFangResult<Vec<DailyBreakdown>> {
+        let (range_sql, binds) = range.sql_and_binds();
+        self.daily_breakdown_where(&format!("1=1{range_sql}"), &binds)
+    }
+
+    /// Shared body of the two daily-breakdown queries: same projection and
+    /// grouping, different `WHERE`.
+    fn daily_breakdown_where(
+        &self,
+        where_sql: &str,
+        binds: &[String],
+    ) -> LibreFangResult<Vec<DailyBreakdown>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        let modifier = format!("-{days} days");
-        let mut stmt = conn
-            .prepare(
-                "SELECT date(timestamp) as day,
-                            COALESCE(SUM(cost_usd), 0.0),
-                            COALESCE(SUM(input_tokens) + SUM(output_tokens), 0),
-                            COUNT(*)
-                     FROM usage_events
-                     WHERE datetime(timestamp) > datetime('now', ?1)
-                     GROUP BY day
-                     ORDER BY day ASC",
-            )
-            .map_err(LibreFangError::memory)?;
+        let sql = format!(
+            "SELECT date(timestamp) as day,
+                    COALESCE(SUM(cost_usd), 0.0),
+                    COALESCE(SUM(input_tokens) + SUM(output_tokens), 0),
+                    COUNT(*)
+             FROM usage_events
+             WHERE {where_sql}
+             GROUP BY day
+             ORDER BY day ASC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
         let rows = stmt
-            .query_map([modifier], |row| {
+            .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
                 Ok(DailyBreakdown {
                     date: row.get(0)?,
                     cost_usd: row.get(1)?,
@@ -1334,6 +1641,61 @@ impl UsageStore {
         Ok(out)
     }
 
+    /// Stream every usage event in `range`, oldest first, handing each row to
+    /// `visit` as it comes off the SQLite cursor (#7891).
+    ///
+    /// This is deliberately callback-driven rather than `-> Vec<UsageExportRow>`.
+    /// The export endpoint exists for archival, so the caller-chosen range can
+    /// cover a full retention window of events; materializing that into a `Vec`
+    /// (and then into a response body) would hold the entire table in memory
+    /// twice. Handing rows out one at a time lets the HTTP layer encode and
+    /// flush each chunk while the statement is still walking the index.
+    ///
+    /// `visit` returns [`std::ops::ControlFlow::Break`] to stop early — the export
+    /// handler uses that when the client disconnects, so an abandoned download
+    /// stops reading rather than draining the whole table into a dead socket.
+    pub fn for_each_event_in_range<F>(&self, range: &DateRange, mut visit: F) -> LibreFangResult<()>
+    where
+        F: FnMut(UsageExportRow) -> std::ops::ControlFlow<()>,
+    {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let (range_sql, binds) = range.sql_and_binds();
+        let sql = format!(
+            "SELECT timestamp, agent_id, billed_agent_id, provider, model,
+                    input_tokens, output_tokens, cost_usd, tool_calls, latency_ms,
+                    user_id, channel, session_id
+             FROM usage_events
+             WHERE 1=1{range_sql}
+             ORDER BY timestamp ASC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(binds.iter()))
+            .map_err(LibreFangError::memory)?;
+
+        while let Some(row) = rows.next().map_err(LibreFangError::memory)? {
+            let parsed = UsageExportRow {
+                timestamp: row.get(0).map_err(LibreFangError::memory)?,
+                agent_id: row.get(1).map_err(LibreFangError::memory)?,
+                billed_agent_id: row.get(2).map_err(LibreFangError::memory)?,
+                provider: row.get(3).map_err(LibreFangError::memory)?,
+                model: row.get(4).map_err(LibreFangError::memory)?,
+                input_tokens: row.get::<_, i64>(5).map_err(LibreFangError::memory)?.max(0) as u64,
+                output_tokens: row.get::<_, i64>(6).map_err(LibreFangError::memory)?.max(0) as u64,
+                cost_usd: row.get(7).map_err(LibreFangError::memory)?,
+                tool_calls: row.get::<_, i64>(8).map_err(LibreFangError::memory)?.max(0) as u64,
+                latency_ms: row.get::<_, i64>(9).map_err(LibreFangError::memory)?.max(0) as u64,
+                user_id: row.get(10).map_err(LibreFangError::memory)?,
+                channel: row.get(11).map_err(LibreFangError::memory)?,
+                session_id: row.get(12).map_err(LibreFangError::memory)?,
+            };
+            if visit(parsed).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Delete usage events older than the given number of days.
     pub fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
@@ -1399,6 +1761,90 @@ mod tests {
         assert_eq!(summary.total_output_tokens, 250);
         assert!((summary.total_cost_usd - 0.011).abs() < 0.0001);
         assert_eq!(summary.total_tool_calls, 3);
+    }
+
+    #[test]
+    fn spawned_worker_spend_rolls_up_to_the_parent_budget_line() {
+        // #7714: a worker spawned by another agent spends on its spawner's
+        // behalf. The spawner must be able to see that cost on its own budget
+        // line, which is what `query_billed_summary` answers.
+        let store = setup();
+        let parent = AgentId::new();
+        let worker = AgentId::new();
+
+        // The parent's own turn: no `billed_agent_id`, so it bills to itself.
+        store
+            .record(&UsageRecord {
+                agent_id: parent,
+                cost_usd: 1.0,
+                input_tokens: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        // The worker's turn, billed to the parent.
+        store
+            .record(&UsageRecord {
+                agent_id: worker,
+                billed_agent_id: Some(parent),
+                cost_usd: 0.25,
+                input_tokens: 5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(parent).unwrap();
+        assert_eq!(
+            billed.call_count, 2,
+            "the parent's budget line must include the worker's call"
+        );
+        assert!(
+            (billed.total_cost_usd - 1.25).abs() < 1e-9,
+            "expected 1.25 rolled up, got {}",
+            billed.total_cost_usd
+        );
+        assert_eq!(billed.total_input_tokens, 15);
+
+        // The worker bills nothing to itself — its spend belongs to the parent.
+        let worker_billed = store.query_billed_summary(worker).unwrap();
+        assert_eq!(
+            worker_billed.call_count, 0,
+            "a worker whose spend rolls up must not also carry it itself"
+        );
+
+        // Enforcement is a separate dimension: `agent_id` is untouched, so the
+        // quota subject each call is checked against is still the agent that
+        // actually made it. This is what keeps the pre-call and post-call
+        // quota checks asking about the same agent.
+        assert_eq!(
+            store.query_summary(Some(worker)).unwrap().call_count,
+            1,
+            "the executing agent must remain the quota subject for its own call"
+        );
+        assert_eq!(
+            store.query_summary(Some(parent)).unwrap().call_count,
+            1,
+            "attribution must not retroactively move the child's call onto the parent's quota"
+        );
+    }
+
+    #[test]
+    fn usage_record_without_billed_agent_bills_to_itself() {
+        // Every pre-#7714 call site leaves `billed_agent_id` unset. Those rows
+        // must keep rolling up to `agent_id`, or the migration would silently
+        // drop historical spend out of every budget view.
+        let store = setup();
+        let agent_id = AgentId::new();
+        store
+            .record(&UsageRecord {
+                agent_id,
+                cost_usd: 0.5,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let billed = store.query_billed_summary(agent_id).unwrap();
+        assert_eq!(billed.call_count, 1);
+        assert!((billed.total_cost_usd - 0.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1632,6 +2078,174 @@ mod tests {
 
         assert_eq!(store.cleanup_old(7).unwrap(), 1);
         assert_eq!(store.query_summary(None).unwrap().call_count, 1);
+    }
+
+    // -- #7891: date-range filtering -------------------------------------
+
+    /// Insert an event stamped at an explicit instant.
+    fn insert_at(store: &UsageStore, agent_id: AgentId, timestamp: &str, cost: f64, model: &str) {
+        let conn = store.pool.get().unwrap();
+        conn.execute(
+            "INSERT INTO usage_events \
+             (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms) \
+             VALUES (?1, ?2, ?3, ?4, 'prov', 10, 20, ?5, 1, 5)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                agent_id.0.to_string(),
+                timestamp,
+                model,
+                cost
+            ],
+        )
+        .unwrap();
+    }
+
+    fn seed_range_fixture(store: &UsageStore) -> AgentId {
+        let agent = AgentId::new();
+        insert_at(store, agent, "2026-01-15T10:00:00+00:00", 1.0, "gpt-a");
+        insert_at(store, agent, "2026-01-31T23:59:59+00:00", 2.0, "gpt-a");
+        insert_at(store, agent, "2026-02-01T00:00:00+00:00", 4.0, "claude-b");
+        agent
+    }
+
+    #[test]
+    fn date_range_parse_rejects_malformed_and_inverted_input() {
+        assert!(matches!(
+            DateRange::parse(Some("01-15-2026"), None),
+            Err(DateRangeError::Malformed {
+                field: "start_date",
+                ..
+            })
+        ));
+        assert!(matches!(
+            DateRange::parse(None, Some("2026-13-01")),
+            Err(DateRangeError::Malformed {
+                field: "end_date",
+                ..
+            })
+        ));
+        assert!(matches!(
+            DateRange::parse(Some("2026-03-01"), Some("2026-01-01")),
+            Err(DateRangeError::Inverted { .. })
+        ));
+        // Equal bounds are a legitimate single-day report, not an inversion.
+        assert!(DateRange::parse(Some("2026-01-01"), Some("2026-01-01")).is_ok());
+    }
+
+    #[test]
+    fn date_range_treats_blank_bounds_as_absent() {
+        let r = DateRange::parse(Some(""), Some("  ")).unwrap();
+        assert!(r.is_unbounded());
+    }
+
+    #[test]
+    fn unbounded_range_reproduces_the_unfiltered_queries() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        assert_eq!(
+            store.query_summary(None).unwrap().call_count,
+            store
+                .query_summary_ranged(None, &DateRange::UNBOUNDED)
+                .unwrap()
+                .call_count
+        );
+        assert_eq!(
+            store.query_by_model().unwrap().len(),
+            store
+                .query_by_model_ranged(&DateRange::UNBOUNDED)
+                .unwrap()
+                .len()
+        );
+        assert_eq!(
+            store.query_model_performance().unwrap().len(),
+            store
+                .query_model_performance_ranged(&DateRange::UNBOUNDED)
+                .unwrap()
+                .len()
+        );
+    }
+
+    #[test]
+    fn ranged_summary_filters_to_the_requested_calendar_month() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        let jan = DateRange::parse(Some("2026-01-01"), Some("2026-01-31")).unwrap();
+        let s = store.query_summary_ranged(None, &jan).unwrap();
+        assert_eq!(s.call_count, 2);
+        assert!((s.total_cost_usd - 3.0).abs() < f64::EPSILON);
+    }
+
+    /// The upper bound must cover the whole final day, not just its midnight
+    /// instant — a `<=` comparison against the bare date would drop the
+    /// 23:59:59 event and quietly understate a monthly total.
+    #[test]
+    fn ranged_end_bound_includes_the_entire_final_day() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        let last_day = DateRange::parse(Some("2026-01-31"), Some("2026-01-31")).unwrap();
+        let s = store.query_summary_ranged(None, &last_day).unwrap();
+        assert_eq!(s.call_count, 1);
+        assert!((s.total_cost_usd - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ranged_daily_breakdown_uses_calendar_bounds() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        let jan = DateRange::parse(Some("2026-01-01"), Some("2026-01-31")).unwrap();
+        let days = store.query_daily_breakdown_ranged(&jan).unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].date, "2026-01-15");
+        assert_eq!(days[1].date, "2026-01-31");
+    }
+
+    #[test]
+    fn for_each_event_in_range_streams_in_ascending_order_and_can_stop_early() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        let mut seen = Vec::new();
+        store
+            .for_each_event_in_range(&DateRange::UNBOUNDED, |row| {
+                seen.push(row.timestamp.clone());
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(
+            seen[0] < seen[1] && seen[1] < seen[2],
+            "ascending: {seen:?}"
+        );
+
+        // Break stops the cursor rather than draining the table.
+        let mut count = 0;
+        store
+            .for_each_event_in_range(&DateRange::UNBOUNDED, |_| {
+                count += 1;
+                std::ops::ControlFlow::Break(())
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn for_each_event_in_range_honours_the_filter() {
+        let store = setup();
+        seed_range_fixture(&store);
+
+        let feb = DateRange::parse(Some("2026-02-01"), Some("2026-02-28")).unwrap();
+        let mut models = Vec::new();
+        store
+            .for_each_event_in_range(&feb, |row| {
+                models.push(row.model.clone());
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(models, vec!["claude-b"]);
     }
 
     #[test]

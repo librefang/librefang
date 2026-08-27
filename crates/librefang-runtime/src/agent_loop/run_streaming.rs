@@ -245,6 +245,11 @@ async fn run_agent_loop_streaming_inner(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // #7605: the session this turn belongs to, when session-scoped memory recall is in effect for this agent.
+    // Resolved once here so the recall (before the turn) and the memorize (after it) agree on the scope even if the manifest were hot-reloaded in between.
+    let session_scope: Option<String> =
+        session_recall_scope(manifest, session, proactive_memory.as_ref());
+
     let RecallSetup {
         memories,
         memories_used,
@@ -258,6 +263,7 @@ async fn run_agent_loop_streaming_inner(
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
         sender_chat_scope: sender_chat_scope.as_deref(),
+        session_scope: session_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: true,
@@ -288,6 +294,7 @@ async fn run_agent_loop_streaming_inner(
         experiment_context: experiment_context.as_ref(),
         running_experiment: running_experiment.as_ref(),
         memories: &memories,
+        memory_fact_budget_percent: opts.memory_fact_budget_percent,
         stable_prefix_mode,
         streaming: true,
     });
@@ -589,26 +596,13 @@ async fn run_agent_loop_streaming_inner(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete (streaming)"
                         );
-                        // Inject the LLM-generated summary as a synthetic user message
-                        // so the agent retains context about what was compacted.
-                        // Without this, the summary is silently discarded and the agent
-                        // loses all knowledge of earlier turns.
-                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
-                        if !result.summary.is_empty() {
-                            compacted.push(Message {
-                                role: Role::User,
-                                content: MessageContent::Text(format!(
-                                    "[Context compaction summary] Earlier conversation turns \
-                                     were summarised to preserve context space. Summary of \
-                                     removed messages: {}",
-                                    result.summary
-                                )),
-                                pinned: false,
-                                timestamp: None,
-                            });
-                        }
-                        compacted.extend(result.kept_messages);
-                        messages = compacted;
+                        apply_context_compaction(
+                            session,
+                            &mut messages,
+                            &mut new_messages_start,
+                            result.summary,
+                            result.kept_messages,
+                        );
                         // `last_prompt_tokens` is NOT reset — see non-streaming
                         // comment for rationale.
                     }
@@ -1191,6 +1185,7 @@ async fn run_agent_loop_streaming_inner(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_chat_scope: sender_chat_scope.as_deref(),
+                        session_scope: session_scope.as_deref(),
                         streaming: true,
                         opts,
                     },

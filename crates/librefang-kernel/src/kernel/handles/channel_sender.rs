@@ -34,6 +34,18 @@ fn sidecar_default_agent<'a>(
     })
 }
 
+/// Wire shape of one roster row, as both roster reads hand it to the tool layer.
+///
+/// `source` rides along on every entry rather than only on the full listing: `channel_members` renders it so the model can see which people it may privately address, and a row that lost its classification in transit would read as addressable.
+fn roster_member_json(member: librefang_memory::roster_store::RosterMember) -> serde_json::Value {
+    serde_json::json!({
+        "user_id": member.user_id,
+        "display_name": member.display_name,
+        "username": member.username,
+        "source": member.source.as_str(),
+    })
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::ChannelSender for LibreFangKernel {
     async fn send_channel_message(
@@ -348,16 +360,20 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         chat_id: &str,
     ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         let members = self.memory.substrate.roster().members(channel, chat_id)?;
-        Ok(members
-            .into_iter()
-            .map(|(user_id, display_name, username)| {
-                serde_json::json!({
-                    "user_id": user_id,
-                    "display_name": display_name,
-                    "username": username,
-                })
-            })
-            .collect())
+        Ok(members.into_iter().map(roster_member_json).collect())
+    }
+
+    fn roster_observed_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
+        let members = self
+            .memory
+            .substrate
+            .roster()
+            .observed_members(channel, chat_id)?;
+        Ok(members.into_iter().map(roster_member_json).collect())
     }
 
     fn roster_remove_member(
@@ -416,7 +432,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // the first equal-specificity match — `max_by_key` would keep the
         // *last*, drifting from inbound on a tie.
         let bound_agent = {
-            let bindings = self.mesh.bindings.lock().unwrap_or_else(|e| e.into_inner());
+            let bindings = super::super::bindings_and_handle::lock_bindings(&self.mesh.bindings);
             let mut best: Option<&librefang_types::config::AgentBinding> = None;
             for b in bindings
                 .iter()

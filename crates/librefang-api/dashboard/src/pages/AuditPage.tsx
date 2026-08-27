@@ -4,7 +4,7 @@
 // rows, default 200) — for deeper history use the export button which hits
 // /api/audit/export with the same filter set.
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -85,17 +85,36 @@ function normaliseFilters(filters: AuditQueryFilters): AuditQueryFilters {
   };
 }
 
+export function auditFiltersToParams(filters: AuditQueryFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === null || value === "") continue;
+    params.set(key, String(value));
+  }
+  return params;
+}
+
 function buildExportUrl(
   filters: AuditQueryFilters,
   format: "csv" | "json",
 ): string {
-  const normalised = normaliseFilters(filters);
-  const params = new URLSearchParams({ format });
-  for (const [k, v] of Object.entries(normalised)) {
-    if (v === undefined || v === null || v === "") continue;
-    params.set(k, String(v));
-  }
+  const params = auditFiltersToParams(normaliseFilters(filters));
+  params.set("format", format);
   return `/api/audit/export?${params.toString()}`;
+}
+
+let pendingObjectUrl: string | null = null;
+let objectUrlRevokeTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function scheduleObjectUrlRevoke(objectUrl: string) {
+  if (objectUrlRevokeTimer !== null) clearTimeout(objectUrlRevokeTimer);
+  if (pendingObjectUrl !== null) URL.revokeObjectURL(pendingObjectUrl);
+  pendingObjectUrl = objectUrl;
+  objectUrlRevokeTimer = setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+    if (pendingObjectUrl === objectUrl) pendingObjectUrl = null;
+    objectUrlRevokeTimer = null;
+  }, 1000);
 }
 
 // Authenticated download: dashboard auth is Bearer-in-header, but
@@ -133,7 +152,53 @@ async function downloadExport(
   a.click();
   a.remove();
   // Defer revoke so the browser has a chance to start the save dialog.
-  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  scheduleObjectUrlRevoke(objectUrl);
+}
+
+export function formatAuditExportError(error: unknown): string {
+  if (error instanceof ApiError) return `${error.status}: ${error.message}`;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+export function isCustomAuditChannel(
+  channel: string | undefined,
+  knownChannels: string[],
+  explicitCustomMode: boolean,
+): boolean {
+  return (
+    explicitCustomMode ||
+    (!!channel && !knownChannels.includes(channel))
+  );
+}
+
+type AuditRouteSearch = {
+  user?: string;
+  action?: string;
+  agent?: string;
+  channel?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  seq?: number;
+};
+
+export function filtersFromRouteSearch(search: AuditRouteSearch): AuditQueryFilters {
+  return {
+    user: search.user,
+    action: search.action,
+    agent: search.agent,
+    channel: search.channel,
+    from: search.from,
+    to: search.to,
+    limit: search.limit ?? 200,
+  };
+}
+
+export function routeSearchIdentity(search: AuditRouteSearch): string {
+  const params = auditFiltersToParams(filtersFromRouteSearch(search));
+  if (search.seq !== undefined) params.set("seq", String(search.seq));
+  return params.toString();
 }
 
 // Action enum identifiers — these are the literal `AuditAction` variant
@@ -436,34 +501,31 @@ export function AuditPage() {
   // `?seq=N` deep-link to a specific entry's detail modal. The page
   // writes back to the URL whenever `active` changes so a bookmark /
   // shared link round-trips.
-  const search = useSearch({ from: "/audit" }) as {
-    user?: string;
-    action?: string;
-    agent?: string;
-    channel?: string;
-    from?: string;
-    to?: string;
-    limit?: number;
-    seq?: number;
-  };
-  const initialFilters: AuditQueryFilters = useMemo(
-    () => ({
-      user: search.user,
-      action: search.action,
-      agent: search.agent,
-      channel: search.channel,
-      from: search.from,
-      to: search.to,
-      limit: search.limit ?? 200,
-    }),
-    // Initial only — subsequent URL changes flow OUT (active → URL),
-    // not in. Reading `search` reactively here would create a loop with
-    // the sync effect below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+  const search = useSearch({ from: "/audit" }) as AuditRouteSearch;
+  const routeFilters = useMemo(
+    () =>
+      filtersFromRouteSearch({
+        user: search.user,
+        action: search.action,
+        agent: search.agent,
+        channel: search.channel,
+        from: search.from,
+        to: search.to,
+        limit: search.limit,
+      }),
+    [
+      search.user,
+      search.action,
+      search.agent,
+      search.channel,
+      search.from,
+      search.to,
+      search.limit,
+    ],
   );
-  const [draft, setDraft] = useState<AuditQueryFilters>(initialFilters);
-  const [active, setActive] = useState<AuditQueryFilters>(initialFilters);
+  const routeIdentity = routeSearchIdentity(search);
+  const [draft, setDraft] = useState<AuditQueryFilters>(routeFilters);
+  const [active, setActive] = useState<AuditQueryFilters>(routeFilters);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -471,12 +533,33 @@ export function AuditPage() {
   // the row map so the `?seq=` URL deep-link can pre-open it without
   // racing with the row click handler.
   const [detailEntry, setDetailEntry] = useState<AuditQueryEntry | null>(null);
+  const [channelCustomMode, setChannelCustomMode] = useState(false);
+  const syncingFromRouteRef = useRef(false);
+  const expectedRouteIdentityRef = useRef<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
   // Per-row detail-expansion. Keyed by `${seq}-${hash}` (same as row key).
   // We default to "clamped" for any row with shouldClampDetail(detail);
   // Show more flips it for that one row only.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+
+  // TanStack Router can update search params without remounting this page.
+  // Accept those external changes while ignoring the replace-navigation
+  // emitted by the active-filter sync effect below.
+  useEffect(() => {
+    if (expectedRouteIdentityRef.current === routeIdentity) {
+      expectedRouteIdentityRef.current = null;
+      syncingFromRouteRef.current = true;
+      return;
+    }
+    syncingFromRouteRef.current = true;
+    setDraft(routeFilters);
+    setActive(routeFilters);
+    setChannelCustomMode(false);
+    setDetailEntry((current) =>
+      current?.seq === search.seq ? current : null,
+    );
+  }, [routeFilters, routeIdentity, search.seq]);
   const toggleExpanded = (key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -549,16 +632,20 @@ export function AuditPage() {
   // channel not in the seed). The Select snaps to "Custom…" and the
   // free-text input below stays visible.
   const channelIsCustom = useMemo(() => {
-    if (!draft.channel) return false;
-    return !channelOptions.some((o) => o.value === draft.channel);
-  }, [draft.channel, channelOptions]);
+    const knownChannels = channelOptions.map((option) => option.value);
+    return isCustomAuditChannel(
+      draft.channel,
+      knownChannels,
+      channelCustomMode,
+    );
+  }, [draft.channel, channelOptions, channelCustomMode]);
 
   const onChannelChange = (value: string) => {
     if (value === "__custom__") {
-      // Stay on whatever was typed; if blank, just open the input.
-      setDraft((d) => ({ ...d, channel: d.channel ?? "" }));
+      setChannelCustomMode(true);
       return;
     }
+    setChannelCustomMode(false);
     setDraft((d) => ({ ...d, channel: value || undefined }));
   };
 
@@ -569,6 +656,7 @@ export function AuditPage() {
 
   const onClearAll = () => {
     const reset: AuditQueryFilters = { limit: 200 };
+    setChannelCustomMode(false);
     setDraft(reset);
     setActive(reset);
   };
@@ -588,7 +676,11 @@ export function AuditPage() {
   // preserved so an open detail modal stays in the URL while the
   // filters change underneath.
   useEffect(() => {
-    const next: Record<string, string | number | undefined> = {
+    if (syncingFromRouteRef.current) {
+      syncingFromRouteRef.current = false;
+      return;
+    }
+    const next: AuditRouteSearch = {
       user: active.user || undefined,
       action: active.action || undefined,
       agent: active.agent || undefined,
@@ -600,6 +692,7 @@ export function AuditPage() {
       limit: active.limit && active.limit !== 200 ? active.limit : undefined,
       seq: detailEntry?.seq,
     };
+    expectedRouteIdentityRef.current = routeSearchIdentity(next);
     navigate({
       to: "/audit",
       // TanStack Router strips undefined keys, so omitted filters
@@ -607,23 +700,19 @@ export function AuditPage() {
       search: next as Record<string, unknown>,
       replace: true,
     });
-  }, [active, detailEntry?.seq, navigate]);
+  }, [active, detailEntry?.seq, navigate, routeIdentity]);
 
-  // `?seq=N` deep-link: when the page boots with a seq in the URL,
-  // wait for the row data and auto-open the matching detail modal.
-  // We only consult `search.seq` once (initial value) — subsequent
-  // URL writes from the modal-open/close path manage themselves.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const initialSeq = useMemo(() => search.seq, []);
+  // `?seq=N` deep-link: wait for the row data and open the matching
+  // detail modal. This stays reactive for in-place route navigation.
   useEffect(() => {
-    if (initialSeq == null || detailEntry) return;
+    if (search.seq == null || detailEntry?.seq === search.seq) return;
     // Defensive `?? []`: the backend returns `{count:0,limit:N}` without an
     // `entries` field on cold registries / pre-first-action, even though the
     // typed schema marks `entries` required. Prevents a render crash before
     // the first audit row exists.
-    const match = (query.data?.entries ?? []).find((e) => e.seq === initialSeq);
+    const match = (query.data?.entries ?? []).find((e) => e.seq === search.seq);
     if (match) setDetailEntry(match);
-  }, [initialSeq, query.data, detailEntry]);
+  }, [search.seq, query.data, detailEntry?.seq]);
 
   // Copy helpers + transient "Copied" affordance. The keyed state lets
   // multiple buttons in the modal each show their own check briefly
@@ -640,14 +729,10 @@ export function AuditPage() {
   };
 
   const buildPermalink = (entry: AuditQueryEntry): string => {
-    const params = new URLSearchParams();
-    if (active.user) params.set("user", active.user);
-    if (active.action) params.set("action", active.action);
-    if (active.agent) params.set("agent", active.agent);
-    if (active.channel) params.set("channel", active.channel);
-    if (active.from) params.set("from", active.from);
-    if (active.to) params.set("to", active.to);
-    if (active.limit && active.limit !== 200) params.set("limit", String(active.limit));
+    const params = auditFiltersToParams({
+      ...active,
+      limit: active.limit === 200 ? undefined : active.limit,
+    });
     params.set("seq", String(entry.seq));
     const qs = params.toString();
     // Use the dashboard's basepath; fall back to current location host so
@@ -663,6 +748,7 @@ export function AuditPage() {
   // and the draft (so the form, when expanded, reflects reality).
   const drillFilter = (key: keyof AuditQueryFilters, value: string) => {
     const next = { ...active, [key]: value };
+    if (key === "channel") setChannelCustomMode(false);
     setActive(next);
     setDraft(next);
   };
@@ -673,13 +759,7 @@ export function AuditPage() {
     try {
       await downloadExport(active, format);
     } catch (err) {
-      setExportError(
-        err instanceof ApiError
-          ? `${err.status}: ${err.message}`
-          : err instanceof Error
-            ? err.message
-            : String(err),
-      );
+      setExportError(formatAuditExportError(err));
     } finally {
       setExporting(false);
     }

@@ -1,5 +1,8 @@
 use super::history::MIN_HISTORY_MESSAGES;
-use super::message::{sanitize_for_memory, ACCUMULATED_TEXT_MAX_BYTES};
+use super::message::{
+    budget_interaction_halves, sanitize_for_memory, ACCUMULATED_TEXT_MAX_BYTES,
+    MEMORY_TRUNCATION_MARKER,
+};
 use super::model::needs_qualified_model_id;
 use super::retry::{BASE_RETRY_DELAY_MS, MAX_RETRIES};
 use super::text_recovery::{
@@ -27,6 +30,175 @@ fn test_max_iterations_constant() {
         MAX_ITERATIONS,
         librefang_types::agent::AutonomousConfig::DEFAULT_MAX_ITERATIONS
     );
+}
+
+#[test]
+fn context_compaction_updates_working_and_persistent_messages() {
+    let current_user = Message::user("current user");
+    let original = vec![
+        Message::user("old user"),
+        Message::assistant("old answer"),
+        current_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 7,
+        last_repaired_generation: Some(7),
+        peer_id: None,
+    };
+    let mut working = original;
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "earlier facts".to_string(),
+        vec![current_user.clone()],
+    );
+
+    assert_eq!(working.len(), session.messages.len());
+    for (working_message, persisted_message) in working.iter().zip(&session.messages) {
+        assert_eq!(working_message.role, persisted_message.role);
+        assert_eq!(
+            working_message.content.text_content(),
+            persisted_message.content.text_content()
+        );
+        assert_eq!(working_message.pinned, persisted_message.pinned);
+    }
+    assert_eq!(session.messages_generation, 8);
+    assert_eq!(session.last_repaired_generation, Some(7));
+    assert_eq!(new_messages_start, 1);
+    assert_eq!(session.messages.len(), 2);
+    assert_eq!(session.messages[0].role, Role::User);
+    assert!(session.messages[0]
+        .content
+        .text_content()
+        .contains("earlier facts"));
+    assert_eq!(session.messages[1].role, current_user.role);
+    assert_eq!(
+        session.messages[1].content.text_content(),
+        current_user.content.text_content()
+    );
+}
+
+#[test]
+fn context_compaction_preserves_current_turn_when_engine_omits_it() {
+    let current_user = Message::user("current user");
+    let current_tool_result = Message::user("current tool result");
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: vec![
+            Message::user("old user"),
+            current_user.clone(),
+            current_tool_result.clone(),
+        ],
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = session.messages.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        "old history".to_string(),
+        Vec::new(),
+    );
+
+    assert_eq!(new_messages_start, 1);
+    assert_eq!(session.messages.len(), 3);
+    assert_eq!(session.messages[1].timestamp, current_user.timestamp);
+    assert_eq!(session.messages[2].timestamp, current_tool_result.timestamp);
+    assert_eq!(working.len(), session.messages.len());
+}
+
+#[test]
+fn context_compaction_uses_last_duplicate_as_current_turn_boundary() {
+    let duplicate_user = Message::user("same request");
+    let original = vec![
+        duplicate_user.clone(),
+        Message::assistant("old answer"),
+        duplicate_user.clone(),
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 2;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 2);
+    assert_eq!(working.len(), session.messages.len());
+}
+
+#[test]
+fn context_compaction_keeps_full_current_turn_when_first_message_repeats() {
+    let repeated_user = Message::user("same request");
+    let original = vec![
+        Message::user("old request"),
+        repeated_user.clone(),
+        Message::assistant("intermediate answer"),
+        repeated_user,
+    ];
+    let mut session = Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id: librefang_types::agent::AgentId::new(),
+        messages: original.clone(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+    let mut working = original.clone();
+    let mut new_messages_start = 1;
+
+    apply_context_compaction(
+        &mut session,
+        &mut working,
+        &mut new_messages_start,
+        String::new(),
+        original,
+    );
+
+    assert_eq!(new_messages_start, 1);
+    let current_turn_text: Vec<_> = session.messages[new_messages_start..]
+        .iter()
+        .map(|message| message.content.text_content())
+        .collect();
+    assert_eq!(
+        current_turn_text,
+        ["same request", "intermediate answer", "same request"]
+    );
+    assert_eq!(working.len(), session.messages.len());
 }
 
 // ── push_accumulated_text bounded growth ──────────────────────────────
@@ -326,6 +498,63 @@ fn test_is_progress_text_leak() {
         "This is a much longer response where the model actually produced a full explanation of what it did and the ellipsis at the end is just stylistic...";
     assert!(long.chars().count() > 120);
     assert!(!is_progress_text_leak(long));
+}
+
+/// #7911: a cap of zero restores the pre-fix behaviour of storing whatever the turn produced, so an operator who wants the old shape can have it.
+#[test]
+fn budget_interaction_halves_zero_cap_is_unbounded() {
+    let big = "x".repeat(200_000);
+    let (u, r) = budget_interaction_halves(&big, "ok", 0);
+    assert_eq!(u.chars().count(), 200_000);
+    assert_eq!(r, "ok");
+}
+
+/// An exchange that already fits is returned byte-for-byte — no marker, no reallocation of content.
+#[test]
+fn budget_interaction_halves_under_budget_is_untouched() {
+    let (u, r) = budget_interaction_halves("hello", "hi there", 8_000);
+    assert_eq!(u, "hello");
+    assert_eq!(r, "hi there");
+}
+
+/// The failure the issue reports: a 200 KB attachment inlined into the user message.
+/// The reply is short, so it must survive whole — the attachment absorbs the entire remaining budget rather than each side losing half.
+#[test]
+fn budget_interaction_halves_gives_a_short_reply_its_full_length() {
+    let attachment = "P".repeat(201_765);
+    let reply = "Summarised the PDF for you.";
+    let (u, r) = budget_interaction_halves(&attachment, reply, 8_000);
+    assert_eq!(r, reply, "a short reply must never be cut");
+    assert_eq!(
+        u.chars().count(),
+        8_000 - reply.chars().count() + MEMORY_TRUNCATION_MARKER.chars().count(),
+        "the user side takes the whole remaining budget plus the marker"
+    );
+    assert!(u.ends_with(MEMORY_TRUNCATION_MARKER));
+}
+
+/// When both sides are oversized neither may starve the other: each gets exactly its half, and the two caps sum to the configured budget.
+#[test]
+fn budget_interaction_halves_splits_evenly_when_both_sides_are_large() {
+    let u_in = "u".repeat(10_000);
+    let r_in = "r".repeat(10_000);
+    let (u, r) = budget_interaction_halves(&u_in, &r_in, 999);
+    let marker = MEMORY_TRUNCATION_MARKER.chars().count();
+    assert_eq!(u.chars().count(), 500 + marker);
+    assert_eq!(r.chars().count(), 499 + marker);
+}
+
+/// Every cut lands on a `char` boundary, so a multi-byte script cannot be sliced into invalid UTF-8 (this would panic on a byte-index slice).
+#[test]
+fn budget_interaction_halves_cuts_on_char_boundaries() {
+    let u_in = "日本語テキスト".repeat(500);
+    let r_in = "émoji 🎉 ".repeat(500);
+    let (u, r) = budget_interaction_halves(&u_in, &r_in, 100);
+    let marker = MEMORY_TRUNCATION_MARKER.chars().count();
+    assert_eq!(u.chars().count(), 50 + marker);
+    assert_eq!(r.chars().count(), 50 + marker);
+    assert!(u_in.starts_with(u.trim_end_matches(MEMORY_TRUNCATION_MARKER)));
+    assert!(r_in.starts_with(r.trim_end_matches(MEMORY_TRUNCATION_MARKER)));
 }
 
 #[test]

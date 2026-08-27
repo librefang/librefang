@@ -84,16 +84,14 @@ export function useSetScheduleDeliveryTargets() {
   });
 }
 
-// Trigger writes must invalidate triggerKeys.all (not just the per-agent
+// Trigger writes invalidate triggerKeys.all (not just the per-agent
 // sub-key) so that SchedulerPage — which queries triggerKeys.lists() without
 // an agentId — also refreshes.  triggerKeys.list(agentId) is a strictly
 // longer key; react-query prefix matching never reaches the shorter lists()
-// key from it.
+// key from it. Triggers are event subscriptions, not CronScheduler jobs, so
+// they do not invalidate the independent cron/schedule views.
 function invalidateTriggerCaches(qc: ReturnType<typeof useQueryClient>) {
-  return Promise.all([
-    qc.invalidateQueries({ queryKey: triggerKeys.all }),
-    qc.invalidateQueries({ queryKey: cronKeys.all }),
-  ]);
+  return qc.invalidateQueries({ queryKey: triggerKeys.all });
 }
 
 export function useCreateTrigger() {
@@ -107,7 +105,7 @@ export function useCreateTrigger() {
 export function useUpdateTrigger() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: TriggerPatch; agentId?: string }) =>
+    mutationFn: ({ id, data }: { id: string; data: TriggerPatch }) =>
       updateTrigger(id, data),
     onSuccess: () => invalidateTriggerCaches(qc),
   });
@@ -116,7 +114,7 @@ export function useUpdateTrigger() {
 export function useDeleteTrigger() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id }: { id: string; agentId?: string }) => deleteTrigger(id),
+    mutationFn: ({ id }: { id: string }) => deleteTrigger(id),
     onSuccess: (_data, { id }) => {
       qc.removeQueries({ queryKey: triggerKeys.detail(id) });
       return invalidateTriggerCaches(qc);
@@ -147,7 +145,7 @@ export function useCreateCronJob() {
 export function useUpdateCronJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, data }: { id: string; data: UpdateCronJobPayload; agentId?: string }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateCronJobPayload }) =>
       updateCronJob(id, data),
     onSuccess: () => invalidateCronCaches(qc),
   });
@@ -156,7 +154,7 @@ export function useUpdateCronJob() {
 export function useDeleteCronJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id }: { id: string; agentId?: string }) => deleteCronJob(id),
+    mutationFn: ({ id }: { id: string }) => deleteCronJob(id),
     onSuccess: () => invalidateCronCaches(qc),
   });
 }
@@ -164,7 +162,7 @@ export function useDeleteCronJob() {
 export function useToggleCronJob() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean; agentId?: string }) =>
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       toggleCronJob(id, enabled),
     onSuccess: () => invalidateCronCaches(qc),
   });

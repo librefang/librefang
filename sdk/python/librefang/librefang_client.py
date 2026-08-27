@@ -54,6 +54,7 @@ class LibreFang:
         self.channels = _ChannelsResource(self)
         self.extensions = _ExtensionsResource(self)
         self.goals = _GoalsResource(self)
+        self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
@@ -118,6 +119,7 @@ class LibreFang:
 
         try:
             buffer = b""
+            data_lines = []
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
@@ -125,27 +127,40 @@ class LibreFang:
                 buffer += chunk
                 lines = buffer.split(b"\n")
                 buffer = lines.pop()
-                for line in lines:
-                    line = line.decode().strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
+                for raw_line in lines:
+                    line = raw_line.decode().removesuffix("\r")
+                    if not line:
+                        if not data_lines:
+                            continue
+                        data_str = "\n".join(data_lines)
+                        data_lines.clear()
                         if data_str == "[DONE]":
                             return
                         try:
                             yield json.loads(data_str)
                         except json.JSONDecodeError:
                             yield {"raw": data_str}
+                    elif line.startswith("data:"):
+                        value = line[5:]
+                        if value.startswith(" "):
+                            value = value[1:]
+                        data_lines.append(value)
             # A clean EOF can arrive without a trailing newline, leaving the last event in the buffer.
             # Parse it here rather than dropping it; the loop above only fires on a newline.
             if buffer:
-                line = buffer.decode().strip()
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str != "[DONE]":
-                        try:
-                            yield json.loads(data_str)
-                        except json.JSONDecodeError:
-                            yield {"raw": data_str}
+                line = buffer.decode().removesuffix("\r")
+                if line.startswith("data:"):
+                    value = line[5:]
+                    if value.startswith(" "):
+                        value = value[1:]
+                    data_lines.append(value)
+            if data_lines:
+                data_str = "\n".join(data_lines)
+                if data_str != "[DONE]":
+                    try:
+                        yield json.loads(data_str)
+                    except json.JSONDecodeError:
+                        yield {"raw": data_str}
         except socket.timeout as e:
             raise LibreFangError(f"Request timed out after {self.timeout}s") from e
         finally:
@@ -208,6 +223,9 @@ class _AgentsResource(_Resource):
     def reset_agent_identity(self, name: str, confirm: Any = None):
         return self._c._request("POST", f"/api/agents/identities/{name}/reset", None, query={"confirm": confirm})
 
+    def spawn_ephemeral_agent(self, **data):
+        return self._c._request("POST", "/api/agents/spawn-ephemeral", data)
+
     def get_agent(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}")
 
@@ -231,6 +249,9 @@ class _AgentsResource(_Resource):
 
     def get_agent_deliveries(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/deliveries")
+
+    def list_agent_ephemeral_runs(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/ephemeral-runs", None, query={"limit": limit})
 
     def list_agent_events(self, id: str, limit: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/events", None, query={"limit": limit})
@@ -522,20 +543,23 @@ class _BudgetResource(_Resource):
     def delete_user_budget(self, user_id: str):
         return self._c._request("DELETE", f"/api/budget/users/{user_id}")
 
-    def usage_stats(self):
-        return self._c._request("GET", "/api/usage")
+    def usage_stats(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model(self):
-        return self._c._request("GET", "/api/usage/by-model")
+    def usage_by_model(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model_performance(self):
-        return self._c._request("GET", "/api/usage/by-model/performance")
+    def usage_by_model_performance(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model/performance", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_daily(self):
-        return self._c._request("GET", "/api/usage/daily")
+    def usage_daily(self, start_date: Any = None, end_date: Any = None, days: Any = None):
+        return self._c._request("GET", "/api/usage/daily", None, query={"start_date": start_date, "end_date": end_date, "days": days})
 
-    def usage_summary(self):
-        return self._c._request("GET", "/api/usage/summary")
+    def usage_export(self, start_date: Any = None, end_date: Any = None, format: Any = None):
+        return self._c._request("GET", "/api/usage/export", None, query={"start_date": start_date, "end_date": end_date, "format": format})
+
+    def usage_summary(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/summary", None, query={"start_date": start_date, "end_date": end_date})
 
 
 # ── Channels Resource ──────────────────────────────────────────
@@ -584,6 +608,35 @@ class _GoalsResource(_Resource):
 
     def list_goal_templates(self):
         return self._c._request("GET", "/api/goals/templates")
+
+
+# ── Groups Resource ────────────────────────────────────────────
+
+class _GroupsResource(_Resource):
+
+    def list_groups(self):
+        return self._c._request("GET", "/api/groups")
+
+    def create_group(self, **data):
+        return self._c._request("POST", "/api/groups", data)
+
+    def get_group(self, name: str):
+        return self._c._request("GET", f"/api/groups/{name}")
+
+    def update_group(self, name: str, **data):
+        return self._c._request("PUT", f"/api/groups/{name}", data)
+
+    def delete_group(self, name: str):
+        return self._c._request("DELETE", f"/api/groups/{name}")
+
+    def add_group_member(self, name: str, user: str):
+        return self._c._request("PUT", f"/api/groups/{name}/members/{user}")
+
+    def remove_group_member(self, name: str, user: str):
+        return self._c._request("DELETE", f"/api/groups/{name}/members/{user}")
+
+    def user_groups(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/groups")
 
 
 # ── Hands Resource ─────────────────────────────────────────────
@@ -769,6 +822,15 @@ class _ModelsResource(_Resource):
     def remove_custom_model(self, id: str):
         return self._c._request("DELETE", f"/api/models/custom/{id}")
 
+    def get_model_overrides(self, id: str):
+        return self._c._request("GET", f"/api/models/overrides/{id}")
+
+    def set_model_overrides(self, id: str, **data):
+        return self._c._request("PUT", f"/api/models/overrides/{id}", data)
+
+    def delete_model_overrides(self, id: str):
+        return self._c._request("DELETE", f"/api/models/overrides/{id}")
+
     def get_model(self, id: str):
         return self._c._request("GET", f"/api/models/{id}")
 
@@ -942,14 +1004,14 @@ class _PluginsResource(_Resource):
 
 class _ProactiveMemoryResource(_Resource):
 
-    def memory_list(self, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list(self, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_add(self, **data):
         return self._c._request("POST", "/api/memory", data)
 
-    def memory_list_agent(self, id: str, category: Any = None, offset: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "offset": offset, "limit": limit})
+    def memory_list_agent(self, id: str, category: Any = None, level: Any = None, offset: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}", None, query={"category": category, "level": level, "offset": offset, "limit": limit})
 
     def memory_reset_agent(self, id: str):
         return self._c._request("DELETE", f"/api/memory/agents/{id}")
@@ -978,8 +1040,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_store_relations(self, id: str, **data):
         return self._c._request("POST", f"/api/memory/agents/{id}/relations", data)
 
-    def memory_search_agent(self, id: str, q: Any = None, limit: Any = None):
-        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "limit": limit})
+    def memory_search_agent(self, id: str, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", f"/api/memory/agents/{id}/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats_agent(self, id: str):
         return self._c._request("GET", f"/api/memory/agents/{id}/stats")
@@ -1002,8 +1064,8 @@ class _ProactiveMemoryResource(_Resource):
     def memory_history(self, memory_id: str):
         return self._c._request("GET", f"/api/memory/items/{memory_id}/history")
 
-    def memory_search(self, q: Any = None, limit: Any = None):
-        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "limit": limit})
+    def memory_search(self, q: Any = None, level: Any = None, limit: Any = None):
+        return self._c._request("GET", "/api/memory/search", None, query={"q": q, "level": level, "limit": limit})
 
     def memory_stats(self):
         return self._c._request("GET", "/api/memory/stats")
@@ -1152,6 +1214,9 @@ class _SystemResource(_Resource):
     def effective_permissions(self, user_id: str):
         return self._c._request("GET", f"/api/authz/effective/{user_id}")
 
+    def whoami(self):
+        return self._c._request("GET", "/api/authz/whoami")
+
     def create_backup(self):
         return self._c._request("POST", "/api/backup")
 
@@ -1245,8 +1310,17 @@ class _SystemResource(_Resource):
     def list_agent_templates(self):
         return self._c._request("GET", "/api/templates")
 
+    def create_agent_type(self, **data):
+        return self._c._request("POST", "/api/templates", data)
+
     def get_agent_template(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}")
+
+    def update_agent_type(self, name: str, **data):
+        return self._c._request("PUT", f"/api/templates/{name}", data)
+
+    def delete_agent_type(self, name: str):
+        return self._c._request("DELETE", f"/api/templates/{name}")
 
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")

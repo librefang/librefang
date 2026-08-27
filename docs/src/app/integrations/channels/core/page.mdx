@@ -143,10 +143,13 @@ common `[[sidecar_channels]]` fields documented under
    - Copy the token (`xapp-...`).
 3. Go to **OAuth & Permissions** and add Bot Token Scopes:
    - `chat:write`
+   - `files:write` (required for `File` / `FileData` attachments sent by agents)
+   - `files:read` (required to forward user-uploaded files and images to the agent)
    - `app_mentions:read`
    - `im:history`
    - `im:read`
    - `im:write`
+   - `users:read` (only if you enable display-name resolution, below)
 4. Install the app to your workspace.
 5. Copy the Bot User OAuth Token (`xoxb-...`).
 6. Set the environment variables:
@@ -175,13 +178,66 @@ SLACK_BOT_TOKEN = "xoxb-..."
 # SLACK_FORCE_FLAT_REPLIES = "false"   # set "true" to post replies as top-level messages
 # SLACK_REACTIONS = "true"             # set "false" to drop the 👀 / ✅ receipt
 # SLACK_PROGRESS_CARD = "true"         # set "false" to drop the task-progress card
+# SLACK_FILE_DOWNLOADS = "true"        # set "false" to stop forwarding user uploads to the agent
+# SLACK_FILE_MAX_BYTES = "10485760"    # inbound attachment size cap
+# SLACK_FILE_ALLOWED_EXTENSIONS = ""   # comma-separated allow-list; empty accepts every extension
+# SLACK_FILE_DOWNLOAD_CHANNELS = ""    # comma-separated channel IDs; empty means every channel
+# SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = ""   # channel IDs that never accept uploads
+# SLACK_RESOLVE_DISPLAY_NAMES = "false"       # set "true" to show human names instead of raw U… ids
+# SLACK_ENUMERATE_MEMBERS = "false"           # set "true" to list every channel member, not only those who have spoken
+# SLACK_DISPLAY_NAME_TTL = "21600"            # how long a resolved name is cached, in seconds
 ```
 
 8. Restart the daemon.
 
 ### How It Works
 
-The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Responses are posted via the `chat.postMessage` Web API. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
+The Slack adapter uses Socket Mode, which establishes a WebSocket connection to Slack's servers. This avoids the need for a public webhook URL. The adapter receives events (app mentions, direct messages) and routes them to the configured agent. Text responses are posted via the `chat.postMessage` Web API. `File` and `FileData` responses use Slack's external upload flow and retain the same thread context. URL-backed files are downloaded only from public HTTP(S) targets and both URL-backed and inline files are capped at 10 MiB. When `threading = true`, replies are sent to the message's thread via `thread_ts`.
+
+### User Uploads
+
+A file or image dropped into a channel or DM reaches the agent as the message content, so the agent can look at the picture, transcribe the clip or read the document instead of being handed a URL it cannot open.
+Slack's private file URLs require the bot token, so the adapter declares a per-host authorization rule for Slack's own file hosts and the daemon downloads the file with it; the token is never attached to any other host, which matters because a workspace member can register a remote file pointing anywhere.
+One attachment per message is forwarded (the wire protocol carries one content value per message) and the attachment takes precedence over the message text, which rides along as its caption.
+Link-preview images are not followed — those belong to a URL somebody pasted, not to an upload.
+
+Four knobs gate it, all optional: `SLACK_FILE_DOWNLOADS` turns the whole feature off, `SLACK_FILE_MAX_BYTES` caps the size (10 MiB by default), `SLACK_FILE_ALLOWED_EXTENSIONS` restricts which extensions are accepted, and `SLACK_FILE_DOWNLOAD_CHANNELS` / `SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS` decide which channels participate — the pair a busy channel needs to opt out without disabling uploads everywhere.
+
+### Sender Display Names
+
+By default the adapter reports the sender's raw Slack id (`U09…`) as their display name, and that is what an agent sees and what the group roster stores.
+Set `SLACK_RESOLVE_DISPLAY_NAMES = "true"` to resolve it through Slack's `users.info` instead, which also fills in the `@handle`.
+This needs the `users:read` bot scope; without it every lookup fails and the adapter keeps reporting ids.
+
+Lookups are cached per user id for `SLACK_DISPLAY_NAME_TTL` seconds (six hours by default), so a busy channel costs a handful of API calls a day rather than one per message — `users.info` sits in a per-method rate limit that an uncached lookup would exhaust.
+Absences are cached too: a deleted user, or a bot missing the scope, costs one request rather than one per message.
+A transient failure (a rate limit, a dropped connection) is only suppressed for a minute, so a workspace that recovers starts resolving names again promptly.
+
+**This is off by default because it changes what LibreFang stores, not only what it shows.**
+The daemon persists one roster row per person who speaks in a group (`channel`, `chat_id`, `user_id`, display name, handle, first and last seen), and that row carries whatever this adapter reports.
+Leaving the knob off keeps the stored value an opaque platform id; turning it on writes real names into `~/.librefang/memory.db` until the row is removed.
+Rows have no automatic expiry today, so treat enabling it as a decision about personal data retention, not a display preference.
+Operators who want human-readable names for a handful of people without any lookup or storage change can keep using `[users]` entries, which stay authoritative.
+
+### Channel Member Enumeration
+
+By default the daemon knows about the people who have spoken in a channel and nobody else, so `channel_members` answers "who has talked here?" rather than "who is in here?".
+Set `SLACK_ENUMERATE_MEMBERS = "true"` to have every inbound group message carry the channel's full `conversations.members` list, which `channel_members` then reports.
+This needs the `channels:read` scope for public channels and `groups:read` for private ones; without them every sweep fails and the roster keeps listing only the speakers.
+
+The list is cached per channel for `SLACK_MEMBER_LIST_TTL` seconds (an hour by default) and capped at `SLACK_MEMBER_LIST_MAX` members (500 by default), across all pages.
+The cap is a data decision, not only a rate-limit one: a company-wide channel lists everyone in the workspace, and each name becomes a stored row.
+Display names on this path come from the cache that `SLACK_RESOLVE_DISPLAY_NAMES` fills, and a sweep never issues its own `users.info` calls — resolving hundreds of people who have never spoken would exhaust that method's rate limit. In practice the people who have spoken carry names and the rest carry ids until they do.
+
+**Enumerated members can be listed, never privately messaged.**
+The daemon records them with `source = "enumerated"`, apart from the `observed` rows it writes for people who actually speak, and `channel_dm` authorizes only against the observed set.
+That separation is the point of the feature's shape: filling the existing roster from the platform's member list would have handed the agent a private channel to every member of every channel it sits in, including people who have never addressed it.
+Speaking promotes someone from `enumerated` to `observed`, and a later sweep never demotes them.
+
+**This is off by default because it changes how many people LibreFang stores, not just how well it names them.**
+`SLACK_RESOLVE_DISPLAY_NAMES` improves the record kept about the handful of people who have addressed the agent; this one creates a record for everyone the workspace lists in the channel, most of whom have not interacted with it.
+The two are independent — enumeration on with name resolution off stores opaque ids, which is the least-data configuration that still answers "who is in this channel?".
+As with display names, rows have no automatic expiry today, so treat enabling it as a decision about personal data retention.
 
 ### Processing-State Reactions
 

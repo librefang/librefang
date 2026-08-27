@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { flushSync } from 'react-dom';
 import { animate } from 'motion/react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -29,6 +28,11 @@ const mdComponents: Components = {
   a: ({ href, children }) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
+// Parsing markdown is substantially more expensive than advancing the motion
+// value. Batch several characters into one render while keeping the reveal
+// responsive enough to look continuous.
+const MIN_RENDER_INTERVAL_MS = 50;
+
 /// Streams `text` character-by-character into the markdown output to
 /// give an LLM-style "typing" effect. The reveal is driven by motion's
 /// `animate()` (instead of a hand-rolled RAF) so it joins the same
@@ -41,31 +45,45 @@ const mdComponents: Components = {
 export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
   const lastIdxRef = useRef(0);
-  const { remarkPlugins: mathRemark, rehypePlugins: mathRehype } = useMathPlugins(text);
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
+  const { remarkPlugins: mathRemark, rehypePlugins: mathRehype } = useMathPlugins(displayed);
 
   useEffect(() => {
     const needsReset = lastIdxRef.current > text.length;
     if (needsReset) {
-      flushSync(() => setDisplayed(""));
+      setDisplayed("");
       lastIdxRef.current = 0;
     }
 
     const start = lastIdxRef.current;
     const remaining = text.length - start;
     if (remaining <= 0) return;
+    const animationSpeed = speedRef.current;
+    const charsPerRender = Math.max(
+      1,
+      Math.ceil(MIN_RENDER_INTERVAL_MS / animationSpeed),
+    );
     const controls = animate(start, text.length, {
-      duration: (remaining * speed) / 1000,
+      duration: (remaining * animationSpeed) / 1000,
       ease: "linear",
       onUpdate: (latest) => {
         const idx = Math.min(Math.floor(latest), text.length);
-        if (idx !== lastIdxRef.current) {
+        const isComplete = idx === text.length;
+        if (isComplete || idx - lastIdxRef.current >= charsPerRender) {
           lastIdxRef.current = idx;
           setDisplayed(text.slice(0, idx));
         }
       },
+      onComplete: () => {
+        if (lastIdxRef.current !== text.length) {
+          lastIdxRef.current = text.length;
+          setDisplayed(text);
+        }
+      },
     });
     return () => controls.stop();
-  }, [text, speed]);
+  }, [text]);
 
   const remarkPlugins = useMemo(
     () => [remarkGfm, ...mathRemark],

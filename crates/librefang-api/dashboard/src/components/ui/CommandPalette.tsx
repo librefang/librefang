@@ -41,6 +41,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const [search, setSearch] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const commandRefs = useRef<(HTMLButtonElement | null)[]>([]);
   useFocusTrap(isOpen, dialogRef, true);
 
   const commands = useMemo<CommandItem[]>(() => [
@@ -92,11 +93,6 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     return label.includes(q) || cmd.id.includes(q);
   }), [commands, search, t]);
 
-  const filteredRef = useRef(filteredCommands);
-  filteredRef.current = filteredCommands;
-  const selectedRef = useRef(selectedIndex);
-  selectedRef.current = selectedIndex;
-
   useEffect(() => {
     if (!isOpen) {
       setSearch("");
@@ -109,18 +105,24 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   }, [filteredCommands]);
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isOpen) return;
+    if (!isOpen) return;
 
+    const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex(i => Math.min(i + 1, filteredRef.current.length - 1));
+        if (filteredCommands.length === 0) return;
+        const nextIndex = Math.min(selectedIndex + 1, filteredCommands.length - 1);
+        setSelectedIndex(nextIndex);
+        commandRefs.current[nextIndex]?.focus();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndex(i => Math.max(i - 1, 0));
-      } else if (e.key === "Enter" && filteredRef.current[selectedRef.current]) {
+        if (filteredCommands.length === 0) return;
+        const nextIndex = Math.max(selectedIndex - 1, 0);
+        setSelectedIndex(nextIndex);
+        commandRefs.current[nextIndex]?.focus();
+      } else if (e.key === "Enter" && filteredCommands[selectedIndex]) {
         e.preventDefault();
-        filteredRef.current[selectedRef.current].action();
+        filteredCommands[selectedIndex].action();
         onClose();
       } else if (e.key === "Escape") {
         onClose();
@@ -129,7 +131,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, filteredCommands, selectedIndex]);
 
   const groupedCommands = useMemo(() => filteredCommands.reduce((acc, cmd) => {
     const key = t(cmd.categoryKey);
@@ -197,6 +199,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                   return (
                     <button
                       key={cmd.id}
+                      ref={(element) => {
+                        commandRefs.current[globalIndex] = element;
+                      }}
+                      onFocus={() => setSelectedIndex(globalIndex)}
                       onClick={() => { cmd.action(); onClose(); }}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors duration-200 ${globalIndex === selectedIndex ? 'bg-brand/10 text-brand' : 'hover:bg-surface-hover'}`}
                     >
@@ -224,7 +230,7 @@ export function useCommandPalette() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setIsOpen(true);
+        setIsOpen((open) => !open);
       }
     };
 

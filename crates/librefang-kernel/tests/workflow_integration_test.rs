@@ -128,6 +128,7 @@ memory_write = ["self.*"]
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "step-beta".to_string(),
@@ -142,12 +143,14 @@ memory_write = ["self.*"]
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -228,11 +231,13 @@ memory_write = ["self.*"]
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -371,6 +376,7 @@ async fn test_workflow_e2e_with_groq() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "summarize".to_string(),
@@ -385,12 +391,14 @@ async fn test_workflow_e2e_with_groq() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -474,6 +482,7 @@ async fn workflow_describe_returns_explicit_input_schema() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -492,6 +501,7 @@ async fn workflow_describe_returns_explicit_input_schema() {
                 description: None,
             },
         ]),
+        owner: None,
     };
 
     let _wf_id = kernel.register_workflow(workflow).await;
@@ -549,6 +559,7 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "step-2".to_string(),
@@ -563,12 +574,14 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let _wf_id = kernel.register_workflow(workflow).await;
@@ -627,6 +640,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -637,6 +651,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             required: true,
             description: None,
         }]),
+        owner: None,
     };
     kernel.register_workflow(explicit).await;
 
@@ -658,11 +673,13 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     kernel.register_workflow(implicit).await;
 
@@ -684,11 +701,13 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     kernel.register_workflow(none).await;
 
@@ -758,6 +777,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
@@ -776,6 +796,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
                 description: Some("Cover image artifact".to_string()),
             },
         ]),
+        owner: None,
     };
     let wf_id = kernel.register_workflow(workflow).await;
 

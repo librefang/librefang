@@ -33,12 +33,15 @@ concurrency:
 jobs:
   tag:
     name: Create release tag
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: release-tag
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: main
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Verify tag format
@@ -58,7 +61,14 @@ jobs:
           # Same gate as release.yml `create_release` — the manifest
           # section must match the tag the maintainer is requesting.
           TAG="$VERSION"
-          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if ! WS_VERSION=$(python3 -c 'import sys, tomllib; data = tomllib.load(sys.stdin.buffer); print(data["workspace"]["package"]["version"])' < Cargo.toml); then
+            echo "::error::could not parse [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          if [ -z "$WS_VERSION" ]; then
+            echo "::error::[workspace.package].version is empty"
+            exit 1
+          fi
           if [ "${TAG#v}" != "$WS_VERSION" ]; then
             echo "::error::requested tag $TAG does not match [workspace.package].version $WS_VERSION"
             exit 1
@@ -82,9 +92,21 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
+          # Environment approval and validation can take long enough for main to advance.
+          # Fail instead of tagging a stale checkout whose version was validated against an older manifest.
+          git fetch --no-tags origin refs/heads/main
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          CURRENT_MAIN_SHA=$(git rev-parse FETCH_HEAD)
+          if [ "$CHECKED_OUT_SHA" != "$CURRENT_MAIN_SHA" ]; then
+            echo "::error::main advanced from $CHECKED_OUT_SHA to $CURRENT_MAIN_SHA; rerun the workflow"
+            exit 1
+          fi
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git tag -- "$VERSION"
-          git push origin "refs/tags/$VERSION"
+          # Include a no-change main update in the atomic push. If main moves
+          # after the fetch above, this refspec becomes non-fast-forward and
+          # GitHub rejects both the branch ref and the new tag.
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$VERSION"
           echo "✓ Pushed tag $VERSION"
           echo "Note: this push will trigger release.yml on the tag — split workflows below are only needed if individual targets need to be re-run."

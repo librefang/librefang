@@ -186,6 +186,16 @@ Validate end-to-end with `workflow_dispatch` on `release.yml` (`channel=current`
 | `HOMEBREW_TAP_TOKEN` | PAT with `contents:write` on `librefang/homebrew-tap` for `sync_homebrew` / `sync_homebrew_cask` |
 | `RAILWAY_TOKEN` / `RENDER_API_KEY` / `FLY_API_TOKEN` | One-click deploy preview environments triggered by `release.yml` |
 
+## Repository automation
+
+| Secret | Purpose | Required scope | Rotation |
+|---|---|---|---|
+| `WEBSITE_REPO_TOKEN` | Pushes generated artifacts to same-repository PR branches, opens scheduled update PRs, and enables their auto-merge so the resulting PAT-authored pushes trigger required CI. | Fine-grained PAT limited to `librefang/librefang` with **Contents: read and write** and **Pull requests: read and write**. | When personnel changes, the token expires, or the credential is compromised. |
+
+Do not grant Actions, Administration, or organization-wide repository access to this credential.
+The default `GITHUB_TOKEN` cannot replace it because GitHub suppresses workflow runs triggered by that token's pushes.
+Do not store a GitHub App installation token here because installation tokens expire; a future App-based flow must mint one during each run from separate App credentials.
+
 ---
 
 ## AUR publishing (release.yml `sync_aur_bin` / `sync_aur_desktop` / `sync_aur_docker`)
@@ -196,7 +206,7 @@ When `AUR_SSH_PRIVATE_KEY` is absent the three jobs no-op with a notice — noth
 | Secret | Purpose | Format | Rotation |
 |---|---|---|---|
 | `AUR_SSH_PRIVATE_KEY` | SSH private key whose public half is registered on the AUR account that owns `librefang-bin`, `librefang-desktop-bin`, `librefang-docker`. Authenticates `git push ssh://aur@aur.archlinux.org/…`. | OpenSSH private key incl. BEGIN/END lines (multi-line; no base64) | When personnel changes or the key is compromised |
-| `AUR_KNOWN_HOSTS` | Optional. `known_hosts` line(s) pinning `aur.archlinux.org`. When absent the workflow fetches them with `ssh-keyscan` at runtime (trust-on-first-use). Set it to remove the TOFU window. | `ssh-keyscan aur.archlinux.org` output | When AUR rotates its host key |
+| `AUR_KNOWN_HOSTS` | Required whenever `AUR_SSH_PRIVATE_KEY` is configured. Pinned `known_hosts` line(s) for `aur.archlinux.org`; publishing fails closed when absent. Verify fingerprints through a trusted Arch-operated channel before storing the lines. | Verified `known_hosts` entries for `aur.archlinux.org` | When AUR rotates its host key |
 | `AUR_GIT_NAME` | Optional. Commit author name for AUR pushes. Defaults to `LibreFang Release Bot`. | plain string | n/a |
 | `AUR_GIT_EMAIL` | Optional. Commit author email for AUR pushes. Defaults to `release-bot@librefang.ai`. | email | n/a |
 
@@ -211,8 +221,9 @@ ssh-keygen -t ed25519 -C "librefang-aur-ci" -f aur_ci -N ""
 
 # 3. Paste the PRIVATE key (aur_ci, incl. BEGIN/END) into AUR_SSH_PRIVATE_KEY.
 
-# 4. (Optional) pin the host key instead of relying on ssh-keyscan:
-ssh-keyscan aur.archlinux.org   # paste into AUR_KNOWN_HOSTS
+# 4. Obtain aur.archlinux.org host keys, verify their fingerprints through a
+#    trusted Arch-operated channel, then paste the verified known_hosts lines
+#    into AUR_KNOWN_HOSTS. Do not trust unverified ssh-keyscan output.
 ```
 
 The AUR repositories (`ssh://aur@aur.archlinux.org/librefang-bin.git`, etc.) must exist and be owned by that account before the first push.
