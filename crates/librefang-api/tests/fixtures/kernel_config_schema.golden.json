@@ -803,6 +803,7 @@
           "enabled": false,
           "session_ttl_days": 7,
           "agent_ttl_days": 30,
+          "episodic_ttl_days": 90,
           "decay_interval_hours": 1
         },
         "chunking": {
@@ -813,13 +814,23 @@
         "vector_backend": null,
         "vector_store_url": null,
         "soft_delete_retention_days": 30,
-        "pool_size": 8
+        "pool_size": 8,
+        "max_episodic_chars": 8000
       },
       "allOf": [
         {
           "$ref": "#/definitions/MemoryConfig"
         }
       ]
+    },
+    "memory_fact_budget_percent": {
+      "description": "Share of the prompt memory section's character budget reserved for extracted facts, as a percentage; the remainder goes to raw dialogue.\n\nThe two classes differ by roughly nine to one in row size, so a single ranked list spends the section on dialogue by size alone and leaves a large fraction of turns with no extracted fact in the prompt at all (#7920). Neither share is wasted: whatever one class does not use spills to the other, so a turn with only one class still fills the whole budget.\n\n`None` means \"use the compiled-in default\" (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the measurement, which could not separate 30/50/70 from run-to-run noise). Values above 100 are clamped down. Lower it when raw dialogue carries narrative continuity your agents depend on; raise it when the store is dominated by per-turn dialogue rows. The section's total character budget is unaffected either way.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint8",
+      "minimum": 0.0
     },
     "memory_wiki": {
       "description": "Memory wiki: durable markdown knowledge vault with provenance and optional Obsidian-friendly export. Off by default; see `librefang-memory-wiki` and issue #3329 for the runbook.",
@@ -4760,6 +4771,7 @@
             "enabled": false,
             "session_ttl_days": 7,
             "agent_ttl_days": 30,
+            "episodic_ttl_days": 90,
             "decay_interval_hours": 1
           },
           "allOf": [
@@ -4812,6 +4824,13 @@
             "boolean",
             "null"
           ]
+        },
+        "max_episodic_chars": {
+          "description": "Upper bound, in characters, on the text of a single episodic memory row written by the agent loop's per-turn writer (#7911). Zero disables the cap.\n\nThe per-turn writer composes `[Past exchange]\\nThem: …\\nYou: …` from the raw turn, so an inbound attachment that the channel adapter rendered into the user message — a transcribed PDF, a pasted log — was previously stored verbatim and embedded verbatim. The cap is applied before the embedding call, so it bounds embedding cost as well as row size, and it is split across the two halves of the exchange so a large user message can never truncate the agent's reply away entirely.",
+          "default": 8000,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
         },
         "pool_size": {
           "description": "Maximum number of pooled SQLite connections served by the memory substrate (#3378 follow-up). The pre-pool design serialised every SQLite call through a single `Mutex<Connection>`; the r2d2 pool removes that bottleneck but introduces a new ceiling — too low and the trigger lane / channel bridges / cron / audit / idempotency callers contend on `pool.get()`, too high and per-connection page caches add up (each connection holds at most ~2 MiB via `PRAGMA cache_size=-2000`). The default of 8 matches `queue.concurrency.trigger_lane` so the lane semaphore, not the pool, is the limiting factor under typical workloads. Bump in lockstep with `trigger_lane` if you raise that, or lower for memory-constrained deployments. Pool exhaustion is surfaced via the `librefang_memory_pool_get_failed_total{store=...}` counter.",
@@ -4875,6 +4894,13 @@
           "description": "Whether time-based decay is enabled.",
           "default": false,
           "type": "boolean"
+        },
+        "episodic_ttl_days": {
+          "description": "EPISODIC-scope memories expire after this many days of no access. Zero disables expiry.\n\n`episodic` is the default scope of the `memories` table and the scope the agent loop writes one row into on every non-fork, non-incognito turn, so before #7911 it was the only scope with no exit at all: never decayed, never distilled, never deleted. The TTL is deliberately longer than the AGENT default because an episodic row is the only record that a conversation happened, and `accessed_at` is refreshed by recall — a row that keeps being retrieved keeps living.",
+          "default": 90,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
         "session_ttl_days": {
           "description": "SESSION-scope memories expire after this many days of no access. Zero disables expiry.",

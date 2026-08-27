@@ -252,6 +252,7 @@ fn redacted_config_json(
         "vector_store_url": config.memory.vector_store_url,
         "soft_delete_retention_days": config.memory.soft_delete_retention_days,
         "pool_size": config.memory.pool_size,
+        "max_episodic_chars": config.memory.max_episodic_chars,
     });
 
     // ── Proactive Memory ──

@@ -1,5 +1,8 @@
 use super::history::MIN_HISTORY_MESSAGES;
-use super::message::{sanitize_for_memory, ACCUMULATED_TEXT_MAX_BYTES};
+use super::message::{
+    budget_interaction_halves, sanitize_for_memory, ACCUMULATED_TEXT_MAX_BYTES,
+    MEMORY_TRUNCATION_MARKER,
+};
 use super::model::needs_qualified_model_id;
 use super::retry::{BASE_RETRY_DELAY_MS, MAX_RETRIES};
 use super::text_recovery::{
@@ -495,6 +498,63 @@ fn test_is_progress_text_leak() {
         "This is a much longer response where the model actually produced a full explanation of what it did and the ellipsis at the end is just stylistic...";
     assert!(long.chars().count() > 120);
     assert!(!is_progress_text_leak(long));
+}
+
+/// #7911: a cap of zero restores the pre-fix behaviour of storing whatever the turn produced, so an operator who wants the old shape can have it.
+#[test]
+fn budget_interaction_halves_zero_cap_is_unbounded() {
+    let big = "x".repeat(200_000);
+    let (u, r) = budget_interaction_halves(&big, "ok", 0);
+    assert_eq!(u.chars().count(), 200_000);
+    assert_eq!(r, "ok");
+}
+
+/// An exchange that already fits is returned byte-for-byte — no marker, no reallocation of content.
+#[test]
+fn budget_interaction_halves_under_budget_is_untouched() {
+    let (u, r) = budget_interaction_halves("hello", "hi there", 8_000);
+    assert_eq!(u, "hello");
+    assert_eq!(r, "hi there");
+}
+
+/// The failure the issue reports: a 200 KB attachment inlined into the user message.
+/// The reply is short, so it must survive whole — the attachment absorbs the entire remaining budget rather than each side losing half.
+#[test]
+fn budget_interaction_halves_gives_a_short_reply_its_full_length() {
+    let attachment = "P".repeat(201_765);
+    let reply = "Summarised the PDF for you.";
+    let (u, r) = budget_interaction_halves(&attachment, reply, 8_000);
+    assert_eq!(r, reply, "a short reply must never be cut");
+    assert_eq!(
+        u.chars().count(),
+        8_000 - reply.chars().count() + MEMORY_TRUNCATION_MARKER.chars().count(),
+        "the user side takes the whole remaining budget plus the marker"
+    );
+    assert!(u.ends_with(MEMORY_TRUNCATION_MARKER));
+}
+
+/// When both sides are oversized neither may starve the other: each gets exactly its half, and the two caps sum to the configured budget.
+#[test]
+fn budget_interaction_halves_splits_evenly_when_both_sides_are_large() {
+    let u_in = "u".repeat(10_000);
+    let r_in = "r".repeat(10_000);
+    let (u, r) = budget_interaction_halves(&u_in, &r_in, 999);
+    let marker = MEMORY_TRUNCATION_MARKER.chars().count();
+    assert_eq!(u.chars().count(), 500 + marker);
+    assert_eq!(r.chars().count(), 499 + marker);
+}
+
+/// Every cut lands on a `char` boundary, so a multi-byte script cannot be sliced into invalid UTF-8 (this would panic on a byte-index slice).
+#[test]
+fn budget_interaction_halves_cuts_on_char_boundaries() {
+    let u_in = "日本語テキスト".repeat(500);
+    let r_in = "émoji 🎉 ".repeat(500);
+    let (u, r) = budget_interaction_halves(&u_in, &r_in, 100);
+    let marker = MEMORY_TRUNCATION_MARKER.chars().count();
+    assert_eq!(u.chars().count(), 50 + marker);
+    assert_eq!(r.chars().count(), 50 + marker);
+    assert!(u_in.starts_with(u.trim_end_matches(MEMORY_TRUNCATION_MARKER)));
+    assert!(r_in.starts_with(r.trim_end_matches(MEMORY_TRUNCATION_MARKER)));
 }
 
 #[test]

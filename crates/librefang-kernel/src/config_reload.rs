@@ -863,6 +863,11 @@ pub fn build_reload_plan_with_caps(
             old.max_history_messages != new.max_history_messages,
             "max_history_messages",
         );
+        // Read live per turn: the kernel copies it into `LoopOptions` from `self.config.load()` at every `send_message_full` / spawn site, so the ArcSwap swap is the whole reapply action.
+        noop_if_changed(
+            old.memory_fact_budget_percent != new.memory_fact_budget_percent,
+            "memory_fact_budget_percent",
+        );
         noop_if_changed(
             old.max_agent_call_depth != new.max_agent_call_depth,
             "max_agent_call_depth",
@@ -1099,6 +1104,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         // -- backfilled NOOP branches --
         "agent_max_iterations",
         "max_history_messages",
+        "memory_fact_budget_percent",
         "max_agent_call_depth",
         "tool_timeout_secs",
         "tool_timeouts",
