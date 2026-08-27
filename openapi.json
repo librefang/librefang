@@ -13103,7 +13103,7 @@
           }
         ],
         "responses": {
-          "200": {
+          "204": {
             "description": "User deleted"
           },
           "404": {

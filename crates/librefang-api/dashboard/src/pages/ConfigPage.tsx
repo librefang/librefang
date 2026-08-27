@@ -31,6 +31,79 @@ import { TomlViewer } from "../components/TomlViewer";
 import { StringMapEditor } from "../components/config/StringMapEditor";
 import { StructListEditor } from "../components/config/StructListEditor";
 
+export function configValuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (
+    a === null ||
+    b === null ||
+    typeof a !== "object" ||
+    typeof b !== "object"
+  ) {
+    return false;
+  }
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    if (
+      !configValuesEqual(
+        (a as Record<string, unknown>)[key],
+        (b as Record<string, unknown>)[key],
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+type ConfigStatusResponse = {
+  status?: string;
+  restart_required?: boolean;
+  reload_error?: string | null;
+};
+
+export function configSavePresentation(
+  data: ConfigStatusResponse,
+  t: (key: string, fallback: string) => string,
+): { ok: boolean; msg: string } {
+  if (data.status === "saved_reload_failed") {
+    const base = t("config.saved_reload_failed", "Saved but reload failed");
+    return {
+      ok: false,
+      msg: data.reload_error ? `${base}: ${data.reload_error}` : base,
+    };
+  }
+  if (data.status === "applied_partial" || data.restart_required) {
+    return {
+      ok: true,
+      msg: t("config.saved_restart", "Saved (restart required)"),
+    };
+  }
+  return { ok: true, msg: t("common.saved", "Saved") };
+}
+
+export function effectiveConfigTab(
+  isSearching: boolean,
+  activeSection: string | null,
+  sectionKeys: string[],
+): string | null {
+  if (isSearching) return null;
+  if (activeSection && sectionKeys.includes(activeSection)) return activeSection;
+  return sectionKeys[0] ?? null;
+}
+
+export function configSectionTabClass(
+  isActive: boolean,
+  isSearching: boolean,
+): string {
+  if (isActive) return "border-brand text-brand";
+  if (isSearching) return "border-transparent text-text-dim/40 cursor-not-allowed";
+  return "border-transparent text-text-dim hover:text-text hover:border-border-subtle";
+}
+
 /* ------------------------------------------------------------------ */
 /*  Category → sections mapping                                        */
 /* ------------------------------------------------------------------ */
@@ -382,14 +455,24 @@ function CopyPathButton({ path }: { path: string }) {
 /*  Field input                                                        */
 /* ------------------------------------------------------------------ */
 
-function JsonEditor({ value, onChange }: { value: unknown; onChange: (v: unknown) => void }) {
+export function JsonEditor({
+  value,
+  onChange,
+}: {
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
   const [text, setText] = useState(() => value != null ? JSON.stringify(value, null, 2) : "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const incoming = value != null ? JSON.stringify(value, null, 2) : "";
     setText((prev) => {
-      try { if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev; } catch { /* empty */ }
+      try {
+        if (JSON.stringify(JSON.parse(prev), null, 2) === incoming) return prev;
+      } catch {
+        return prev;
+      }
       return incoming;
     });
   }, [value]);
@@ -719,16 +802,13 @@ export function ConfigPage({ category }: { category: string }) {
 
   const saveMutation = useSetConfigValue({
     onSuccess: (data, variables) => {
-      const reloadFailed = data.status === "saved_reload_failed";
-      const restartRequired = data.status === "applied_partial" || data.restart_required;
-      if (reloadFailed) {
-        setSaveStatus((s) => ({ ...s, [variables.path]: { ok: false, msg: t("config.saved_reload_failed", "Saved but reload failed") } }));
-      } else {
-        const msg = restartRequired ? t("config.saved_restart", "Saved (restart required)") : t("common.saved", "Saved");
-        setSaveStatus((s) => ({ ...s, [variables.path]: { ok: true, msg } }));
-      }
+      const presentation = configSavePresentation(data, t);
+      setSaveStatus((s) => ({ ...s, [variables.path]: presentation }));
       setPendingChanges((p) => {
-        if (!(variables.path in p) || JSON.stringify(p[variables.path]) === JSON.stringify(variables.value)) {
+        if (
+          !(variables.path in p) ||
+          configValuesEqual(p[variables.path], variables.value)
+        ) {
           const next = { ...p }; delete next[variables.path]; return next;
         }
         return p;
@@ -792,18 +872,9 @@ export function ConfigPage({ category }: { category: string }) {
           continue;
         }
 
-        const reloadFailed = result.data?.status === "saved_reload_failed";
-        const restartRequired = result.data?.status === "applied_partial" || result.data?.restart_required;
-        const reloadErr = reloadFailed && result.data?.reload_error ? result.data.reload_error : null;
-        const msg = reloadFailed
-          ? reloadErr
-            ? `${t("config.saved_reload_failed", "Saved but reload failed")}: ${reloadErr}`
-            : t("config.saved_reload_failed", "Saved but reload failed")
-          : restartRequired
-            ? t("config.saved_restart", "Saved (restart required)")
-            : t("common.saved", "Saved");
-        nextStatuses[result.path] = { ok: !reloadFailed, msg };
-        if (reloadFailed) errors++;
+        const presentation = configSavePresentation(result.data ?? {}, t);
+        nextStatuses[result.path] = presentation;
+        if (!presentation.ok) errors++;
       }
 
       setSaveStatus((current) => ({ ...current, ...nextStatuses }));
@@ -811,7 +882,10 @@ export function ConfigPage({ category }: { category: string }) {
       setPendingChanges((current) => {
         const next = { ...current };
         for (const result of results) {
-          if (!result.error && JSON.stringify(current[result.path]) === JSON.stringify(result.value)) {
+          if (
+            !result.error &&
+            configValuesEqual(current[result.path], result.value)
+          ) {
             delete next[result.path];
           }
         }
@@ -908,9 +982,11 @@ export function ConfigPage({ category }: { category: string }) {
   const q = searchQuery.toLowerCase();
   const isSearching = q.length > 0;
 
-  const effectiveTab = isSearching
-    ? null
-    : (activeSection && sectionKeys.includes(activeSection) ? activeSection : sectionKeys[0] ?? null);
+  const effectiveTab = effectiveConfigTab(
+    isSearching,
+    activeSection,
+    sectionKeys,
+  );
 
   // Which sections have pending changes (for tab dot indicators)
   const sectionsWithPending = useMemo(() => {
@@ -1091,18 +1167,13 @@ export function ConfigPage({ category }: { category: string }) {
           {sectionKeys.map((sKey) => {
             const isActive = !isSearching && effectiveTab === sKey;
             const hasDot = sectionsWithPending.has(sKey);
+            const tabClass = configSectionTabClass(isActive, isSearching);
             return (
               <button
                 key={sKey}
                 onClick={() => { setActiveSection(sKey); setSearchQuery(""); }}
                 disabled={isSearching}
-                className={`relative px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-                  isActive
-                    ? "border-brand text-brand"
-                    : isSearching
-                      ? "border-transparent text-text-dim/40 cursor-not-allowed"
-                      : "border-transparent text-text-dim hover:text-text hover:border-border-subtle"
-                }`}
+                className={`relative px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors whitespace-nowrap flex items-center gap-1.5 ${tabClass}`}
               >
                 {t(`config.sec_${sKey}`, sectionLabelFallback(sKey))}
                 {hasDot && (
@@ -1345,7 +1416,7 @@ export function ConfigPage({ category }: { category: string }) {
                                 if (path in pendingChanges) saveMutation.mutate({ path, value: pendingChanges[path] });
                               }}
                               isLoading={isSaving}
-                              disabled={isSaving}
+                              disabled={isSaving || batchSaving}
                             >
                               <Save className="w-3 h-3" />
                             </Button>
@@ -1374,7 +1445,13 @@ export function ConfigPage({ category }: { category: string }) {
             <Button variant="ghost" size="sm" onClick={() => setPendingChanges({})}>
               {t("config.discard", "Discard")}
             </Button>
-            <Button variant="primary" size="sm" onClick={handleBatchSave} isLoading={batchSaving} disabled={batchSaving}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleBatchSave}
+              isLoading={batchSaving}
+              disabled={batchSaving || saveMutation.isPending}
+            >
               <Save className="w-3 h-3 mr-1" />
               {t("config.save_all", "Save All")}
             </Button>
