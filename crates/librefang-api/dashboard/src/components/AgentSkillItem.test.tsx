@@ -75,7 +75,7 @@ describe("AgentSkillItem", () => {
         onClick={onClick}
       />,
     );
-    await userEvent.click(screen.getByTestId("agent-skill-item"));
+    await userEvent.click(screen.getByTestId("agent-skill-item-action"));
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
@@ -97,6 +97,8 @@ describe("AgentSkillItem", () => {
     expect(onRemove).toHaveBeenCalledTimes(1);
     // stopPropagation must keep the row's onClick from also firing.
     expect(onClick).not.toHaveBeenCalled();
+    expect(screen.getByTestId("agent-skill-item-action"))
+      .not.toContainElement(screen.getByTestId("agent-skill-item-remove"));
   });
 
   it("renders an add affordance and assigns via the row click", async () => {
@@ -105,7 +107,7 @@ describe("AgentSkillItem", () => {
       <AgentSkillItem name="writing-coach" action="add" onClick={onClick} />,
     );
     expect(screen.getByTestId("agent-skill-item-add")).toBeTruthy();
-    await userEvent.click(screen.getByTestId("agent-skill-item"));
+    await userEvent.click(screen.getByTestId("agent-skill-item-action"));
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
@@ -123,6 +125,33 @@ describe("AgentSkillItem", () => {
     expect(btn.disabled).toBe(true);
     await userEvent.click(btn);
     expect(onRemove).not.toHaveBeenCalled();
+  });
+
+  it("gives the interactive row a name from its visible content", () => {
+    render(
+      <AgentSkillItem
+        name="web-search"
+        description="Searches the public web"
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", {
+      name: "web-search Searches the public web",
+    })).toBeInTheDocument();
+  });
+
+  it("blocks keyboard and pointer activation while busy", async () => {
+    const user = userEvent.setup();
+    const onClick = vi.fn();
+    render(<AgentSkillItem name="web-search" onClick={onClick} busy />);
+    const action = screen.getByTestId("agent-skill-item-action");
+
+    expect(action).toBeDisabled();
+    action.focus();
+    await user.keyboard("{Enter} ");
+    await user.click(action);
+    expect(onClick).not.toHaveBeenCalled();
   });
 
   // #7713 — a skill named in the manifest that the registry does not have.
