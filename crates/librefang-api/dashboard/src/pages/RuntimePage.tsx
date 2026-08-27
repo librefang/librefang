@@ -70,6 +70,33 @@ type BackupConfirmState = {
   components: string[];
 };
 
+export function laneUtilizationColor(percent: number): string {
+  if (percent >= 80) return "bg-error";
+  if (percent >= 50) return "bg-warning";
+  return "bg-brand";
+}
+
+export function taskStatusVariant(status?: string) {
+  if (status === "failed") return "error";
+  if (status === "completed") return "success";
+  if (status === "in_progress") return "brand";
+  return "warning";
+}
+
+export function anchorStatusVariant(status: string) {
+  if (status === "ok") return "success";
+  if (status === "diverged") return "error";
+  return "warning";
+}
+
+function useSettledMutationReset(settled: boolean, reset: () => void) {
+  useEffect(() => {
+    if (!settled) return;
+    const timeout = setTimeout(reset, 5000);
+    return () => clearTimeout(timeout);
+  }, [reset, settled]);
+}
+
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
   const d = Math.floor(seconds / 86400);
@@ -167,6 +194,22 @@ export function RuntimePage() {
   const deleteTaskMutation = useDeleteTask();
   const retryTaskMutation = useRetryTask();
   const cleanupMutation = useCleanupSessions();
+  const backupSettled = backupMutation.isSuccess || backupMutation.isError;
+  const restoreSettled = restoreMutation.isSuccess || restoreMutation.isError;
+  const reloadSettled = reloadMutation.isSuccess || reloadMutation.isError;
+  const cleanupSettled = cleanupMutation.isSuccess || cleanupMutation.isError;
+  const shutdownSettled = shutdownMutation.isSuccess || shutdownMutation.isError;
+  const resetBackup = backupMutation.reset;
+  const resetRestore = restoreMutation.reset;
+  const resetReload = reloadMutation.reset;
+  const resetCleanup = cleanupMutation.reset;
+  const resetShutdown = shutdownMutation.reset;
+
+  useSettledMutationReset(backupSettled, resetBackup);
+  useSettledMutationReset(restoreSettled, resetRestore);
+  useSettledMutationReset(reloadSettled, resetReload);
+  useSettledMutationReset(cleanupSettled, resetCleanup);
+  useSettledMutationReset(shutdownSettled, resetShutdown);
 
   // --- Derived data ---
   const snapshot = snapshotQuery.data ?? null;
@@ -516,7 +559,7 @@ export function RuntimePage() {
                     const active = lane.active ?? 0;
                     const capacity = lane.capacity ?? 1;
                     const pct = capacity > 0 ? Math.min((active / capacity) * 100, 100) : 0;
-                    const color = pct >= 80 ? "bg-error" : pct >= 50 ? "bg-warning" : "bg-brand";
+                    const color = laneUtilizationColor(pct);
                     return (
                       <div key={lane.lane ?? "default"}>
                         <div className="flex items-center justify-between mb-1">
@@ -538,15 +581,27 @@ export function RuntimePage() {
                     const taskId = task.id;
                     return (
                       <div key={taskId ?? task.created_at ?? `${task.status}-${task.type ?? "task"}`} className="flex items-center gap-2 text-xs py-1 px-2 rounded-lg bg-main/30">
-                        <Badge variant={task.status === "failed" ? "error" : task.status === "completed" ? "success" : task.status === "in_progress" ? "brand" : "warning"}>
+                        <Badge variant={taskStatusVariant(task.status)}>
                           {task.status || "-"}
                         </Badge>
                         <span className="flex-1 truncate font-mono text-[10px]">{taskId?.slice(0, 12)}</span>
                         {task.status === "failed" && taskId && (
-                          <button onClick={() => retryTaskMutation.mutate(taskId)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
+                          <button
+                            onClick={() => retryTaskMutation.mutate(taskId)}
+                            disabled={retryTaskMutation.isPending}
+                            className="text-brand hover:text-brand/80 text-[10px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("runtime.retry")}
+                          </button>
                         )}
                         {(task.status === "pending" || task.status === "in_progress") && taskId && (
-                          <button onClick={() => deleteTaskMutation.mutate(taskId)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
+                          <button
+                            onClick={() => deleteTaskMutation.mutate(taskId)}
+                            disabled={deleteTaskMutation.isPending}
+                            className="text-error hover:text-error/80 text-[10px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("runtime.cancel_task")}
+                          </button>
                         )}
                       </div>
                     );
@@ -624,13 +679,9 @@ export function RuntimePage() {
                     don't show stale or speculative status. */}
                 {auditVerifyQuery.data?.anchor_status && (
                   <Badge
-                    variant={
-                      auditVerifyQuery.data.anchor_status === "ok"
-                        ? "success"
-                        : auditVerifyQuery.data.anchor_status === "diverged"
-                          ? "error"
-                          : "warning"
-                    }
+                    variant={anchorStatusVariant(
+                      auditVerifyQuery.data.anchor_status,
+                    )}
                     title={auditVerifyQuery.data.anchor_path ?? undefined}
                   >
                     {t("runtime.audit_anchor", { defaultValue: "anchor" })}: {auditVerifyQuery.data.anchor_status}
@@ -745,15 +796,24 @@ export function RuntimePage() {
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Archive className="h-4 w-4 text-brand" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.backups")}</h2>
                 <div className="ml-auto">
-                  <Button variant="secondary" size="sm" leftIcon={<Download className="w-3 h-3" />} isLoading={backupMutation.isPending} onClick={() => backupMutation.mutate()}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    leftIcon={<Download className="w-3 h-3" />}
+                    isLoading={backupMutation.isPending}
+                    onClick={() =>
+                      backupMutation.mutate(undefined, {
+                        onSuccess: () =>
+                          addToast(t("runtime.backup_created"), "success"),
+                      })
+                    }
+                  >
                     {t("runtime.create_backup")}
                   </Button>
                 </div>
               </div>
 
-              {backupMutation.isSuccess && <p className="text-xs text-success mb-2">{t("runtime.backup_created")}</p>}
               {backupMutation.isError && <p className="text-xs text-error mb-2">{t("runtime.backup_error")}</p>}
-              {restoreMutation.isSuccess && <p className="text-xs text-success mb-2">{t("runtime.restore_success")}</p>}
               {restoreMutation.isError && <p className="text-xs text-error mb-2">{t("runtime.restore_error")}</p>}
 
               {backups.length > 0 ? (
@@ -836,7 +896,23 @@ export function RuntimePage() {
               <Button variant="secondary" size="sm" leftIcon={<RefreshCw className="w-3.5 h-3.5" />} isLoading={reloadMutation.isPending} onClick={() => reloadMutation.mutate()}>
                 {t("runtime.reload_config")}
               </Button>
-              <Button variant="secondary" size="sm" leftIcon={<Clock className="w-3.5 h-3.5" />} isLoading={cleanupMutation.isPending} onClick={() => cleanupMutation.mutate()}>
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<Clock className="w-3.5 h-3.5" />}
+                isLoading={cleanupMutation.isPending}
+                onClick={() =>
+                  cleanupMutation.mutate(undefined, {
+                    onSuccess: (data) =>
+                      addToast(
+                        t("runtime.sessions_deleted", {
+                          count: data?.sessions_deleted ?? 0,
+                        }),
+                        "success",
+                      ),
+                  })
+                }
+              >
                 {t("runtime.cleanup_sessions")}
               </Button>
               <Button variant="danger" size="sm" leftIcon={<Power className="w-3.5 h-3.5" />} onClick={() => setShowShutdownConfirm(true)}>
@@ -850,7 +926,6 @@ export function RuntimePage() {
               </p>
             )}
             {reloadMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.reload_error")}</p>}
-            {cleanupMutation.isSuccess && <p className="text-xs text-success mt-3">{t("runtime.sessions_deleted", { count: cleanupMutation.data?.sessions_deleted ?? 0 })}</p>}
             {shutdownMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.shutdown_error")}</p>}
           </Card>
         </>
@@ -910,6 +985,7 @@ export function RuntimePage() {
               keepConfig: backupConfirm.keepConfig,
               components: backupConfirm.components,
             });
+            addToast(t("runtime.restore_success"), "success");
           }
         }}
         onClose={() => setBackupConfirm(null)}
