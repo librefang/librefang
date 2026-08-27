@@ -1,4 +1,6 @@
 """Schema-shape contract tests for the sidecar self-description protocol."""
+import pytest
+
 from librefang.sidecar.protocol import Field, Schema
 
 
@@ -40,9 +42,19 @@ def test_schema_serializes_fields():
 
 
 def test_field_rejects_unknown_type():
-    import pytest
     with pytest.raises(ValueError, match="unknown field type"):
         Field("X", "X", "magic")
+
+
+def test_field_select_serializes_copied_options():
+    options = ["en", "zh"]
+    field = Field("LANG", "Language", "select", options=options)
+
+    serialized = field.to_dict()
+
+    assert serialized["type"] == "select"
+    assert serialized["options"] == ["en", "zh"]
+    assert serialized["options"] is not options
 
 
 def test_schema_reports_the_sdk_version():

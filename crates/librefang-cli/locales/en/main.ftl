@@ -2342,3 +2342,35 @@ tui-wizard-status-continuing = Continuing...
 
 
 
+
+# ── User groups (#7745) ─────────────────────────────────────────────────────
+group-none = No groups configured.
+group-section-detail = Group
+group-label-name = Name
+group-label-description = Description
+group-label-roles = Roles
+group-label-members = Members
+group-label-groups = Groups
+group-label-unregistered = Unregistered members
+group-header-members = MEMBERS
+group-header-roles = ROLES
+group-header-description = DESCRIPTION
+group-created = Group { $name } created.
+group-create-failed = Failed to create group: { $error }
+group-deleted = Group { $name } deleted.
+group-delete-failed = Failed to delete group: { $error }
+group-show-failed = Failed to read group: { $error }
+group-member-added = { $user } added to { $group }.
+group-member-removed = { $user } removed from { $group }.
+group-member-failed = Failed to change membership: { $error }
+group-user-none = { $user } belongs to no groups.
+tui-tab-groups = Groups
+tui-groups-title = Groups
+tui-groups-count = { $count } group(s)
+tui-groups-header-name = NAME
+tui-groups-header-members = MEMBERS
+tui-groups-header-roles = ROLES
+tui-groups-header-description = DESCRIPTION
+tui-groups-loading = Loading groups…
+tui-groups-empty = No groups configured. Create one with `librefang group create <name>`.
+tui-groups-hints = ↑/↓ navigate · r refresh

@@ -4,6 +4,10 @@
 //! - **USER**: Never decays (permanent user knowledge).
 //! - **SESSION**: Decays after `session_ttl_days` of no access.
 //! - **AGENT**: Decays after `agent_ttl_days` of no access.
+//! - **EPISODIC**: Decays after `episodic_ttl_days` of no access (#7911).
+//!
+//! `episodic` is both the table default (`migration.rs`, `scope TEXT NOT NULL DEFAULT 'episodic'`) and the scope the agent loop writes one row into on every non-fork, non-incognito turn, so it is by far the highest-volume scope in a real store.
+//! Before #7911 it was the only scope this sweep did not touch, which left the episodic layer with no exit: written every turn, never distilled by the consolidation engine (that engine only lowers `confidence` and merges near-verbatim duplicates — it never deletes by age), and never expired.
 //!
 //! Accessing a memory (via search/recall) resets the decay timer by updating
 //! `accessed_at`, which is already handled by `SemanticStore::recall_with_embedding`.
@@ -22,8 +26,8 @@ use tracing::{debug, info, warn};
 
 /// Run time-based decay on the memories table.
 ///
-/// Soft-deletes SESSION and AGENT scope memories whose `accessed_at` is older
-/// than the configured TTL. USER scope memories are never touched.
+/// Soft-deletes SESSION, AGENT and EPISODIC scope memories whose `accessed_at` is older than the configured TTL.
+/// USER scope memories are never touched.
 ///
 /// `accessed_at` is stored as RFC3339; rather than rely on lexicographic
 /// string comparison (which is wrong as soon as offsets / `Z` vs `+00:00` /
@@ -33,8 +37,8 @@ use tracing::{debug, info, warn};
 /// A zero TTL disables expiry for that scope. Rows with missing or malformed
 /// `accessed_at` values are left intact and reported for operator attention.
 ///
-/// Returns the number of memories soft-deleted. SESSION and AGENT updates are
-/// committed atomically.
+/// Returns the number of memories soft-deleted.
+/// All scope updates share one transaction and are committed atomically.
 pub fn run_decay(
     pool: &Pool<SqliteConnectionManager>,
     config: &MemoryDecayConfig,
@@ -51,72 +55,34 @@ pub fn run_decay(
     let tx = db.transaction().map_err(LibreFangError::memory)?;
 
     // Decay SESSION scope memories — soft-delete only.
-    if config.session_ttl_days > 0 {
-        let cutoff = now - chrono::Duration::days(i64::from(config.session_ttl_days));
-        let cutoff_str = cutoff.to_rfc3339();
-        let malformed = tx
-            .query_row(
-                "SELECT COUNT(*) FROM memories \
-                 WHERE deleted = 0 AND scope = ?1 \
-                   AND (accessed_at IS NULL OR datetime(accessed_at) IS NULL)",
-                ["session_memory"],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(LibreFangError::memory)?;
-        if malformed > 0 {
-            warn!(
-                scope = "SESSION",
-                malformed, "Memory decay skipped rows with invalid accessed_at"
-            );
-        }
-        let deleted = tx
-            .execute(
-                "UPDATE memories \
-                 SET deleted = 1, deleted_at = ?3 \
-                 WHERE deleted = 0 AND scope = ?1 \
-                   AND datetime(accessed_at) < datetime(?2)",
-                rusqlite::params!["session_memory", cutoff_str, now_unix],
-            )
-            .map_err(LibreFangError::memory)?;
-        if deleted > 0 {
-            debug!(scope = "SESSION", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
-        }
-        total_deleted += deleted;
-    }
+    total_deleted += decay_scope(
+        &tx,
+        "session_memory",
+        "SESSION",
+        config.session_ttl_days,
+        now,
+        now_unix,
+    )?;
 
     // Decay AGENT scope memories — soft-delete only.
-    if config.agent_ttl_days > 0 {
-        let cutoff = now - chrono::Duration::days(i64::from(config.agent_ttl_days));
-        let cutoff_str = cutoff.to_rfc3339();
-        let malformed = tx
-            .query_row(
-                "SELECT COUNT(*) FROM memories \
-                 WHERE deleted = 0 AND scope = ?1 \
-                   AND (accessed_at IS NULL OR datetime(accessed_at) IS NULL)",
-                ["agent_memory"],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(LibreFangError::memory)?;
-        if malformed > 0 {
-            warn!(
-                scope = "AGENT",
-                malformed, "Memory decay skipped rows with invalid accessed_at"
-            );
-        }
-        let deleted = tx
-            .execute(
-                "UPDATE memories \
-                 SET deleted = 1, deleted_at = ?3 \
-                 WHERE deleted = 0 AND scope = ?1 \
-                   AND datetime(accessed_at) < datetime(?2)",
-                rusqlite::params!["agent_memory", cutoff_str, now_unix],
-            )
-            .map_err(LibreFangError::memory)?;
-        if deleted > 0 {
-            debug!(scope = "AGENT", deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
-        }
-        total_deleted += deleted;
-    }
+    total_deleted += decay_scope(
+        &tx,
+        "agent_memory",
+        "AGENT",
+        config.agent_ttl_days,
+        now,
+        now_unix,
+    )?;
+
+    // Decay EPISODIC scope memories — soft-delete only (#7911).
+    total_deleted += decay_scope(
+        &tx,
+        "episodic",
+        "EPISODIC",
+        config.episodic_ttl_days,
+        now,
+        now_unix,
+    )?;
 
     tx.commit().map_err(LibreFangError::memory)?;
 
@@ -125,6 +91,56 @@ pub fn run_decay(
     }
 
     Ok(total_deleted)
+}
+
+/// Soft-delete every non-deleted row in `scope` whose `accessed_at` is older than `ttl_days`, inside the caller's transaction.
+///
+/// A zero `ttl_days` disables expiry for that scope and is a no-op.
+/// `label` is the operator-facing scope name used in log fields; it is deliberately distinct from `scope` because the log vocabulary (`SESSION` / `AGENT` / `EPISODIC`) predates the stored values (`session_memory` / `agent_memory` / `episodic`) and operator runbooks grep for the former.
+///
+/// `accessed_at` is stored as RFC3339; both sides are wrapped in `datetime(...)` so SQLite parses them as real timestamps rather than comparing strings whose offsets or fractional-second precision may differ.
+/// Rows with a missing or malformed `accessed_at` are left intact and counted into a single warn line so an operator can find them.
+fn decay_scope(
+    tx: &rusqlite::Transaction<'_>,
+    scope: &str,
+    label: &str,
+    ttl_days: u32,
+    now: chrono::DateTime<Utc>,
+    now_unix: i64,
+) -> LibreFangResult<usize> {
+    if ttl_days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now - chrono::Duration::days(i64::from(ttl_days));
+    let cutoff_str = cutoff.to_rfc3339();
+    let malformed = tx
+        .query_row(
+            "SELECT COUNT(*) FROM memories \
+             WHERE deleted = 0 AND scope = ?1 \
+               AND (accessed_at IS NULL OR datetime(accessed_at) IS NULL)",
+            [scope],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(LibreFangError::memory)?;
+    if malformed > 0 {
+        warn!(
+            scope = label,
+            malformed, "Memory decay skipped rows with invalid accessed_at"
+        );
+    }
+    let deleted = tx
+        .execute(
+            "UPDATE memories \
+             SET deleted = 1, deleted_at = ?3 \
+             WHERE deleted = 0 AND scope = ?1 \
+               AND datetime(accessed_at) < datetime(?2)",
+            rusqlite::params![scope, cutoff_str, now_unix],
+        )
+        .map_err(LibreFangError::memory)?;
+    if deleted > 0 {
+        debug!(scope = label, deleted, cutoff = %cutoff_str, "Soft-deleted stale memories");
+    }
+    Ok(deleted)
 }
 
 /// Hard-delete memories that have been soft-deleted for longer than
@@ -225,6 +241,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -241,6 +258,133 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining_id, "new-session");
+    }
+
+    /// #7911: `episodic` is the scope the agent loop writes on every turn and the table default, and before this change `run_decay` did not name it — so the highest-volume scope in a real store was the one scope with no exit at all.
+    #[test]
+    fn episodic_memories_expire_after_their_ttl() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+
+        let old_time = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+        insert_memory(&conn, "old-episodic", "episodic", &old_time);
+        let recent_time = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        insert_memory(&conn, "recent-episodic", "episodic", &recent_time);
+        assert_eq!(count_memories(&conn), 2);
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            episodic_ttl_days: 90,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 1);
+
+        let db = pool.get().unwrap();
+        let remaining: String = db
+            .query_row("SELECT id FROM memories WHERE deleted = 0", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, "recent-episodic");
+    }
+
+    /// The TTL is measured against `accessed_at`, which recall refreshes, so a row that keeps being retrieved keeps living however old it is.
+    /// This is the property that makes a time-based policy safe for a scope whose whole job is "what did we talk about".
+    #[test]
+    fn episodic_ttl_is_measured_from_last_access_not_creation() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+
+        // created_at is 400 days old, accessed_at is yesterday.
+        let created = (Utc::now() - chrono::Duration::days(400)).to_rfc3339();
+        let accessed = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES ('hot-row', '00000000-0000-0000-0000-000000000001', 'still useful', '\"System\"', 'episodic', 1.0, '{}', ?1, ?2, 63, 0)",
+            rusqlite::params![created, accessed],
+        )
+        .unwrap();
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 0,
+            agent_ttl_days: 0,
+            episodic_ttl_days: 90,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 0);
+        assert_eq!(count_memories(&pool.get().unwrap()), 1);
+    }
+
+    /// A zero TTL disables expiry for the episodic scope only — the other scopes still sweep, so the knob is per-scope and not a master switch.
+    #[test]
+    fn episodic_ttl_zero_disables_only_the_episodic_scope() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+
+        let old_time = (Utc::now() - chrono::Duration::days(365)).to_rfc3339();
+        insert_memory(&conn, "old-episodic", "episodic", &old_time);
+        insert_memory(&conn, "old-agent", "agent_memory", &old_time);
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            episodic_ttl_days: 0,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 1);
+
+        let db = pool.get().unwrap();
+        let remaining: String = db
+            .query_row("SELECT id FROM memories WHERE deleted = 0", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, "old-episodic");
+    }
+
+    /// Decay is a soft delete, so the existing `prune_soft_deleted_memories` retention sweep is what finally reclaims the row and its embedding BLOB.
+    /// Without this the episodic exit would only be half-built: rows would stop being recalled but the bytes would stay forever.
+    #[test]
+    fn expired_episodic_rows_are_hard_deleted_by_the_retention_sweep() {
+        let pool = make_pool();
+        let conn = pool.get().unwrap();
+        let old_time = (Utc::now() - chrono::Duration::days(365)).to_rfc3339();
+        insert_memory(&conn, "old-episodic", "episodic", &old_time);
+        drop(conn);
+
+        let config = MemoryDecayConfig {
+            enabled: true,
+            session_ttl_days: 0,
+            agent_ttl_days: 0,
+            episodic_ttl_days: 90,
+            decay_interval_hours: 1,
+        };
+        assert_eq!(run_decay(&pool, &config).unwrap(), 1);
+
+        // Backdate deleted_at so the retention sweep considers it eligible.
+        {
+            let db = pool.get().unwrap();
+            db.execute(
+                "UPDATE memories SET deleted_at = ?1 WHERE id = 'old-episodic'",
+                rusqlite::params![Utc::now().timestamp() - 31 * 86_400],
+            )
+            .unwrap();
+        }
+        assert_eq!(prune_soft_deleted_memories(&pool, 30).unwrap(), 1);
+
+        let total: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 0, "the row and its BLOB are gone, not just hidden");
     }
 
     #[test]
@@ -260,6 +404,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -291,6 +436,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -315,6 +461,7 @@ mod tests {
             enabled: false,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -348,6 +495,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -376,6 +524,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
 
@@ -416,6 +565,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
         assert!(run_decay(&pool, &config).is_err());
@@ -435,6 +585,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
         assert_eq!(run_decay(&pool, &config).unwrap(), 0);
@@ -456,6 +607,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 0,
             agent_ttl_days: 0,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
         assert_eq!(run_decay(&pool, &config).unwrap(), 0);
@@ -485,6 +637,7 @@ mod tests {
             enabled: true,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 0,
             decay_interval_hours: 1,
         };
         run_decay(&pool, &config).unwrap();

@@ -756,6 +756,7 @@ async fn run_agent_loop_inner(
         experiment_context: experiment_context.as_ref(),
         running_experiment: running_experiment.as_ref(),
         memories: &memories,
+        memory_fact_budget_percent: opts.memory_fact_budget_percent,
         stable_prefix_mode,
         streaming: false,
     });

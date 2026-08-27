@@ -42,6 +42,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::get(effective_permissions),
         )
         .route("/authz/check", axum::routing::get(check))
+        .route("/authz/whoami", axum::routing::get(whoami))
 }
 
 /// Reject the request unless the caller is an authenticated `Admin`+.
@@ -289,6 +290,107 @@ pub async fn check(
         allowed,
         reason,
         scope: "user_policy_only",
+    })
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// whoami — the caller's own effective identity (#7746)
+// ---------------------------------------------------------------------------
+
+/// Response of `GET /api/authz/whoami`.
+///
+/// The four fields answer the four questions an operator debugging an SSO denial actually has, in the order they ask them: who does the daemon think I am, what privilege did that resolve to, which teams am I on, and what did those teams confer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct WhoamiView {
+    /// Display name the credential resolved to.
+    /// `root` for the master api key, a trusted loopback caller, or an `allow_no_auth` deployment.
+    pub name: String,
+    /// Canonical `UserId` — the value that reaches `authorize()` and every audit entry.
+    pub user_id: String,
+    /// RBAC privilege level, `viewer` / `user` / `admin` / `owner`.
+    pub role: String,
+    /// The caller's [`librefang_types::principal::Principal`] in canonical `kind:uuid` form, or `null` for the synthetic root credential — which names no `[[users]]` entry and is therefore not a principal that can own anything.
+    /// Mirrors `AuthenticatedApiUser::owner_principal`.
+    pub principal: Option<String>,
+    /// Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims.
+    pub groups: Vec<String>,
+    /// The subset of `groups` that came from this request's token rather than from `[[groups]] members`.
+    /// Empty for every non-OIDC credential.
+    ///
+    /// Present as its own field because the difference is the thing an operator is trying to see: a name in `groups` but not here is something they have to remove from `config.toml` by hand, and a name in both is a grant that the identity provider can no longer retract.
+    pub idp_groups: Vec<String>,
+    /// Group-conferred role strings — each effective group's own name plus its declared `roles`.
+    /// The channel-binding vocabulary, deliberately **not** the RBAC ladder: `role` above is a separate answer and no entry here contributes to it.
+    pub roles: Vec<String>,
+}
+
+/// GET /api/authz/whoami — the calling credential's own resolved identity (#7746).
+///
+/// # Why it is not `require_admin`
+///
+/// The two sibling endpoints in this module report on *another* user and are gated at `Admin`.
+/// This one reports on the caller and nothing else, so it discloses to a `Viewer` only what that `Viewer` already presented, and gating it at `Admin` would withhold it from exactly the person most likely to need it — the SSO user whose claims mapped to less than they expected.
+/// An unauthenticated caller never reaches the handler at all: `/api/authz/*` is on no public allowlist, so `middleware::auth` has already answered 401.
+///
+/// # Why the IdP-derived membership is recomputed here
+///
+/// It is not stored anywhere to read.
+/// `IdpGroupMembership` is put into request extensions by the OIDC middleware from the token this request carried, and dies with the request; `KernelConfig::effective_groups_for` unions it with the declared `[[groups]]` at the moment of the call.
+/// That is what makes a revocation in the identity provider visible here as soon as the caller's token stops carrying the claim, with no local cleanup step.
+#[utoipa::path(
+    get,
+    path = "/api/authz/whoami",
+    tag = "system",
+    responses(
+        (status = 200, description = "The calling credential's resolved identity", body = WhoamiView),
+        (status = 401, description = "No credential established"),
+    )
+)]
+pub async fn whoami(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<AuthenticatedApiUser>>,
+    idp_groups: Option<axum::Extension<crate::middleware::IdpGroupMembership>>,
+) -> Response {
+    // `middleware::auth` inserts `AuthenticatedApiUser` for every credential it
+    // admits. The `None` arm is the trusted-loopback / `allow_no_auth` case,
+    // which is admitted without one; report it as the same synthetic root
+    // identity the rest of the surface uses rather than 401-ing a caller the
+    // auth layer deliberately let through.
+    let (name, role, user_id, principal) = match api_user.as_ref().map(|e| &e.0) {
+        Some(u) => (
+            u.name.clone(),
+            u.role,
+            u.user_id,
+            u.owner_principal().map(|p| p.to_string()),
+        ),
+        None => (
+            "root".to_string(),
+            UserRole::Owner,
+            UserId(crate::middleware::ROOT_API_KEY_USER_ID),
+            None,
+        ),
+    };
+
+    let claimed = idp_groups.map(|e| e.0.groups).unwrap_or_default();
+    let config = state.kernel.config_ref();
+    let groups = config.effective_groups_for(&name, &claimed);
+    let roles = config.effective_roles_for(&name, &claimed);
+
+    Json(WhoamiView {
+        name,
+        user_id: user_id.to_string(),
+        role: role.to_string(),
+        principal,
+        groups: groups.into_iter().collect(),
+        // Only the names that actually resolved to a declared group, so this is
+        // always a subset of `groups` and never advertises a membership the
+        // union above discarded.
+        idp_groups: claimed
+            .into_iter()
+            .filter(|n| config.group(n).is_some())
+            .collect(),
+        roles: roles.into_iter().collect(),
     })
     .into_response()
 }

@@ -1972,6 +1972,32 @@ impl LibreFangKernel {
             // originating session's checker is no longer live — skip the
             // session-scoped dangerous-command check here.
             dangerous_command_checker: None,
+            // #7744: deliberately `None`, and this is the one decision the
+            // issue thread left genuinely open, so it is recorded here rather
+            // than in a commit message.
+            //
+            // `DeferredToolExecution` is persisted. A principal written into
+            // it would be resolved at *defer* time and consumed at *resume*
+            // time — possibly after a restart, a config reload, or the
+            // deletion of the user it names — so it would be an assertion
+            // about the past presented as a live one. That is the same failure
+            // mode as stamping an unauthenticated sender: it looks
+            // authoritative and is not.
+            //
+            // The three candidate answers are (a) stamp it and accept the
+            // staleness, (b) re-resolve at resume and fail closed if the
+            // principal is gone, (c) refuse to defer a tool call that needs an
+            // owner. Choosing between them needs the enforcement semantics
+            // that this increment deliberately does not have yet — with
+            // nothing reading the owner, all three are indistinguishable — so
+            // the conservative one is taken and the choice is left to the PR
+            // that makes ownership restrict something.
+            //
+            // Concretely: a `workflow_create` or `cron_create` that goes
+            // through the approval gate is recorded unowned. That is a real
+            // gap, and it is narrower than the alternative of recording an
+            // owner nobody re-verified.
+            acting_principal: None,
         }
     }
 

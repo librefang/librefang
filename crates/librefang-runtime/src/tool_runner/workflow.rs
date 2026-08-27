@@ -338,10 +338,13 @@ pub(super) async fn tool_workflow_cancel(
 /// Splitting those across the two layers is how the tool schema and the enforced rule drift apart, and the kernel is the only side that can make the uniqueness check atomic with the insert.
 ///
 /// The whole `input` object is forwarded rather than a rebuilt subset, so a field added to the kernel-side spec is reachable from the tool the moment it exists.
+/// `acting_principal` is the owner recorded on the workflow: the identity the turn was acting for, not the agent that assembled it.
+/// It is a separate typed argument from `input` because the whole `input` object is forwarded to the kernel verbatim — a field the model could write would be a field the model could choose, and an owner the creating turn can name is not an owner.
 pub(super) async fn tool_workflow_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
+    acting_principal: Option<librefang_types::principal::Principal>,
 ) -> ToolResult {
     if !input["name"].is_string() {
         return Err(ToolError::MissingParameter("name"));
@@ -359,7 +362,7 @@ pub(super) async fn tool_workflow_create(
     let kh = require_kernel_typed(kernel)?;
     // `InvalidInput` (a spec that cannot become a workflow) and `Conflict` (the name is taken) both describe something the model can fix on its next turn, so the kernel's message is relayed as the reason rather than being flattened into an opaque upstream failure.
     let summary = kh
-        .create_workflow(input, caller_agent_id)
+        .create_workflow(input, caller_agent_id, acting_principal)
         .await
         .map_err(|e| match e {
             // The kernel's reason already names the offending field, so it is relayed whole rather than pinned to one schema parameter that may not be the one at fault.
@@ -384,6 +387,10 @@ pub(super) async fn tool_workflow_create(
         "description": summary.description,
         "step_count": summary.step_count,
         "has_input_schema": summary.has_input_schema,
+        // Echoed back in the canonical `kind:uuid` form so the model can see
+        // who the workflow was recorded for and say so, rather than inferring
+        // it. Absent when the turn resolved no principal.
+        "owner": summary.owner.map(|p| p.to_string()),
     })
     .to_string())
 }
