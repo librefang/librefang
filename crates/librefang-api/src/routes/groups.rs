@@ -192,12 +192,22 @@ fn normalize_list(values: &[String], limit: usize, label: &str) -> Result<Vec<St
     Ok(set.into_iter().collect())
 }
 
+/// The `{"status": "error", ...}` envelope is forbidden repo-wide (#3505): the HTTP
+/// status code is the source of truth for error-vs-ok, and a body-level `status`
+/// field invites clients to branch on it instead and disagree with the code.
+/// `scripts/check-error-shape.sh` enforces this.
+///
+/// Kept as a `(StatusCode, msg)` helper so the sixteen call sites read the same as
+/// before; only the envelope changed.
 fn err_response(status: StatusCode, msg: impl Into<String>) -> axum::response::Response {
-    (
-        status,
-        Json(serde_json::json!({ "status": "error", "error": msg.into() })),
-    )
-        .into_response()
+    let msg = msg.into();
+    match status {
+        StatusCode::BAD_REQUEST => crate::types::ApiErrorResponse::bad_request(msg),
+        StatusCode::NOT_FOUND => crate::types::ApiErrorResponse::not_found(msg),
+        StatusCode::CONFLICT => crate::types::ApiErrorResponse::conflict(msg),
+        _ => crate::types::ApiErrorResponse::internal(msg),
+    }
+    .into_response()
 }
 
 fn persist_error_response(state: &Arc<AppState>, e: PersistError) -> axum::response::Response {
