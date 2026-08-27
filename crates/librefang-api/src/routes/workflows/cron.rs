@@ -66,10 +66,22 @@ pub async fn list_cron_jobs(
 #[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job created", body = crate::types::JsonObject)))]
 pub async fn create_cron_job(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let agent_id = body["agent_id"].as_str().unwrap_or("");
-    match state.kernel.cron_create(agent_id, body.clone()).await {
+    // #7744: the job belongs to the authenticated caller, read from the auth
+    // extension and never from `body` — which is forwarded to `cron_create`
+    // whole, so a body-readable owner would be a caller-chosen owner.
+    let owner = api_user
+        .as_ref()
+        .and_then(|u| u.0.owner_principal())
+        .or_else(|| state.kernel.config_ref().default_owner_principal());
+    match state
+        .kernel
+        .cron_create(agent_id, body.clone(), owner)
+        .await
+    {
         Ok(result) => {
             // cron_create returns a JSON string — parse it so the response
             // is a proper JSON object instead of a stringified blob.

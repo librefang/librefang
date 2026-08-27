@@ -431,6 +431,22 @@ export const userKeys = {
   detail: (name: string) => [...userKeys.details(), name] as const,
 };
 
+// #7745 — user groups. `memberships(user)` hangs off the same root so a
+// membership change can invalidate `groupKeys.all` and sweep both the group
+// list and every per-user reverse lookup in one call, which is what every
+// membership mutation actually needs: adding alice to `oncall` changes the
+// group row AND alice's resolved role set.
+export const groupKeys = {
+  all: ["groups"] as const,
+  lists: () => [...groupKeys.all, "list"] as const,
+  list: (filters: { search?: string } = {}) =>
+    [...groupKeys.lists(), filters] as const,
+  details: () => [...groupKeys.all, "detail"] as const,
+  detail: (name: string) => [...groupKeys.details(), name] as const,
+  memberships: () => [...groupKeys.all, "membership"] as const,
+  membership: (user: string) => [...groupKeys.memberships(), user] as const,
+};
+
 // M5 / #3203 — per-user spend ranking + per-user detail. Endpoint stubbed
 // until budget tracking sprouts a user dimension.
 export const userBudgetKeys = {

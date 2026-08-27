@@ -240,11 +240,13 @@ pub(super) fn parse_time_to_hour_minute(s: &str) -> Result<(u32, u32), String> {
     Ok((hour, 0))
 }
 
+/// `acting_principal` is stamped on the resulting job exactly as it is for `cron_create` (#7744) — `schedule_create` is the natural-language front end for the same artifact, so an owner recorded by one and not the other would make ownership depend on which spelling the model happened to pick.
 pub(super) async fn tool_schedule_create(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
     sender_id: Option<&str>,
+    acting_principal: Option<librefang_types::principal::Principal>,
 ) -> ToolResult {
     let kh = require_kernel_typed(kernel)?;
     let agent_id = caller_agent_id.ok_or_else(|| caller_agent_id_missing("schedule_create"))?;
@@ -302,7 +304,7 @@ pub(super) async fn tool_schedule_create(
     }
 
     let result = kh
-        .cron_create(agent_id, job_json)
+        .cron_create(agent_id, job_json, acting_principal)
         .await
         .map_err(ToolError::upstream)?;
     Ok(format!(
@@ -423,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn schedule_create_without_kernel_returns_unavailable() {
-        let r = tool_schedule_create(&json!({}), None, Some("agent-a"), None).await;
+        let r = tool_schedule_create(&json!({}), None, Some("agent-a"), None, None).await;
         assert!(matches!(r, Err(ToolError::Unavailable("Kernel handle"))));
     }
 
