@@ -18,6 +18,7 @@ import {
   useReloadSkills,
 } from "./skills";
 import {
+  overviewKeys,
   runtimeKeys,
   skillKeys,
   fanghubKeys,
@@ -84,7 +85,7 @@ describe("useRestoreBackup", () => {
 
     const { result } = renderHook(() => useRestoreBackup(), { wrapper });
 
-    result.current.mutate("backup-1");
+    result.current.mutate({ filename: "backup-1" });
     await vi.waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalled();
     });
@@ -207,10 +208,60 @@ describe("useCleanupSessions", () => {
   });
 });
 
+describe("runtime mutation options", () => {
+  it("composes create-backup success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useCreateBackup({ onSuccess }), { wrapper });
+    await result.current.mutateAsync();
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("composes restore-backup success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useRestoreBackup({ onSuccess }), { wrapper });
+    await result.current.mutateAsync({ filename: "backup-1" });
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("composes delete-backup success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useDeleteBackup({ onSuccess }), { wrapper });
+    await result.current.mutateAsync("backup-1");
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("composes delete-task success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useDeleteTask({ onSuccess }), { wrapper });
+    await result.current.mutateAsync("task-1");
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("composes retry-task success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useRetryTask({ onSuccess }), { wrapper });
+    await result.current.mutateAsync("task-1");
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+
+  it("composes cleanup-session success callbacks", async () => {
+    const onSuccess = vi.fn();
+    const { wrapper } = createQueryClientWrapper();
+    const { result } = renderHook(() => useCleanupSessions({ onSuccess }), { wrapper });
+    await result.current.mutateAsync();
+    expect(onSuccess).toHaveBeenCalledOnce();
+  });
+});
+
 describe("useShutdownServer", () => {
-  it("calls shutdownServer without invalidating queries", async () => {
+  it("clears runtime and overview snapshot caches after shutdown", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
-    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const removeSpy = vi.spyOn(queryClient, "removeQueries");
 
     const { result } = renderHook(() => useShutdownServer(), { wrapper });
 
@@ -219,7 +270,8 @@ describe("useShutdownServer", () => {
       expect(result.current.isSuccess).toBe(true);
     });
 
-    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(removeSpy).toHaveBeenCalledWith({ queryKey: runtimeKeys.all });
+    expect(removeSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });
 

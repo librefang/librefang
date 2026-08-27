@@ -63,6 +63,9 @@ const LIBREFANG_SDK_VERSION: &str = concat!("librefang-rl-export/", env!("CARGO_
 /// purpose — Tinker's telemetry schema treats `platform` as a label.
 const LIBREFANG_PLATFORM: &str = "librefang";
 
+/// Header used by Tinker's generated SDK to deduplicate retried writes.
+const TINKER_IDEMPOTENCY_HEADER: &str = "x-idempotency-key";
+
 /// Wire shape of the Tinker "create session" request body. Matches the
 /// Stainless-generated SDK's `CreateSessionRequest` (tags, user_metadata,
 /// sdk_version, project_id, type discriminator).
@@ -191,12 +194,17 @@ async fn export_to_tinker_with_client(
         project_id: Some(project),
         request_type: "create_session",
     };
+    // Match Tinker's generated SDK: one opaque key per logical request,
+    // reused across transport retries. Without it, a response-side failure
+    // after the server commits can create an orphan session on the retry.
+    let create_idempotency_key = format!("librefang-rl-export-{}", uuid::Uuid::new_v4());
 
     let create_json: CreateSessionResponse =
         crate::retry::retry_upload("tinker.create_session", || {
             let req = client
                 .post(&create_url)
                 .header("x-api-key", api_key)
+                .header(TINKER_IDEMPOTENCY_HEADER, &create_idempotency_key)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .json(&create_body);
             async move {
@@ -304,8 +312,26 @@ mod tests {
     //! evolve uniformly.
     use super::*;
     use chrono::TimeZone;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{body_partial_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct FailFirstCreateSession {
+        attempts: AtomicUsize,
+    }
+
+    impl Respond for FailFirstCreateSession {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(503).set_body_string("temporary outage")
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "type": "create_session",
+                    "session_id": "deduplicated-session",
+                }))
+            }
+        }
+    }
 
     fn sample_export(run_id: &str) -> RlTrajectoryExport {
         RlTrajectoryExport {
@@ -366,6 +392,60 @@ mod tests {
             b"opaque-trajectory-bytes".len() as u64,
             "bytes_uploaded must equal payload length",
         );
+    }
+
+    #[tokio::test]
+    async fn create_session_reuses_idempotency_key_across_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/create_session"))
+            .respond_with(FailFirstCreateSession {
+                attempts: AtomicUsize::new(0),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/telemetry"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        export_to_tinker_with_base(
+            &server.uri(),
+            "rl-proj",
+            "tml-test-key",
+            sample_export("client-run-id"),
+        )
+        .await
+        .expect("transient create-session failure should recover");
+
+        let requests = server.received_requests().await.expect("request journal");
+        let create_requests: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/create_session")
+            .collect();
+        assert_eq!(create_requests.len(), 2);
+
+        let first_key = create_requests[0]
+            .headers
+            .get(TINKER_IDEMPOTENCY_HEADER)
+            .expect("first attempt must carry an idempotency key");
+        let second_key = create_requests[1]
+            .headers
+            .get(TINKER_IDEMPOTENCY_HEADER)
+            .expect("retry must carry an idempotency key");
+        assert_eq!(
+            first_key, second_key,
+            "one logical request must reuse its key"
+        );
+
+        let key = first_key.to_str().expect("idempotency key must be ASCII");
+        let uuid = key
+            .strip_prefix("librefang-rl-export-")
+            .expect("key must identify the LibreFang client");
+        uuid::Uuid::parse_str(uuid).expect("key suffix must be a UUID");
     }
 
     #[tokio::test]

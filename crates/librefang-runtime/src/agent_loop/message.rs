@@ -158,6 +158,67 @@ pub(super) fn sanitize_for_memory(text: &str) -> Option<String> {
     }
 }
 
+/// Marker appended to a side of the exchange that was cut by [`budget_interaction_halves`].
+/// Kept short and unambiguous so a recalled row reads as an excerpt rather than as a sentence the user actually stopped mid-way through.
+pub(super) const MEMORY_TRUNCATION_MARKER: &str = "… [truncated]";
+
+/// Split `max_chars` across the two halves of a `[Past exchange]` row and return each half cut to its share (#7911).
+///
+/// The per-turn episodic writer inlines whatever the turn produced, so a channel adapter that renders an attachment into the user message — a transcribed PDF, a pasted log — used to be stored and embedded verbatim.
+/// The largest row reported on the issue was 201 765 characters.
+///
+/// Budgeting rules, in order:
+/// - `max_chars == 0` disables the cap entirely and returns both halves untouched.
+/// - A side that already fits keeps all of its characters, and the characters it did not need are handed to the other side.
+///   This is what stops a huge user message from truncating the agent's reply away: the reply is usually small, takes its full length out of the budget, and the attachment absorbs the rest.
+/// - When both sides are over their half, each gets exactly `max_chars / 2`.
+///
+/// Lengths are counted in `char`s, and every cut lands on a `char` boundary, so the result is always valid UTF-8 and never splits a multi-byte grapheme's code point.
+/// The marker is appended on top of the budget rather than inside it — a caller asking for 8 000 characters gets at most 8 000 characters of *content*.
+pub(super) fn budget_interaction_halves(
+    user_text: &str,
+    response_text: &str,
+    max_chars: usize,
+) -> (String, String) {
+    if max_chars == 0 {
+        return (user_text.to_string(), response_text.to_string());
+    }
+    let user_len = user_text.chars().count();
+    let resp_len = response_text.chars().count();
+    if user_len + resp_len <= max_chars {
+        return (user_text.to_string(), response_text.to_string());
+    }
+
+    let half = max_chars / 2;
+    // Whichever side fits inside its half releases the remainder to the other.
+    let (user_cap, resp_cap) = if user_len <= half {
+        (user_len, max_chars - user_len)
+    } else if resp_len <= half {
+        (max_chars - resp_len, resp_len)
+    } else {
+        // `max_chars` may be odd; give the leftover character to the user side so the two caps still sum to exactly `max_chars`.
+        (max_chars - half, half)
+    };
+
+    (
+        truncate_to_chars(user_text, user_cap),
+        truncate_to_chars(response_text, resp_cap),
+    )
+}
+
+/// Cut `text` to at most `max_chars` `char`s, appending [`MEMORY_TRUNCATION_MARKER`] when anything was removed.
+fn truncate_to_chars(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        None => text.to_string(),
+        Some((byte_idx, _)) => {
+            let mut out = String::with_capacity(byte_idx + MEMORY_TRUNCATION_MARKER.len());
+            out.push_str(&text[..byte_idx]);
+            out.push_str(MEMORY_TRUNCATION_MARKER);
+            out
+        }
+    }
+}
+
 /// Thin delegate to the canonical cascade-leak detector in `silent_response`.
 /// See `crates/librefang-runtime/src/silent_response.rs` for full docs,
 /// marker lists, and trip-condition rationale.
@@ -192,6 +253,26 @@ pub(super) fn is_parameter_error_content(content: &str) -> bool {
     lower.contains("invalid parameter") ||
     lower.contains("parameter is required") ||
     lower.contains("argument is required")
+}
+
+fn ensure_post_trim_minimum(
+    messages: &mut Vec<Message>,
+    agent_name: &str,
+    user_message: &str,
+    history_kind: &str,
+) {
+    if messages.len() >= 2 && messages.iter().any(|m| m.role == Role::User) {
+        return;
+    }
+
+    warn!(
+        agent = %agent_name,
+        history = history_kind,
+        remaining = messages.len(),
+        "Trim + repair left too few messages, synthesizing minimal conversation"
+    );
+    messages.retain(|message| message.role == Role::System);
+    messages.push(Message::user(user_message));
 }
 
 /// Safely trim message history to `DEFAULT_MAX_HISTORY_MESSAGES`, cutting at
@@ -259,6 +340,12 @@ pub(super) fn safe_trim_messages(
         *session_messages = crate::session_repair::validate_and_repair(session_messages);
         *session_messages =
             crate::session_repair::ensure_starts_with_user(std::mem::take(session_messages));
+        ensure_post_trim_minimum(
+            session_messages,
+            agent_name,
+            user_message,
+            "persistent session",
+        );
     }
 
     if messages.len() <= max_history {
@@ -309,20 +396,7 @@ pub(super) fn safe_trim_messages(
 
     // Post-trim safety: ensure at least a user message survives so the LLM
     // request body is never empty.
-    if messages.len() < 2 || !messages.iter().any(|m| m.role == Role::User) {
-        warn!(
-            agent = %agent_name,
-            remaining = messages.len(),
-            "Trim + repair left too few messages, synthesizing minimal conversation"
-        );
-        // Keep any surviving system message, then append the current user turn.
-        let system_msgs: Vec<Message> = messages
-            .drain(..)
-            .filter(|m| m.role == Role::System)
-            .collect();
-        *messages = system_msgs;
-        messages.push(Message::user(user_message));
-    }
+    ensure_post_trim_minimum(messages, agent_name, user_message, "working copy");
 
     (working_mutated, session_mutated)
 }
@@ -524,5 +598,29 @@ mod safe_trim_session_repair_tests {
              got {:?} — this is the regression the audit closed",
             session[0].role
         );
+    }
+
+    #[test]
+    fn safe_trim_preserves_system_and_synthesizes_user_in_persisted_session() {
+        let mut system = Message::system("pinned system policy");
+        system.pinned = true;
+        let mut session = vec![system];
+        session.extend((0..20).map(|i| Message::assistant(format!("assistant-only-{i}"))));
+        let mut working = session.clone();
+
+        let (_, session_mutated) = safe_trim_messages(
+            &mut working,
+            &mut session,
+            "agent-under-test",
+            "current user message",
+            4,
+        );
+
+        assert!(session_mutated);
+        assert_eq!(session.len(), 2);
+        assert_eq!(session[0].role, Role::System);
+        assert_eq!(session[0].content.text_content(), "pinned system policy");
+        assert_eq!(session[1].role, Role::User);
+        assert_eq!(session[1].content.text_content(), "current user message");
     }
 }

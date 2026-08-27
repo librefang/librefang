@@ -74,8 +74,12 @@ impl SetupWizard {
                 }
                 "shell" => caps.shell.push("*".to_string()),
                 "memory" => {
-                    caps.memory_read.push("*".to_string());
-                    caps.memory_write.push("*".to_string());
+                    caps.memory_read
+                        .get_or_insert_with(Vec::new)
+                        .push("*".to_string());
+                    caps.memory_write
+                        .get_or_insert_with(Vec::new)
+                        .push("*".to_string());
                     for t in &["memory_store", "memory_recall"] {
                         let s = t.to_string();
                         if !caps.tools.contains(&s) {
@@ -149,6 +153,10 @@ impl SetupWizard {
             version: librefang_types::VERSION.to_string(),
             description: intent.description.clone(),
             author: "wizard".to_string(),
+            // The wizard has no caller identity in hand, so the agent it drafts
+            // falls back to `config.toml: default_owner` for its ownerless turns
+            // rather than being pinned to a principal nobody named (#7744).
+            owner: None,
             module: "builtin:chat".to_string(),
             schedule,
             session_mode: librefang_types::agent::SessionMode::default(),

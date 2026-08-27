@@ -957,6 +957,134 @@ fn translate_slack_role(
     mapped.and_then(UserRole::try_from_str_role)
 }
 
+/// Translate the `roles` claim of a validated OIDC ID token into a LibreFang [`UserRole`] using `[external_auth.role_map]` (#7744).
+///
+/// This is the same vocabulary as [`Action::required_role`] — `Viewer` < `User` < `Admin` < `Owner` — and deliberately not the free-form `BindingContext.roles` strings the channel router matches agent bindings on.
+/// Those two look alike and mean different things: the router's roles decide *which agent* answers a message, this one decides *what the caller may do*.
+/// Feeding IdP claims into the router's vocabulary would give an identity provider a say in agent routing and still leave authorization unanswered, so the claims are translated here, at the boundary, and only the resulting `UserRole` travels onward.
+///
+/// Returns `None` — meaning "no grant", not "least privilege" — when:
+/// - the operator declared no `role_map` (the default, so an OIDC bearer authorizes exactly nothing until an operator opts in),
+/// - none of the caller's claim values appear in the map, or
+/// - every matching entry names an unrecognised LibreFang role.
+///
+/// A caller holding several mapped roles gets the **highest-privilege** match, mirroring [`translate_discord_role`].
+/// Claim ordering is the IdP's business; letting it decide the effective LibreFang role would move privilege outside operator control.
+///
+/// A typo'd target (`"admn"`) is skipped rather than resolving to `User`, so an unrecognised role can never escalate — the caller keeps whatever the rest of the map granted them, and nothing at all if that was empty.
+pub fn translate_oidc_roles(
+    role_map: &std::collections::BTreeMap<String, String>,
+    claim_roles: &[String],
+) -> Option<UserRole> {
+    if role_map.is_empty() {
+        return None;
+    }
+    let mut best: Option<UserRole> = None;
+    for claim in claim_roles {
+        if let Some(mapped_str) = role_map.get(claim) {
+            if let Some(candidate) = UserRole::try_from_str_role(mapped_str) {
+                best = Some(match best {
+                    Some(prev) => prev.max(candidate),
+                    None => candidate,
+                });
+            }
+        }
+    }
+    best
+}
+
+/// Translate an OIDC caller's identity-attribute claim values into the set of local `[[groups]]` they are a member of for this request, using `[external_auth.group_map]` (#7746).
+///
+/// # Mapped, not name-matched
+///
+/// A claim value confers membership only when an operator wrote it into `group_map`, and only in the group that entry names.
+/// Matching an IdP group *by name* against `[[groups]]` would hand the identity provider the ability to mint a grant by inventing a claim value — in a tenant where creating a group is self-service, that is every employee — and it is the same property [`translate_oidc_roles`] protects for the role ladder.
+/// The claim values themselves are whatever `[external_auth] claim_paths` resolved: `roles` and `groups` by default, `scope` and Keycloak's nested `realm_access.roles` on request.
+///
+/// # A target that names no declared group is skipped
+///
+/// `declared` is consulted so a typo'd or stale target (`"platform" = "oncal"`) contributes nothing rather than minting a group that exists only inside this map.
+/// Such a group would be a live [`librefang_types::principal::Principal`] — it could own artifacts and appear in an audit entry — while being invisible in `[[groups]]` and therefore unmanageable and unauditable by the operator who is nominally responsible for it.
+/// The same reasoning makes `translate_oidc_roles` skip an unrecognised role string rather than defaulting it, and [`validate_oidc_group_map`] reports the condition at boot so it is a log line rather than a mystery.
+///
+/// # Returns a set, not a best match
+///
+/// Unlike [`translate_oidc_roles`], which picks the highest-privilege match because a privilege ladder is ordinal, membership has no ordering and every match counts.
+/// `BTreeSet` so two claim orderings — the IdP's business, and not stable between logins — produce a byte-identical result wherever this is stringified (#3298).
+///
+/// An empty `group_map` returns an empty set: the feature is off until an operator opts in, exactly as `role_map` is.
+pub fn translate_oidc_groups(
+    group_map: &std::collections::BTreeMap<String, String>,
+    declared: &[librefang_types::config::GroupConfig],
+    claim_values: &[String],
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    if group_map.is_empty() {
+        return out;
+    }
+    for claim in claim_values {
+        let Some(target) = group_map.get(claim) else {
+            continue;
+        };
+        if declared.iter().any(|g| &g.name == target) {
+            out.insert(target.clone());
+        } else {
+            debug!(
+                claim = claim.as_str(),
+                target = target.as_str(),
+                "external_auth.group_map names a group that is not declared in [[groups]]; \
+                 the claim confers no membership"
+            );
+        }
+    }
+    out
+}
+
+/// Validate every target in `[external_auth.group_map]` against the declared `[[groups]]` and emit a `tracing::warn!` per target that names none, returning the count.
+///
+/// Same rationale as [`validate_oidc_role_map`]: [`translate_oidc_groups`] already fails closed on a dangling target, so this exists purely so an operator who renames a group and forgets the map — or writes `"platform" = "oncal"` — learns at boot instead of wondering why their SSO users belong to nothing.
+///
+/// Ordering of the warnings follows the `BTreeMap`, so a boot log is comparable across restarts.
+pub fn validate_oidc_group_map(
+    group_map: &std::collections::BTreeMap<String, String>,
+    declared: &[librefang_types::config::GroupConfig],
+) -> usize {
+    let mut dangling = 0usize;
+    for (claim, target) in group_map {
+        if !declared.iter().any(|g| &g.name == target) {
+            warn!(
+                claim = claim.as_str(),
+                target = target.as_str(),
+                "external_auth.group_map points at a group that does not exist in [[groups]] \
+                 — callers holding this claim will be granted no membership by this entry"
+            );
+            dangling += 1;
+        }
+    }
+    dangling
+}
+
+/// Validate every target role string in `[external_auth.role_map]` and emit
+/// a `tracing::warn!` for each value that won't parse, returning the count.
+///
+/// Same rationale as [`validate_channel_role_mapping`]: the runtime already fails closed on a typo, so this exists purely so an operator who writes `"librefang-admins" = "admn"` learns about it at boot instead of wondering why SSO logins keep getting 401.
+pub fn validate_oidc_role_map(role_map: &std::collections::BTreeMap<String, String>) -> usize {
+    let mut typos = 0usize;
+    for (claim, mapped) in role_map {
+        if UserRole::try_from_str_role(mapped).is_none() {
+            warn!(
+                claim = claim.as_str(),
+                value = mapped.as_str(),
+                "external_auth.role_map has an unrecognized LibreFang role string \
+                 — callers holding this claim will be granted nothing by this entry. \
+                 Valid values: owner, admin, user, viewer, guest"
+            );
+            typos += 1;
+        }
+    }
+    typos
+}
+
 /// Validate every configured role string in `[channel_role_mapping]`
 /// against [`UserRole::try_from_str_role`] and emit a `tracing::warn!`
 /// for each value that won't parse.
@@ -1653,6 +1781,8 @@ mod channel_role_tests {
     use librefang_types::config::{
         ChannelRoleMapping, DiscordRoleMapping, SlackRoleMapping, TelegramRoleMapping,
     };
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1783,6 +1913,215 @@ mod channel_role_tests {
             )
             .await;
         assert_eq!(role, UserRole::User);
+    }
+
+    /// `[external_auth.role_map]` uses the same `UserRole` vocabulary as
+    /// `Action::required_role`, with the same highest-wins rule as the Discord
+    /// mapping above — claim ordering is the identity provider's business and
+    /// must not decide LibreFang privilege (#7744).
+    #[test]
+    fn oidc_role_map_picks_highest_privilege_match() {
+        let map = BTreeMap::from([
+            ("everyone".to_string(), "viewer".to_string()),
+            ("librefang-operators".to_string(), "admin".to_string()),
+        ]);
+        assert_eq!(
+            translate_oidc_roles(
+                &map,
+                &["everyone".to_string(), "librefang-operators".to_string()],
+            ),
+            Some(UserRole::Admin),
+        );
+        // Reversed claim order must produce the identical answer.
+        assert_eq!(
+            translate_oidc_roles(
+                &map,
+                &["librefang-operators".to_string(), "everyone".to_string()],
+            ),
+            Some(UserRole::Admin),
+        );
+    }
+
+    /// An unrecognised target role is skipped rather than resolving to `User`
+    /// the way the lenient `UserRole::from_str_role` would, so a typo can
+    /// neither escalate nor quietly authenticate anyone.
+    #[test]
+    fn oidc_role_map_skips_unrecognised_target_roles() {
+        let typo_only = BTreeMap::from([("librefang-owners".to_string(), "ownr".to_string())]);
+        assert_eq!(
+            translate_oidc_roles(&typo_only, &["librefang-owners".to_string()]),
+            None,
+            "a typo'd target must grant nothing, not `User`"
+        );
+        assert_eq!(validate_oidc_role_map(&typo_only), 1);
+
+        // A typo alongside a good entry leaves the good entry intact.
+        let mixed = BTreeMap::from([
+            ("librefang-owners".to_string(), "ownr".to_string()),
+            ("librefang-readers".to_string(), "viewer".to_string()),
+        ]);
+        assert_eq!(
+            translate_oidc_roles(
+                &mixed,
+                &[
+                    "librefang-owners".to_string(),
+                    "librefang-readers".to_string()
+                ],
+            ),
+            Some(UserRole::Viewer),
+        );
+    }
+
+    /// The default — no map declared — grants nothing no matter what the
+    /// identity provider claims, and neither does a claim nobody mapped.
+    #[test]
+    fn oidc_role_map_grants_nothing_by_default() {
+        let empty = BTreeMap::new();
+        assert_eq!(
+            translate_oidc_roles(&empty, &["librefang-owners".to_string()]),
+            None,
+        );
+        assert_eq!(validate_oidc_role_map(&empty), 0);
+
+        let map = BTreeMap::from([("librefang-owners".to_string(), "owner".to_string())]);
+        assert_eq!(
+            translate_oidc_roles(&map, &["some-other-corporate-group".to_string()]),
+            None,
+        );
+        assert_eq!(translate_oidc_roles(&map, &[]), None);
+    }
+
+    // ── `[external_auth.group_map]` (#7746) ─────────────────────────────
+
+    fn declared(names: &[&str]) -> Vec<librefang_types::config::GroupConfig> {
+        names
+            .iter()
+            .map(|n| librefang_types::config::GroupConfig {
+                name: (*n).to_string(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oidc_group_map_grants_only_what_an_operator_wrote_down() {
+        let groups = declared(&["oncall", "compliance"]);
+        let map = BTreeMap::from([("platform-oncall".to_string(), "oncall".to_string())]);
+
+        assert_eq!(
+            translate_oidc_groups(&map, &groups, &["platform-oncall".to_string()]),
+            BTreeSet::from(["oncall".to_string()]),
+        );
+
+        // SECURITY: the whole point of the map. A caller whose IdP group happens
+        // to be *named* `compliance` gets nothing, because no operator wrote a
+        // `compliance` entry — otherwise anyone who can create a group in the
+        // identity provider could mint a LibreFang grant by choosing its name.
+        assert_eq!(
+            translate_oidc_groups(&map, &groups, &["compliance".to_string()]),
+            BTreeSet::new(),
+        );
+    }
+
+    #[test]
+    fn oidc_group_map_is_off_until_an_operator_opts_in() {
+        let groups = declared(&["oncall"]);
+        let empty = BTreeMap::new();
+        assert_eq!(
+            translate_oidc_groups(&empty, &groups, &["oncall".to_string()]),
+            BTreeSet::new(),
+        );
+        assert_eq!(validate_oidc_group_map(&empty, &groups), 0);
+    }
+
+    #[test]
+    fn oidc_group_map_skips_targets_that_name_no_declared_group() {
+        // A typo'd or stale target must contribute nothing rather than minting a
+        // group that exists only inside the map — such a group would be a live
+        // `Principal` that no operator can see in `[[groups]]`.
+        let groups = declared(&["oncall"]);
+        let typo = BTreeMap::from([("platform-oncall".to_string(), "oncal".to_string())]);
+        assert_eq!(
+            translate_oidc_groups(&typo, &groups, &["platform-oncall".to_string()]),
+            BTreeSet::new(),
+        );
+        assert_eq!(validate_oidc_group_map(&typo, &groups), 1);
+
+        // …and the good half of a half-broken map still works.
+        let mixed = BTreeMap::from([
+            ("platform-oncall".to_string(), "oncall".to_string()),
+            ("platform-billing".to_string(), "billin".to_string()),
+        ]);
+        assert_eq!(
+            translate_oidc_groups(
+                &mixed,
+                &groups,
+                &[
+                    "platform-oncall".to_string(),
+                    "platform-billing".to_string()
+                ],
+            ),
+            BTreeSet::from(["oncall".to_string()]),
+        );
+        assert_eq!(validate_oidc_group_map(&mixed, &groups), 1);
+    }
+
+    #[test]
+    fn oidc_group_map_accumulates_every_match_and_is_claim_order_independent() {
+        // Unlike the role ladder, membership has no ordering: every match counts,
+        // and two claim orderings must produce a byte-identical set (#3298).
+        let groups = declared(&["oncall", "compliance"]);
+        let map = BTreeMap::from([
+            ("platform-oncall".to_string(), "oncall".to_string()),
+            ("sox-reviewers".to_string(), "compliance".to_string()),
+            // Two IdP groups collapsing onto one local group is legitimate —
+            // regional shards of the same rota — and must not double-count.
+            ("platform-oncall-emea".to_string(), "oncall".to_string()),
+        ]);
+        let forward = translate_oidc_groups(
+            &map,
+            &groups,
+            &[
+                "platform-oncall".to_string(),
+                "sox-reviewers".to_string(),
+                "platform-oncall-emea".to_string(),
+            ],
+        );
+        let reversed = translate_oidc_groups(
+            &map,
+            &groups,
+            &[
+                "platform-oncall-emea".to_string(),
+                "sox-reviewers".to_string(),
+                "platform-oncall".to_string(),
+            ],
+        );
+        assert_eq!(
+            forward,
+            BTreeSet::from(["compliance".to_string(), "oncall".to_string()]),
+        );
+        assert_eq!(forward, reversed);
+        assert_eq!(
+            forward.iter().cloned().collect::<Vec<_>>(),
+            reversed.iter().cloned().collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn oidc_group_membership_confers_no_rbac_privilege() {
+        // SECURITY: the two ladders stay separate. A group called `owner`,
+        // mapped from a claim called `owner`, is a group called `owner` — the
+        // privilege ladder is only reachable through `role_map`, which is a
+        // different entry an operator has to write deliberately.
+        let groups = declared(&["owner"]);
+        let group_map = BTreeMap::from([("librefang-owners".to_string(), "owner".to_string())]);
+        let claims = ["librefang-owners".to_string()];
+        assert_eq!(
+            translate_oidc_groups(&group_map, &groups, &claims),
+            BTreeSet::from(["owner".to_string()]),
+        );
+        // Same claim value, empty `role_map`: no privilege at all.
+        assert_eq!(translate_oidc_roles(&BTreeMap::new(), &claims), None);
     }
 
     #[tokio::test]

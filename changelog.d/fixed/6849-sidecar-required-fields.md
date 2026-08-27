@@ -1,1 +1,0 @@
-- Documented the Rust sidecar SDK's deliberate fail-closed handling of missing required command fields and its compatibility difference from the legacy Python parser. (@houko)

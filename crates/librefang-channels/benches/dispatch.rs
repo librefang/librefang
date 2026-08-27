@@ -60,7 +60,7 @@ fn bench_message_roundtrip(c: &mut Criterion) {
     c.bench_function("message_roundtrip", |b| {
         b.iter(|| {
             let json = serde_json::to_string(black_box(&msg)).unwrap();
-            let _: ChannelMessage = serde_json::from_str(&json).unwrap();
+            black_box(serde_json::from_str::<ChannelMessage>(&json).unwrap())
         })
     });
 }

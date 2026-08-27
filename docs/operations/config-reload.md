@@ -106,10 +106,12 @@ classified differently — the row note spells out which is which.
 | `passkey_rp_id` | R | WebAuthn Relying Party ID — the `Webauthn` instance is built once at boot. |
 | `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
+| `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
+| `default_owner` | N | Fleet-wide fallback owner for artifacts created by a turn with no authenticated caller (#7744) — parsed from the live config at each creation. Changing it does not rewrite owners already recorded. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
-| `external_auth` | H/N | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`) are **N**: the OAuth layer reads them live from the ArcSwap config on every request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so a bare config swap makes them effective on the next request — no restart, no cache eviction. |
+| `external_auth` | H/N | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`, `role_map`, `group_map`, `claim_paths`) are **N**: the OAuth layer reads them live from the ArcSwap config on every request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so a bare config swap makes them effective on the next request — no restart, no cache eviction. |
 | `oauth` | R | OAuth client-ID overrides for PKCE flows. |
 | `auth_profiles` | R | Per-provider auth profiles for key rotation. |
 | `pairing` | N | Device pairing config (read live per request). |
@@ -148,6 +150,7 @@ classified differently — the row note spells out which is which.
 | `context_engine` | R | Pluggable context-engine config. |
 | `tool_results` | N | Tool-result context budget + artifact spill config. |
 | `max_history_messages` | N | Global message-history trim cap (see arch doc). |
+| `memory_fact_budget_percent` | N | Share of the prompt memory section budget reserved for extracted facts (#7920). |
 | `agent_max_iterations` | N | Operator override for the agent-loop iteration cap. |
 | `max_agent_call_depth` | N | Maximum inter-agent call depth. |
 
@@ -225,7 +228,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `web` | H | Web tools config (search + fetch) — rebuilds web context. |
 | `browser` | R | Browser automation config — the `BrowserManager` captures it by value at boot with no rebuild path, so a change needs a restart. |
-| `media` | N | Media-understanding config. |
+| `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
 | `tts` | N | Text-to-speech config. |
@@ -236,6 +239,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `notification` | N | Notification-engine config for alerts and task state. |
 | `usage_footer` | H | Usage footer mode (what to show after each response). |
+| `usage` | N | Retention horizon for the `usage_events` table; the daily metering sweep reads it live, so a change is in force on the next sweep. |
 | `inbox` | R | File-based input inbox config. |
 | `audit` | R | Audit log config. |
 | `telemetry` | R | OpenTelemetry + Prometheus config. |

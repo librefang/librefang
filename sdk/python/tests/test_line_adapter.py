@@ -11,23 +11,32 @@ plus the three improvements documented in the module header
 import base64
 import hashlib
 import hmac
-import io
 import json
 import os
-import threading
-import urllib.error
 
 import pytest
 
+from librefang.sidecar.adapters import line as la
 
-os.environ.setdefault("LINE_CHANNEL_SECRET", "test-secret")
-os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", "test-access-token")
-from librefang.sidecar.adapters import line as la  # noqa: E402
-
-from _sidecar_fakes import _FakeResp, _FakeUrlopen, _HdrShim
+from _sidecar_fakes import _FakeUrlopen
 
 
 # ---- _FakeUrlopen scaffolding ----------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_line_env(monkeypatch):
+    defaults = {
+        "LINE_CHANNEL_SECRET": "test-secret",
+        "LINE_CHANNEL_ACCESS_TOKEN": "test-access-token",
+        "LINE_WEBHOOK_PORT": "",
+        "LINE_WEBHOOK_PATH": "",
+        "LINE_BIND_HOST": "",
+        "LINE_ACCOUNT_ID": "",
+        "LINE_API_BASE": "",
+    }
+    for key, value in defaults.items():
+        monkeypatch.setenv(key, value)
 
 
 def _adapter(**env):
@@ -59,30 +68,25 @@ def test_default_env_construction():
     assert a.account_id is None
 
 
-def test_missing_channel_secret_exits_2():
-    os.environ["LINE_CHANNEL_SECRET"] = ""
-    os.environ["LINE_CHANNEL_ACCESS_TOKEN"] = "tok"
+def test_missing_channel_secret_exits_2(monkeypatch):
+    monkeypatch.setenv("LINE_CHANNEL_SECRET", "")
     with pytest.raises(SystemExit) as exc:
         la.LineAdapter()
     assert exc.value.code == 2
-    os.environ["LINE_CHANNEL_SECRET"] = "test-secret"
 
 
-def test_missing_access_token_exits_2():
-    os.environ["LINE_CHANNEL_SECRET"] = "sec"
-    os.environ["LINE_CHANNEL_ACCESS_TOKEN"] = ""
+def test_missing_access_token_exits_2(monkeypatch):
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "")
     with pytest.raises(SystemExit) as exc:
         la.LineAdapter()
     assert exc.value.code == 2
-    os.environ["LINE_CHANNEL_ACCESS_TOKEN"] = "test-access-token"
 
 
-def test_whitespace_only_token_exits_2():
-    os.environ["LINE_CHANNEL_ACCESS_TOKEN"] = "   "
+def test_whitespace_only_token_exits_2(monkeypatch):
+    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "   ")
     with pytest.raises(SystemExit) as exc:
         la.LineAdapter()
     assert exc.value.code == 2
-    os.environ["LINE_CHANNEL_ACCESS_TOKEN"] = "test-access-token"
 
 
 def test_webhook_port_env_override():

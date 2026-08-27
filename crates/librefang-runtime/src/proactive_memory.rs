@@ -956,6 +956,11 @@ fn parse_llm_extraction_response(
                 accessed_at: None,
                 access_count: None,
                 agent_id: None,
+                // Freshly extracted, never retrieved by a query — nothing has
+                // measured this against anything (#7808).
+                similarity: None,
+                // Not stored yet, so there is no storage scope to carry (#7920).
+                scope: None,
             })
         })
         // H2: cap memories per extraction. A misbehaving extractor can
@@ -1095,6 +1100,8 @@ mod tests {
             accessed_at: None,
             access_count: None,
             agent_id: None,
+            similarity: None,
+            scope: None,
         }
     }
 
@@ -1135,6 +1142,7 @@ mod tests {
             image_url: None,
             image_embedding: None,
             modality: Default::default(),
+            similarity: None,
         }
     }
 
@@ -1348,6 +1356,7 @@ mod tests {
             image_url: None,
             image_embedding: None,
             modality: Default::default(),
+            similarity: None,
         }];
         let json = format!(r#"{{"action": "UPDATE", "existing_id": "{}"}}"#, mem_id);
         let result = parse_decision_response(&json, &fragments).unwrap();

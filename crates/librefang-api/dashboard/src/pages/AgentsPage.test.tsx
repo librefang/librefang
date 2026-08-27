@@ -3,7 +3,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { SystemPromptSection } from "./AgentsPage";
+import { cloneResultNotice, SystemPromptSection } from "./AgentsPage";
 import { usePatchAgent } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
 import { usePromptVersions } from "../lib/queries/agents";
@@ -39,6 +39,36 @@ vi.mock("react-i18next", () => ({
 const usePatchAgentMock = usePatchAgent as unknown as ReturnType<typeof vi.fn>;
 const useBindMock = useBindPromptVersionToAgent as unknown as ReturnType<typeof vi.fn>;
 const usePromptVersionsMock = usePromptVersions as unknown as ReturnType<typeof vi.fn>;
+
+describe("cloneResultNotice", () => {
+  const base = { agent_id: "agent-copy", name: "copy" };
+
+  it("keeps complete clones on the success path", () => {
+    expect(cloneResultNotice({ ...base, partial: false, warnings: [] })).toEqual({
+      partial: false,
+      warnings: "unknown",
+    });
+  });
+
+  it("preserves stable warning codes for partial clones", () => {
+    expect(cloneResultNotice({
+      ...base,
+      partial: true,
+      warnings: ["identity_files_copy_failed", "registry_identity_copy_failed"],
+    })).toEqual({
+      partial: true,
+      warnings: "identity_files_copy_failed, registry_identity_copy_failed",
+    });
+  });
+
+  it("fails safe when warnings and the partial flag disagree", () => {
+    expect(cloneResultNotice({
+      ...base,
+      partial: false,
+      warnings: ["destination_workspace_missing"],
+    }).partial).toBe(true);
+  });
+});
 
 function renderSection(prompt: string) {
   const qc = new QueryClient({
@@ -107,6 +137,10 @@ describe("SystemPromptSection (#6187)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Bind from library/i }));
     fireEvent.click(screen.getByRole("button", { name: /^Bind$/i }));
     expect(bindMutate).toHaveBeenCalledTimes(1);
-    expect(bindMutate.mock.calls[0][0]).toEqual({ agentId: "agent-1", version });
+    expect(bindMutate.mock.calls[0][0]).toEqual({
+      agentId: "agent-1",
+      version,
+      previousSystemPrompt: "original prompt",
+    });
   });
 });

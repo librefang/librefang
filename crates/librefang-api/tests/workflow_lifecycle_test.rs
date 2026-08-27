@@ -701,6 +701,89 @@ async fn rerun_workflow_run_starts_new_run_with_same_input() {
     assert_eq!(detail["workflow_id"].as_str(), Some(wf_id_str.as_str()));
 }
 
+/// #7714: a re-run repeats the same work on the same owner's behalf, so it
+/// inherits the original run's owner rather than becoming ownerless (or
+/// picking up the operator who pressed the button, who is not the owner).
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_workflow_run_inherits_the_original_runs_owner() {
+    use librefang_kernel::workflow::WorkflowId;
+    use librefang_types::agent::AgentId;
+
+    let h = boot().await;
+    let wf_id_str = create_workflow(&h).await;
+    let wf_id = WorkflowId(wf_id_str.parse().unwrap());
+    let engine = h.state.kernel.workflow_engine();
+
+    let owner = AgentId::new();
+    let original = engine
+        .create_run_owned(wf_id, "owned params".to_string(), Some(owner))
+        .await
+        .expect("create owned run");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{original}/rerun"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body:?}");
+    let new_id = body["run_id"].as_str().expect("run_id in body").to_string();
+
+    // Asserted over HTTP, because the owner is only useful if a client can
+    // read it back off the run.
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{new_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert_eq!(
+        detail["owner_agent_id"].as_str(),
+        Some(owner.to_string().as_str()),
+        "the re-run must carry the original owner forward: {detail:?}"
+    );
+    assert_eq!(detail["input"].as_str(), Some("owned params"));
+
+    // The original is untouched and still reports the same owner.
+    let (status, original_detail) = get(&h, &format!("/api/workflows/runs/{original}")).await;
+    assert_eq!(status, StatusCode::OK, "{original_detail:?}");
+    assert_eq!(
+        original_detail["owner_agent_id"].as_str(),
+        Some(owner.to_string().as_str())
+    );
+}
+
+/// #7714: an ownerless run re-runs as ownerless. The re-run path must not
+/// invent an owner for a run that never had one.
+#[tokio::test(flavor = "multi_thread")]
+async fn rerun_of_an_ownerless_run_stays_ownerless() {
+    use librefang_kernel::workflow::WorkflowId;
+
+    let h = boot().await;
+    let wf_id_str = create_workflow(&h).await;
+    let wf_id = WorkflowId(wf_id_str.parse().unwrap());
+    let engine = h.state.kernel.workflow_engine();
+
+    let original = engine
+        .create_run(wf_id, "operator params".to_string())
+        .await
+        .expect("create ownerless run");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{original}/rerun"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body:?}");
+    let new_id = body["run_id"].as_str().expect("run_id in body").to_string();
+
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{new_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    assert!(
+        detail["owner_agent_id"].is_null(),
+        "an operator re-run of an ownerless run must stay ownerless: {detail:?}"
+    );
+}
+
 /// Re-running a run id that does not exist is a 404.
 #[tokio::test(flavor = "multi_thread")]
 async fn rerun_unknown_run_returns_404() {
@@ -764,11 +847,13 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = engine.register(wf).await;
     let run_id = engine

@@ -159,3 +159,67 @@ async fn os4_temperature_strip_stream() {
         "retry request should omit temperature: {second}"
     );
 }
+
+// ── reasoning_effort strip-and-retry, streaming path (#7769) ───────────────
+
+/// litellm's rejection: the gateway strips the parameter before the model sees it, and the message names the adapter rather than the model.
+fn litellm_400_reasoning_effort_rejected() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        "error": {
+            "message": "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning_effort'], for model=gpt-test. Received Model Group=default",
+            "type": "invalid_request_error"
+        }
+    }))
+}
+
+/// The streaming path carries its own copy of the parameter-strip ladder, so the recovery has to be proven there too — agents stream by default, so this is the path the bug is actually met on.
+#[tokio::test]
+#[serial_test::serial]
+async fn os5_reasoning_effort_strip_stream() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(litellm_400_reasoning_effort_rejected())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_sse_body(&["hello"]))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let request = librefang_llm_driver::CompletionRequest {
+        thinking: Some(librefang_types::config::ThinkingConfig::default()),
+        ..simple_request("gpt-test")
+    };
+    let (result, events) = collect_stream(&driver, request).await;
+    assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { .. })),
+        "the retried stream must still deliver content: {events:?}"
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "expected 2 requests (1x400 + 1x200)");
+
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    assert_eq!(
+        first.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("medium"),
+        "first request should carry the budget-derived reasoning_effort: {first}"
+    );
+    assert!(
+        second.get("reasoning_effort").is_none(),
+        "retry request should omit reasoning_effort: {second}"
+    );
+}

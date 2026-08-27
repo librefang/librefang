@@ -307,7 +307,7 @@ pub async fn agent_metrics(
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -315,7 +315,8 @@ pub async fn agent_metrics(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -325,14 +326,16 @@ pub async fn agent_metrics(
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            )
+                .into_response();
         }
     };
     if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        )
+            .into_response();
     }
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
@@ -361,18 +364,11 @@ pub async fn agent_metrics(
         .map(|s| s.messages.len() as u64)
         .unwrap_or(0);
 
-    // Error count from the audit log (count entries with non-"ok" outcome for this agent).
-    // NOTE: This scans the most recent 100k audit entries. Agents with errors beyond
-    // this window will have under-reported error counts. A dedicated per-agent error
-    // counter or index would eliminate this limitation.
     let agent_id_str = agent_id.to_string();
-    let error_count: u64 = state
-        .kernel
-        .audit()
-        .recent(100_000)
-        .iter()
-        .filter(|e| e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success")
-        .count() as u64;
+    let error_count = match state.kernel.audit().count_agent_errors(&agent_id_str) {
+        Ok(count) => count,
+        Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+    };
 
     // Uptime since the agent was created.
     let uptime_secs = (chrono::Utc::now() - entry.created_at).num_seconds().max(0) as u64;
@@ -418,6 +414,7 @@ pub async fn agent_metrics(
             "avg_response_time_ms": avg_response_time_ms,
         })),
     )
+        .into_response()
 }
 
 /// GET /api/agents/{id}/logs — Returns structured execution logs for an agent.
@@ -448,7 +445,7 @@ pub async fn agent_logs(
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
@@ -456,7 +453,8 @@ pub async fn agent_logs(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -465,7 +463,8 @@ pub async fn agent_logs(
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
+        )
+            .into_response();
     }
 
     let max_entries: usize = params
@@ -487,21 +486,18 @@ pub async fn agent_logs(
 
     let agent_id_str = agent_id.to_string();
 
-    // Filter audit log entries belonging to this agent.
-    let entries: Vec<serde_json::Value> = state
-        .kernel
-        .audit()
-        .recent(100_000)
+    let outcome = (!level_filter.is_empty()).then_some(level_filter.as_str());
+    let audit_entries =
+        match state
+            .kernel
+            .audit()
+            .recent_for_agent(&agent_id_str, outcome, offset, max_entries)
+        {
+            Ok(entries) => entries,
+            Err(error) => return ApiErrorResponse::internal_scrub(error).into_response(),
+        };
+    let entries: Vec<serde_json::Value> = audit_entries
         .iter()
-        .filter(|e| e.agent_id == agent_id_str)
-        .filter(|e| {
-            if level_filter.is_empty() {
-                return true;
-            }
-            e.outcome.eq_ignore_ascii_case(&level_filter)
-        })
-        .skip(offset)
-        .take(max_entries)
         .map(|e| {
             serde_json::json!({
                 "seq": e.seq,
@@ -522,4 +518,172 @@ pub async fn agent_logs(
             "logs": entries,
         })),
     )
+        .into_response()
+}
+
+/// Wire-shape for one ephemeral worker run under a parent agent (refs #7752).
+///
+/// Mirrors [`librefang_memory::EphemeralRunRow`], defined here as a `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the shape without forcing utoipa into the memory crate.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct EphemeralRunView {
+    pub id: String,
+    /// Caller-supplied mission label, before sanitization into a directory name.
+    pub label: String,
+    /// Uid-style name the worker ran under (`<label>-<8 hex>`).
+    pub worker_name: String,
+    /// Agent type whose template supplied the worker's persona, when one was named.
+    pub agent_type: Option<String>,
+    /// The task the parent delegated, clipped to the store's text cap.
+    pub task: String,
+    /// The worker's answer, clipped to the store's text cap. Empty for a failed run.
+    pub response: String,
+    /// `completed` or `failed`.
+    pub status: String,
+    /// Why the run failed, when it did.
+    pub error: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub iterations: i64,
+    pub tool_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    /// Cost billed to the parent for this run.
+    pub cost_usd: f64,
+    pub latency_ms: i64,
+    pub started_at: String,
+    pub finished_at: String,
+}
+
+impl From<librefang_memory::EphemeralRunRow> for EphemeralRunView {
+    fn from(r: librefang_memory::EphemeralRunRow) -> Self {
+        Self {
+            id: r.id,
+            label: r.label,
+            worker_name: r.worker_name,
+            agent_type: r.agent_type,
+            task: r.task,
+            response: r.response,
+            status: r.status,
+            error: r.error,
+            provider: r.provider,
+            model: r.model,
+            iterations: r.iterations,
+            tool_calls: r.tool_calls,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cost_usd: r.cost_usd,
+            latency_ms: r.latency_ms,
+            started_at: r.started_at,
+            finished_at: r.finished_at,
+        }
+    }
+}
+
+/// Aggregate across the runs retained for one parent.
+#[derive(Debug, Clone, Default, serde::Serialize, utoipa::ToSchema)]
+pub struct EphemeralRunRollupView {
+    pub runs: u64,
+    pub failed: u64,
+    pub cost_usd: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct EphemeralRunsResponse {
+    pub runs: Vec<EphemeralRunView>,
+    pub rollup: EphemeralRunRollupView,
+}
+
+/// GET /api/agents/{id}/ephemeral-runs — what this agent delegated to ephemeral workers, and what each one cost (refs #7752).
+///
+/// An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.
+/// Its spend reached the parent's ledger through `usage_events.billed_agent_id`, but the *work* behind the spend had no record, so an operator watching an agent misbehave through workers had nothing to inspect.
+/// This endpoint is that record.
+///
+/// The rollup covers the same retained rows as `runs`, not all time: the store keeps a bounded number of runs per parent so a path designed to be called cheaply and often cannot grow the table without limit.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/ephemeral-runs",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Parent agent ID"),
+        ("limit" = Option<u32>, Query, description = "Max rows (default 30, max 200)"),
+    ),
+    responses(
+        (status = 200, description = "Ephemeral worker runs spawned by this agent", body = EphemeralRunsResponse),
+        (status = 400, description = "Invalid agent id"),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn list_agent_ephemeral_runs(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid agent id" })),
+            )
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_uuid) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    };
+    // Same owner-scoping as /stats and /events, and for a stronger reason: a run record carries the delegated task and the worker's answer verbatim, which is conversation content, not just counters.
+    if let Some(ref user) = api_user {
+        use crate::middleware::UserRole;
+        if user.0.role < UserRole::Admin
+            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(30)
+        .min(200) as usize;
+
+    let store = librefang_memory::EphemeralRunStore::new(state.kernel.memory_substrate().pool());
+    let parent = agent_uuid.0.to_string();
+    let runs = match store.list_for_parent(&parent, limit) {
+        Ok(r) => r,
+        // `e` carries raw rusqlite error text (column names, constraint identifiers, "database is locked") from the memory layer (audit: rusqlite-errors-leak).
+        // Scrub the body; the full chain still lands in `tracing::error!` for ops.
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_response(),
+    };
+    let rollup = match store.rollup_for_parent(&parent) {
+        Ok(r) => EphemeralRunRollupView {
+            runs: r.runs,
+            failed: r.failed,
+            cost_usd: r.cost_usd,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+        },
+        Err(e) => return ApiErrorResponse::internal_scrub(e).into_response(),
+    };
+
+    Json(EphemeralRunsResponse {
+        runs: runs.into_iter().map(EphemeralRunView::from).collect(),
+        rollup,
+    })
+    .into_response()
 }

@@ -1,5 +1,8 @@
 import { useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import type { router } from "../router";
+
+type DashboardRoutePath = keyof typeof router.routesByPath;
 
 /// Vim-style `g` + letter navigation bindings. The first letter of the
 /// route is canonical; collisions (scheduler vs skills, providers vs
@@ -13,7 +16,10 @@ import { useNavigate } from "@tanstack/react-router";
 /// namespace at render time — see `ShortcutsHelp.tsx`. The constant lives
 /// outside React context so it can also drive the actual key-handler
 /// below, where labels are not needed.
-export const G_NAV_SHORTCUTS: Record<string, { to: string; labelKey: string }> = {
+export const G_NAV_SHORTCUTS: Record<
+  string,
+  { to: DashboardRoutePath; labelKey: string }
+> = {
   o: { to: "/overview", labelKey: "overview" },
   c: { to: "/chat", labelKey: "chat" },
   a: { to: "/agents", labelKey: "agents" },
@@ -80,6 +86,20 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
         return;
       }
 
+      const now = Date.now();
+
+      // A fresh `g` prefix owns the next key. Consume the chord before
+      // single-key actions so `g n` navigates instead of creating.
+      if (gPressedAt && now - gPressedAt < G_TIMEOUT_MS) {
+        gPressedAt = 0;
+        const target = G_NAV_SHORTCUTS[e.key.toLowerCase()];
+        if (target) {
+          e.preventDefault();
+          navigate({ to: target.to });
+        }
+        return;
+      }
+
       // `?` opens the help modal. Shift is held to produce `?` on most
       // layouts, so we check the character rather than `e.shiftKey`.
       if (e.key === "?") {
@@ -105,20 +125,6 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
       if (e.key === "n") {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent(CREATE_EVENT));
-        return;
-      }
-
-      const now = Date.now();
-
-      // If the previous keypress was `g` and still fresh, consume this
-      // key as the second half of a `g<x>` navigation binding.
-      if (gPressedAt && now - gPressedAt < G_TIMEOUT_MS) {
-        gPressedAt = 0;
-        const target = G_NAV_SHORTCUTS[e.key.toLowerCase()];
-        if (target) {
-          e.preventDefault();
-          navigate({ to: target.to } as never);
-        }
         return;
       }
 

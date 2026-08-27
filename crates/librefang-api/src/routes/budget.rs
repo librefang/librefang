@@ -14,6 +14,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(usage_by_model_performance),
         )
         .route("/usage/daily", axum::routing::get(usage_daily))
+        // #7891 — bulk CSV extract for archival / external BI. Streamed, so a
+        // multi-month range does not materialize in the daemon's heap.
+        .route("/usage/export", axum::routing::get(usage_export))
         .route(
             "/budget",
             axum::routing::get(budget_status).put(update_budget),
@@ -47,9 +50,76 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use librefang_memory::usage::DateRange;
 use librefang_types::agent::UserId;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Usage date-range filtering (#7891)
+// ---------------------------------------------------------------------------
+
+/// Optional `start_date` / `end_date` filter shared by every `/api/usage*` endpoint.
+///
+/// Both fields are `Option`, so a request with no query string deserializes to
+/// the unbounded range and every endpoint answers exactly as it did before
+/// #7891. That backward-compatibility property is locked in by a dedicated test
+/// per endpoint in `crates/librefang-api/tests/usage_date_range_test.rs`.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageRangeQuery {
+    /// Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+}
+
+/// `/api/usage/daily` additionally accepts a relative window size.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageDailyQuery {
+    /// Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+    /// How many days back from now to report on. Defaults to 7, capped at 366.
+    /// Mutually exclusive with `start_date` / `end_date`.
+    pub days: Option<u32>,
+}
+
+/// Default size of the relative `/api/usage/daily` window.
+///
+/// This is the value the handler hard-coded before #7891, kept as the default
+/// so an existing caller sees no change.
+const DEFAULT_DAILY_DAYS: u32 = 7;
+
+/// Upper bound on the relative `/api/usage/daily` window.
+///
+/// 366 is one leap year: the longest window for which "a row per day" is still
+/// a report a human reads rather than a bulk extract, and the point past which
+/// `GET /api/usage/export` is the right tool. It also bounds the response at
+/// 366 rows regardless of how many events back them, so the endpoint cannot be
+/// turned into a memory amplifier by a large `days` value.
+const MAX_DAILY_DAYS: u32 = 366;
+
+/// Parse the shared date-range parameters, mapping any failure to a 400 whose
+/// message names the offending parameter and the accepted form.
+///
+/// Returning an error rather than an empty result set is deliberate: a
+/// mistyped `start_date` that silently yields zero rows reads as "we spent
+/// nothing last month", which is the specific way a cost report goes wrong
+/// without anyone noticing.
+//
+// `ApiErrorResponse` trips clippy's `result_large_err` lint (see the same
+// suppression on `consume_oauth_nonce` in `oauth.rs` and the closure at
+// budget.rs:1599); every call site here is `Err(e) => return
+// e.into_response()`, not a hot loop, so one allocation on the rare
+// malformed-input path is fine.
+#[allow(clippy::result_large_err)]
+fn parse_range(
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<DateRange, ApiErrorResponse> {
+    DateRange::parse(start_date, end_date).map_err(|e| ApiErrorResponse::bad_request(e.to_string()))
+}
 
 // ---------------------------------------------------------------------------
 // Audit-detail diff formatters
@@ -137,6 +207,12 @@ fn fmt_global_budget_diff(
 // Usage endpoint
 // ---------------------------------------------------------------------------
 
+fn usage_query_error(error: impl std::fmt::Display) -> Response {
+    ApiErrorResponse::internal_scrub(error)
+        .with_code("usage_query_failed")
+        .into_response()
+}
+
 /// GET /api/usage — Get per-agent usage statistics.
 ///
 /// The per-agent rollup is materialized from the in-memory agent registry
@@ -145,32 +221,49 @@ fn fmt_global_budget_diff(
     get,
     path = "/api/usage",
     tag = "budget",
-    responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_stats(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
     let usage_store = state.kernel.memory_substrate().usage();
-    let items: Vec<serde_json::Value> = state
+    let items = state
         .kernel
         .agent_registry()
         .list()
         .iter()
-        .map(|e| {
-            // Read from persistent SQLite store (survives restarts)
-            let summary = usage_store.query_summary(Some(e.id)).unwrap_or_default();
-            serde_json::json!({
-                "agent_id": e.id.to_string(),
-                "name": e.name,
-                "is_hand": e.is_hand,
-                "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
-                "input_tokens": summary.total_input_tokens,
-                "output_tokens": summary.total_output_tokens,
-                "total_cost_usd": summary.total_cost_usd,
-                "cost": summary.total_cost_usd,
-                "call_count": summary.call_count,
-                "tool_calls": summary.total_tool_calls,
-            })
-        })
-        .collect();
+        .map(
+            |e| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                // Read from persistent SQLite store (survives restarts)
+                let summary = usage_store.query_summary_ranged(Some(e.id), &range)?;
+                Ok(serde_json::json!({
+                    "agent_id": e.id.to_string(),
+                    "name": e.name,
+                    "is_hand": e.is_hand,
+                    "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
+                    "input_tokens": summary.total_input_tokens,
+                    "output_tokens": summary.total_output_tokens,
+                    "total_cost_usd": summary.total_cost_usd,
+                    "cost": summary.total_cost_usd,
+                    "call_count": summary.call_count,
+                    "tool_calls": summary.total_tool_calls,
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => return usage_query_error(error),
+    };
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,
@@ -178,6 +271,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -189,24 +283,35 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     get,
     path = "/api/usage/summary",
     tag = "budget",
-    responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Overall usage summary", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory_substrate().usage().query_summary(None) {
+pub async fn usage_summary(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_summary_ranged(None, &range)
+    {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
             "total_output_tokens": s.total_output_tokens,
             "total_cost_usd": s.total_cost_usd,
             "call_count": s.call_count,
             "total_tool_calls": s.total_tool_calls,
-        })),
-        Err(_) => Json(serde_json::json!({
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost_usd": 0.0,
-            "call_count": 0,
-            "total_tool_calls": 0,
-        })),
+        }))
+        .into_response(),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -215,10 +320,26 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     get,
     path = "/api/usage/by-model",
     tag = "budget",
-    responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Usage grouped by model", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory_substrate().usage().query_by_model() {
+pub async fn usage_by_model(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_by_model_ranged(&range)
+    {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
                 .iter()
@@ -232,9 +353,9 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -243,14 +364,25 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     get,
     path = "/api/usage/by-model/performance",
     tag = "budget",
-    responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Model performance metrics", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model_performance(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
     match state
         .kernel
         .memory_substrate()
         .usage()
-        .query_model_performance()
+        .query_model_performance_ranged(&range)
     {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -270,9 +402,9 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -281,14 +413,44 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     get,
     path = "/api/usage/daily",
     tag = "budget",
-    responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
+    params(UsageDailyQuery),
+    responses(
+        (status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed range, out-of-bounds `days`, or `days` combined with a date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let days = state
-        .kernel
-        .memory_substrate()
-        .usage()
-        .query_daily_breakdown(7);
+pub async fn usage_daily(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageDailyQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    // `days` and an explicit range answer the same question two different
+    // ways, so honouring one and dropping the other would give a caller a
+    // window they did not ask for and no signal that it happened.
+    if !range.is_unbounded() && q.days.is_some() {
+        return ApiErrorResponse::bad_request(
+            "`days` cannot be combined with `start_date` / `end_date`; use `days` for a rolling window or the dates for a calendar range",
+        )
+        .into_response();
+    }
+
+    let usage = state.kernel.memory_substrate().usage();
+    let days = if range.is_unbounded() {
+        let requested = q.days.unwrap_or(DEFAULT_DAILY_DAYS);
+        if requested == 0 || requested > MAX_DAILY_DAYS {
+            return ApiErrorResponse::bad_request(format!(
+                "`days` must be between 1 and {MAX_DAILY_DAYS} (got {requested}); for a longer window use GET /api/usage/export"
+            ))
+            .into_response();
+        }
+        usage.query_daily_breakdown(requested)
+    } else {
+        usage.query_daily_breakdown_ranged(&range)
+    };
     let today_cost = state.kernel.memory_substrate().usage().query_today_cost();
     let first_event = state
         .kernel
@@ -308,14 +470,237 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 })
             })
             .collect::<Vec<_>>(),
-        Err(_) => vec![],
+        Err(error) => return usage_query_error(error),
+    };
+    let today_cost = match today_cost {
+        Ok(cost) => cost,
+        Err(error) => return usage_query_error(error),
+    };
+    let first_event = match first_event {
+        Ok(date) => date,
+        Err(error) => return usage_query_error(error),
     };
 
     Json(serde_json::json!({
         "days": days_list,
-        "today_cost_usd": today_cost.unwrap_or(0.0),
-        "first_event_date": first_event.unwrap_or(None),
+        "today_cost_usd": today_cost,
+        "first_event_date": first_event,
     }))
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// CSV export (#7891)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/usage/export`.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageExportQuery {
+    /// Inclusive start of the export window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the export window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+    /// Output format. Only `csv` is supported; omitted means `csv`.
+    pub format: Option<String>,
+}
+
+/// Header row of the CSV export. Column order is part of the endpoint's
+/// contract — archived files are re-read months later by tools that bind to
+/// position, so appending is safe but reordering is not.
+const CSV_HEADER: &str = "timestamp,agent_id,agent_name,billed_agent_id,provider,model,input_tokens,output_tokens,cost_usd,tool_calls,latency_ms,user_id,channel,session_id\n";
+
+/// Flush the row buffer to the response stream once it reaches this size.
+///
+/// Chunking amortizes the per-send channel and framing overhead across many
+/// rows while keeping resident memory flat regardless of how many events the
+/// range covers — the point of streaming the export in the first place.
+const CSV_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Render one field as an RFC 4180 CSV value, defusing spreadsheet formula
+/// injection on the way.
+///
+/// Two separate concerns, both of which a naive `join(",")` gets wrong:
+///
+/// 1. **Quoting.** A value containing a comma, a double quote, CR or LF has to
+///    be wrapped in double quotes with interior quotes doubled. Agent names,
+///    model ids and provider strings are free text, so any of these can and do
+///    appear; without quoting the row silently gains columns and every
+///    downstream field shifts.
+/// 2. **Formula injection.** Excel, LibreOffice and Google Sheets evaluate a
+///    cell whose text begins with `=`, `+`, `-`, `@`, or a leading tab / CR as
+///    a formula. An agent named `=HYPERLINK("http://evil","click")` therefore
+///    becomes live content in the reviewer's spreadsheet — a real risk here
+///    precisely because this export exists to be opened in Excel. The guard is
+///    the documented OWASP one: prefix the value with a single quote, which
+///    spreadsheets strip on display and treat as "this is text".
+///
+/// The guard applies only to text columns. Numeric columns are formatted by
+/// this module from typed values, so they carry no attacker-controlled prefix,
+/// and applying the guard there would corrupt legitimate negative numbers.
+fn csv_text_field(raw: &str) -> String {
+    // Formula-injection guard, applied before quoting so the prefix is itself
+    // inside the quotes when quoting is needed.
+    let guarded = if raw
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{raw}")
+    } else {
+        raw.to_string()
+    };
+
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
+    }
+}
+
+/// Append one usage event to the CSV buffer.
+fn append_csv_row(
+    buf: &mut String,
+    row: &librefang_memory::usage::UsageExportRow,
+    agent_names: &std::collections::HashMap<String, String>,
+) {
+    use std::fmt::Write as _;
+
+    let agent_name = agent_names
+        .get(&row.agent_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    // `write!` to a String is infallible; the Result is discarded deliberately.
+    let _ = writeln!(
+        buf,
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        csv_text_field(&row.timestamp),
+        csv_text_field(&row.agent_id),
+        csv_text_field(agent_name),
+        csv_text_field(row.billed_agent_id.as_deref().unwrap_or("")),
+        csv_text_field(&row.provider),
+        csv_text_field(&row.model),
+        row.input_tokens,
+        row.output_tokens,
+        row.cost_usd,
+        row.tool_calls,
+        row.latency_ms,
+        csv_text_field(row.user_id.as_deref().unwrap_or("")),
+        csv_text_field(row.channel.as_deref().unwrap_or("")),
+        csv_text_field(row.session_id.as_deref().unwrap_or("")),
+    );
+}
+
+/// GET /api/usage/export — Stream raw usage events for a date range as CSV.
+#[utoipa::path(
+    get,
+    path = "/api/usage/export",
+    tag = "budget",
+    params(UsageExportQuery),
+    responses(
+        (status = 200, description = "CSV stream of usage events", content_type = "text/csv", body = String),
+        (status = 400, description = "Malformed or inverted date range, or unsupported format", body = crate::types::JsonObject)
+    )
+)]
+pub async fn usage_export(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageExportQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    match q.format.as_deref() {
+        None | Some("") | Some("csv") => {}
+        Some(other) => {
+            return ApiErrorResponse::bad_request(format!(
+                "unsupported `format` {other:?}; the only supported export format is `csv`"
+            ))
+            .into_response()
+        }
+    }
+
+    // Resolve agent ids to names once, before streaming. The map is bounded by
+    // the number of registered agents (not by the size of the export), so it
+    // does not reintroduce the memory cost that streaming the rows avoids.
+    let agent_names: std::collections::HashMap<String, String> = state
+        .kernel
+        .agent_registry()
+        .list()
+        .iter()
+        .map(|e| (e.id.to_string(), e.name.clone()))
+        .collect();
+
+    let store = state.kernel.memory_substrate().usage().clone();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+
+    tokio::task::spawn_blocking(move || {
+        let mut buf = String::with_capacity(CSV_CHUNK_BYTES + 1024);
+        buf.push_str(CSV_HEADER);
+
+        let mut client_gone = false;
+        let result = store.for_each_event_in_range(&range, |row| {
+            append_csv_row(&mut buf, &row, &agent_names);
+            if buf.len() >= CSV_CHUNK_BYTES {
+                let chunk = std::mem::take(&mut buf);
+                if tx
+                    .blocking_send(Ok(axum::body::Bytes::from(chunk)))
+                    .is_err()
+                {
+                    // Receiver dropped: the client hung up. Stop walking the
+                    // cursor instead of draining the table into a dead socket.
+                    client_gone = true;
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+
+        if client_gone {
+            return;
+        }
+
+        if let Err(e) = result {
+            tracing::warn!("usage export failed mid-stream: {e}");
+            // Headers (and probably some rows) are already on the wire, so the
+            // status code can no longer say 500. Terminating the body with an
+            // error aborts the chunked stream, which surfaces to the client as
+            // a truncated download rather than a silently short archive.
+            let _ = tx.blocking_send(Err(std::io::Error::other(format!(
+                "usage export failed: {e}"
+            ))));
+            return;
+        }
+
+        if !buf.is_empty() {
+            let _ = tx.blocking_send(Ok(axum::body::Bytes::from(buf)));
+        }
+    });
+
+    let filename = match (range.start(), range.end()) {
+        (Some(s), Some(e)) => format!("librefang-usage-{s}-to-{e}.csv"),
+        (Some(s), None) => format!("librefang-usage-from-{s}.csv"),
+        (None, Some(e)) => format!("librefang-usage-through-{e}.csv"),
+        (None, None) => "librefang-usage-all.csv".to_string(),
+    };
+
+    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -381,12 +766,6 @@ pub async fn update_budget(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    // Capture OLD config BEFORE the mutation so the audit row can carry
-    // an old→new diff. Without this the chain only records the forward
-    // state, forcing forensics to scan multiple rows to reconstruct
-    // what the operator actually changed.
-    let old_budget = state.kernel.budget_config();
-
     // Build the target budget by merging body fields onto the live snapshot.
     // Accept both the config-side keys (`max_hourly_usd`) and the GET-shape
     // aliases (`hourly_limit`) so a read-modify-write client that pipes GET
@@ -422,22 +801,18 @@ pub async fn update_budget(
         Ok(Some(n))
     };
 
-    let mut new_budget = old_budget.clone();
-    match parse_cap("max_hourly_usd", "hourly_limit") {
-        Ok(Some(v)) => new_budget.max_hourly_usd = v,
-        Ok(None) => {}
+    let hourly_cap = match parse_cap("max_hourly_usd", "hourly_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
-    match parse_cap("max_daily_usd", "daily_limit") {
-        Ok(Some(v)) => new_budget.max_daily_usd = v,
-        Ok(None) => {}
+    };
+    let daily_cap = match parse_cap("max_daily_usd", "daily_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
-    match parse_cap("max_monthly_usd", "monthly_limit") {
-        Ok(Some(v)) => new_budget.max_monthly_usd = v,
-        Ok(None) => {}
+    };
+    let monthly_cap = match parse_cap("max_monthly_usd", "monthly_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
+    };
     // alert_threshold: reject out-of-range explicitly instead of silently
     // clamping. A clamped 2.5 → 1.0 returns 200 + the dashboard shows 1.0,
     // which looks like the operator's edit took effect when the typed value
@@ -445,6 +820,7 @@ pub async fn update_budget(
     // persists to `config.toml`, so a clamp would burn an operator's typo
     // into disk indefinitely. The reject-with-400 path mirrors the cap-
     // field validator above: bad input → loud failure, never quiet coercion.
+    let mut alert_threshold = None;
     if let Some(raw) = body.get("alert_threshold") {
         if !raw.is_null() {
             let n = match raw.as_f64() {
@@ -468,9 +844,10 @@ pub async fn update_budget(
                 ))
                 .into_response();
             }
-            new_budget.alert_threshold = n;
+            alert_threshold = Some(n);
         }
     }
+    let mut token_cap = None;
     if let Some(raw) = body.get("default_max_llm_tokens_per_hour") {
         if !raw.is_null() {
             let v = match raw.as_u64() {
@@ -482,8 +859,31 @@ pub async fn update_budget(
                     .into_response();
                 }
             };
-            new_budget.default_max_llm_tokens_per_hour = v;
+            token_cap = Some(v);
         }
+    }
+
+    // Serialize snapshot + partial merge with every other budget writer.
+    // Taking the snapshot before this guard lets two disjoint concurrent
+    // PUTs both merge from the same baseline and makes the later write erase
+    // the earlier one.
+    let config_guard = state.config_write_lock.lock().await;
+    let old_budget = state.kernel.budget_config();
+    let mut new_budget = old_budget.clone();
+    if let Some(value) = hourly_cap {
+        new_budget.max_hourly_usd = value;
+    }
+    if let Some(value) = daily_cap {
+        new_budget.max_daily_usd = value;
+    }
+    if let Some(value) = monthly_cap {
+        new_budget.max_monthly_usd = value;
+    }
+    if let Some(value) = alert_threshold {
+        new_budget.alert_threshold = value;
+    }
+    if let Some(value) = token_cap {
+        new_budget.default_max_llm_tokens_per_hour = value;
     }
 
     // Persist the new `[budget]` table to `config.toml` and reload so the
@@ -492,7 +892,7 @@ pub async fn update_budget(
     // then synchronises the in-memory `MeteringSubsystem.budget_config`
     // ArcSwap (via `HotAction::UpdateBudget`) without us having to mutate
     // it twice.
-    if let Err(e) = persist_budget(&state, &new_budget).await {
+    if let Err(e) = persist_budget_locked(&state, &new_budget, &config_guard).await {
         // Audit the *attempt* even on failure. Without this row, the
         // chain only records successful budget edits — forensics has
         // no trace that an operator tried to set caps that the kernel
@@ -523,27 +923,30 @@ pub async fn update_budget(
             // surfaces a 400 instead of a misleading 500.
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
-            PersistBudgetError::Managed => crate::routes::managed_config_response(),
+            PersistBudgetError::Managed => {
+                crate::routes::managed_config_response(state.kernel.config_path())
+            }
         };
     }
 
-    // `persist_budget` already ran `reload_config()`, which routed
-    // `HotAction::UpdateBudget` into `MeteringSubsystem.update_budget`.
-    // The local `new_budget` variable IS what's now in the ArcSwap, so
-    // skip the extra `kernel.budget_config()` round-trip.
+    // Build the response and audit diff from the reloaded snapshot. The TOML
+    // round-trip runs `clamp_bounds`, so the requested struct is not the
+    // authoritative enforcement state.
+    let live_budget = state.kernel.budget_config();
+    drop(config_guard);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "global_budget updated: {}",
-            fmt_global_budget_diff(&old_budget, &new_budget)
+            fmt_global_budget_diff(&old_budget, &live_budget)
         ),
         "ok",
         api_user_ref.map(|u| u.user_id),
         Some("api".to_string()),
     );
 
-    match state.kernel.metering_ref().budget_status(&new_budget) {
+    match state.kernel.metering_ref().budget_status(&live_budget) {
         Ok(status) => Json(status).into_response(),
         Err(error) => ApiErrorResponse::internal_scrub(error).into_response(),
     }
@@ -589,25 +992,17 @@ impl std::fmt::Display for PersistBudgetError {
 /// validate → atomic write → reload). The validate step rejects writes
 /// that would produce a TOML the kernel can't parse; on error neither the
 /// disk file nor the in-memory snapshot move forward.
-async fn persist_budget(
+async fn persist_budget_locked(
     state: &Arc<AppState>,
     new_budget: &librefang_types::config::BudgetConfig,
+    _guard: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), PersistBudgetError> {
-    if crate::routes::guard_config_write().is_some() {
+    if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistBudgetError::Managed);
     }
-    let _guard = state.config_write_lock.lock().await;
-
-    let config_path = state.kernel.home_dir().join("config.toml");
-    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
-        || config_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(PersistBudgetError::Internal(
-            "invalid config file path".to_string(),
-        ));
-    }
+    // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
+    // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
+    let config_path = state.kernel.config_path().to_path_buf();
 
     // Read the existing file. A read failure on an existing file MUST
     // abort — falling back to "" would silently drop every other section
@@ -718,9 +1113,18 @@ pub async fn agent_budget_status(
     let quota = &entry.manifest.resources;
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
-    let hourly = usage_store.query_hourly(agent_id).unwrap_or(0.0);
-    let daily = usage_store.query_daily(agent_id).unwrap_or(0.0);
-    let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_hourly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let daily = match usage_store.query_daily(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let monthly = match usage_store.query_monthly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
 
     // Token usage from scheduler
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
@@ -780,11 +1184,10 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 
     // Fetch all per-agent daily costs in a single GROUP BY query, then build a
     // lookup map so the registry join below is O(n) not O(n²).
-    let daily_costs: std::collections::HashMap<_, _> = usage_store
-        .query_all_agents_daily()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let daily_costs: std::collections::HashMap<_, _> = match usage_store.query_all_agents_daily() {
+        Ok(costs) => costs.into_iter().collect(),
+        Err(error) => return usage_query_error(error),
+    };
 
     // Use `list_arcs()` instead of `list()` so we get `Vec<Arc<AgentEntry>>`
     // back rather than a fresh owned clone of every entry. Each
@@ -824,6 +1227,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.
@@ -882,15 +1286,17 @@ pub async fn update_agent_budget(
         }
     }
 
-    // Capture OLD per-agent caps BEFORE the in-memory mutation so the
-    // audit row can carry an old→new diff for forensics. `None` here
-    // means the agent vanished between the path-parse and the snapshot,
-    // which the `update_resources` call below will surface as 404.
-    let old_resources = state
+    let Some(old_resources) = state
         .kernel
         .agent_registry()
         .get(agent_id)
-        .map(|e| e.manifest.resources.clone());
+        .map(|entry| entry.manifest.resources.clone())
+    else {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found("Agent not found"),
+        );
+    };
 
     let body = match state
         .kernel
@@ -898,16 +1304,39 @@ pub async fn update_agent_budget(
         .update_resources(agent_id, hourly, daily, monthly, tokens)
     {
         Ok(()) => {
-            // Persist updated entry
-            let new_resources = state
-                .kernel
-                .agent_registry()
-                .get(agent_id)
-                .map(|e| e.manifest.resources.clone());
-            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-                if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
-                    tracing::warn!("Failed to persist agent state: {e}");
-                }
+            let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::not_found("Agent not found"),
+                );
+            };
+            let new_resources = entry.manifest.resources.clone();
+            if let Err(error) = state.kernel.memory_substrate().save_agent(&entry) {
+                let rollback = state
+                    .kernel
+                    .agent_registry()
+                    .replace_resources(agent_id, old_resources.clone());
+                tracing::error!(
+                    %agent_id,
+                    %error,
+                    rollback_error = rollback.as_ref().err().map(ToString::to_string),
+                    "Failed to persist agent budget; restored prior live quota"
+                );
+                state.kernel.audit().record_with_context(
+                    agent_id.to_string(),
+                    librefang_kernel::audit::AuditAction::ConfigChange,
+                    format!(
+                        "agent_budget update failed for {agent_id}: attempted {}",
+                        fmt_agent_resources_diff(Some(&old_resources), Some(&new_resources))
+                    ),
+                    "error",
+                    api_user_ref.map(|u| u.user_id),
+                    Some("api".to_string()),
+                );
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::internal_scrub(error),
+                );
             }
             // Audit with old→new diff and caller attribution. agent_id
             // is the *target* of the change, not the actor — the actor
@@ -917,28 +1346,13 @@ pub async fn update_agent_budget(
                 librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "agent_budget updated for {agent_id}: {}",
-                    fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
+                    fmt_agent_resources_diff(Some(&old_resources), Some(&new_resources))
                 ),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            // Return the post-mutation ResourceQuota so callers can
-            // setQueryData / hydrate caches without an extra GET.
-            // If the agent vanished between update and snapshot (race),
-            // fall back to a minimal ack so the call still appears to
-            // have succeeded — `update_resources` already returned Ok.
-            match new_resources {
-                Some(resources) => (StatusCode::OK, Json(resources)).into_response(),
-                None => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "ok",
-                        "message": "Agent budget updated"
-                    })),
-                )
-                    .into_response(),
-            }
+            (StatusCode::OK, Json(new_resources)).into_response()
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     };
@@ -1116,14 +1530,26 @@ pub async fn user_budget_detail(
         .users
         .iter()
         .find(|u| UserId::from_name(&u.name) == user_id);
-    let display_name = user_cfg.map(|u| u.name.clone());
-    let role = user_cfg.map(|u| u.role.clone());
-    let budget = user_cfg.and_then(|u| u.budget.clone());
+    let Some(user_cfg) = user_cfg else {
+        return ApiErrorResponse::not_found("user not found").into_response();
+    };
+    let display_name = user_cfg.name.clone();
+    let role = user_cfg.role.clone();
+    let budget = user_cfg.budget.clone();
 
     let usage_store = state.kernel.memory_substrate().usage();
-    let hourly = usage_store.query_user_hourly(user_id).unwrap_or(0.0);
-    let daily = usage_store.query_user_daily(user_id).unwrap_or(0.0);
-    let monthly = usage_store.query_user_monthly(user_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_user_hourly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let daily = match usage_store.query_user_daily(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let monthly = match usage_store.query_user_monthly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
 
     // Compute alert breach against the user's configured budget. When no
     // limit is set the percentage is 0 and `alert_breach` is false — the
@@ -1172,7 +1598,7 @@ pub async fn user_budget_detail(
         // global / per-agent / per-provider caps). When `alert_breach`
         // flips true, the next LLM call from this user is denied at the
         // BudgetExceeded gate.
-        "enforced": true,
+        "enforced": budget.is_some(),
     }))
     .into_response()
 }
@@ -1359,7 +1785,9 @@ pub async fn update_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
-        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(super::users::PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -1449,7 +1877,9 @@ pub async fn delete_user_budget(
         Err(super::users::PersistError::Internal(m)) => {
             ApiErrorResponse::internal(m).into_response()
         }
-        Err(super::users::PersistError::Managed) => crate::routes::managed_config_response(),
+        Err(super::users::PersistError::Managed) => {
+            crate::routes::managed_config_response(state.kernel.config_path())
+        }
     }
 }
 
@@ -1502,7 +1932,7 @@ fn exhaustion_reason_label(
         (status = 200, description = "Per-provider budget snapshot", body = crate::types::JsonObject)
     )
 )]
-pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> Response {
     let budget = state.kernel.budget_config();
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
@@ -1512,7 +1942,10 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
     // for free — caller relies on this for deterministic UI ordering.
     let mut providers: std::collections::BTreeSet<String> =
         budget.providers.keys().cloned().collect();
-    let observed = usage_store.query_distinct_providers().unwrap_or_default();
+    let observed = match usage_store.query_distinct_providers() {
+        Ok(providers) => providers,
+        Err(error) => return usage_query_error(error),
+    };
     for p in &observed {
         providers.insert(p.clone());
     }
@@ -1537,35 +1970,39 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
         })
         .unwrap_or_default();
 
-    let rows: Vec<serde_json::Value> = providers
+    let rows = providers
         .into_iter()
-        .map(|provider| {
-            let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
-            let unconfigured = !budget.providers.contains_key(&provider);
-            let spend_hourly = usage_store.query_provider_hourly(&provider).unwrap_or(0.0);
-            let spend_daily = usage_store.query_provider_daily(&provider).unwrap_or(0.0);
-            let spend_monthly = usage_store.query_provider_monthly(&provider).unwrap_or(0.0);
-            let tokens_hourly = usage_store
-                .query_provider_tokens_hourly(&provider)
-                .unwrap_or(0);
-            let ex = exhaustion_snapshot.get(&provider);
-            serde_json::json!({
-                "provider": provider,
-                "unconfigured": unconfigured,
-                "cap_hourly_usd": configured.max_cost_per_hour_usd,
-                "cap_daily_usd": configured.max_cost_per_day_usd,
-                "cap_monthly_usd": configured.max_cost_per_month_usd,
-                "cap_tokens_per_hour": configured.max_tokens_per_hour,
-                "spend_hourly_usd": spend_hourly,
-                "spend_daily_usd": spend_daily,
-                "spend_monthly_usd": spend_monthly,
-                "tokens_this_hour": tokens_hourly,
-                "is_exhausted": ex.is_some(),
-                "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
-                "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
-            })
-        })
-        .collect();
+        .map(
+            |provider| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
+                let unconfigured = !budget.providers.contains_key(&provider);
+                let spend_hourly = usage_store.query_provider_hourly(&provider)?;
+                let spend_daily = usage_store.query_provider_daily(&provider)?;
+                let spend_monthly = usage_store.query_provider_monthly(&provider)?;
+                let tokens_hourly = usage_store.query_provider_tokens_hourly(&provider)?;
+                let ex = exhaustion_snapshot.get(&provider);
+                Ok(serde_json::json!({
+                    "provider": provider,
+                    "unconfigured": unconfigured,
+                    "cap_hourly_usd": configured.max_cost_per_hour_usd,
+                    "cap_daily_usd": configured.max_cost_per_day_usd,
+                    "cap_monthly_usd": configured.max_cost_per_month_usd,
+                    "cap_tokens_per_hour": configured.max_tokens_per_hour,
+                    "spend_hourly_usd": spend_hourly,
+                    "spend_daily_usd": spend_daily,
+                    "spend_monthly_usd": spend_monthly,
+                    "tokens_this_hour": tokens_hourly,
+                    "is_exhausted": ex.is_some(),
+                    "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
+                    "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return usage_query_error(error),
+    };
 
     let alert_threshold = budget.alert_threshold;
     (
@@ -1683,10 +2120,26 @@ pub async fn update_provider_budget(
         Ok(Some(n))
     };
 
-    // Capture the OLD entry for the audit diff BEFORE we mutate. `None`
-    // here means "this provider was not configured before" — the diff
-    // will render the old side as `none` and the new side as the values
-    // the operator just set.
+    // Parse the patch before taking the config write guard. The live snapshot
+    // and partial merge happen under that guard below.
+    let hourly_cap = match parse_cost_cap("max_cost_per_hour_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let daily_cap = match parse_cost_cap("max_cost_per_day_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let monthly_cap = match parse_cost_cap("max_cost_per_month_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let token_cap = match parse_token_cap("max_tokens_per_hour") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+
+    let config_guard = state.config_write_lock.lock().await;
     let old_budget_config = state.kernel.budget_config();
     let old_provider = old_budget_config.providers.get(&provider_id).cloned();
 
@@ -1694,25 +2147,17 @@ pub async fn update_provider_budget(
     // in the body keeps its prior value — matches the global PUT's
     // partial-update contract (`budget_put_with_empty_object_is_noop`).
     let mut next_provider = old_provider.clone().unwrap_or_default();
-    match parse_cost_cap("max_cost_per_hour_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_hour_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = hourly_cap {
+        next_provider.max_cost_per_hour_usd = value;
     }
-    match parse_cost_cap("max_cost_per_day_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_day_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = daily_cap {
+        next_provider.max_cost_per_day_usd = value;
     }
-    match parse_cost_cap("max_cost_per_month_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_month_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = monthly_cap {
+        next_provider.max_cost_per_month_usd = value;
     }
-    match parse_token_cap("max_tokens_per_hour") {
-        Ok(Some(v)) => next_provider.max_tokens_per_hour = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = token_cap {
+        next_provider.max_tokens_per_hour = value;
     }
 
     // Compose the full BudgetConfig the persist layer expects, with the
@@ -1724,7 +2169,7 @@ pub async fn update_provider_budget(
         .providers
         .insert(provider_id.clone(), next_provider.clone());
 
-    if let Err(e) = persist_budget(&state, &new_budget).await {
+    if let Err(e) = persist_budget_locked(&state, &new_budget, &config_guard).await {
         state.kernel.audit().record_with_context(
             "system",
             librefang_kernel::audit::AuditAction::ConfigChange,
@@ -1739,16 +2184,25 @@ pub async fn update_provider_budget(
         return match e {
             PersistBudgetError::BadRequest(m) => ApiErrorResponse::bad_request(m).into_response(),
             PersistBudgetError::Internal(m) => ApiErrorResponse::internal(m).into_response(),
-            PersistBudgetError::Managed => crate::routes::managed_config_response(),
+            PersistBudgetError::Managed => {
+                crate::routes::managed_config_response(state.kernel.config_path())
+            }
         };
     }
 
+    let live_budget = state.kernel.budget_config();
+    let live_provider = live_budget
+        .providers
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+    drop(config_guard);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "provider_budget updated for {provider_id}: {}",
-            fmt_provider_budget_diff(old_provider.as_ref(), Some(&next_provider))
+            fmt_provider_budget_diff(old_provider.as_ref(), Some(&live_provider))
         ),
         "ok",
         api_user_ref.map(|u| u.user_id),
@@ -1759,10 +2213,10 @@ pub async fn update_provider_budget(
         StatusCode::OK,
         Json(serde_json::json!({
             "provider": provider_id,
-            "max_cost_per_hour_usd": next_provider.max_cost_per_hour_usd,
-            "max_cost_per_day_usd": next_provider.max_cost_per_day_usd,
-            "max_cost_per_month_usd": next_provider.max_cost_per_month_usd,
-            "max_tokens_per_hour": next_provider.max_tokens_per_hour,
+            "max_cost_per_hour_usd": live_provider.max_cost_per_hour_usd,
+            "max_cost_per_day_usd": live_provider.max_cost_per_day_usd,
+            "max_cost_per_month_usd": live_provider.max_cost_per_month_usd,
+            "max_tokens_per_hour": live_provider.max_tokens_per_hour,
         })),
     )
         .into_response()

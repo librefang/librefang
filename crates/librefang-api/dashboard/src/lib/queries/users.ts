@@ -14,13 +14,10 @@ import { withOverrides, type QueryOverrides } from "./options";
 const STALE_MS = 30_000;
 
 export const userQueries = {
-  list: (filters: { role?: string; search?: string } = {}) =>
+  list: () =>
     queryOptions({
-      queryKey: userKeys.list(filters),
-      queryFn: async () => {
-        const all = await listUsers();
-        return filterUsers(all, filters);
-      },
+      queryKey: userKeys.list({}),
+      queryFn: listUsers,
       staleTime: STALE_MS,
     }),
   detail: (name: string) =>
@@ -38,7 +35,8 @@ function filterUsers(
 ): UserItem[] {
   let out = users;
   if (filters.role && filters.role !== "all") {
-    out = out.filter(u => u.role === filters.role);
+    const role = filters.role.toLowerCase();
+    out = out.filter(u => u.role.toLowerCase() === role);
   }
   if (filters.search && filters.search.trim()) {
     const q = filters.search.trim().toLowerCase();
@@ -46,8 +44,10 @@ function filterUsers(
       if (u.name.toLowerCase().includes(q)) return true;
       // Match on any platform_id binding so admins can search by Telegram
       // ID etc.
-      return Object.values(u.channel_bindings).some(v =>
-        v.toLowerCase().includes(q),
+      const bindings = u.channel_bindings;
+      if (!bindings || typeof bindings !== "object") return false;
+      return Object.values(bindings).some(v =>
+        typeof v === "string" && v.toLowerCase().includes(q),
       );
     });
   }
@@ -58,7 +58,10 @@ export function useUsers(
   filters: { role?: string; search?: string } = {},
   options: QueryOverrides = {},
 ) {
-  return useQuery(withOverrides(userQueries.list(filters), options));
+  return useQuery({
+    ...withOverrides(userQueries.list(), options),
+    select: (users) => filterUsers(users, filters),
+  });
 }
 
 export function useUser(name: string, options: QueryOverrides = {}) {

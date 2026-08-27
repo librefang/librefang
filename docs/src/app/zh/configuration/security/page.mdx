@@ -18,6 +18,24 @@ redirect_url = "http://127.0.0.1:4545/api/auth/callback"
 scopes = ["openid", "profile", "email"]
 allowed_domains = ["example.com"]
 session_ttl_secs = 86400
+
+# 下面两份映射所匹配的声明值从令牌的哪些位置读取。
+# 使用点号路径；`<client>` 会被替换为该提供商的 client_id。
+# 默认为 ["roles", "groups"]。
+claim_paths = ["realm_access.roles", "resource_access.<client>.roles", "groups"]
+
+# 哪些 IdP 群组可以调用 API，以及对应的权限级别。
+# 默认为空：未配置时，OIDC bearer 令牌不会通过任何认证。
+[external_auth.role_map]
+"librefang-owners" = "owner"
+"librefang-operators" = "admin"
+"engineering" = "user"
+
+# 哪些 IdP 群组会让调用方成为本地 [[groups]] 条目的成员。
+# 与 role_map 相互独立：成员身份本身不携带任何权限。
+[external_auth.group_map]
+"platform-oncall" = "oncall"
+"sox-reviewers" = "compliance"
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -31,7 +49,66 @@ session_ttl_secs = 86400
 | `allowed_domains` | list of strings | `[]` | 限制登录到这些邮箱域名。空列表 = 允许所有。 |
 | `audience` | string | `""` | 要验证的 JWT audience 声明。为空时默认使用 `client_id`。 |
 | `session_ttl_secs` | u64 | `86400` | 会话令牌有效期（秒）。默认 24 小时。 |
+| `require_email_verified` | bool | `true` | 拒绝 ID 令牌中没有 `email_verified = true` 的登录。仅当提供商不签发该声明时才设为 `false`。 |
 | `providers` | list of objects | `[]` | 多个 OIDC/OAuth2 提供商。配置后优先于上述单提供商字段。 |
+| `role_map` | table of string → string | `{}` | IdP 角色/群组声明值 → LibreFang 角色（`owner` / `admin` / `user` / `viewer` / `guest`）。详见下文。 |
+| `group_map` | table of string → string | `{}` | IdP 群组/角色/scope 声明值 → 调用方将被视为其成员的 `[[groups]]` 条目名称。详见下文。 |
+| `claim_paths` | list of strings | `["roles","groups"]` | 两份映射所匹配的声明的点号路径。`<client>` 会被替换为提供商的 `client_id`。详见下文。 |
+
+#### `role_map`：把 ID 令牌变成 API 凭据
+
+在这里添加条目之前，通过验证的 OIDC bearer 令牌不会授予任何权限——守护进程会用提供商的 JWKS 验证令牌，而调用方仍然收到与完全不带令牌时相同的 401。
+授予权限的是这份映射本身，因此权限始终来自运维人员写下的配置，而不是身份提供商单方面的决定。
+
+键是 `claim_paths` 解析出的声明值（默认为 `roles` 和 `groups` 两个声明），值是 LibreFang 角色，使用与 `[[users]] role` 和 `[channel_role_mapping]` 相同的 `viewer` < `user` < `admin` < `owner` 阶梯。
+持有多个已映射群组的调用方会获得**权限最高**的匹配项，因此声明的顺序（那是提供商的事，不是你的）无法决定最终生效的角色。
+
+以下三种情况有意不授予任何权限，而不是回退到某个默认值：
+
+- 映射中不存在的声明值，
+- 存在但指向无法识别的角色字符串的声明值（例如 `"admn"` 这类拼写错误，会在启动和配置重载时以 `WARN` 报告），
+- 来自既未配置 `audience` 也未配置 `client_id` 的提供商的令牌，因为此时 JWT audience 校验被禁用，任何由该发行者密钥签名的令牌都会通过验证。
+
+`require_email_verified` 同样适用于此：邮箱未经提供商验证的令牌不携带任何角色。
+
+该映射从配置快照中实时读取，因此 `POST /api/config/reload` 会让修改在下一个请求生效，无需重启。
+它有意**不能**通过 `POST /api/config/set` 写入——能编辑它的调用方可以通过写入自己已持有的群组名把自己提升为 `owner`——但 `GET /api/config` 可以读回它，以便确认当前哪些群组携带权限。
+
+#### `group_map`：把 IdP 群组接到 LibreFang 团队上
+
+`[[groups]]`（见身份一节）为团队命名——值班轮换、项目组、部门——好让权限和归属可以指向团队，而不必逐个列出成员。
+`group_map` 让这些团队的成员身份来自你的身份提供商，而不是靠手工录入、然后在有人换岗时悄悄过期。
+
+键与 `role_map` 一样是声明值；值是 `[[groups]]` 的名称。
+和角色一样，成员身份是**映射得来的，绝不按名称匹配**：除非你写下了那条映射，否则名为 `oncall` 的 IdP 群组不会加入本地的 `oncall` 群组。
+这一点值得说清楚——在允许自助创建群组的租户里，按名称匹配意味着任何能建群的人都可以挑一个名字，从而获得那个团队所拥有的一切。
+
+成员身份会做什么、不会做什么：
+
+- 它**会**把群组自身的名称以及 `roles` 列表中的每个字符串作为绑定规则的角色字符串授予调用方，并在归属判断中把调用方视为该群组的成员。
+- 它**不会**授予任何 RBAC 权限。名为 `owner` 的群组只是一个叫 `owner` 的团队。如果你希望某个 IdP 声明同时携带成员身份和权限，就把它同时写进 `role_map` 和 `group_map`——两条条目，刻意为之。
+
+成员身份在**每个请求**上都从所出示的令牌重新计算，且**绝不会写入 `config.toml`**。
+这正是撤销权限能够生效的原因：在身份提供商中把某人移出群组，其当前令牌过期后这里的成员身份即随之消失，本地无需任何清理。
+反过来则不会发生——身份提供商不再声明某个群组，并不会把那个人从你手写的 `[[groups]] members` 列表中移除。`members` 中的名字是你自己的授权，只有你能收回。当两边都指向同一个人时，结果就是二者的并集。
+
+`group_map` 的值若指向 `[[groups]]` 中不存在的群组，则不授予任何成员身份，并会在启动和配置重载时以 `WARN` 报告——包括群组被删除或改名而映射未同步这种最常见的情况。
+
+`GET /api/authz/whoami` 会报告调用方凭据实际解析成了什么：角色、principal、生效的群组、其中哪些来自令牌，以及群组授予的角色字符串。SSO 登录后权限不如预期时，先看这里。
+
+#### `claim_paths`：声明值从哪里来
+
+两份映射匹配的是同一组解析出来的声明值，而 `claim_paths` 决定这组值由令牌的哪些部分构成。
+条目是点号路径，因此 Keycloak 的 `realm_access.roles` 和 `resource_access.<client>.roles` 都可以寻址；`<client>` 会被替换为该提供商自己的 `client_id`，所以同一条条目可以跨提供商使用，也绝不会取到同一令牌中其他客户端的角色。
+解析结果为字符串数组的路径贡献其中每个元素；解析结果为单个字符串的路径贡献其按空白分隔的各个词。解析不到任何内容的路径不是错误——各家提供商签发的声明本就不同。
+
+默认值是 `["roles", "groups"]`。
+`scope` 有意不在其中：`roles` 和 `groups` 是身份提供商关于**用户**的断言，而 `scope` 描述的是某个**客户端应用**申请并获得了什么，同一租户中为其他 OAuth 客户端签发的令牌同样携带它。
+如果你需要它，把 `"scope"` 加进列表，并且只在已设置 `audience` 的情况下这样做——没有 audience 绑定时，守护进程根本不会派生任何授权。
+
+注意，增加一条路径会同时扩大 `role_map` 和 `group_map` 的匹配范围，因为两者读取同一组值。
+
+出于与 `role_map` 相同的理由，`group_map` 和 `claim_paths` 通过 `POST /api/config/set` 是只读的，也出于同样的理由可以通过 `GET /api/config` 读回。
 
 对于多提供商配置，使用 `[[external_auth.providers]]`，支持以下字段：`id`、`display_name`、`issuer_url`、`auth_url`、`token_url`、`userinfo_url`、`jwks_uri`、`client_id`、`client_secret_env`、`redirect_url`、`scopes`、`allowed_domains`、`audience`。
 
@@ -217,7 +294,7 @@ max_memories_per_agent = 1000
 | `session_ttl_hours` | u32 | `24` | 会话记忆的 TTL（小时）。超过此时间的记忆在每次 Agent 执行前被清理。 |
 | `duplicate_threshold` | f32 | `0.5` | 重复检测的相似度阈值（0.0-1.0）。有嵌入向量时使用余弦相似度，否则回退到 Jaccard 词重叠。 |
 | `confidence_decay_rate` | f64 | `0.01` | 每天的置信度衰减率。遵循指数衰减：`conf x e^(-rate x days)`。默认 `0.01` 约 70 天减半。 |
-| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时淘汰最旧/置信度最低的条目。`0` = 无上限。 |
+| `max_memories_per_agent` | usize | `1000` | 每个 Agent 的最大记忆数。超出时优先淘汰原始对话行，其次才是抽取出的事实；同类之内按置信度从低到高淘汰。`0` = 无上限。 |
 
 ---
 

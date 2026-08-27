@@ -1,4 +1,4 @@
-//! Integration tests for the `/api/agents` clone/reload/push + bulk-ops
+//! Integration tests for the `/api/agents` clone/reload/inject/push + bulk-ops
 //! route clusters.
 //!
 //! Refs the "agents-mutation-routes-untested" umbrella (Critical) — final
@@ -9,8 +9,9 @@
 //!   POST   /api/agents/{id}/clone   (201 + read-back; 409 on duplicate name;
 //!                                     404 on unknown source; 400 invalid id)
 //!   POST   /api/agents/{id}/reload  (200 + read-back side effect; negative)
+//!   POST   /api/agents/{id}/inject  (404 unknown agent without error leakage)
 //!   POST   /api/agents/{id}/push    (400 validation; 404 unknown agent;
-//!                                     502 when no channel adapter is wired)
+//!                                     scrubbed 502 when no channel adapter is wired)
 //!   POST   /api/agents/bulk         (multi-create + read-back)
 //!   DELETE /api/agents/bulk         (multi-delete + read-back 404)
 //!   POST   /api/agents/bulk/start   (set Full mode + read-back)
@@ -179,12 +180,53 @@ async fn test_clone_agent_creates_independent_copy() {
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
     let new_id = body["agent_id"].as_str().expect("agent_id in response");
     assert_eq!(body["name"], "clone-dest");
+    assert_eq!(body["partial"], false);
+    assert_eq!(body["warnings"], serde_json::json!([]));
     assert_ne!(new_id, src.to_string(), "clone must get a fresh id");
 
     // Read-back: the clone is independently addressable and carries the new name.
     let (status, got) = send(h.app.clone(), get(&format!("/api/agents/{}", new_id))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got["name"], "clone-dest");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_identity_copy_failure_returns_partial_creation() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "partial-clone-source");
+    let source_workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(src)
+        .and_then(|entry| entry.manifest.workspace.clone())
+        .expect("source workspace");
+    let source_identity = source_workspace.join(".identity");
+    std::fs::remove_dir_all(&source_identity).expect("remove source identity directory");
+    std::fs::write(&source_identity, "not a directory")
+        .expect("replace identity directory with a file");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{}/clone", src),
+            serde_json::json!({"new_name": "partial-clone-dest"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["name"], "partial-clone-dest");
+    assert_eq!(body["partial"], true);
+    assert_eq!(
+        body["warnings"],
+        serde_json::json!(["identity_files_copy_failed"])
+    );
+
+    let new_id = body["agent_id"].as_str().expect("agent_id in response");
+    let (status, got) = send(h.app.clone(), get(&format!("/api/agents/{new_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got["name"], "partial-clone-dest");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -392,6 +434,29 @@ async fn test_reload_unknown_agent_is_rejected() {
 }
 
 // ===========================================================================
+// INJECT — POST /api/agents/{id}/inject
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_inject_unknown_agent_scrubs_kernel_error() {
+    let h = boot(TEST_TOKEN).await;
+    let missing_id = unknown_agent_id();
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{missing_id}/inject"),
+            serde_json::json!({"message": "interrupt"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+    assert_eq!(body["error"]["message"], "agent not found");
+    assert_eq!(body["error"]["code"], "agent_not_found");
+    assert!(!body.to_string().contains(&missing_id.to_string()));
+}
+
+// ===========================================================================
 // PUSH — POST /api/agents/{id}/push
 //
 // The push happy path delivers through a live channel adapter (Telegram,
@@ -478,6 +543,8 @@ async fn test_push_no_channel_adapter_returns_502() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "body: {body}");
     assert_eq!(body["success"], false);
     assert_eq!(body["agent_id"], id.to_string());
+    assert_eq!(body["detail"], "Channel adapter rejected the message");
+    assert!(!body.to_string().contains("telegram"));
 }
 
 // ===========================================================================

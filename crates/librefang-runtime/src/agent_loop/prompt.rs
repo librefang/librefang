@@ -79,7 +79,7 @@ pub(super) async fn remember_interaction_best_effort(
                         agent_id,
                         interaction_text,
                         MemorySource::Conversation,
-                        "episodic",
+                        librefang_types::memory::EPISODIC_SCOPE,
                         HashMap::new(),
                         Some(&vec),
                         peer_id,
@@ -104,7 +104,7 @@ pub(super) async fn remember_interaction_best_effort(
                         agent_id,
                         interaction_text,
                         MemorySource::Conversation,
-                        "episodic",
+                        librefang_types::memory::EPISODIC_SCOPE,
                         HashMap::new(),
                         peer_id,
                     )
@@ -123,7 +123,7 @@ pub(super) async fn remember_interaction_best_effort(
             agent_id,
             interaction_text,
             MemorySource::Conversation,
-            "episodic",
+            librefang_types::memory::EPISODIC_SCOPE,
             HashMap::new(),
             peer_id,
         )
@@ -153,21 +153,50 @@ fn proactive_item_to_fragment(
         fallback
     }));
 
+    // Both of these were previously flattened, and the class predicate the prompt memory section
+    // budgets by rests on exactly the two of them (#7920).
+    // `MemoryItem::from_fragment` folds every storage scope it does not recognise — `episodic`
+    // included — into `MemoryLevel::Session`, so reconstructing the scope from `level` relabelled a
+    // raw-dialogue row as `session_memory` and the section then filed it as an extracted fact and
+    // gave it a fact-sized share of the budget.
+    // `MemoryItem.scope` carries the real one; `level.scope_str()` remains the fallback for items
+    // that never came from a stored fragment.
+    let scope = item
+        .scope
+        .clone()
+        .unwrap_or_else(|| item.level.scope_str().to_string());
+    // Likewise the source: hard-coding `Conversation` made an imported or system-written episodic
+    // row indistinguishable from one this agent's per-turn writer produced.
+    let source = item
+        .source
+        .as_deref()
+        .and_then(|s| {
+            serde_json::from_value::<librefang_types::memory::MemorySource>(
+                serde_json::Value::String(s.to_string()),
+            )
+            .ok()
+        })
+        .unwrap_or(librefang_types::memory::MemorySource::Conversation);
+
     MemoryFragment {
         id: memory_id,
         agent_id,
         content: item.content,
         embedding: None,
         metadata: item.metadata,
-        source: librefang_types::memory::MemorySource::Conversation,
+        source,
         confidence: 1.0,
         created_at: item.created_at,
         accessed_at: chrono::Utc::now(),
         access_count: 0,
-        scope: item.level.scope_str().to_string(),
+        scope,
         image_url: None,
         image_embedding: None,
         modality: Default::default(),
+        // Carried through so the recall's own ranking survives the conversion
+        // (#7808). It is `None` unless the recall that produced this item was
+        // embedding-ranked, which is exactly when a score exists.
+        similarity: item.similarity,
     }
 }
 
@@ -204,6 +233,11 @@ pub(super) struct RecallSetupContext<'a> {
     /// (dashboard, direct API, CLI) — the filter then degrades to a
     /// no-op, preserving legacy recall behaviour.
     pub(super) sender_chat_scope: Option<&'a str>,
+    /// Identity of the session this turn belongs to, rendered as a UUID string, used for the #7605 cross-session memory filter.
+    ///
+    /// `Some` whenever session-scoped recall is in effect for this agent (`[proactive_memory] session_scoped_recall`, overridable per agent); `None` restores the pre-#7605 behaviour where every memory of an agent is a candidate for every one of that agent's turns.
+    /// Resolved by `session_recall_scope` in `end_turn.rs` from the session the loop is actually reading and writing — there is no separate notion of a session here.
+    pub(super) session_scope: Option<&'a str>,
     /// Optional kernel handle used to resolve the per-user memory ACL
     /// (RBAC M3, #3054). When `None` the auto-retrieve path runs without
     /// a guard — preserving pre-M3 single-user behaviour.
@@ -225,6 +259,10 @@ pub(super) struct PromptSetupContext<'a> {
     pub(super) experiment_context: Option<&'a ExperimentContext>,
     pub(super) running_experiment: Option<&'a librefang_types::agent::PromptExperiment>,
     pub(super) memories: &'a [MemoryFragment],
+    /// Operator override for the share of the prompt memory section's character budget reserved for extracted facts, as a percentage.
+    ///
+    /// Kernel populates this from `KernelConfig.memory_fact_budget_percent`; `None` uses `prompt_builder::MEMORY_FACT_BUDGET_PERCENT`.
+    pub(super) memory_fact_budget_percent: Option<u8>,
     pub(super) stable_prefix_mode: bool,
     pub(super) streaming: bool,
 }
@@ -299,14 +337,60 @@ pub(super) fn select_running_experiment(
     }
 }
 
+/// Raw-dialogue candidates carried out of recall into the prompt memory section.
+///
+/// Unchanged from the historical class-blind window, and deliberately so: raw dialogue's 30 % share of the section budget renders about three rows, and even the whole budget renders about eleven, so a wider dialogue window is candidates the section could never print.
+const MEMORY_RECALL_LIMIT_DIALOGUE: usize = 5;
+
+/// Extracted-fact candidates carried out of recall into the prompt memory section.
+///
+/// Sized to what the fact share of the section budget can actually render — about 29 bullets at the 133-character mean measured in #7920 — so that the character budget, not the candidate window, is what decides how many facts appear.
+/// Five was the old shared window, and a fact had to outrank raw dialogue nine times its size to claim one of those five slots.
+const MEMORY_RECALL_LIMIT_FACTS: usize = 25;
+
+/// Take the top-N of each memory class from one ranked list, preserving rank order within each.
+///
+/// The two classes are budgeted separately in the prompt (`prompt_builder::format_memory_items_by_class`), and that split is only as good as the candidates it is handed: a class-blind cap applied here decides the section's class mix before the budget ever gets a say.
+///
+/// No spill between the quotas. The section's own fill already spills an unused share from either class to the other, and a dialogue quota above `MEMORY_RECALL_LIMIT_DIALOGUE` could not be rendered even when facts are absent, so spilling here would only widen the "further remembered details are not shown" count.
+fn select_recall_candidates(
+    memories: Vec<MemoryFragment>,
+    dialogue_limit: usize,
+    fact_limit: usize,
+) -> Vec<MemoryFragment> {
+    let mut dialogue_kept = 0usize;
+    let mut facts_kept = 0usize;
+    memories
+        .into_iter()
+        .filter(|frag| {
+            let (kept, limit) = if frag.is_raw_dialogue() {
+                (&mut dialogue_kept, dialogue_limit)
+            } else {
+                (&mut facts_kept, fact_limit)
+            };
+            if *kept < limit {
+                *kept += 1;
+                true
+            } else {
+                false
+            }
+        })
+        .collect()
+}
+
 pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
-    // #5227: when an active chat scope is supplied, ask the substrate for
-    // a wider candidate window so the per-scope post-filter below has
-    // enough headroom to keep `MEMORY_RECALL_LIMIT` legitimate results.
-    // Without the inflation a substrate query that returns ~5 memories
-    // all stamped for the *other* chat would leave zero results after
-    // filtering. Matches the inflation factor used by `auto_retrieve`.
-    const MEMORY_RECALL_LIMIT: usize = 5;
+    // #5227: ask the substrate for a wider candidate window than the section will use, so the
+    // per-scope post-filters below have enough headroom to keep a full set of legitimate results.
+    // Without the inflation a substrate query that returns ~5 memories all stamped for the *other*
+    // chat would leave zero results after filtering.
+    // Matches the inflation factor used by `auto_retrieve`.
+    //
+    // #7920 widened it to every turn rather than only scope-filtered ones, and raised what it is a
+    // multiple of. The window is now the candidate budget of both memory classes together, because
+    // the selection below takes the top-N *per class*: on a store that is 4:1 raw dialogue, a
+    // 5-row window contains a fact only by luck, and in 29 % of the measured turns it contained
+    // none at all.
+    const MEMORY_RECALL_LIMIT: usize = MEMORY_RECALL_LIMIT_DIALOGUE + MEMORY_RECALL_LIMIT_FACTS;
     // Use the chat-qualified scope (`"telegram:<chatId>"`) for the
     // #5227 filter, not the bare `sender_channel` (`"telegram"`). On
     // Telegram / Slack / Discord native bridges the latter is identical
@@ -318,11 +402,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
         .sender_chat_scope
         .map(str::trim)
         .is_some_and(|s| !s.is_empty());
-    let recall_fetch_limit = if chat_scope_active {
-        (MEMORY_RECALL_LIMIT * 4).max(50)
-    } else {
-        MEMORY_RECALL_LIMIT
-    };
+    let recall_fetch_limit = (MEMORY_RECALL_LIMIT * 4).max(50);
     let mut memories = if let Some(engine) = ctx.context_engine {
         // The context engine's `ingest` uses its own (typically small,
         // default 5) recall budget and is unaware of `chat_scope`. When
@@ -350,7 +430,13 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                 "Context engine ingest failed; continuing without recalled memories"
             },
         );
-        if chat_scope_active && !ctx.stable_prefix_mode {
+        // #7920 ungated this. `DefaultContextEngine::ingest` runs its own recall bounded by
+        // `ContextEngineConfig::max_recall_results` (5 by default) and class-blind, and the kernel
+        // always builds an engine (`boot.rs`: the binding is `Some(engine)` unconditionally), so on
+        // a turn with no chat or session scope — dashboard, REST, cron — the engine's top-5 *was*
+        // the section's entire candidate pool. Selecting per class out of five rows that are 4:1
+        // raw dialogue cannot produce facts that are not there.
+        if !ctx.stable_prefix_mode {
             let extra = if let Some(emb) = ctx.embedding_driver {
                 match emb.embed_one(ctx.user_message).await {
                     Ok(qv) => recall_or_default(
@@ -502,13 +588,30 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
             librefang_types::memory::memory_scope_allows_recall(&frag.scope, &frag.metadata, want)
         });
     }
-    // Truncate AFTER the scope filter, not before. The fetch widened
-    // to `recall_fetch_limit = max(MEMORY_RECALL_LIMIT*4, 50)` above
-    // specifically so the filter has something to throw away — capping
-    // here is what restores the prompt's expected `MEMORY_RECALL_LIMIT`
-    // window. When `chat_scope_active == false` the fetch was already
-    // capped at `MEMORY_RECALL_LIMIT`, making this `truncate` a no-op.
-    memories.truncate(MEMORY_RECALL_LIMIT);
+    // #7605: the same treatment for the session that owns this turn.
+    // This path is the substrate/context-engine recall, which is a second way memories reach the prompt — gating only `auto_retrieve` below would leave one visitor's rows arriving here instead.
+    if let Some(want) = ctx.session_scope {
+        memories.retain(|frag| {
+            librefang_types::memory::memory_session_scope_allows_recall(&frag.metadata, want)
+        });
+    }
+    // Cap AFTER the scope filters, not before.
+    // The fetch widened to `recall_fetch_limit = max(MEMORY_RECALL_LIMIT * 4, 50)` above
+    // specifically so the filters have something to throw away; capping here is what restores the
+    // prompt's expected candidate window.
+    //
+    // The cap is per class (#7920). A class-blind `truncate` handed the section whatever the top-N
+    // happened to be, and on a store that is 4:1 raw dialogue the top-N is raw dialogue: in 29 % of
+    // the measured turns not one extracted fact survived it, which no amount of budgeting
+    // downstream can repair — the section cannot render a candidate it was never given.
+    // Neither class can lose here: a class-blind top-`MEMORY_RECALL_LIMIT_DIALOGUE` could never
+    // have contained more dialogue rows than the dialogue quota allows, so this selection returns
+    // at least as many of each class as the old one did, and usually many more facts.
+    memories = select_recall_candidates(
+        memories,
+        MEMORY_RECALL_LIMIT_DIALOGUE,
+        MEMORY_RECALL_LIMIT_FACTS,
+    );
 
     // Fork turns skip auto_retrieve: (a) it would add memory fragments
     // to the prompt that the parent turn didn't have, breaking byte-
@@ -538,6 +641,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                                 ctx.user_message,
                                 ctx.sender_user_id,
                                 ctx.sender_chat_scope,
+                                ctx.session_scope,
                             )
                             .await;
                         if let Ok(ref mut its) = items {
@@ -557,6 +661,7 @@ pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> Reca
                             ctx.user_message,
                             ctx.sender_user_id,
                             ctx.sender_chat_scope,
+                            ctx.session_scope,
                         )
                         .await
                 }
@@ -639,17 +744,32 @@ pub(super) fn build_prompt_setup(ctx: PromptSetupContext<'_>) -> PromptSetup {
     }
 
     let memory_context_msg = if !ctx.memories.is_empty() {
-        let mem_pairs: Vec<(String, String)> = ctx
-            .memories
-            .iter()
-            .map(|m| (String::new(), m.content.clone()))
-            .collect();
+        // Split by class before the section is built.
+        // Recall ranks both classes in one list and that ranking is sound — raw dialogue takes slightly *under* its base rate of the slots — but a dialogue row inlines a whole exchange and outweighs an extracted fact by roughly nine to one in characters, so one shared budget hands the section to dialogue on size alone and leaves 29 % of turns with no fact in the prompt at all (#7920).
+        // `partition` preserves rank order within each class, so the section stays a fixed arrangement of a fixed input (#3298).
+        let (dialogue, facts): (Vec<&MemoryFragment>, Vec<&MemoryFragment>) =
+            ctx.memories.iter().partition(|m| m.is_raw_dialogue());
+        let to_pairs = |frags: &[&MemoryFragment]| -> Vec<(String, String)> {
+            frags
+                .iter()
+                .map(|m| (String::new(), m.content.clone()))
+                .collect()
+        };
+        let fact_pairs = to_pairs(&facts);
+        let dialogue_pairs = to_pairs(&dialogue);
         if ctx.stable_prefix_mode {
-            let personal_ctx =
-                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            let personal_ctx = crate::prompt_builder::format_memory_items_by_class(
+                &fact_pairs,
+                &dialogue_pairs,
+                ctx.memory_fact_budget_percent,
+            );
             Some(personal_ctx)
         } else {
-            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            let section = crate::prompt_builder::build_memory_section_by_class(
+                &fact_pairs,
+                &dialogue_pairs,
+                ctx.memory_fact_budget_percent,
+            );
             system_prompt.push_str("\n\n");
             system_prompt.push_str(&section);
             None
@@ -879,6 +999,7 @@ mod tests {
             sender_user_id: None,
             sender_channel: Some("telegram"),
             sender_chat_scope: Some(dm_scope),
+            session_scope: None,
             kernel: None,
             stable_prefix_mode: false,
             streaming: false,
@@ -919,6 +1040,82 @@ mod tests {
                 f.content
             );
         }
+    }
+
+    /// #7605 — the substrate/context-engine recall path is a second way memories reach a prompt, alongside `auto_retrieve`.
+    /// Gating only the latter would leave one visitor's rows arriving here instead, so this asserts the session filter applies to fragments recalled from the substrate too.
+    #[tokio::test]
+    async fn recall_setup_drops_other_sessions_memories_7605() {
+        use librefang_types::memory::SESSION_SCOPE_METADATA_KEY;
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let write_for_session = |content: &str, session: Option<&str>| {
+            let mut meta = std::collections::HashMap::new();
+            if let Some(s) = session {
+                meta.insert(
+                    SESSION_SCOPE_METADATA_KEY.to_string(),
+                    serde_json::Value::String(s.to_string()),
+                );
+            }
+            substrate
+                .remember_with_embedding(
+                    agent_id,
+                    content,
+                    MemorySource::Conversation,
+                    librefang_types::memory::MemoryLevel::Session.scope_str(),
+                    meta,
+                    None,
+                    None,
+                )
+                .unwrap();
+        };
+
+        write_for_session("project Atlas ships Friday", Some(session_a));
+        write_for_session("project Atlas has a legacy note", None);
+
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+        let setup = setup_recalled_memories(RecallSetupContext {
+            session: &session,
+            user_message: "project Atlas",
+            memory: substrate.as_ref(),
+            embedding_driver: None,
+            proactive_memory: None,
+            context_engine: None,
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_scope: None,
+            session_scope: Some(session_b),
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts: &opts,
+        })
+        .await;
+
+        assert!(
+            !setup
+                .memories
+                .iter()
+                .any(|f| f.content.contains("ships Friday")),
+            "regression #7605: a memory written in session A reached session B's prompt: {:?}",
+            setup
+                .memories
+                .iter()
+                .map(|f| &f.content)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            setup
+                .memories
+                .iter()
+                .any(|f| f.content.contains("legacy note")),
+            "untagged rows must still surface, or upgrading would blank out an existing store"
+        );
     }
 
     /// #5474: `remember_interaction_best_effort` must propagate `peer_id` so
@@ -1004,6 +1201,275 @@ mod tests {
             global.len(),
             1,
             "NULL-peer row must be findable without peer filter"
+        );
+    }
+
+    /// Deterministic stand-in for a real embedding model.
+    ///
+    /// Two dimensions, chosen by a marker in the text, so cosine rank order is fixed by the fixture rather than by whatever a tokenizer happens to do: the query and every raw-dialogue row sit on the same axis (cosine 1.0), every fact sits off it (cosine ~0.9).
+    /// Every dialogue row therefore outranks every fact, which is the shape #7920 measured — 29 % of turns whose top-ranked window held no fact at all.
+    struct AxisEmbedding;
+
+    #[async_trait::async_trait]
+    impl crate::embedding::EmbeddingDriver for AxisEmbedding {
+        async fn embed(
+            &self,
+            texts: &[&str],
+        ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("zzfact") {
+                        vec![0.9, 0.436]
+                    } else {
+                        vec![1.0, 0.0]
+                    }
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    /// Write a corpus of the shape #7920 measured: raw dialogue outnumbering extracted facts about
+    /// 4:1, and every dialogue row ranking above every fact.
+    fn write_class_mixed_corpus(substrate: &MemorySubstrate, agent_id: AgentId) {
+        for i in 0..40 {
+            substrate
+                .remember_with_embedding(
+                    agent_id,
+                    &format!("[Past exchange]\nThem: atlas {i}?\nYou: atlas shipped."),
+                    MemorySource::Conversation,
+                    librefang_types::memory::EPISODIC_SCOPE,
+                    std::collections::HashMap::new(),
+                    Some(&[1.0, 0.0]),
+                    None,
+                )
+                .unwrap();
+        }
+        for i in 0..10 {
+            let mut meta = std::collections::HashMap::new();
+            meta.insert(
+                librefang_types::memory::MEMORY_CATEGORY_METADATA_KEY.to_string(),
+                serde_json::json!("preference"),
+            );
+            substrate
+                .remember_with_embedding(
+                    agent_id,
+                    &format!("zzfact {i}: the user prefers atlas rollouts announced in advance."),
+                    MemorySource::Conversation,
+                    librefang_types::memory::MemoryLevel::User.scope_str(),
+                    meta,
+                    Some(&[0.9, 0.436]),
+                    None,
+                )
+                .unwrap();
+        }
+    }
+
+    /// #7920 — the section can only budget what recall hands it.
+    ///
+    /// Both recall producers rank the two memory classes in one list and cut it class-blind, so on
+    /// a store that is 4:1 raw dialogue the candidates that reach the prompt are raw dialogue and
+    /// the per-class budget downstream has no facts to place. This asserts the candidate set
+    /// itself, not the rendered section, because that is where the loss happens.
+    #[tokio::test]
+    async fn recall_setup_carries_both_memory_classes_7920() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        write_class_mixed_corpus(&substrate, agent_id);
+
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+        let embedding = AxisEmbedding;
+        let setup = setup_recalled_memories(RecallSetupContext {
+            session: &session,
+            user_message: "atlas",
+            memory: substrate.as_ref(),
+            embedding_driver: Some(&embedding),
+            proactive_memory: None,
+            context_engine: None,
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_scope: None,
+            session_scope: None,
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts: &opts,
+        })
+        .await;
+
+        let facts = setup
+            .memories
+            .iter()
+            .filter(|f| !f.is_raw_dialogue())
+            .count();
+        let dialogue = setup
+            .memories
+            .iter()
+            .filter(|f| f.is_raw_dialogue())
+            .count();
+        assert_eq!(
+            facts, 10,
+            "every extracted fact in the store must reach the section: got {facts} facts, {dialogue} dialogue rows"
+        );
+        assert_eq!(
+            dialogue, MEMORY_RECALL_LIMIT_DIALOGUE,
+            "raw dialogue must still fill its own quota, not be excluded"
+        );
+    }
+
+    /// The same, on the branch production actually takes.
+    ///
+    /// The kernel always builds a context engine (`boot.rs` binds it unconditionally as `Some`), so
+    /// the engine branch — whose `ingest` runs its own class-blind recall bounded by
+    /// `max_recall_results` — is the live path. Before #7920 the supplemental substrate fetch that
+    /// widens that window ran only when a chat or session scope was active, so a dashboard / REST /
+    /// cron turn handed the section the engine's top five rows and nothing else.
+    #[tokio::test]
+    async fn recall_setup_carries_both_classes_through_the_context_engine_7920() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        write_class_mixed_corpus(&substrate, agent_id);
+
+        let engine_cfg = ContextEngineConfig {
+            max_recall_results: 5,
+            ..Default::default()
+        };
+        let engine = DefaultContextEngine::new(
+            engine_cfg,
+            Arc::clone(&substrate),
+            Some(Arc::new(AxisEmbedding)),
+        );
+
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+        let embedding = AxisEmbedding;
+        let setup = setup_recalled_memories(RecallSetupContext {
+            session: &session,
+            user_message: "atlas",
+            memory: substrate.as_ref(),
+            embedding_driver: Some(&embedding),
+            proactive_memory: None,
+            context_engine: Some(&engine),
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_scope: None,
+            session_scope: None,
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts: &opts,
+        })
+        .await;
+
+        let facts = setup
+            .memories
+            .iter()
+            .filter(|f| !f.is_raw_dialogue())
+            .count();
+        assert!(
+            facts > 0,
+            "no extracted fact survived the engine path's candidate selection; \
+             candidates = {:?}",
+            setup
+                .memories
+                .iter()
+                .map(|f| (
+                    f.scope.clone(),
+                    f.content.chars().take(24).collect::<String>()
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A quota is a ceiling on its own class, never a floor taken from the other.
+    #[test]
+    fn recall_candidate_selection_caps_each_class_independently() {
+        let agent_id = AgentId::new();
+        let dialogue = |i: usize| MemoryFragment {
+            id: librefang_types::memory::MemoryId(uuid::Uuid::new_v4()),
+            agent_id,
+            content: format!("[Past exchange] {i}"),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            source: MemorySource::Conversation,
+            confidence: 1.0,
+            created_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            scope: librefang_types::memory::EPISODIC_SCOPE.to_string(),
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
+            similarity: None,
+        };
+        let fact = |i: usize| MemoryFragment {
+            scope: librefang_types::memory::MemoryLevel::User
+                .scope_str()
+                .to_string(),
+            content: format!("fact {i}"),
+            ..dialogue(i)
+        };
+
+        // Dialogue first, the ranking that starved facts in production.
+        let mixed: Vec<MemoryFragment> = (0..20).map(dialogue).chain((0..20).map(fact)).collect();
+        let kept = select_recall_candidates(mixed, 5, 25);
+        assert_eq!(kept.iter().filter(|f| f.is_raw_dialogue()).count(), 5);
+        assert_eq!(kept.iter().filter(|f| !f.is_raw_dialogue()).count(), 20);
+        // Rank order is preserved inside each class.
+        assert!(kept[0].content.starts_with("[Past exchange] 0"));
+
+        // A class that is absent costs the other class nothing, and takes nothing from it.
+        let facts_only: Vec<MemoryFragment> = (0..40).map(fact).collect();
+        assert_eq!(select_recall_candidates(facts_only, 5, 25).len(), 25);
+        let dialogue_only: Vec<MemoryFragment> = (0..40).map(dialogue).collect();
+        assert_eq!(select_recall_candidates(dialogue_only, 5, 25).len(), 5);
+    }
+
+    /// A raw-dialogue row that reaches the prompt through proactive memory must still read as raw
+    /// dialogue.
+    ///
+    /// `MemoryItem::from_fragment` maps the storage scope through `MemoryLevel`, whose catch-all arm
+    /// folds `episodic` into `Session`, so before #7920 the round trip relabelled dialogue as
+    /// `session_memory` — and the section's class split, which reads the scope, handed it a
+    /// fact-sized share of the budget.
+    #[test]
+    fn proactive_conversion_preserves_the_memory_class() {
+        let agent_id = AgentId::new();
+        let frag = MemoryFragment {
+            id: librefang_types::memory::MemoryId(uuid::Uuid::new_v4()),
+            agent_id,
+            content: "[Past exchange]\nThem: hi\nYou: hello".to_string(),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            source: MemorySource::Conversation,
+            confidence: 1.0,
+            created_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            scope: librefang_types::memory::EPISODIC_SCOPE.to_string(),
+            image_url: None,
+            image_embedding: None,
+            modality: Default::default(),
+            similarity: None,
+        };
+        assert!(frag.is_raw_dialogue(), "fixture is not raw dialogue");
+
+        let item = librefang_types::memory::MemoryItem::from_fragment(frag);
+        assert_eq!(
+            item.level,
+            librefang_types::memory::MemoryLevel::Session,
+            "the lossy fold this guards against is gone; revisit the conversion"
+        );
+        let round_tripped = proactive_item_to_fragment(item, agent_id);
+        assert!(
+            round_tripped.is_raw_dialogue(),
+            "proactive round trip relabelled raw dialogue as an extracted fact: scope={}",
+            round_tripped.scope
         );
     }
 }

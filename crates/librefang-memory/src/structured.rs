@@ -334,10 +334,18 @@ impl StructuredStore {
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned());
 
+        // Lineage (#7930, schema v54).
+        // `parent_recorded` is written as `1` unconditionally: reaching this line means a live `AgentEntry` stated its parentage, so `parent_id IS NULL` on this row from now on means "no parent", not "never asked".
+        // Rows still carrying the migration's `DEFAULT 0` are the ones written before v54, and only those.
+        //
+        // `entry.children` is deliberately NOT written anywhere — it is derived from other rows' `parent_id` on read.
+        // See `migrate_v54`, decision 2.
+        let parent_id = entry.parent.as_ref().map(|p| p.0.to_string());
+
         conn.execute(
-            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9",
+            "INSERT INTO agents (id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, manifest = ?3, state = ?4, updated_at = ?6, session_id = ?7, identity = ?8, source_toml_path = ?9, parent_id = ?10, parent_recorded = 1",
             rusqlite::params![
                 entry.id.0.to_string(),
                 entry.name,
@@ -348,18 +356,47 @@ impl StructuredStore {
                 entry.session_id.0.to_string(),
                 identity_json,
                 source_toml_path,
+                parent_id,
             ],
         )
         .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
+    /// Agent ids whose `parent_id` is `agent_id`, sorted for a stable snapshot.
+    ///
+    /// This is the derivation behind [`AgentEntry::children`] (#7930): there is no `children` column, so the child list is recomputed from the authoritative `parent_id` edges on every read.
+    /// `idx_agents_parent_id` (schema v54) makes it an index lookup rather than the full-table blob scan it would be if lineage lived inside the `manifest` msgpack.
+    ///
+    /// Sorted by id text so repeated reads of an unchanged database produce byte-identical output — child lists reach LLM prompts via the topology view, and unordered iteration there silently invalidates provider prompt caches (#3298).
+    fn child_ids_of(conn: &rusqlite::Connection, agent_id: &str) -> LibreFangResult<Vec<AgentId>> {
+        let mut stmt = conn
+            .prepare("SELECT id FROM agents WHERE parent_id = ?1 ORDER BY id")
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id], |row| row.get::<_, String>(0))
+            .map_err(LibreFangError::memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id_str = row.map_err(LibreFangError::memory)?;
+            if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+                out.push(AgentId(uuid));
+            }
+        }
+        Ok(out)
+    }
+
     /// Load an agent entry from the database.
     pub fn load_agent(&self, agent_id: AgentId) -> LibreFangResult<Option<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
+        // Widest form first, narrowing on prepare failure.
+        // `parent_id` / `parent_recorded` (schema v54, #7930) are the newest pair, so they head the fallback chain; a database that has not crossed v54 falls through to the pre-existing 9-column form and reports every agent's lineage as unknown rather than as root.
         let mut stmt = conn
-            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            .prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents WHERE id = ?1")
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents WHERE id = ?1")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents WHERE id = ?1")
                     .or_else(|_| {
@@ -393,6 +430,17 @@ impl StructuredStore {
             } else {
                 None
             };
+            // #7930: absent columns (pre-v54 DB) and a row carrying the migration's `DEFAULT 0` both mean "lineage never recorded".
+            let parent_id_str: Option<String> = if col_count >= 10 {
+                row.get(9).ok().flatten()
+            } else {
+                None
+            };
+            let parent_recorded: bool = if col_count >= 11 {
+                row.get::<_, i64>(10).unwrap_or(0) != 0
+            } else {
+                false
+            };
             Ok((
                 name,
                 manifest_blob,
@@ -401,6 +449,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             ))
         });
 
@@ -413,6 +463,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             )) => {
                 let mut manifest: librefang_types::agent::AgentManifest =
                     rmp_serde::from_slice(&manifest_blob).map_err(LibreFangError::serialization)?;
@@ -441,6 +493,12 @@ impl StructuredStore {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
                 let is_hand = manifest.is_hand;
+                // #7930: `parent` comes from the column; `children` is derived from the inverse edges, never stored.
+                let parent = parent_id_str
+                    .as_deref()
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .map(AgentId);
+                let children = Self::child_ids_of(&conn, &agent_id.0.to_string())?;
                 Ok(Some(AgentEntry {
                     id: agent_id,
                     name,
@@ -449,8 +507,9 @@ impl StructuredStore {
                     mode: Default::default(),
                     created_at,
                     last_active: Utc::now(),
-                    parent: None,
-                    children: vec![],
+                    parent,
+                    parent_unknown: !parent_recorded,
+                    children,
                     session_id,
                     source_toml_path: source_toml_path.map(std::path::PathBuf::from),
                     tags: vec![],
@@ -504,11 +563,15 @@ impl StructuredStore {
     pub fn load_all_agents(&self) -> LibreFangResult<Vec<AgentEntry>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
-        // Try with identity+session_id columns first, fall back gracefully
+        // Try the widest column set first, falling back gracefully.
+        // The `parent_id` / `parent_recorded` pair (schema v54, #7930) is newest and therefore first; a database that has not crossed v54 falls through and every agent hydrates with `parent_unknown: true`.
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents",
+                "SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path, parent_id, parent_recorded FROM agents",
             )
+            .or_else(|_| {
+                conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity, source_toml_path FROM agents")
+            })
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at, session_id, identity FROM agents")
             })
@@ -543,6 +606,17 @@ impl StructuredStore {
                 } else {
                     None
                 };
+                // #7930: a missing column (pre-v54 DB) and a `DEFAULT 0` row both mean "lineage never recorded for this agent".
+                let parent_id_str: Option<String> = if col_count >= 10 {
+                    row.get(9).ok().flatten()
+                } else {
+                    None
+                };
+                let parent_recorded: bool = if col_count >= 11 {
+                    row.get::<_, i64>(10).unwrap_or(0) != 0
+                } else {
+                    false
+                };
                 Ok((
                     id_str,
                     name,
@@ -552,6 +626,8 @@ impl StructuredStore {
                     session_id_str,
                     identity_str,
                     source_toml_path,
+                    parent_id_str,
+                    parent_recorded,
                 ))
             })
             .map_err(LibreFangError::memory)?;
@@ -570,6 +646,8 @@ impl StructuredStore {
                 session_id_str,
                 identity_str,
                 source_toml_path,
+                parent_id_str,
+                parent_recorded,
             ) = match row {
                 Ok(r) => r,
                 Err(e) => {
@@ -653,6 +731,12 @@ impl StructuredStore {
                 .unwrap_or_default();
 
             let is_hand = manifest.is_hand;
+            // #7930: `parent` from the column.
+            // `children` is filled in below, once every row has been read, by inverting these edges in memory — there is no `children` column to disagree with them.
+            let parent = parent_id_str
+                .as_deref()
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .map(librefang_types::agent::AgentId);
             agents.push(AgentEntry {
                 id: agent_id,
                 name,
@@ -661,7 +745,8 @@ impl StructuredStore {
                 mode: Default::default(),
                 created_at,
                 last_active: Utc::now(),
-                parent: None,
+                parent,
+                parent_unknown: !parent_recorded,
                 children: vec![],
                 session_id,
                 source_toml_path: source_toml_path.map(std::path::PathBuf::from),
@@ -672,6 +757,32 @@ impl StructuredStore {
                 is_hand,
                 ..Default::default()
             });
+        }
+
+        // Derive `children` by inverting the `parent` edges just read (#7930).
+        //
+        // Doing it here rather than with a per-agent `WHERE parent_id = ?` keeps the whole rehydration at one table scan, and — more importantly — derives the child lists from exactly the set of rows that survived the skip-and-continue filters above.
+        // A row dropped for a bad UUID or an undeserialisable manifest therefore cannot appear as somebody's child, which a second independent query against the table would have let happen.
+        //
+        // `BTreeMap` rather than `HashMap`: child lists reach LLM prompts through the topology view, and HashMap iteration order varies per process, which invalidates provider prompt caches on unchanged content (#3298).
+        // Keyed by the inner `Uuid` because `AgentId` is deliberately not `Ord`.
+        let mut children_by_parent: std::collections::BTreeMap<uuid::Uuid, Vec<AgentId>> =
+            std::collections::BTreeMap::new();
+        for agent in &agents {
+            if let Some(parent_id) = agent.parent {
+                children_by_parent
+                    .entry(parent_id.0)
+                    .or_default()
+                    .push(agent.id);
+            }
+        }
+        for list in children_by_parent.values_mut() {
+            list.sort_by_key(|id| id.0);
+        }
+        for agent in &mut agents {
+            if let Some(children) = children_by_parent.get(&agent.id.0) {
+                agent.children = children.clone();
+            }
         }
 
         // Apply queued repairs (re-save upgraded blobs)
@@ -787,18 +898,42 @@ mod tests {
     /// `:memory:` DB with `max_size(1)` cannot exercise the race the
     /// transactional `modify` fixes.
     ///
-    /// `busy_timeout` must be set via `with_init`, not on a single connection pulled from the pool after `build()`: r2d2 defaults `min_idle` to `max_size`, so it eagerly opens up to 8 connections in the background, and every subsequent checkout can hand out a fresh one on demand too.
-    /// Configuring only the one connection grabbed here left the other pooled connections with SQLite's default 0ms busy timeout, so concurrent `modify()` calls under contention failed immediately with "database is locked" instead of waiting — flaky, mostly on Windows CI where lock contention is more likely to line up.
+    /// The pragmas must match what a file-backed store actually runs with in production, and they must be applied via `with_init` rather than to one connection pulled from the pool after `build()`: r2d2 defaults `min_idle` to `max_size`, so it eagerly opens up to 8 connections in the background and every subsequent checkout can hand out a fresh one on demand.
+    ///
+    /// `busy_timeout` alone is not enough, and a pool configured with only that flaked on Windows CI with "database is locked" (`SQLITE_BUSY`).
+    /// Without `journal_mode=WAL` the database runs in rollback-journal mode, where committing a `BEGIN IMMEDIATE` transaction has to promote RESERVED to EXCLUSIVE and therefore has to wait for every other connection to drop its SHARED read lock.
+    /// SQLite deliberately does *not* invoke the busy handler on that promotion path — two connections each waiting for the other to release a read lock would deadlock — so it returns `SQLITE_BUSY` immediately and the timeout never applies.
+    /// Every file-backed pool in production is built with `DEFAULT_CONNECTION_PRAGMAS`, which selects WAL, where writers serialise on a single write lock that the busy handler *does* cover; the only pools without it are `:memory:` ones pinned to `max_size(1)`, which cannot contend at all.
+    /// Configuring the test differently from production meant this regression test exercised a lock-escalation path the store is never deployed on.
     fn setup_file_backed(path: &std::path::Path) -> StructuredStore {
         let pool = Pool::builder()
             .max_size(8)
-            .build(
-                SqliteConnectionManager::file(path)
-                    .with_init(|c| c.busy_timeout(std::time::Duration::from_secs(10))),
-            )
+            .build(SqliteConnectionManager::file(path).with_init(|c| {
+                c.execute_batch(crate::substrate::DEFAULT_CONNECTION_PRAGMAS)?;
+                // Longer than the 5 s production default: CI runners are slow and 24 threads contend far harder than any real workload.
+                c.busy_timeout(std::time::Duration::from_secs(30))
+            }))
             .unwrap();
         run_migrations(&pool.get().unwrap()).unwrap();
         StructuredStore::new(pool)
+    }
+
+    #[test]
+    fn file_backed_test_pool_runs_in_wal_like_production() {
+        // Guard for the #7905 main-red: `modify_concurrent_appends_lose_no_writes_5138` contends 24 threads on one key, and in rollback-journal mode the commit-time RESERVED -> EXCLUSIVE promotion returns SQLITE_BUSY without ever consulting the busy handler.
+        // The pool has already been "fixed" once by raising busy_timeout, which cannot help on that path.
+        // Pin the journal mode so the next edit to the helper cannot silently drop back to a configuration production never uses.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = setup_file_backed(&tmp.path().join("kv.db"));
+        let conn = store.pool.get().unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            "wal",
+            "the file-backed test pool must use the production pragmas"
+        );
     }
 
     #[test]
@@ -1062,6 +1197,211 @@ mod tests {
         assert_eq!(
             loaded.source_toml_path,
             Some(std::path::PathBuf::from("/tmp/test-agent/agent.toml"))
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Agent lineage persistence (#7930)
+    // ---------------------------------------------------------------------
+
+    /// Build a minimal saveable entry with a given id and parent.
+    fn lineage_entry(id: AgentId, name: &str, parent: Option<AgentId>) -> AgentEntry {
+        AgentEntry {
+            id,
+            name: name.to_string(),
+            manifest: librefang_types::agent::AgentManifest::default(),
+            state: librefang_types::agent::AgentState::Running,
+            created_at: Utc::now(),
+            last_active: Utc::now(),
+            parent,
+            session_id: librefang_types::agent::SessionId::new(),
+            ..Default::default()
+        }
+    }
+
+    /// The exact regression from #7930: before schema v54 there was no column for `parent`, so this round-trip returned `None` for a child agent and the API reported `parent_agent_id: null` for it after every restart.
+    #[test]
+    fn agent_parent_survives_a_store_round_trip() {
+        let store = setup();
+        let parent_id = AgentId::new();
+        let child_id = AgentId::new();
+
+        store
+            .save_agent(&lineage_entry(parent_id, "parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(parent_id)))
+            .unwrap();
+
+        let loaded = store.load_agent(child_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.parent,
+            Some(parent_id),
+            "the child's parent link must survive reload — this is #7930"
+        );
+        assert!(
+            !loaded.parent_unknown,
+            "a row written after v54 has authoritative lineage"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let child = all.iter().find(|a| a.id == child_id).unwrap();
+        assert_eq!(
+            child.parent,
+            Some(parent_id),
+            "load_all_agents is the boot path — it must agree with load_agent"
+        );
+    }
+
+    /// A root agent saved after v54 reports `None` *authoritatively*: the API may render it as a top-level agent, which it may not do for a pre-v54 row (see `pre_v54_agent_row_reports_unknown_lineage_not_root`).
+    #[test]
+    fn root_agent_saved_after_v54_is_a_known_root() {
+        let store = setup();
+        let id = AgentId::new();
+        store.save_agent(&lineage_entry(id, "solo", None)).unwrap();
+
+        let loaded = store.load_agent(id).unwrap().unwrap();
+        assert_eq!(loaded.parent, None);
+        assert!(
+            !loaded.parent_unknown,
+            "a genuine root agent must be distinguishable from an unrecorded one"
+        );
+    }
+
+    /// `children` has no column — it is recomputed from the `parent_id` edges.
+    #[test]
+    fn children_are_derived_from_parent_edges_and_sorted() {
+        let store = setup();
+        let parent_id = AgentId::new();
+        let mut child_ids = vec![AgentId::new(), AgentId::new(), AgentId::new()];
+
+        store
+            .save_agent(&lineage_entry(parent_id, "parent", None))
+            .unwrap();
+        for (i, cid) in child_ids.iter().enumerate() {
+            store
+                .save_agent(&lineage_entry(*cid, &format!("child-{i}"), Some(parent_id)))
+                .unwrap();
+        }
+        // An unrelated root agent must not be swept into the child list.
+        store
+            .save_agent(&lineage_entry(AgentId::new(), "unrelated", None))
+            .unwrap();
+
+        child_ids.sort_by_key(|id| id.0);
+
+        let loaded = store.load_agent(parent_id).unwrap().unwrap();
+        assert_eq!(
+            loaded.children, child_ids,
+            "load_agent must derive children from parent_id, sorted by id"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let parent = all.iter().find(|a| a.id == parent_id).unwrap();
+        assert_eq!(
+            parent.children, child_ids,
+            "load_all_agents must derive the same list as load_agent"
+        );
+        let unrelated = all.iter().find(|a| a.name == "unrelated").unwrap();
+        assert!(unrelated.children.is_empty());
+    }
+
+    /// Re-pointing a child at a new parent must move it, not duplicate it.
+    /// This is what a stored `children` column could not have guaranteed: `spawn_agent_inner` appends to the parent's in-memory list and persists only the child row, so the old parent's stored list would have kept the child forever.
+    #[test]
+    fn reparenting_moves_the_child_rather_than_duplicating_it() {
+        let store = setup();
+        let old_parent = AgentId::new();
+        let new_parent = AgentId::new();
+        let child_id = AgentId::new();
+
+        store
+            .save_agent(&lineage_entry(old_parent, "old-parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(new_parent, "new-parent", None))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(old_parent)))
+            .unwrap();
+        store
+            .save_agent(&lineage_entry(child_id, "child", Some(new_parent)))
+            .unwrap();
+
+        assert_eq!(
+            store.load_agent(old_parent).unwrap().unwrap().children,
+            Vec::<AgentId>::new(),
+            "the old parent must lose the child — two stored copies could not have agreed"
+        );
+        assert_eq!(
+            store.load_agent(new_parent).unwrap().unwrap().children,
+            vec![child_id]
+        );
+        assert_eq!(
+            store.load_agent(child_id).unwrap().unwrap().parent,
+            Some(new_parent)
+        );
+    }
+
+    /// A row written before schema v54 must report lineage as *unknown*.
+    /// Reading it as a root agent would replace #7930's wrong `null` with a confidently wrong "this agent has no parent".
+    #[test]
+    fn pre_v54_agent_row_reports_unknown_lineage_not_root() {
+        let store = setup();
+        let id = AgentId::new();
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+
+        // Reproduce exactly what `ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0` leaves behind for a row that already existed.
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE agents SET parent_id = NULL, parent_recorded = 0 WHERE id = ?1",
+                rusqlite::params![id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let loaded = store.load_agent(id).unwrap().unwrap();
+        assert_eq!(loaded.parent, None);
+        assert!(
+            loaded.parent_unknown,
+            "a pre-v54 row must NOT start claiming to be a root agent"
+        );
+
+        let all = store.load_all_agents().unwrap();
+        let legacy = all.iter().find(|a| a.id == id).unwrap();
+        assert!(
+            legacy.parent_unknown,
+            "load_all_agents (the boot path) must agree that the lineage is unknown"
+        );
+    }
+
+    /// Saving a pre-v54 row again promotes it out of "unknown": the caller just stated its lineage, so `parent_recorded` flips to 1.
+    #[test]
+    fn re_saving_a_pre_v54_row_records_its_lineage() {
+        let store = setup();
+        let id = AgentId::new();
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+        {
+            let conn = store.pool.get().unwrap();
+            conn.execute(
+                "UPDATE agents SET parent_recorded = 0 WHERE id = ?1",
+                rusqlite::params![id.0.to_string()],
+            )
+            .unwrap();
+        }
+        assert!(store.load_agent(id).unwrap().unwrap().parent_unknown);
+
+        store
+            .save_agent(&lineage_entry(id, "legacy", None))
+            .unwrap();
+        assert!(
+            !store.load_agent(id).unwrap().unwrap().parent_unknown,
+            "an explicit save states the lineage, so the row is no longer unknown"
         );
     }
 

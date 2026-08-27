@@ -173,12 +173,6 @@ function renderPage() {
   );
 }
 
-beforeEach(() => {
-  if (!Element.prototype.scrollIntoView) {
-    Element.prototype.scrollIntoView = function () {};
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

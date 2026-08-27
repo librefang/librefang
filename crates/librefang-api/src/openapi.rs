@@ -46,6 +46,9 @@ use crate::types;
         routes::list_agent_templates,
         routes::get_agent_template,
         routes::get_agent_template_toml,
+        routes::create_agent_type,
+        routes::update_agent_type,
+        routes::delete_agent_type,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
@@ -54,7 +57,9 @@ use crate::types;
         routes::list_agents,
         routes::get_agent_stats,
         routes::list_agent_events,
+        routes::list_agent_ephemeral_runs,
         routes::spawn_agent,
+        routes::spawn_ephemeral_agent,
         routes::get_agent,
         routes::kill_agent,
         routes::patch_agent,
@@ -201,6 +206,9 @@ use crate::types;
         // ── Models & Providers ──
         routes::list_models,
         routes::get_model,
+        routes::get_model_overrides,
+        routes::set_model_overrides,
+        routes::delete_model_overrides,
         routes::list_aliases,
         routes::create_alias,
         routes::delete_alias,
@@ -305,6 +313,7 @@ use crate::types;
         routes::usage_by_model,
         routes::usage_by_model_performance,
         routes::usage_daily,
+        routes::usage_export,
 
         // ── Auto-Dream (background memory consolidation) ──
         routes::auto_dream_status,
@@ -313,6 +322,14 @@ use crate::types;
         routes::auto_dream_set_enabled,
 
         // ── Users / RBAC ──
+        routes::groups::list_groups,
+        routes::groups::get_group,
+        routes::groups::create_group,
+        routes::groups::update_group,
+        routes::groups::delete_group,
+        routes::groups::add_group_member,
+        routes::groups::remove_group_member,
+        routes::groups::user_groups,
         routes::users::list_users,
         routes::users::get_user,
         routes::users::create_user,
@@ -329,6 +346,7 @@ use crate::types;
         // ── Authorization (RBAC checks) ──
         routes::check,
         routes::effective_permissions,
+        routes::authz::whoami,
 
         // ── Memory (KV) ──
         routes::get_agent_kv,
@@ -522,11 +540,20 @@ use crate::types;
         types::PushMessageRequest,
         crate::server::ChangePasswordRequest,
         routes::auto_dream::SetEnabledRequest,
+        routes::agents::SpawnEphemeralRequest,
+        routes::agents::SpawnEphemeralResponse,
         routes::agents::AgentStats24hView,
         routes::agents::AgentStatsPrevView,
         routes::agents::AgentEventRowView,
         routes::agents::AgentEventsResponse,
+        routes::agents::EphemeralRunsResponse,
+        routes::agents::EphemeralRunView,
+        routes::agents::EphemeralRunRollupView,
         routes::agents::SessionContextResponse,
+        routes::authz::WhoamiView,
+        routes::groups::GroupView,
+        routes::groups::GroupUpsert,
+        routes::groups::UserGroupsView,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,
@@ -562,6 +589,7 @@ use crate::types;
         (name = "auth", description = "OAuth/OIDC authentication endpoints"),
         (name = "openai", description = "OpenAI-compatible API endpoints"),
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
+        (name = "groups", description = "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"),
     ),
 )]
 pub struct ApiDoc;

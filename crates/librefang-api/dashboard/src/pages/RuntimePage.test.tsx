@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RuntimePage } from "./RuntimePage";
+import {
+  RuntimePage,
+  anchorStatusVariant,
+  laneUtilizationColor,
+  taskStatusVariant,
+} from "./RuntimePage";
 import {
   useQueueStatus,
   useHealthDetail,
@@ -26,6 +31,7 @@ import {
   useCleanupSessions,
 } from "../lib/mutations/runtime";
 import { useReloadConfig } from "../lib/mutations/config";
+import { useUIStore } from "../lib/store";
 
 vi.mock("../lib/queries/runtime", () => ({
   useQueueStatus: vi.fn(),
@@ -110,6 +116,7 @@ function makeMutation(overrides: Record<string, unknown> = {}) {
     isError: false,
     data: undefined,
     error: null,
+    reset: vi.fn(),
     ...overrides,
   };
 }
@@ -237,6 +244,7 @@ function renderPage() {
 describe("RuntimePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useUIStore.setState({ toasts: [] });
     setQueryDefaults();
     setMutationDefaults();
   });
@@ -310,12 +318,69 @@ describe("RuntimePage", () => {
     expect(mutate).toHaveBeenCalledTimes(1);
   });
 
+  it("surfaces config reload warnings instead of reporting plain success", () => {
+    let onSuccess: ((data: { status: string; warnings?: string[] }) => void) | undefined;
+    useReloadConfigMock.mockImplementation((options) => {
+      onSuccess = options?.onSuccess as typeof onSuccess;
+      return makeMutation();
+    });
+    renderPage();
+
+    act(() => {
+      onSuccess?.({
+        status: "partial",
+        warnings: ["Channel adapters could not be restarted; see server logs"],
+      });
+    });
+
+    expect(
+      screen.getByText(
+        "runtime.reload_success — Channel adapters could not be restarted; see server logs",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces restart-required reloads as warnings with their reasons", () => {
+    let onSuccess: ((data: {
+      status: string;
+      restart_required?: boolean;
+      restart_reasons?: string[];
+    }) => void) | undefined;
+    useReloadConfigMock.mockImplementation((options) => {
+      onSuccess = options?.onSuccess as typeof onSuccess;
+      return makeMutation();
+    });
+    renderPage();
+
+    act(() => {
+      onSuccess?.({
+        status: "partial",
+        restart_required: true,
+        restart_reasons: ["api_listen changed"],
+      });
+    });
+
+    const notice = screen.getByText(
+      "runtime.reload_success — api_listen changed",
+    );
+    expect(notice).toBeInTheDocument();
+    expect(notice).toHaveClass("text-warning");
+  });
+
   it("invokes createBackup mutation when create backup button is clicked", () => {
     const mutate = vi.fn();
     useCreateBackupMock.mockReturnValue(makeMutation({ mutate }));
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.create_backup" }));
     expect(mutate).toHaveBeenCalledTimes(1);
+    const options = mutate.mock.calls[0][1] as { onSuccess?: () => void };
+    options.onSuccess?.();
+    expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({
+        message: "runtime.backup_created",
+        type: "success",
+      }),
+    ]);
   });
 
   it("retries a failed task via retryTask mutation", () => {
@@ -332,6 +397,119 @@ describe("RuntimePage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore" }));
     fireEvent.click(screen.getByRole("button", { name: "runtime.restore_confirm" }));
-    expect(mutateAsync).toHaveBeenCalledWith("backup-1.tar.gz");
+    expect(mutateAsync).toHaveBeenCalledWith({ filename: "backup-1.tar.gz", keepConfig: false, components: [] });
+  });
+
+  it("keeps restore confirmation open until the mutation settles", async () => {
+    let resolveRestore: () => void = () => undefined;
+    const mutateAsync = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRestore = resolve;
+        }),
+    );
+    useRestoreBackupMock.mockReturnValue(makeMutation({ mutateAsync }));
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "runtime.restore" }));
+    const confirm = screen.getByRole("button", {
+      name: "runtime.restore_confirm",
+    });
+    fireEvent.click(confirm);
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(confirm).toBeDisabled();
+    resolveRestore();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({
+        message: "runtime.restore_success",
+        type: "success",
+      }),
+    ]);
+  });
+
+  it("resets settled mutation-status banners after five seconds", () => {
+    vi.useFakeTimers();
+    const backupReset = vi.fn();
+    const restoreReset = vi.fn();
+    const cleanupReset = vi.fn();
+    const reloadReset = vi.fn();
+    const shutdownReset = vi.fn();
+    useCreateBackupMock.mockReturnValue(
+      makeMutation({ isError: true, reset: backupReset }),
+    );
+    useRestoreBackupMock.mockReturnValue(
+      makeMutation({ isError: true, reset: restoreReset }),
+    );
+    useCleanupSessionsMock.mockReturnValue(
+      makeMutation({ isSuccess: true, reset: cleanupReset }),
+    );
+    useReloadConfigMock.mockReturnValue(
+      makeMutation({ isError: true, reset: reloadReset }),
+    );
+    useShutdownServerMock.mockReturnValue(
+      makeMutation({ isError: true, reset: shutdownReset }),
+    );
+    renderPage();
+
+    for (const message of [
+      "runtime.backup_error",
+      "runtime.restore_error",
+      "runtime.reload_error",
+      "runtime.shutdown_error",
+    ]) {
+      expect(screen.getByText(message)).toBeInTheDocument();
+    }
+    act(() => vi.advanceTimersByTime(5000));
+    expect(backupReset).toHaveBeenCalledTimes(1);
+    expect(restoreReset).toHaveBeenCalledTimes(1);
+    expect(cleanupReset).toHaveBeenCalledTimes(1);
+    expect(reloadReset).toHaveBeenCalledTimes(1);
+    expect(shutdownReset).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("does not postpone an older mutation reset when another action settles", () => {
+    vi.useFakeTimers();
+    const backupReset = vi.fn();
+    const restoreReset = vi.fn();
+    let restoreSettled = false;
+    useCreateBackupMock.mockReturnValue(
+      makeMutation({ isError: true, reset: backupReset }),
+    );
+    useRestoreBackupMock.mockImplementation(() =>
+      makeMutation({ isError: restoreSettled, reset: restoreReset }),
+    );
+    renderPage();
+
+    act(() => vi.advanceTimersByTime(4000));
+    restoreSettled = true;
+    fireEvent.click(screen.getByRole("button", { name: "runtime.shutdown" }));
+    act(() => vi.advanceTimersByTime(1000));
+    expect(backupReset).toHaveBeenCalledTimes(1);
+    expect(restoreReset).not.toHaveBeenCalled();
+
+    act(() => vi.advanceTimersByTime(4000));
+    expect(restoreReset).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+});
+
+describe("RuntimePage presentation helpers", () => {
+  it("maps lane utilization thresholds", () => {
+    expect(laneUtilizationColor(49)).toBe("bg-brand");
+    expect(laneUtilizationColor(50)).toBe("bg-warning");
+    expect(laneUtilizationColor(80)).toBe("bg-error");
+  });
+
+  it("maps task and audit-anchor badge variants", () => {
+    expect(taskStatusVariant("failed")).toBe("error");
+    expect(taskStatusVariant("completed")).toBe("success");
+    expect(taskStatusVariant("in_progress")).toBe("brand");
+    expect(taskStatusVariant("pending")).toBe("warning");
+    expect(anchorStatusVariant("ok")).toBe("success");
+    expect(anchorStatusVariant("diverged")).toBe("error");
+    expect(anchorStatusVariant("none")).toBe("warning");
   });
 });

@@ -54,8 +54,8 @@ pub use self::types::{AgentLoopResult, ExperimentContext, LoopOptions, LoopPhase
 use self::end_turn::{
     build_silent_agent_loop_result, classify_end_turn_retry, finalize_end_turn_text,
     finalize_successful_end_turn, gated_proactive_memory_for_memorize,
-    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, EndTurnRetry,
-    EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
+    gated_proactive_memory_for_retrieve, maybe_fold_stale_tool_results, session_recall_scope,
+    EndTurnRetry, EndTurnRetryContext, FinalizeEndTurnContext, FinalizeEndTurnResultData,
 };
 use self::history::resolve_max_history;
 use self::message::{
@@ -128,6 +128,70 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
     }
     session.set_messages(repaired);
     session.last_repaired_generation = Some(session.messages_generation);
+}
+
+fn apply_context_compaction(
+    session: &mut Session,
+    messages: &mut Vec<Message>,
+    new_messages_start: &mut usize,
+    summary: String,
+    kept_messages: Vec<Message>,
+) {
+    let previous_new_messages_start = (*new_messages_start).min(session.messages.len());
+    let current_turn = &session.messages[previous_new_messages_start..];
+    let current_turn_json = current_turn
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            warn!(%error, "Failed to identify current-turn boundary during compaction");
+        })
+        .ok();
+
+    let mut compacted = Vec::with_capacity(kept_messages.len() + usize::from(!summary.is_empty()));
+    if !summary.is_empty() {
+        compacted.push(Message {
+            role: Role::User,
+            content: MessageContent::Text(format!(
+                "[Context compaction summary] Earlier conversation turns were summarised to \
+                 preserve context space. Summary of removed messages: {summary}"
+            )),
+            pinned: false,
+            timestamp: None,
+        });
+    }
+    compacted.extend(kept_messages);
+
+    let compacted_new_messages_start = current_turn_json
+        .as_ref()
+        .and_then(|turn| {
+            if turn.is_empty() {
+                return Some(compacted.len());
+            }
+            let compacted_json = compacted
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    warn!(%error, "Failed to identify compacted current-turn boundary");
+                })
+                .ok()?;
+            compacted_json
+                .windows(turn.len())
+                .rposition(|window| window == turn.as_slice())
+        })
+        .unwrap_or_else(|| {
+            // A custom context engine may omit or rewrite the current turn.
+            // Keep it in persistent history and in the next LLM request rather
+            // than letting a stale pre-compaction boundary hide or lose it.
+            let start = compacted.len();
+            compacted.extend_from_slice(current_turn);
+            start
+        });
+
+    session.set_messages(compacted.clone());
+    *messages = compacted;
+    *new_messages_start = compacted_new_messages_start;
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
@@ -643,6 +707,11 @@ async fn run_agent_loop_inner(
 
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
+    // #7605: the session this turn belongs to, when session-scoped memory recall is in effect for this agent.
+    // Resolved once here so the recall (before the turn) and the memorize (after it) agree on the scope even if the manifest were hot-reloaded in between.
+    let session_scope: Option<String> =
+        session_recall_scope(manifest, session, proactive_memory.as_ref());
+
     let RecallSetup {
         memories,
         memories_used,
@@ -656,6 +725,7 @@ async fn run_agent_loop_inner(
         sender_user_id: sender_user_id.as_deref(),
         sender_channel: sender_channel.as_deref(),
         sender_chat_scope: sender_chat_scope.as_deref(),
+        session_scope: session_scope.as_deref(),
         kernel: kernel.as_ref(),
         stable_prefix_mode,
         streaming: false,
@@ -686,6 +756,7 @@ async fn run_agent_loop_inner(
         experiment_context: experiment_context.as_ref(),
         running_experiment: running_experiment.as_ref(),
         memories: &memories,
+        memory_fact_budget_percent: opts.memory_fact_budget_percent,
         stable_prefix_mode,
         streaming: false,
     });
@@ -1004,26 +1075,13 @@ async fn run_agent_loop_inner(
                             kept = result.kept_messages.len(),
                             "Context engine compaction complete"
                         );
-                        // Inject the LLM-generated summary as a synthetic user message
-                        // so the agent retains context about what was compacted.
-                        // Without this, the summary is silently discarded and the agent
-                        // loses all knowledge of earlier turns.
-                        let mut compacted = Vec::with_capacity(result.kept_messages.len() + 1);
-                        if !result.summary.is_empty() {
-                            compacted.push(Message {
-                                role: Role::User,
-                                content: MessageContent::Text(format!(
-                                    "[Context compaction summary] Earlier conversation turns \
-                                     were summarised to preserve context space. Summary of \
-                                     removed messages: {}",
-                                    result.summary
-                                )),
-                                pinned: false,
-                                timestamp: None,
-                            });
-                        }
-                        compacted.extend(result.kept_messages);
-                        messages = compacted;
+                        apply_context_compaction(
+                            session,
+                            &mut messages,
+                            &mut new_messages_start,
+                            result.summary,
+                            result.kept_messages,
+                        );
                         // `last_prompt_tokens` is intentionally NOT reset here.
                         // A second compaction should only fire after the next
                         // LLM call raises it above threshold again.  Resetting
@@ -1545,6 +1603,7 @@ async fn run_agent_loop_inner(
                         messages: &messages,
                         sender_user_id: sender_user_id.as_deref(),
                         sender_chat_scope: sender_chat_scope.as_deref(),
+                        session_scope: session_scope.as_deref(),
                         streaming: false,
                         opts,
                     },

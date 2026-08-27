@@ -1,0 +1,6 @@
+`cargo test` no longer makes real, billable LLM calls on a developer machine.
+  `KernelConfig::default()` sets `default_model.provider = "auto"`, which tells boot to interrogate the host — provider API-key env vars, a TCP probe for a local Ollama, a logged-in coding-agent CLI on `PATH` — and adopt the first thing it finds, so a test kernel had no way to say "no LLM driver" other than to leave one unconfigured and hope the machine had none either.
+  That premise held on a CI runner and failed on the laptop of anyone who develops LibreFang with Claude Code or an `OPENAI_API_KEY` exported, where the same tests instead spawned the real CLI against the checkout or hit the provider API for real.
+  Pinning a deliberately nonexistent provider name did not help: boot classifies an unknown provider as a misconfiguration to recover from and falls through to the very same host probe, rewriting the live config to whatever it detected.
+  `default_model.provider = "none"` now states the absence of a driver outright, and boot honours it by installing the stub driver directly — no provider construction, no credential-helper subprocess, no fallback slot, no auto-detection — with per-turn resolution short-circuiting to the same stub.
+  (#7813) (@houko)

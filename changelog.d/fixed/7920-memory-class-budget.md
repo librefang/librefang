@@ -1,0 +1,6 @@
+Divide the prompt memory section's character budget between extracted facts and raw dialogue instead of filling it first-come from one ranked list.
+Recall never distinguished the two classes, and a raw-dialogue row inlines a whole exchange — 1167 characters against 133 for an extracted fact — so dialogue took 92 % of the section by characters while taking only its base-rate share of the slots, and in 29 % of turns not one extracted fact reached the prompt at all.
+Facts now get 70 % of the budget by default (`memory_fact_budget_percent` in `config.toml` moves it), each class fills greedily from its own ranked list, and whatever one class leaves unspent goes to the other, so a turn that recalled only one class still uses the whole budget.
+A raw-dialogue row retrieved through proactive memory is also filed as raw dialogue again: the conversion to `MemoryItem` folded every unrecognised storage scope into `session_memory`, which the split would have read as an extracted fact.
+The section costs exactly as many characters as before; the same budget simply buys more, smaller records.
+Measured by @nevgenov over 80 real queries with hidden provenance: usefulness 5.80 → 10.82, and turns carrying at least one directly-answering record 68 % → 85 % (#7922) (@houko)
