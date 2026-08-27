@@ -186,6 +186,16 @@ Validate end-to-end with `workflow_dispatch` on `release.yml` (`channel=current`
 | `HOMEBREW_TAP_TOKEN` | PAT with `contents:write` on `librefang/homebrew-tap` for `sync_homebrew` / `sync_homebrew_cask` |
 | `RAILWAY_TOKEN` / `RENDER_API_KEY` / `FLY_API_TOKEN` | One-click deploy preview environments triggered by `release.yml` |
 
+## Repository automation
+
+| Secret | Purpose | Required scope | Rotation |
+|---|---|---|---|
+| `WEBSITE_REPO_TOKEN` | Pushes generated artifacts to same-repository PR branches, opens scheduled update PRs, and enables their auto-merge so the resulting PAT-authored pushes trigger required CI. | Fine-grained PAT limited to `librefang/librefang` with **Contents: read and write** and **Pull requests: read and write**. | When personnel changes, the token expires, or the credential is compromised. |
+
+Do not grant Actions, Administration, or organization-wide repository access to this credential.
+The default `GITHUB_TOKEN` cannot replace it because GitHub suppresses workflow runs triggered by that token's pushes.
+Do not store a GitHub App installation token here because installation tokens expire; a future App-based flow must mint one during each run from separate App credentials.
+
 ---
 
 ## AUR publishing (release.yml `sync_aur_bin` / `sync_aur_desktop` / `sync_aur_docker`)
