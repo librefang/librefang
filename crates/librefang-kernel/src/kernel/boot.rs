@@ -404,6 +404,11 @@ impl LibreFangKernel {
         substrate
             .set_consolidation_duplicate_threshold(config.proactive_memory.duplicate_threshold);
 
+        // #7911: bound the per-turn episodic memory row.
+        // The runtime's per-turn writer reads this off the substrate it already holds, so the value does not have to be threaded through `LoopOptions` at every construction site.
+        // `[memory]` is restart-required in `build_reload_plan`, so a value read once here cannot go stale relative to the config on disk.
+        substrate.set_max_episodic_chars(config.memory.max_episodic_chars);
+
         // Optionally attach an external vector store backend.
         if let Some(ref backend) = config.memory.vector_backend {
             match backend.as_str() {

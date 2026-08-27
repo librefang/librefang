@@ -17,6 +17,7 @@ use super::screens::{
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
+    groups::GroupInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
@@ -206,6 +207,8 @@ pub enum AppEvent {
     },
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
+    /// User groups loaded (#7745).
+    GroupsLoaded(Vec<GroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
     /// Hand definitions loaded (marketplace).
@@ -3060,6 +3063,57 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
                 latency_ms: 0,
                 message: crate::i18n::t("tui-event-provider-test-not-available-in-process"),
             }));
+        }
+    });
+}
+
+/// Fetch user groups (#7745).
+///
+/// `GET /api/groups` is Admin-or-above; the write verbs are Owner-only and the
+/// screen does not offer them, so a Viewer-scoped TUI degrades to an empty list
+/// rather than a wall of permission errors.
+pub fn spawn_fetch_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/groups")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let groups: Vec<GroupInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|g| GroupInfo {
+                                    name: g["name"].as_str().unwrap_or("").to_string(),
+                                    description: g["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    member_count: g["member_count"].as_u64().unwrap_or(0),
+                                    roles: g["roles"]
+                                        .as_array()
+                                        .map(|r| {
+                                            r.iter()
+                                                .filter_map(|v| v.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join(",")
+                                        })
+                                        .unwrap_or_default(),
+                                    has_unregistered_members: g["unknown_members"]
+                                        .as_array()
+                                        .map(|u| !u.is_empty())
+                                        .unwrap_or(false),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::GroupsLoaded(groups));
+                }
+            }
+        }
+        // Groups live in `config.toml`, which the in-process backend has no
+        // HTTP surface for; the daemon path is the only one that can answer.
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::GroupsLoaded(Vec::new()));
         }
     });
 }

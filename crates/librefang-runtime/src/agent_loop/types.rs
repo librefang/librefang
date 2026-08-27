@@ -110,6 +110,12 @@ pub struct LoopOptions {
     /// supported floor are clamped up at resolution time; values above the
     /// hard ceiling are clamped down.
     pub max_history_messages: Option<usize>,
+    /// Operator-level override for the share of the prompt memory section's character budget reserved for extracted facts, as a percentage.
+    ///
+    /// Kernel populates this from `KernelConfig.memory_fact_budget_percent`.
+    /// `None` → `prompt_builder::MEMORY_FACT_BUDGET_PERCENT` (70), the best arm of the A/B in #7920.
+    /// Values above 100 are clamped down at resolution time; 0 and 100 are legal and mean "one class only, until the other class's spill", since neither share is ever wasted.
+    pub memory_fact_budget_percent: Option<u8>,
     /// Auxiliary LLM client used for cheap-tier side tasks
     /// (context compression, title generation, search summarisation,
     /// vision captioning). When `None`, side tasks fall back to the

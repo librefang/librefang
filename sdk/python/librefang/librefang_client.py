@@ -54,6 +54,7 @@ class LibreFang:
         self.channels = _ChannelsResource(self)
         self.extensions = _ExtensionsResource(self)
         self.goals = _GoalsResource(self)
+        self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
@@ -248,6 +249,9 @@ class _AgentsResource(_Resource):
 
     def get_agent_deliveries(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/deliveries")
+
+    def list_agent_ephemeral_runs(self, id: str, limit: Any = None):
+        return self._c._request("GET", f"/api/agents/{id}/ephemeral-runs", None, query={"limit": limit})
 
     def list_agent_events(self, id: str, limit: Any = None):
         return self._c._request("GET", f"/api/agents/{id}/events", None, query={"limit": limit})
@@ -539,20 +543,23 @@ class _BudgetResource(_Resource):
     def delete_user_budget(self, user_id: str):
         return self._c._request("DELETE", f"/api/budget/users/{user_id}")
 
-    def usage_stats(self):
-        return self._c._request("GET", "/api/usage")
+    def usage_stats(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model(self):
-        return self._c._request("GET", "/api/usage/by-model")
+    def usage_by_model(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_by_model_performance(self):
-        return self._c._request("GET", "/api/usage/by-model/performance")
+    def usage_by_model_performance(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/by-model/performance", None, query={"start_date": start_date, "end_date": end_date})
 
-    def usage_daily(self):
-        return self._c._request("GET", "/api/usage/daily")
+    def usage_daily(self, start_date: Any = None, end_date: Any = None, days: Any = None):
+        return self._c._request("GET", "/api/usage/daily", None, query={"start_date": start_date, "end_date": end_date, "days": days})
 
-    def usage_summary(self):
-        return self._c._request("GET", "/api/usage/summary")
+    def usage_export(self, start_date: Any = None, end_date: Any = None, format: Any = None):
+        return self._c._request("GET", "/api/usage/export", None, query={"start_date": start_date, "end_date": end_date, "format": format})
+
+    def usage_summary(self, start_date: Any = None, end_date: Any = None):
+        return self._c._request("GET", "/api/usage/summary", None, query={"start_date": start_date, "end_date": end_date})
 
 
 # ── Channels Resource ──────────────────────────────────────────
@@ -601,6 +608,35 @@ class _GoalsResource(_Resource):
 
     def list_goal_templates(self):
         return self._c._request("GET", "/api/goals/templates")
+
+
+# ── Groups Resource ────────────────────────────────────────────
+
+class _GroupsResource(_Resource):
+
+    def list_groups(self):
+        return self._c._request("GET", "/api/groups")
+
+    def create_group(self, **data):
+        return self._c._request("POST", "/api/groups", data)
+
+    def get_group(self, name: str):
+        return self._c._request("GET", f"/api/groups/{name}")
+
+    def update_group(self, name: str, **data):
+        return self._c._request("PUT", f"/api/groups/{name}", data)
+
+    def delete_group(self, name: str):
+        return self._c._request("DELETE", f"/api/groups/{name}")
+
+    def add_group_member(self, name: str, user: str):
+        return self._c._request("PUT", f"/api/groups/{name}/members/{user}")
+
+    def remove_group_member(self, name: str, user: str):
+        return self._c._request("DELETE", f"/api/groups/{name}/members/{user}")
+
+    def user_groups(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/groups")
 
 
 # ── Hands Resource ─────────────────────────────────────────────

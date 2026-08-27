@@ -1229,6 +1229,7 @@ impl LibreFangKernel {
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
+            memory_fact_budget_percent: cfg.memory_fact_budget_percent,
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),

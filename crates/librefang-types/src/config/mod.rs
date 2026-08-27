@@ -151,6 +151,125 @@ admin_role = "admin"
     }
 
     #[test]
+    fn groups_default_to_empty_and_are_omitted_from_serialized_config() {
+        let cfg = KernelConfig::default();
+        assert!(cfg.groups.is_empty());
+        let serialized = toml::to_string(&cfg).unwrap();
+        assert!(
+            !serialized.contains("[[groups]]"),
+            "an empty group list must not leave a stranded [[groups]] section behind"
+        );
+    }
+
+    #[test]
+    fn groups_round_trip_through_toml() {
+        let toml_str = r#"
+            [[groups]]
+            name = "oncall"
+            description = "Support rota"
+            members = ["alice", "bob"]
+            roles = ["approver"]
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.groups.len(), 1);
+        assert_eq!(cfg.groups[0].name, "oncall");
+        assert_eq!(cfg.groups[0].description, "Support rota");
+        assert!(cfg.groups[0].has_member("alice"));
+        assert!(!cfg.groups[0].has_member("carol"));
+    }
+
+    #[test]
+    fn groups_omitted_optional_fields_default_to_empty() {
+        let toml_str = r#"
+            [[groups]]
+            name = "minimal"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.groups[0].description, "");
+        assert!(cfg.groups[0].members.is_empty());
+        assert!(cfg.groups[0].roles.is_empty());
+    }
+
+    #[test]
+    fn groups_for_user_sorts_by_name_regardless_of_declaration_order() {
+        let cfg = KernelConfig {
+            groups: vec![
+                crate::config::GroupConfig {
+                    name: "zulu".to_string(),
+                    members: vec!["alice".to_string()],
+                    ..Default::default()
+                },
+                crate::config::GroupConfig {
+                    name: "alpha".to_string(),
+                    members: vec!["alice".to_string()],
+                    ..Default::default()
+                },
+                crate::config::GroupConfig {
+                    name: "other".to_string(),
+                    members: vec!["bob".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let names: Vec<&str> = cfg
+            .groups_for_user("alice")
+            .into_iter()
+            .map(|g| g.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha", "zulu"]);
+        assert!(cfg.groups_for_user("nobody").is_empty());
+    }
+
+    #[test]
+    fn roles_for_user_unions_group_names_and_declared_roles() {
+        let cfg = KernelConfig {
+            groups: vec![
+                crate::config::GroupConfig {
+                    name: "oncall".to_string(),
+                    members: vec!["alice".to_string()],
+                    roles: vec!["approver".to_string()],
+                    ..Default::default()
+                },
+                crate::config::GroupConfig {
+                    name: "billing".to_string(),
+                    members: vec!["alice".to_string()],
+                    // `approver` is conferred twice; the set collapses it.
+                    roles: vec!["approver".to_string(), "auditor".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let roles: Vec<String> = cfg.roles_for_user("alice").into_iter().collect();
+        assert_eq!(roles, vec!["approver", "auditor", "billing", "oncall"]);
+        assert!(cfg.roles_for_user("bob").is_empty());
+    }
+
+    #[test]
+    fn roles_for_user_does_not_leak_the_rbac_privilege_level() {
+        // `UserConfig.role` is a different ladder. A group named `owner` must
+        // not silently confer owner privilege, and the RBAC role must not show
+        // up in the group-derived set either.
+        let cfg = KernelConfig {
+            users: vec![UserConfig {
+                name: "alice".to_string(),
+                role: "admin".to_string(),
+                ..Default::default()
+            }],
+            groups: vec![crate::config::GroupConfig {
+                name: "oncall".to_string(),
+                members: vec!["alice".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let roles = cfg.roles_for_user("alice");
+        assert!(roles.contains("oncall"));
+        assert!(!roles.contains("admin"));
+    }
+
+    #[test]
     fn test_user_config_serde() {
         let uc = UserConfig {
             name: "Alice".to_string(),
