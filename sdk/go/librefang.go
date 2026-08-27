@@ -738,24 +738,28 @@ func (r *BudgetResource) DeleteUserBudget(user_id string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/budget/users/%s", user_id), nil, nil)
 }
 
-func (r *BudgetResource) UsageStats() (interface{}, error) {
-	return r.client.request("GET", "/api/usage", nil, nil)
+func (r *BudgetResource) UsageStats(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage", nil, query)
 }
 
-func (r *BudgetResource) UsageByModel() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/by-model", nil, nil)
+func (r *BudgetResource) UsageByModel(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/by-model", nil, query)
 }
 
-func (r *BudgetResource) UsageByModelPerformance() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/by-model/performance", nil, nil)
+func (r *BudgetResource) UsageByModelPerformance(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/by-model/performance", nil, query)
 }
 
-func (r *BudgetResource) UsageDaily() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/daily", nil, nil)
+func (r *BudgetResource) UsageDaily(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/daily", nil, query)
 }
 
-func (r *BudgetResource) UsageSummary() (interface{}, error) {
-	return r.client.request("GET", "/api/usage/summary", nil, nil)
+func (r *BudgetResource) UsageExport(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/export", nil, query)
+}
+
+func (r *BudgetResource) UsageSummary(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/usage/summary", nil, query)
 }
 
 // ── Channels Resource

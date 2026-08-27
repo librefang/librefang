@@ -652,6 +652,10 @@ fn redacted_config_json(
         );
     }
 
+    set!("usage", {
+        "retention_days": config.usage.retention_days,
+    });
+
     set!("external_auth", {
         "enabled": config.external_auth.enabled,
         "issuer_url": config.external_auth.issuer_url,

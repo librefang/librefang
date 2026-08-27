@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 53;
+const SCHEMA_VERSION: u32 = 54;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -268,6 +268,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     //
     // Written as v51, renumbered to 53 on merge: #7916 took 51 and #7086 took 52 while this was in review.
     run_step!(53, migrate_v53);
+
+    // v54 (#7930): persist agent lineage.
+    // `AgentEntry.parent` had no column at all, so every reload from the store hydrated it as `None` and the API answered `parent_agent_id: null` for agents that demonstrably had a parent.
+    // Adds `agents.parent_id` plus the index that makes "list this agent's children" a lookup instead of a full-table scan, and `agents.parent_recorded` so a row written before this migration is distinguishable from an agent that genuinely has no parent.
+    //
+    // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
+    run_step!(54, migrate_v54);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1127,6 +1134,79 @@ fn migrate_v52(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (52, datetime('now'), 'Add group_roster.source so bulk-enumerated members stay out of the channel_dm authorization set (#7086)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v54 (#7930): persist an agent's parent link.
+///
+/// `AgentEntry.parent: Option<AgentId>` records which agent spawned another, but the `agents` table never had a column for it.
+/// Every hydration site in `structured.rs` therefore hardcoded `parent: None`, and because `routes/agents/mod.rs` serialises the field as `parent_agent_id`, the API positively asserted "this agent has no parent" for every agent after any daemon restart.
+/// That is worse than an absent field: `billed_agent_for` in the kernel resolves spend to `entry.parent.unwrap_or(entry.id)`, so a restarted worker silently started billing itself instead of its spawner.
+///
+/// # Decision 1 — a real column, not a field inside the `manifest` blob
+///
+/// `parent_id` is a first-class `TEXT` column with `idx_agents_parent_id` over it.
+///
+/// The manifest blob was the cheaper edit (no DDL, no ladder rung) and it is the wrong home twice over.
+/// Structurally, `manifest` is the operator-authored `AgentManifest` — the thing an `agent.toml` round-trips to — whereas parentage is runtime lineage the kernel assigns at spawn.
+/// Folding one into the other means `load_all_agents`' auto-repair pass (which re-serialises every manifest it reads and writes back any blob that differs) starts rewriting rows whenever lineage moves, and any future manifest export leaks a runtime edge into a config file.
+/// Operationally, a msgpack blob is opaque to SQLite: "list this agent's children" against a blob is a full-table scan that deserialises every manifest in the database, whereas against an indexed column it is `WHERE parent_id = ?1`.
+/// That query is the whole reason decision 2 below can be made at all.
+///
+/// # Decision 2 — `children` is derived, never stored
+///
+/// There is no `children` column and there will not be one.
+/// `children` is a pure inverse of `parent`, and storing both invites the two copies to disagree — which is not hypothetical here: `spawn_agent_inner` already calls `registry.add_child(parent_id, agent_id)` to push the child onto the parent's in-memory entry and then persists only the *child* row, so a stored `children` list would have been born stale on the very first spawn.
+/// The read path reconstructs it from `parent_id` instead — a single indexed lookup for `load_agent`, and one in-memory grouping pass for `load_all_agents` — so the relationship has exactly one writer and cannot skew.
+///
+/// # Decision 3 — `NULL` on a pre-migration row means "unknown", not "root"
+///
+/// `ALTER TABLE ... ADD COLUMN parent_id` backfills every existing row with `NULL`, and `NULL` is also what a genuine top-level agent stores.
+/// Collapsing those two cases would replace one wrong answer with a more confident wrong answer: every agent that predates this migration would begin claiming, positively, to be a root agent.
+///
+/// So the migration adds a second column, `parent_recorded INTEGER NOT NULL DEFAULT 0`.
+/// The `DEFAULT 0` is doing the real work — it is what stamps every pre-existing row as "lineage was never recorded for this row".
+/// `save_agent` writes `1` unconditionally from now on, so the three states are distinguishable:
+///
+/// | `parent_recorded` | `parent_id` | meaning                          |
+/// |-------------------|-------------|----------------------------------|
+/// | `0`               | `NULL`      | unknown — row predates v54       |
+/// | `1`               | `NULL`      | known root — no parent           |
+/// | `1`               | id          | child of that agent              |
+///
+/// A separate boolean beats the cheaper alternative of a sentinel value inside `parent_id` (`''` for "known root", `NULL` for "unknown").
+/// A sentinel makes `WHERE parent_id IS NULL` and any future `JOIN agents parent ON a.parent_id = parent.id` quietly wrong for every reader who does not know the convention, and it puts a non-id string in an id column.
+/// One byte per agent row is a fair price for a column that describes itself.
+///
+/// The distinction surfaces on `AgentEntry` as `parent_unknown: bool`.
+/// The polarity is deliberate: `Default` / `#[serde(default)]` yields `false` = "recorded", which is correct for every entry the kernel constructs in memory (it knows the lineage it just assigned).
+/// Only the store's hydration path can set it `true`, and only for a row that really was written before this migration.
+fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "agents", "parent_id")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    // DEFAULT 0 is the load-bearing part: it marks every row that already existed as "parent was never recorded" (see decision 3 above).
+    if !try_column_exists(conn, "agents", "parent_recorded")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // The index that makes decision 2 (derive `children`) affordable.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agents_parent_id ON agents(parent_id)",
+        [],
+    )?;
+    // Record the audit row under 54 — this migration's OWN number.
+    // `migrate_v50` recorded itself as 49 (#7924/#7925), which desynchronises `user_version` from the `migrations` table and forces the backfill pass at the bottom of `run_migrations` to paper over it on every boot.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
         [],
     )?;
     Ok(())
@@ -3997,6 +4077,142 @@ mod tests {
         assert_eq!(
             n, 1,
             "v41 sessions index must exist exactly once after repeated boots"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // v54 (#7930): agent lineage persistence
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn v54_adds_parent_columns_and_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            column_exists(&conn, "agents", "parent_id"),
+            "v54 must add agents.parent_id — without it AgentEntry.parent has nowhere to live"
+        );
+        assert!(
+            column_exists(&conn, "agents", "parent_recorded"),
+            "v54 must add agents.parent_recorded so a pre-v54 row is distinguishable from a root agent"
+        );
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_agents_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "idx_agents_parent_id is what makes deriving `children` a lookup instead of a scan"
+        );
+    }
+
+    #[test]
+    fn v54_is_idempotent_across_repeated_boots() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_agents_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "v54 index must exist exactly once after repeated boots"
+        );
+    }
+
+    #[test]
+    fn v54_records_its_audit_row_under_its_own_version() {
+        // `migrate_v50` recorded itself as version 49 (#7924/#7925), which desynchronises the audit trail from `user_version`.
+        // Guard against that copy-paste for v54 specifically.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 54",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v54 must have recorded an audit row under version 54");
+        assert!(
+            description.contains("#7930"),
+            "the v54 audit row must be v54's own, not a backfill placeholder or another migration's: {description}"
+        );
+    }
+
+    #[test]
+    fn v54_marks_pre_existing_agent_rows_as_lineage_unknown() {
+        // The regression this guards: `ALTER TABLE ... ADD COLUMN parent_id` backfills NULL, and NULL is also what a genuine root agent stores.
+        // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
+        //
+        // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
+        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has both.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE agents (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                manifest BLOB NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                session_id TEXT DEFAULT '',
+                identity TEXT DEFAULT '{}',
+                source_toml_path TEXT DEFAULT NULL
+            );
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL
+            );
+            CREATE TABLE group_roster (
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+            );
+            INSERT INTO agents (id, name, manifest, state, created_at, updated_at)
+            VALUES ('legacy-agent', 'legacy', x'80', '\"Running\"', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+        set_schema_version(&conn, 50).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let (parent_id, parent_recorded): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT parent_id, parent_recorded FROM agents WHERE id = 'legacy-agent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            parent_id, None,
+            "a pre-v54 row has no recoverable parent id"
+        );
+        assert_eq!(
+            parent_recorded, 0,
+            "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
         );
     }
 }

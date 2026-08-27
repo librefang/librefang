@@ -353,7 +353,11 @@ pub(crate) fn enrich_agent_json(
             "color": e.identity.color,
         },
         "web_search_augmentation": e.manifest.web_search_augmentation,
+        // #7930: `parent_agent_id` used to be `null` for every agent after a daemon restart, because nothing persisted the link.
+        // It now round-trips through `agents.parent_id`.
+        // `parent_unknown` distinguishes the two reasons the field can be `null`: `false` means the agent really has no parent, `true` means the row predates schema v54 and its lineage was never recorded — a client must not render the latter as a root agent.
         "parent_agent_id": e.parent.as_ref().map(|p| p.to_string()),
+        "parent_unknown": e.parent_unknown,
         "children": e.children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         "session_id": e.session_id.0.to_string(),
         "tags": e.tags,

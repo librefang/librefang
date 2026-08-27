@@ -400,6 +400,7 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         {"key": "links", "struct_field": "links"},
         {"key": "reload", "struct_field": "reload"},
         {"key": "budget", "struct_field": "budget"},
+        {"key": "usage", "struct_field": "usage"},
         {"key": "thinking", "struct_field": "thinking"},
         {"key": "pairing", "struct_field": "pairing"},
         {"key": "broadcast", "struct_field": "broadcast"},

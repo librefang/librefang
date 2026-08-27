@@ -313,6 +313,7 @@ use crate::types;
         routes::usage_by_model,
         routes::usage_by_model_performance,
         routes::usage_daily,
+        routes::usage_export,
 
         // ── Auto-Dream (background memory consolidation) ──
         routes::auto_dream_status,
