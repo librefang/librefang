@@ -83,6 +83,17 @@ use std::time::Instant;
 
 use crate::types::ApiErrorResponse;
 
+fn scrubbed_provider_error(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::error!(%error, operation, "provider operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "Internal server error"})),
+    )
+}
+
 pub(crate) fn parse_codex_configured_model(body: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(body).ok()?;
     let model = value.get("model")?.as_str()?.trim();
@@ -3272,10 +3283,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
-        ),
+        Err(e) => scrubbed_provider_error("copilot_oauth_start", e),
     }
 }
 
@@ -3320,12 +3328,9 @@ pub async fn copilot_oauth_poll(
             // Save to secrets.env
             let secrets_path = state.kernel.home_dir().join("secrets.env");
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")}),
-                    ),
-                );
+                let (status, Json(mut body)) = scrubbed_provider_error("copilot_token_persist", e);
+                body["status"] = serde_json::Value::String("error".to_string());
+                return (status, Json(body));
             }
 
             // Set in current process. Serialized through the process-global
@@ -3432,14 +3437,13 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "status": "error",
-                "message": e,
-            })),
-        )
-            .into_response(),
+        Err(e) => {
+            let (status, Json(mut body)) = scrubbed_provider_error("catalog_update", e);
+            body["status"] = serde_json::Value::String("error".to_string());
+            body["message"] = body["error"].take();
+            body.as_object_mut().expect("JSON object").remove("error");
+            (status, Json(body)).into_response()
+        }
     }
 }
 
@@ -3491,14 +3495,14 @@ pub async fn detect_ollama() -> impl IntoResponse {
 mod tests {
     use super::{
         parse_claude_code_settings_model, parse_codex_configured_model,
-        parse_gemini_style_settings_model, synthesized_cli_model_row,
+        parse_gemini_style_settings_model, scrubbed_provider_error, synthesized_cli_model_row,
         upsert_provider_discover_models, upsert_provider_urls,
     };
     use crate::routes::agent_templates::{get_profile, list_profiles};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
+    use axum::{Json, Router};
     use tower::ServiceExt;
 
     /// Build the live catalog record the discovery handler passes to the writer.
@@ -3622,6 +3626,18 @@ mod tests {
         assert_eq!(provider.base_url, "https://gateway.internal/v1");
         assert_eq!(provider.api_key_env, "LITELLM_API_KEY");
         assert!(provider.discover_models);
+    }
+
+    #[test]
+    fn provider_internal_errors_do_not_expose_source_details() {
+        let secret = "/private/home/secrets.env: permission denied; upstream body=token-value";
+        let (status, Json(body)) = scrubbed_provider_error("test", secret);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "Internal server error");
+        assert!(!body.to_string().contains(secret));
+        assert!(!body.to_string().contains("secrets.env"));
+        assert!(!body.to_string().contains("token-value"));
     }
 
     #[test]
