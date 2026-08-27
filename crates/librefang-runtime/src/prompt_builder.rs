@@ -602,18 +602,36 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
 ///
 /// Also used by `agent_loop.rs` to append recalled memories after DB lookup.
 pub fn build_memory_section(memories: &[(String, String)]) -> String {
-    let mut out = String::from(
-        "## Memory\n\
-         - When the user asks about something from a previous conversation, Always call memory_list first to identify relevant memory keys.\n\
-         - Based on the list, use memory_recall with specific keys to fetch necessary details.\n\
-         - Store important preferences, decisions, and context with memory_store for future use.",
-    );
+    let mut out = String::from(MEMORY_SECTION_GUIDANCE);
     if !memories.is_empty() {
         out.push_str("\n\n");
         out.push_str(&format_memory_items_as_personal_context(memories));
     }
     out
 }
+
+/// Build the memory section (Section 4) from the two memory classes, each with its own share of the character budget.
+///
+/// The class-aware counterpart of [`build_memory_section`]; see [`format_memory_items_by_class`] for why the split exists.
+pub fn build_memory_section_by_class(
+    facts: &[(String, String)],
+    dialogue: &[(String, String)],
+    fact_budget_percent: Option<u8>,
+) -> String {
+    let mut out = String::from(MEMORY_SECTION_GUIDANCE);
+    let body = format_memory_items_by_class(facts, dialogue, fact_budget_percent);
+    if !body.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&body);
+    }
+    out
+}
+
+/// The fixed guidance that opens the Memory section, above any recalled bullets.
+const MEMORY_SECTION_GUIDANCE: &str = "## Memory\n\
+     - When the user asks about something from a previous conversation, Always call memory_list first to identify relevant memory keys.\n\
+     - Based on the list, use memory_recall with specific keys to fetch necessary details.\n\
+     - Store important preferences, decisions, and context with memory_store for future use.";
 
 /// Maximum number of recalled memory bullets rendered into the personal-context block.
 ///
@@ -625,16 +643,30 @@ pub const MEMORY_BULLET_LIMIT: usize = 10;
 /// Per-bullet character budget, applied before the boundary-aware cut.
 pub const MEMORY_BULLET_MAX_CHARS: usize = 500;
 
-/// Character budget for the memory bullets as a whole, counted over bullet *content*
-/// (the `- [key] ` scaffolding is bounded and excluded).
+/// Maximum characters of a memory key rendered into a bullet's `[key] ` label.
 ///
-/// Deliberately equal to `MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS`, so it is a
-/// true ceiling rather than a behaviour change: with today's constants it is saturated
-/// by ten full-length bullets and never binds. It exists because three producers feed
-/// this section — substrate recall, proactive memory, and the context engine — and
-/// until now nobody owned its total, so raising either constant would have silently
-/// multiplied the section's share of the context window (#7756 §1.3).
-pub const MEMORY_SECTION_MAX_CHARS: usize = MEMORY_BULLET_LIMIT * MEMORY_BULLET_MAX_CHARS;
+/// The key half of a recalled memory is caller-controlled — `PromptContext.recalled_memories` is a public field and [`format_memory_items_as_personal_context`] a public function, and neither `librefang-memory` nor `librefang-types::memory` bounds a key's length — so an uncapped label let three memories with 50 000-character keys render 151 003 characters into a section whose stated budget is 5 000 (#7910).
+/// Mirrors `SKILL_NAME_DISPLAY_CAP`, which bounds a third-party-controlled name the same way.
+pub const MEMORY_KEY_DISPLAY_CAP: usize = 64;
+
+/// Characters a bullet spends on framing, over and above the content it carries.
+///
+/// - `- ` prefix and the trailing newline = 3
+/// - `[`, `] ` around the key label = 3
+/// - sanitized key (up to `MEMORY_KEY_DISPLAY_CAP`) + `...` = N + 3
+///
+/// Counted explicitly, the way `SKILL_BOILERPLATE_OVERHEAD` counts a skill entry's framing, so that [`MEMORY_SECTION_MAX_CHARS`] can be a ceiling over every character the bullet list contributes rather than over content alone.
+const MEMORY_BULLET_FRAMING_OVERHEAD: usize = 3 + 3 + MEMORY_KEY_DISPLAY_CAP + 3;
+
+/// Character budget for the memory bullets as a whole, counted over the bullets as they are rendered — content, `- [key] ` scaffolding, truncation marker and newline all included.
+///
+/// Deliberately equal to `MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD)`, so it is a true ceiling rather than a behaviour change: with today's constants it is saturated by ten full-length bullets carrying maximum-length keys, and never binds below that.
+/// It exists because three producers feed this section — substrate recall, proactive memory, and the context engine — and until now nobody owned its total, so raising either constant would have silently multiplied the section's share of the context window (#7756 §1.3).
+///
+/// The framing allowance is part of the budget rather than excluded from it because excluding a quantity is only safe while that quantity is bounded, and the key label was not (#7910).
+/// The fixed preamble above the bullets is a compile-time constant and is not counted.
+pub const MEMORY_SECTION_MAX_CHARS: usize =
+    MEMORY_BULLET_LIMIT * (MEMORY_BULLET_MAX_CHARS + MEMORY_BULLET_FRAMING_OVERHEAD);
 
 /// Appended to a memory bullet that was cut short.
 ///
@@ -648,6 +680,28 @@ pub const MEMORY_TRUNCATION_MARKER: &str = " […truncated]";
 /// it and reporting the omission.
 const MEMORY_BULLET_MIN_CHARS: usize = 80;
 
+/// Share of [`MEMORY_SECTION_MAX_CHARS`] reserved for extracted facts when the section is filled per class, as a percentage.
+///
+/// The two memory classes differ by an order of magnitude in row size — a raw-dialogue row inlines a whole exchange and averaged 1167 characters on the corpus measured in #7920, an extracted fact 133 — so a single ranked list hands the section to dialogue on size alone.
+/// Slot share was never the problem: dialogue took 77.4 % of the slots against a 79.5 % share of the corpus, and still 91.7 % of the characters, leaving 29 % of turns with no extracted fact in the prompt at all.
+///
+/// 70 % is the best of the arms measured (usefulness 10.82 against 5.80 for one mixed list, over 80 real queries at an unchanged 5000-character budget), but the measurement cannot separate 30/50/70 from run-to-run noise — the finding is "divide the budget", not "divide it 70/30", which is why `KernelConfig::memory_fact_budget_percent` can move it without a recompile.
+/// Dropping dialogue entirely scored *worse* than the split (9.75), so this is a floor for facts and not an exclusion of dialogue.
+pub const MEMORY_FACT_BUDGET_PERCENT: u8 = 70;
+
+/// Upper bound on the bullets a single memory class may render.
+///
+/// The per-class character budget is the binding constraint in practice — [`MEMORY_BULLET_MIN_CHARS`] plus framing means [`MEMORY_SECTION_MAX_CHARS`] can never hold more than ~70 bullets whatever this says — so this is a legibility backstop against a corpus of pathologically short facts, not a size bound.
+/// It is deliberately far above [`MEMORY_BULLET_LIMIT`]: at the measured fact size a 70 % share of the section budget holds about 29 facts, and the arm that placed 33 records is the one that won, so a limit of 10 would have thrown most of the benefit away while leaving the section's character count unchanged.
+pub const MEMORY_CLASS_BULLET_LIMIT: usize = 40;
+
+/// Resolve the configured fact share against the compiled default, clamped to a percentage.
+///
+/// `None` means "no operator override", not "zero" — an unset knob must keep the measured default rather than starve one class.
+pub fn resolve_fact_budget_percent(configured: Option<u8>) -> u8 {
+    configured.unwrap_or(MEMORY_FACT_BUDGET_PERCENT).min(100)
+}
+
 /// Minimum percentage of the per-bullet budget a boundary cut must retain.
 ///
 /// Without a floor, a bullet whose first sentence ends after twelve characters would be
@@ -655,28 +709,39 @@ const MEMORY_BULLET_MIN_CHARS: usize = 80;
 /// meant to replace.
 const MEMORY_BOUNDARY_MIN_PERCENT: usize = 60;
 
+/// Byte index one past the `n`th character of `s`, or `s.len()` when `s` is shorter.
+///
+/// Always a character boundary, so slicing `s` with it cannot panic on multi-byte input.
+fn char_boundary_at(s: &str, n: usize) -> usize {
+    s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len())
+}
+
 /// Truncate a memory bullet at a sentence boundary, falling back to a word boundary.
 ///
-/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there,
-/// this walks back to the last sentence terminator inside the budget, then to the last
-/// word boundary, and only performs a bare character cut when the text offers neither
-/// (scripts without spaces, or a single unbroken token). Every shortened result carries
-/// [`MEMORY_TRUNCATION_MARKER`].
+/// Unlike [`cap_str`], which cuts at the Nth character regardless of what is there, this walks back to the last sentence terminator inside the budget, then to the last word boundary, and only performs a bare character cut when the text offers neither (scripts without spaces, or a single unbroken token).
+/// Every shortened result carries [`MEMORY_TRUNCATION_MARKER`], except in the degenerate case where `max_chars` leaves no room for both a marker and any content at all.
 ///
-/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget,
-/// so a boundary never costs more content than it saves.
+/// Both candidate cuts must retain at least `MEMORY_BOUNDARY_MIN_PERCENT` of the budget, so a boundary never costs more content than it saves.
+///
+/// The result never exceeds `max_chars` characters.
+/// The marker is part of what is returned, so it is reserved out of the budget before the window is chosen — appending it to a window that already filled `max_chars` is what let every truncated bullet overshoot the section budget by exactly one marker's worth (#7910).
+/// All cuts are made at character boundaries.
 fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     if content.chars().count() <= max_chars {
         return content.to_string();
     }
+    let marker_chars = MEMORY_TRUNCATION_MARKER.chars().count();
+    let content_chars = max_chars.saturating_sub(marker_chars);
+    if content_chars == 0 {
+        // Not enough room for content and a marker both.
+        // A bare character cut still honours the cap, and a bullet that is nothing but a marker carries no information anyway.
+        let end = char_boundary_at(content, max_chars);
+        return content[..end].trim_end().to_string();
+    }
     // Byte index one past the last character the budget allows.
-    let end = content
-        .char_indices()
-        .nth(max_chars)
-        .map(|(i, _)| i)
-        .unwrap_or(content.len());
+    let end = char_boundary_at(content, content_chars);
     let window = &content[..end];
-    let floor = max_chars * MEMORY_BOUNDARY_MIN_PERCENT / 100;
+    let floor = content_chars * MEMORY_BOUNDARY_MIN_PERCENT / 100;
 
     // Byte indices, exclusive. `sentence_cut` keeps the terminator; `word_cut` drops
     // the whitespace it found (the trailing trim below removes any that survives).
@@ -700,6 +765,27 @@ fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
     format!("{}{}", window[..cut].trim_end(), MEMORY_TRUNCATION_MARKER)
 }
 
+/// The framing that introduces the recalled-memory bullets in both the system prompt and the stand-alone context message.
+///
+/// Soft hint only — actual enforcement against cascade scaffolding leaks is `agent_loop::is_cascade_leak`.
+/// Do not delete that runtime guard on the assumption that this prompt clause is sufficient.
+const MEMORY_PERSONAL_CONTEXT_PREAMBLE: &str = "You have the following understanding of this person from previous conversations. \
+         This is knowledge you have — not a list to recite. Let it naturally shape how you \
+         respond:\n\
+         \n\
+         - Reference relevant context when it helps (\"since you're working in Rust...\", \
+         \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
+         - Let remembered preferences silently guide your style, format, and depth — you \
+         don't need to announce that you're doing so.\n\
+         - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
+         or mechanically list what you know. A friend doesn't preface every remark with \
+         \"I remember you told me...\".\n\
+         - NEVER quote, echo, or reproduce the literal text of these memory bullets in your reply. \
+         Paraphrase only what is relevant. These bullets are private context, not chat content \
+         to surface back to the user.\n\
+         - If a memory is clearly outdated or the user contradicts it, trust the current \
+         conversation over stored context.\n\n";
+
 /// Format recalled memories as a natural personal-context block.
 ///
 /// Used by both the system prompt (appended to the Memory section) and
@@ -707,10 +793,38 @@ fn truncate_memory_bullet(content: &str, max_chars: usize) -> String {
 /// stable_prefix_mode.  The framing instructs the LLM to use the
 /// knowledge the way a person who actually knows you would — naturally,
 /// without announcing that it "remembers" things.
+///
+/// Class-blind: every memory competes for one budget in rank order.
+/// [`format_memory_items_by_class`] is the class-aware form and is what the agent loop uses.
 pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) -> String {
     format_memory_items_within_budget(
         memories,
         MEMORY_BULLET_LIMIT,
+        MEMORY_BULLET_MAX_CHARS,
+        MEMORY_SECTION_MAX_CHARS,
+    )
+}
+
+/// Format recalled memories with the section's character budget divided between the two memory classes.
+///
+/// `facts` and `dialogue` are each already in rank order; each class is filled greedily from its own list, so a raw-dialogue row can no longer spend the characters a fact would have used (#7920).
+/// `fact_budget_percent` is the operator override for the fact share; `None` uses [`MEMORY_FACT_BUDGET_PERCENT`].
+///
+/// Neither share is wasted when the other class cannot fill it.
+/// Facts are filled first against their own share, dialogue then draws on everything facts left behind, and any facts that did not fit take whatever dialogue in turn left over — so a turn with no facts still renders the whole budget as dialogue, and a turn with no dialogue spends the whole budget on facts.
+///
+/// The total is unchanged: both classes charge the same running counter against [`MEMORY_SECTION_MAX_CHARS`], so the section costs no more characters than the class-blind form did (#7910).
+/// What changes is how many records that budget buys — the same characters carry more, smaller records.
+pub fn format_memory_items_by_class(
+    facts: &[(String, String)],
+    dialogue: &[(String, String)],
+    fact_budget_percent: Option<u8>,
+) -> String {
+    format_memory_items_by_class_within_budget(
+        facts,
+        dialogue,
+        fact_budget_percent,
+        MEMORY_CLASS_BULLET_LIMIT,
         MEMORY_BULLET_MAX_CHARS,
         MEMORY_SECTION_MAX_CHARS,
     )
@@ -729,52 +843,120 @@ fn format_memory_items_within_budget(
     if memories.is_empty() {
         return String::new();
     }
-    // Soft hint only — actual enforcement against cascade scaffolding leaks
-    // is `agent_loop::is_cascade_leak`. Do not delete that runtime guard
-    // on the assumption that this prompt clause is sufficient.
-    let mut out = String::from(
-        "You have the following understanding of this person from previous conversations. \
-         This is knowledge you have — not a list to recite. Let it naturally shape how you \
-         respond:\n\
-         \n\
-         - Reference relevant context when it helps (\"since you're working in Rust...\", \
-         \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
-         - Let remembered preferences silently guide your style, format, and depth — you \
-         don't need to announce that you're doing so.\n\
-         - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
-         or mechanically list what you know. A friend doesn't preface every remark with \
-         \"I remember you told me...\".\n\
-         - NEVER quote, echo, or reproduce the literal text of these memory bullets in your reply. \
-         Paraphrase only what is relevant. These bullets are private context, not chat content \
-         to surface back to the user.\n\
-         - If a memory is clearly outdated or the user contradicts it, trust the current \
-         conversation over stored context.\n\n",
-    );
     let mut spent = 0usize;
+    let (bullets, rendered) = fill_memory_bullets(
+        memories,
+        bullet_limit,
+        bullet_max_chars,
+        section_max_chars,
+        &mut spent,
+    );
+    let mut out = String::from(MEMORY_PERSONAL_CONTEXT_PREAMBLE);
+    out.push_str(&bullets);
+    push_memory_omission_note(&mut out, memories.len().saturating_sub(rendered));
+    out
+}
+
+/// Budget-parameterised body of [`format_memory_items_by_class`].
+fn format_memory_items_by_class_within_budget(
+    facts: &[(String, String)],
+    dialogue: &[(String, String)],
+    fact_budget_percent: Option<u8>,
+    bullet_limit: usize,
+    bullet_max_chars: usize,
+    section_max_chars: usize,
+) -> String {
+    if facts.is_empty() && dialogue.is_empty() {
+        return String::new();
+    }
+    let percent = resolve_fact_budget_percent(fact_budget_percent) as usize;
+    let fact_ceiling = section_max_chars.saturating_mul(percent) / 100;
+    // One counter for both classes: the ceilings below differ, but every bullet either class renders is charged against the same total, which is what keeps the section inside `section_max_chars` however the split falls.
+    let mut spent = 0usize;
+    let (mut fact_bullets, mut facts_rendered) = fill_memory_bullets(
+        facts,
+        bullet_limit,
+        bullet_max_chars,
+        fact_ceiling,
+        &mut spent,
+    );
+    // Dialogue's ceiling is the whole section, not the complement of the fact share — whatever facts did not spend is dialogue's to use rather than lost.
+    let (dialogue_bullets, dialogue_rendered) = fill_memory_bullets(
+        dialogue,
+        bullet_limit,
+        bullet_max_chars,
+        section_max_chars,
+        &mut spent,
+    );
+    // And the same in the other direction: facts held back by their own ceiling get a second pass over whatever dialogue left, so an absent or small dialogue class is not a wasted share.
+    if facts_rendered < facts.len() {
+        let (extra_bullets, extra_rendered) = fill_memory_bullets(
+            &facts[facts_rendered..],
+            bullet_limit.saturating_sub(facts_rendered),
+            bullet_max_chars,
+            section_max_chars,
+            &mut spent,
+        );
+        fact_bullets.push_str(&extra_bullets);
+        facts_rendered += extra_rendered;
+    }
+    let mut out = String::from(MEMORY_PERSONAL_CONTEXT_PREAMBLE);
+    // Facts before dialogue, each class contiguous, both in their own rank order: a fixed arrangement of a fixed input, so the rendered section is byte-identical across processes and the provider prompt cache still hits (#3298).
+    out.push_str(&fact_bullets);
+    out.push_str(&dialogue_bullets);
+    push_memory_omission_note(
+        &mut out,
+        (facts.len() + dialogue.len()).saturating_sub(facts_rendered + dialogue_rendered),
+    );
+    out
+}
+
+/// Render memories as bullets, front to back, while the running total `spent` stays under `ceiling`.
+///
+/// Returns the rendered bullets and how many memories they consumed; the caller reports the remainder.
+/// `spent` is shared across every call that contributes to one section, so a class filled later sees the characters an earlier class already took.
+fn fill_memory_bullets(
+    memories: &[(String, String)],
+    bullet_limit: usize,
+    bullet_max_chars: usize,
+    ceiling: usize,
+    spent: &mut usize,
+) -> (String, usize) {
+    let mut out = String::new();
     let mut rendered = 0usize;
     for (key, content) in memories.iter().take(bullet_limit) {
-        let remaining = section_max_chars.saturating_sub(spent);
-        if remaining < MEMORY_BULLET_MIN_CHARS {
+        // The key is caller-controlled, so it is sanitized and capped before it is rendered and charged at its rendered length — an uncapped, uncharged label is unbounded growth in the one section whose whole purpose is to be bounded (#7910).
+        let label = match sanitize_for_prompt(key, MEMORY_KEY_DISPLAY_CAP) {
+            k if k.is_empty() => String::new(),
+            k => format!("[{k}] "),
+        };
+        // `- ` + label + `\n`: everything in the rendered line that is not content.
+        let framing = 3 + label.chars().count();
+        let remaining = ceiling.saturating_sub(*spent);
+        // Charge the framing before deciding whether a bullet is worth rendering, so that what survives is at least `MEMORY_BULLET_MIN_CHARS` of content rather than a label.
+        let content_budget = remaining.saturating_sub(framing);
+        if content_budget < MEMORY_BULLET_MIN_CHARS {
             break;
         }
-        let capped = truncate_memory_bullet(content, bullet_max_chars.min(remaining));
-        spent += capped.chars().count();
+        let capped = truncate_memory_bullet(content, bullet_max_chars.min(content_budget));
+        let line = format!("- {label}{capped}\n");
+        // `truncate_memory_bullet` honours its budget, so this cannot exceed `remaining`.
+        *spent += line.chars().count();
         rendered += 1;
-        if key.is_empty() {
-            out.push_str(&format!("- {capped}\n"));
-        } else {
-            out.push_str(&format!("- [{key}] {capped}\n"));
-        }
+        out.push_str(&line);
     }
-    // Say so rather than dropping silently. The count is the only signal the model gets
-    // that its recalled context was clipped, whether by `bullet_limit` or by the budget.
-    let omitted = memories.len().saturating_sub(rendered);
+    (out, rendered)
+}
+
+/// Say what was dropped rather than dropping it silently.
+///
+/// The count is the only signal the model gets that its recalled context was clipped, whether by a bullet limit or by the character budget.
+fn push_memory_omission_note(out: &mut String, omitted: usize) {
     if omitted > 0 {
         out.push_str(&format!(
             "\n({omitted} further remembered details are not shown here.)\n"
         ));
     }
-    out
 }
 
 /// When skill count exceeds this threshold, the system prompt uses a compact
@@ -1496,11 +1678,7 @@ fn cap_str(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
-        let end = s
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(s.len());
+        let end = char_boundary_at(s, max_chars);
         // Defense in depth: walk back to a char boundary in case `end` is ever
         // produced by something other than `char_indices` in the future.
         format!("{}...", safe_truncate_str(s, end))

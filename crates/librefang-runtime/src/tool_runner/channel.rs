@@ -231,16 +231,21 @@ pub(super) async fn tool_channel_dm(
         ));
     }
 
+    // `roster_observed_members`, never `roster_members` (#7086).
+    // The roster holds two kinds of row since bulk enumeration landed: people observed speaking here, and people a platform merely listed as members of the channel.
+    // Only the first kind may be privately addressed — enumerating a Slack channel would otherwise hand the agent a DM channel to every member of it, including everyone who has never spoken to it, which is the #6117 leak re-opened through a side door.
+    // The narrowing lives in the store's `AND source = 'observed'` predicate; calling the wider read here is exactly the mistake the two-method split exists to make visible.
+    //
     // Platform ids are opaque and `send_channel_*` lookups are case-sensitive (#6078), so the membership check is too: a case-insensitive match here would authorize one id and deliver to a different one.
     let members = kh
-        .roster_members(channel, conversation)
+        .roster_observed_members(channel, conversation)
         .map_err(|e| e.to_string())?;
     let is_member = members
         .iter()
         .any(|m| m.get("user_id").and_then(|v| v.as_str()) == Some(user_id));
     if !is_member {
         return Err(format!(
-            "channel_dm user_id '{user_id}' is not a recorded member of the current conversation on channel '{channel}'. A private message may only be addressed to someone the daemon has seen speak in this conversation — call channel_members to see who that is."
+            "channel_dm user_id '{user_id}' is not someone the daemon has observed speaking in the current conversation on channel '{channel}'. A private message may only be addressed to someone who has spoken here — call channel_members and pick a member whose source is 'observed'. A member listed as 'enumerated' is known to the platform but has never addressed this agent, and cannot be messaged privately."
         ));
     }
 
@@ -312,8 +317,12 @@ fn resolve_roster_target<'a>(
 
 /// `channel_members` — enumerate the persisted roster of a group conversation.
 ///
-/// This is the read half of the roster the channel bridge has been writing since the `group_roster` table landed: every group message the daemon observes upserts its sender through `ChannelBridgeHandle::roster_upsert`, and `KernelHandle::roster_members` has been able to read it back the whole time with no caller.
-/// Without this tool an agent sitting in a shared Slack or Telegram group cannot answer "who is in this channel?", and has no way to obtain the platform user id it needs to attribute a request to the person who made it (#7086).
+/// This is the read half of the roster the channel bridge writes: every group message the daemon observes upserts its sender through `ChannelBridgeHandle::roster_upsert`, and an adapter that supplies a platform member list adds the rest through `roster_upsert_enumerated` (#7086).
+/// Without this tool an agent sitting in a shared Slack or Telegram group cannot answer "who is in this channel?", and has no way to obtain the platform user id it needs to attribute a request to the person who made it.
+///
+/// Every entry carries a `source`, and it is not decoration.
+/// `"observed"` means the person has spoken here and may be privately addressed with `channel_dm`; `"enumerated"` means a platform listed them and `channel_dm` will refuse.
+/// The counts are surfaced alongside the list so the model can see the boundary without tallying the rows itself, and the note spells out the consequence — a model that assumes every listed member is reachable would otherwise discover the split one refusal at a time.
 ///
 /// Read-only and non-mutating: it neither sends anything nor teaches the roster about anyone new.
 pub(super) fn tool_channel_members(
@@ -340,10 +349,18 @@ pub(super) fn tool_channel_members(
         .roster_members(roster_channel, chat_id)
         .map_err(|e| e.to_string())?;
 
+    let observed_count = members
+        .iter()
+        .filter(|m| m.get("source").and_then(|v| v.as_str()) == Some("observed"))
+        .count();
+    let enumerated_count = members.len() - observed_count;
+
     let mut out = serde_json::json!({
         "channel": roster_channel,
         "chat_id": chat_id,
         "count": members.len(),
+        "observed_count": observed_count,
+        "enumerated_count": enumerated_count,
         "members": members,
     });
 
@@ -351,7 +368,11 @@ pub(super) fn tool_channel_members(
     // Say so, rather than letting the model read `[]` as "this channel has no members" or as a broken tool.
     if members.is_empty() {
         out["note"] = serde_json::Value::String(
-            "No members recorded for this conversation. The roster is built from group messages the daemon has observed, so a member who has never spoken in it is absent, and a direct message has no roster at all.".to_string(),
+            "No members recorded for this conversation. The roster is built from group messages the daemon has observed, plus the platform member list on adapters configured to supply one, so a conversation nobody has spoken in on an adapter that does not enumerate has no roster — and a direct message has none either.".to_string(),
+        );
+    } else if enumerated_count > 0 {
+        out["note"] = serde_json::Value::String(
+            "Members with source 'observed' have spoken in this conversation and can be reached with channel_dm. Members with source 'enumerated' come from the platform's member list and have never addressed this agent — they are listed here but channel_dm will refuse them.".to_string(),
         );
     }
 

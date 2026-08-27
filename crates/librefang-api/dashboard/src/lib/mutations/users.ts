@@ -28,6 +28,7 @@ import {
   userKeys,
   permissionPolicyKeys,
   authzKeys,
+  groupKeys,
 } from "../queries/keys";
 
 export function useCreateUser() {
@@ -40,6 +41,9 @@ export function useCreateUser() {
       // "user not found" 404 from a prior lookup of the same name.
       qc.invalidateQueries({ queryKey: userKeys.detail(variables.name) });
       qc.invalidateQueries({ queryKey: authzKeys.effective(variables.name) });
+      // A group can list a member before that member has a user row; creating
+      // the row flips `unknown_members` on every group that named them.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }
@@ -63,6 +67,10 @@ export function useUpdateUser() {
         qc.invalidateQueries({
           queryKey: authzKeys.effective(variables.payload.name),
         });
+        // The daemon carries a rename through every group's membership list
+        // in the same config write, so the cached group rows still name the
+        // old member.
+        qc.invalidateQueries({ queryKey: groupKeys.all });
       } else {
         qc.invalidateQueries({ queryKey: userKeys.detail(variables.originalName) });
         qc.invalidateQueries({
@@ -84,6 +92,10 @@ export function useDeleteUser() {
       // remove the snapshot rather than invalidate so a refetch doesn't
       // race a now-404 endpoint.
       qc.removeQueries({ queryKey: authzKeys.effective(name) });
+      // The daemon strips a deleted user from every group in the same config
+      // write (#7745), so the cached group rows and the per-user reverse
+      // lookups are both stale the moment this resolves.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }
@@ -103,6 +115,9 @@ export function useImportUsers() {
       // Bulk import can rewrite roles, policies, and channel bindings on
       // arbitrary users — sweep the entire effective-permissions subtree.
       qc.invalidateQueries({ queryKey: authzKeys.all });
+      // Import can create rows for names that groups already list, which
+      // clears their `unknown_members` flag.
+      qc.invalidateQueries({ queryKey: groupKeys.all });
     },
   });
 }

@@ -44,11 +44,27 @@ fn list_json(subdir: &str) -> Vec<String> {
     let dir = corpus_dir().join(subdir);
     let mut out: Vec<String> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("read entry in {}: {e}", dir.display()))
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .filter(|n| n.ends_with(".json"))
         .collect();
     out.sort();
     out
+}
+
+#[test]
+fn corpus_directory_exists() {
+    let dir = corpus_dir();
+    assert!(
+        dir.is_dir(),
+        "sidecar conformance corpus directory is missing: {}",
+        dir.display()
+    );
 }
 
 /// Every corpus file is a JSON object with a string `method`.
@@ -70,26 +86,155 @@ fn corpus_files_are_well_formed() {
     }
 }
 
-/// Consumer side: every corpus event deserializes into the
-/// `SidecarEvent` variant named by its `method`.
+fn optional_str<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
+    params.get(key).and_then(Value::as_str)
+}
+
+fn value_or(params: &Value, key: &str, default: Value) -> Value {
+    params.get(key).cloned().unwrap_or(default)
+}
+
+fn assert_event_matches_fixture(name: &str, fixture: &Value, event: &SidecarEvent) {
+    let method = fixture["method"]
+        .as_str()
+        .unwrap_or_else(|| panic!("events/{name}: missing method"));
+    let params = fixture.get("params").unwrap_or(&Value::Null);
+
+    match event {
+        SidecarEvent::Message { params: actual } => {
+            assert_eq!(method, "message", "events/{name}: variant mismatch");
+            assert_eq!(actual.user_id, params["user_id"]);
+            assert_eq!(actual.user_name, params["user_name"]);
+            assert_eq!(actual.text.as_deref(), optional_str(params, "text"));
+            assert_eq!(
+                actual.channel_id.as_deref(),
+                optional_str(params, "channel_id")
+            );
+            assert_eq!(actual.platform.as_deref(), optional_str(params, "platform"));
+            assert_eq!(
+                actual.message_id.as_deref(),
+                optional_str(params, "message_id")
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.content).unwrap(),
+                value_or(params, "content", Value::Null)
+            );
+            assert_eq!(actual.username.as_deref(), optional_str(params, "username"));
+            assert_eq!(
+                actual.librefang_user.as_deref(),
+                optional_str(params, "librefang_user")
+            );
+            assert_eq!(
+                actual.is_group,
+                params
+                    .get("is_group")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            );
+            assert_eq!(
+                actual.thread_id.as_deref(),
+                optional_str(params, "thread_id")
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.group_members).unwrap(),
+                value_or(params, "group_members", serde_json::json!([]))
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.group_participants).unwrap(),
+                value_or(params, "group_participants", serde_json::json!([]))
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.metadata).unwrap(),
+                value_or(params, "metadata", serde_json::json!({}))
+            );
+        }
+        SidecarEvent::Ready { params: actual } => {
+            assert_eq!(method, "ready", "events/{name}: variant mismatch");
+            assert_eq!(
+                serde_json::to_value(&actual.capabilities).unwrap(),
+                value_or(params, "capabilities", serde_json::json!([]))
+            );
+            assert_eq!(
+                actual.account_id.as_deref(),
+                optional_str(params, "account_id")
+            );
+            assert_eq!(
+                actual.suppress_error_responses,
+                params
+                    .get("suppress_error_responses")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.notification_recipients).unwrap(),
+                value_or(params, "notification_recipients", serde_json::json!([]))
+            );
+            assert_eq!(
+                serde_json::to_value(&actual.header_rules).unwrap(),
+                value_or(params, "header_rules", serde_json::json!([]))
+            );
+            assert_eq!(
+                actual.protocol_version,
+                params
+                    .get("protocol_version")
+                    .and_then(Value::as_u64)
+                    .map(|version| version as u32)
+            );
+        }
+        SidecarEvent::Error { params: actual } => {
+            assert_eq!(method, "error", "events/{name}: variant mismatch");
+            assert_eq!(actual.message, params["message"]);
+        }
+        SidecarEvent::Typing { params: actual } => {
+            assert_eq!(method, "typing", "events/{name}: variant mismatch");
+            assert_eq!(actual.user_id, params["user_id"]);
+            assert_eq!(actual.user_name, params["user_name"]);
+            assert_eq!(actual.is_typing, params["is_typing"]);
+        }
+        SidecarEvent::QrReady { params: actual } => {
+            assert_eq!(method, "qr_ready", "events/{name}: variant mismatch");
+            assert_eq!(actual.qr_code, params["qr_code"]);
+            assert_eq!(actual.qr_url.as_deref(), optional_str(params, "qr_url"));
+            assert_eq!(actual.message.as_deref(), optional_str(params, "message"));
+            assert_eq!(
+                serde_json::to_value(actual.expires_at).unwrap(),
+                value_or(params, "expires_at", Value::Null)
+            );
+        }
+        SidecarEvent::QrStatus { params: actual } => {
+            assert_eq!(method, "qr_status", "events/{name}: variant mismatch");
+            assert_eq!(actual.status, params["status"]);
+            assert_eq!(actual.message.as_deref(), optional_str(params, "message"));
+        }
+    }
+}
+
+/// Consumer side: every event variant has a fixture and every fixture deserializes into the exact fields it declares.
 #[test]
 fn events_deserialize_into_expected_variant() {
-    for name in list_json("events") {
+    let expected = [
+        "error.json",
+        "message_command.json",
+        "message_minimal.json",
+        "message_text.json",
+        "qr_ready.json",
+        "qr_status.json",
+        "ready_full.json",
+        "ready_minimal.json",
+        "typing.json",
+    ];
+    assert_eq!(
+        list_json("events"),
+        expected,
+        "event corpus files and asserted variants diverged"
+    );
+
+    for name in expected {
         let v = read_corpus(&format!("events/{name}"));
-        let method = v["method"].as_str().unwrap().to_string();
         let raw = serde_json::to_string(&v).unwrap();
         let ev: SidecarEvent = serde_json::from_str(&raw)
             .unwrap_or_else(|e| panic!("events/{name}: deserialize: {e}"));
-        let ok = matches!(
-            (&ev, method.as_str()),
-            (SidecarEvent::Message { .. }, "message")
-                | (SidecarEvent::Ready { .. }, "ready")
-                | (SidecarEvent::Error { .. }, "error")
-                | (SidecarEvent::Typing { .. }, "typing")
-                | (SidecarEvent::QrReady { .. }, "qr_ready")
-                | (SidecarEvent::QrStatus { .. }, "qr_status")
-        );
-        assert!(ok, "events/{name}: parsed variant != method {method:?}");
+        assert_event_matches_fixture(name, &v, &ev);
     }
 }
 
@@ -99,10 +244,10 @@ fn events_deserialize_into_expected_variant() {
 #[test]
 fn ready_full_and_minimal_both_parse() {
     let full = read_corpus("events/ready_full.json");
-    if let SidecarEvent::Ready { params } = serde_json::from_value(full).unwrap() {
+    if let SidecarEvent::Ready { params } = serde_json::from_value(full.clone()).unwrap() {
         assert_eq!(
-            params.capabilities,
-            vec!["typing", "reaction", "interactive", "thread", "streaming"]
+            serde_json::to_value(params.capabilities).unwrap(),
+            full["params"]["capabilities"]
         );
         assert_eq!(params.account_id.as_deref(), Some("bot-1"));
         // Compared against the constant, not a literal: the corpus number and the daemon's number are the same contract, and `tests/sidecar_version_contract.rs` pins the rest of the mirrors.

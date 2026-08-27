@@ -959,6 +959,8 @@ fn parse_llm_extraction_response(
                 // Freshly extracted, never retrieved by a query — nothing has
                 // measured this against anything (#7808).
                 similarity: None,
+                // Not stored yet, so there is no storage scope to carry (#7920).
+                scope: None,
             })
         })
         // H2: cap memories per extraction. A misbehaving extractor can
@@ -1099,6 +1101,7 @@ mod tests {
             access_count: None,
             agent_id: None,
             similarity: None,
+            scope: None,
         }
     }
 

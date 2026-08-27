@@ -1,0 +1,5 @@
+`channel_members` can now report everyone a platform lists in a channel, not only the people who have spoken there — the Slack adapter walks `conversations.members` when `SLACK_ENUMERATE_MEMBERS` is enabled, and the daemon persists what it finds.
+An agent sitting in a shared channel could previously answer "who has talked here?" but not "who is in here?", which is the question people actually ask it.
+The two sets are stored apart, with a `source` column on each roster row, because `channel_dm` authorizes a private message against that roster: bulk-filling it would have quietly turned "people this agent has interacted with" into "everyone the workspace lists", letting an agent DM a channel member who has never addressed it.
+Enumeration therefore widens what can be reported and never what can be messaged, and speaking is still what earns someone a private reply.
+Off by default and behind its own switch, because unlike `SLACK_RESOLVE_DISPLAY_NAMES` — which changes how well the daemon names the handful of people who have spoken to it — this changes how many people it stores at all. (#7919) (@houko)

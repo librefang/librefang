@@ -160,6 +160,9 @@ pub struct RemoteMode(pub std::sync::RwLock<bool>);
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub struct ServerHandleHolder(pub std::sync::Mutex<Option<server::ServerHandle>>);
 
+/// Desktop-only, for the same reason `ServerHandleHolder` is: its only caller sits behind the same `cfg`.
+/// Without this attribute the function is still compiled for iOS and Android, where nothing calls it, and `-D warnings` turns the resulting `dead_code` into a hard error — which is how it broke the iOS simulator build on `main` while every desktop lane stayed green.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 fn lock_server_handle<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("desktop server handle lock poisoned; recovering server state");
@@ -589,8 +592,12 @@ pub fn run(server_url: Option<String>, force_local: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_server_handle, validate_server_url};
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    use super::lock_server_handle;
+    use super::validate_server_url;
 
+    /// Gated with the helper it exercises: on iOS and Android `lock_server_handle` is not compiled, so an ungated test fails to resolve the symbol there.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     #[test]
     fn poisoned_server_handle_lock_recovers_state_and_remains_usable() {
         let holder = std::sync::Mutex::new(Some("running"));
