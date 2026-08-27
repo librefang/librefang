@@ -356,6 +356,10 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "max_cron_jobs", "agent_max_iterations", "workspaces_dir",
                 // Newly surfaced root-level scalars (#4678).
                 "update_channel", "max_history_messages", "max_upload_size_bytes",
+                // Fleet-wide fallback owner for artifacts created without an
+                // authenticated caller (#7744). Root-level scalar, so it renders here
+                // rather than as its own section.
+                "default_owner",
                 "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
                 "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
                 "tool_timeout_secs",

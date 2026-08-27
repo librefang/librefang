@@ -233,6 +233,9 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         // Root-level prompt-shaping scalar like the line above: rendered as a
         // `general` root_level entry, not as its own section (#7920).
         "memory_fact_budget_percent",
+        // Same shape again: a root-level scalar on the synthetic "general"
+        // section, not its own descriptor (#7744).
+        "default_owner",
         "default_routing",
         "require_auth_for_reads",
         // auth-posture scalar gating require_auth_for_reads=false (#5357);
