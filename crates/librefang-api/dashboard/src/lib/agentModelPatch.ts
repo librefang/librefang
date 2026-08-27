@@ -51,22 +51,33 @@ export function buildModelConfigPatch(
 ): BuildModelConfigPatchResult {
   const trimmedProvider = draft.provider.trim();
   const trimmedModel = draft.model.trim();
-  const parsedMaxTokens = parseInt(draft.max_tokens, 10);
-  const parsedTemperature = parseFloat(draft.temperature);
+  const trimmedMaxTokens = draft.max_tokens.trim();
+  const trimmedTemperature = draft.temperature.trim();
 
   if (!trimmedProvider || !trimmedModel) return { patch: null };
-  if (isNaN(parsedMaxTokens) || parsedMaxTokens <= 0) return { patch: null };
-  if (isNaN(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
+  if (!/^\d+$/.test(trimmedMaxTokens)) return { patch: null };
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmedTemperature)) return { patch: null };
+
+  const parsedMaxTokens = Number(trimmedMaxTokens);
+  const parsedTemperature = Number(trimmedTemperature);
+  if (!Number.isSafeInteger(parsedMaxTokens) || parsedMaxTokens <= 0) return { patch: null };
+  if (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 2) {
     return { patch: null };
   }
 
   const patch: ModelConfigPatch = {};
 
-  const modelChanged = trimmedModel !== persisted?.model;
-  const providerChanged = trimmedProvider !== persisted?.provider;
-  if (modelChanged || providerChanged) {
+  const persistedModel = persisted?.model?.trim() ?? "";
+  const persistedProvider = persisted?.provider?.trim() ?? "";
+  const modelChanged = trimmedModel !== persistedModel;
+  const providerChanged = trimmedProvider !== persistedProvider;
+  if (providerChanged) {
+    // PATCH /config applies provider changes only while processing `model`,
+    // so a provider edit must carry the current model as its trigger.
     patch.model = trimmedModel;
     patch.provider = trimmedProvider;
+  } else if (modelChanged) {
+    patch.model = trimmedModel;
   }
 
   // Same nullish-defaulted baseline as the modelDirty gate — see module doc.
