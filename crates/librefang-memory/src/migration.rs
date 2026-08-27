@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 51;
+const SCHEMA_VERSION: u32 = 54;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -251,6 +251,30 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // anywhere. NULL means "written before this migration, model unknown" and
     // is treated as comparable, so no existing deployment changes behaviour.
     run_step!(51, migrate_v51);
+
+    // v52 (#7086): add `group_roster.source` so the observational roster and a
+    // platform's bulk member list can share one table without sharing one
+    // meaning. `channel_dm` authorizes against `source = 'observed'` only.
+    //
+    // This took 52 rather than 51 because #7916 held 51 while both were in
+    // review. #7916 landed first, so the ladder is contiguous and no number is
+    // skipped: the audit backfill inserts a row per version in `1..=user_version`,
+    // and every one of those versions now has a migration behind it.
+    run_step!(52, migrate_v52);
+
+    // v53 (#7752): add the `ephemeral_runs` table so a disposable sub-agent run leaves a record attributable to the agent that spawned it.
+    // Before this an ephemeral worker vanished completely — its spend reached the parent's ledger through `usage_events.billed_agent_id` (v49) but the work that produced the spend was invisible, so an operator could not answer "what did this agent delegate, and what did each one cost".
+    // Purely additive: no existing table is touched and no existing row changes meaning.
+    //
+    // Written as v51, renumbered to 53 on merge: #7916 took 51 and #7086 took 52 while this was in review.
+    run_step!(53, migrate_v53);
+
+    // v54 (#7930): persist agent lineage.
+    // `AgentEntry.parent` had no column at all, so every reload from the store hydrated it as `None` and the API answered `parent_agent_id: null` for agents that demonstrably had a parent.
+    // Adds `agents.parent_id` plus the index that makes "list this agent's children" a lookup instead of a full-table scan, and `agents.parent_recorded` so a row written before this migration is distinguishable from an agent that genuinely has no parent.
+    //
+    // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
+    run_step!(54, migrate_v54);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1089,6 +1113,105 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v52 (#7086): `group_roster.source` — where a roster row came from.
+///
+/// The roster had exactly one meaning until now: a row existed because that person was observed speaking in that chat.
+/// `channel_dm` (#7874) leans on precisely that meaning — it authorizes a private message against the roster, so the set doubles as "people this agent has actually interacted with here".
+///
+/// The bulk enumeration this issue asked for (Slack's `conversations.members`) reports everyone the platform lists, most of whom have never addressed the agent.
+/// Writing those into the same undifferentiated rows would silently promote the whole channel into `channel_dm`'s authorization set — an agent could then DM a member who has never spoken to it, which is a privilege escalation dressed as a feature.
+///
+/// So the two sets share the table and the primary key but not the predicate.
+/// `source` is `'observed'` (someone spoke) or `'enumerated'` (a platform listed them), every pre-migration row is `'observed'` because the sender upsert was the only writer, and the authorization query filters on the column explicitly.
+/// A single column beats a second table here because the natural key is identical in both sets: a member who is enumerated and later speaks is one row that changes classification, not two rows needing a UNION with a priority rule at every read site.
+fn migrate_v52(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "group_roster", "source")? {
+        conn.execute(
+            "ALTER TABLE group_roster ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (52, datetime('now'), 'Add group_roster.source so bulk-enumerated members stay out of the channel_dm authorization set (#7086)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v54 (#7930): persist an agent's parent link.
+///
+/// `AgentEntry.parent: Option<AgentId>` records which agent spawned another, but the `agents` table never had a column for it.
+/// Every hydration site in `structured.rs` therefore hardcoded `parent: None`, and because `routes/agents/mod.rs` serialises the field as `parent_agent_id`, the API positively asserted "this agent has no parent" for every agent after any daemon restart.
+/// That is worse than an absent field: `billed_agent_for` in the kernel resolves spend to `entry.parent.unwrap_or(entry.id)`, so a restarted worker silently started billing itself instead of its spawner.
+///
+/// # Decision 1 — a real column, not a field inside the `manifest` blob
+///
+/// `parent_id` is a first-class `TEXT` column with `idx_agents_parent_id` over it.
+///
+/// The manifest blob was the cheaper edit (no DDL, no ladder rung) and it is the wrong home twice over.
+/// Structurally, `manifest` is the operator-authored `AgentManifest` — the thing an `agent.toml` round-trips to — whereas parentage is runtime lineage the kernel assigns at spawn.
+/// Folding one into the other means `load_all_agents`' auto-repair pass (which re-serialises every manifest it reads and writes back any blob that differs) starts rewriting rows whenever lineage moves, and any future manifest export leaks a runtime edge into a config file.
+/// Operationally, a msgpack blob is opaque to SQLite: "list this agent's children" against a blob is a full-table scan that deserialises every manifest in the database, whereas against an indexed column it is `WHERE parent_id = ?1`.
+/// That query is the whole reason decision 2 below can be made at all.
+///
+/// # Decision 2 — `children` is derived, never stored
+///
+/// There is no `children` column and there will not be one.
+/// `children` is a pure inverse of `parent`, and storing both invites the two copies to disagree — which is not hypothetical here: `spawn_agent_inner` already calls `registry.add_child(parent_id, agent_id)` to push the child onto the parent's in-memory entry and then persists only the *child* row, so a stored `children` list would have been born stale on the very first spawn.
+/// The read path reconstructs it from `parent_id` instead — a single indexed lookup for `load_agent`, and one in-memory grouping pass for `load_all_agents` — so the relationship has exactly one writer and cannot skew.
+///
+/// # Decision 3 — `NULL` on a pre-migration row means "unknown", not "root"
+///
+/// `ALTER TABLE ... ADD COLUMN parent_id` backfills every existing row with `NULL`, and `NULL` is also what a genuine top-level agent stores.
+/// Collapsing those two cases would replace one wrong answer with a more confident wrong answer: every agent that predates this migration would begin claiming, positively, to be a root agent.
+///
+/// So the migration adds a second column, `parent_recorded INTEGER NOT NULL DEFAULT 0`.
+/// The `DEFAULT 0` is doing the real work — it is what stamps every pre-existing row as "lineage was never recorded for this row".
+/// `save_agent` writes `1` unconditionally from now on, so the three states are distinguishable:
+///
+/// | `parent_recorded` | `parent_id` | meaning                          |
+/// |-------------------|-------------|----------------------------------|
+/// | `0`               | `NULL`      | unknown — row predates v54       |
+/// | `1`               | `NULL`      | known root — no parent           |
+/// | `1`               | id          | child of that agent              |
+///
+/// A separate boolean beats the cheaper alternative of a sentinel value inside `parent_id` (`''` for "known root", `NULL` for "unknown").
+/// A sentinel makes `WHERE parent_id IS NULL` and any future `JOIN agents parent ON a.parent_id = parent.id` quietly wrong for every reader who does not know the convention, and it puts a non-id string in an id column.
+/// One byte per agent row is a fair price for a column that describes itself.
+///
+/// The distinction surfaces on `AgentEntry` as `parent_unknown: bool`.
+/// The polarity is deliberate: `Default` / `#[serde(default)]` yields `false` = "recorded", which is correct for every entry the kernel constructs in memory (it knows the lineage it just assigned).
+/// Only the store's hydration path can set it `true`, and only for a row that really was written before this migration.
+fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "agents", "parent_id")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    // DEFAULT 0 is the load-bearing part: it marks every row that already existed as "parent was never recorded" (see decision 3 above).
+    if !try_column_exists(conn, "agents", "parent_recorded")? {
+        conn.execute(
+            "ALTER TABLE agents ADD COLUMN parent_recorded INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    // The index that makes decision 2 (derive `children`) affordable.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agents_parent_id ON agents(parent_id)",
+        [],
+    )?;
+    // Record the audit row under 54 — this migration's OWN number.
+    // `migrate_v50` recorded itself as 49 (#7924/#7925), which desynchronises `user_version` from the `migrations` table and forces the backfill pass at the bottom of `run_migrations` to paper over it on every boot.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Rebuild `memories_fts` from `memories`, dropping whatever was there.
 ///
 /// Idempotent and safe to call at any time: the index is a pure derivative of
@@ -1101,6 +1224,51 @@ fn rebuild_memories_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO memories_fts (memory_id, agent_id, content) \
          SELECT id, agent_id, content FROM memories",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v53 (#7752): ephemeral worker run records.
+///
+/// An ephemeral worker runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.
+/// That left an operator with nothing to inspect: v49 gave the parent the *spend* through `usage_events.billed_agent_id`, but the work behind the spend had no record at all.
+///
+/// This table is that record, and it is deliberately not a session.
+/// The alternative — clearing the worker's `incognito` flag so the agent loop persists its session under the parent's `AgentId` — also un-gates the episodic-memory write, the context-engine advance and the proactive `auto_memorize` pass, all of which key on the same id, and would fold a delegated sub-run's text into the parent's own recall and conversation list.
+/// See `crate::ephemeral_run_store` for the full argument.
+///
+/// `parent_agent_id` is indexed because every read is scoped to one parent, and carries no foreign key for the same reason the other agent-scoped tables do not: the cascade is explicit, in `MemorySubstrate::remove_agent`, so all agent-scoped deletes stay in one reviewable list rather than split between SQL and Rust.
+fn migrate_v53(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ephemeral_runs (
+            id              TEXT PRIMARY KEY,
+            parent_agent_id TEXT NOT NULL,
+            label           TEXT NOT NULL,
+            worker_name     TEXT NOT NULL,
+            agent_type      TEXT,
+            task            TEXT NOT NULL DEFAULT '',
+            response        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL CHECK (status IN ('completed','failed')),
+            error           TEXT,
+            provider        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT '',
+            iterations      INTEGER NOT NULL DEFAULT 0,
+            tool_calls      INTEGER NOT NULL DEFAULT 0,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL NOT NULL DEFAULT 0.0,
+            latency_ms      INTEGER NOT NULL DEFAULT 0,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT NOT NULL,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ephemeral_runs_parent
+            ON ephemeral_runs(parent_agent_id, finished_at DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (53, datetime('now'), 'Add ephemeral_runs table so a disposable sub-agent run leaves a record under its parent (#7752)')",
         [],
     )?;
     Ok(())
@@ -2227,6 +2395,23 @@ mod tests {
                 "migration v{v} is applied (user_version={user_version}) but has no audit row"
             );
         }
+
+        // …and each one must have written that row *itself*.
+        // The two checks above run after the #3538 backfill at the end of `run_migrations`, which inserts a placeholder row for any version that failed to record itself — so they pass even when a migration writes its audit row under the wrong version number.
+        // `migrate_v50` did exactly that (it recorded itself as 49, where `INSERT OR IGNORE` silently dropped it against v49's existing row), and the only visible symptom was a "drift detected and self-healed" warning on every fresh boot.
+        // A clean ladder must need no backfill at all.
+        let placeholders: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE description = 'audit-row backfill (#3538)'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            placeholders, 0,
+            "a fresh ladder must need no audit-row backfill; some migrate_vN is \
+             recording its audit row under a version other than its own"
+        );
     }
 
     /// Companion to `test_every_migration_records_audit_row`, and the guard that test could not be (#7924).
@@ -2936,6 +3121,48 @@ mod tests {
             "re-running migrate_v49 must not touch data"
         );
         assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
+    }
+
+    /// #7752: the `ephemeral_runs` table must exist after the ladder, accept a row, refuse an out-of-domain `status`, and survive a re-run untouched.
+    #[test]
+    fn test_migrate_v53_creates_ephemeral_runs_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO ephemeral_runs (
+                 id, parent_agent_id, label, worker_name, status,
+                 started_at, finished_at, cost_usd
+             ) VALUES ('r1', 'parent-1', 'researcher', 'researcher-00ff', 'completed',
+                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z', 0.25)",
+            [],
+        )
+        .unwrap();
+
+        // The CHECK constraint is the last line of defence behind the store's own status validation; an unknown value must never round-trip.
+        assert!(
+            conn.execute(
+                "INSERT INTO ephemeral_runs (
+                     id, parent_agent_id, label, worker_name, status,
+                     started_at, finished_at
+                 ) VALUES ('r2', 'parent-1', 'x', 'x-00ff', 'sideways',
+                           '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z')",
+                [],
+            )
+            .is_err(),
+            "status must be constrained to the run outcomes the store writes"
+        );
+
+        migrate_v53(&conn).unwrap();
+        let (n, cost): (i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), IFNULL(SUM(cost_usd), 0.0) FROM ephemeral_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "re-running migrate_v53 must not touch data");
+        assert_eq!(cost, 0.25, "re-running migrate_v53 must not touch data");
     }
 
     #[test]
@@ -3850,6 +4077,142 @@ mod tests {
         assert_eq!(
             n, 1,
             "v41 sessions index must exist exactly once after repeated boots"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // v54 (#7930): agent lineage persistence
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn v54_adds_parent_columns_and_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(
+            column_exists(&conn, "agents", "parent_id"),
+            "v54 must add agents.parent_id — without it AgentEntry.parent has nowhere to live"
+        );
+        assert!(
+            column_exists(&conn, "agents", "parent_recorded"),
+            "v54 must add agents.parent_recorded so a pre-v54 row is distinguishable from a root agent"
+        );
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_agents_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "idx_agents_parent_id is what makes deriving `children` a lookup instead of a scan"
+        );
+    }
+
+    #[test]
+    fn v54_is_idempotent_across_repeated_boots() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_agents_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "v54 index must exist exactly once after repeated boots"
+        );
+    }
+
+    #[test]
+    fn v54_records_its_audit_row_under_its_own_version() {
+        // `migrate_v50` recorded itself as version 49 (#7924/#7925), which desynchronises the audit trail from `user_version`.
+        // Guard against that copy-paste for v54 specifically.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let description: String = conn
+            .query_row(
+                "SELECT description FROM migrations WHERE version = 54",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v54 must have recorded an audit row under version 54");
+        assert!(
+            description.contains("#7930"),
+            "the v54 audit row must be v54's own, not a backfill placeholder or another migration's: {description}"
+        );
+    }
+
+    #[test]
+    fn v54_marks_pre_existing_agent_rows_as_lineage_unknown() {
+        // The regression this guards: `ALTER TABLE ... ADD COLUMN parent_id` backfills NULL, and NULL is also what a genuine root agent stores.
+        // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
+        //
+        // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
+        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has both.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE agents (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                manifest BLOB NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                session_id TEXT DEFAULT '',
+                identity TEXT DEFAULT '{}',
+                source_toml_path TEXT DEFAULT NULL
+            );
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL
+            );
+            CREATE TABLE group_roster (
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            );
+            CREATE TABLE migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                description TEXT NOT NULL
+            );
+            INSERT INTO agents (id, name, manifest, state, created_at, updated_at)
+            VALUES ('legacy-agent', 'legacy', x'80', '\"Running\"', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+        set_schema_version(&conn, 50).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let (parent_id, parent_recorded): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT parent_id, parent_recorded FROM agents WHERE id = 'legacy-agent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            parent_id, None,
+            "a pre-v54 row has no recoverable parent id"
+        );
+        assert_eq!(
+            parent_recorded, 0,
+            "a pre-v54 row must read as UNKNOWN lineage, not as a root agent"
         );
     }
 }

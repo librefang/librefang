@@ -57,6 +57,23 @@ pub struct LoopOptions {
     /// what gets sent to the provider — only what happens at the
     /// post-response persistence boundary.
     pub is_fork: bool,
+    /// The principal this turn is acting *for* (#7744).
+    ///
+    /// Resolved kernel-side by [`librefang_types::principal::resolve_acting_principal`]
+    /// — the authenticated caller when a human started the turn, the agent
+    /// manifest's `owner` when nothing did (cron, triggers, workflow steps,
+    /// autonomous ticks), `config.toml: default_owner` after that, and `None`
+    /// when the deployment has declared none of the three.
+    ///
+    /// It rides on `LoopOptions` rather than in `manifest.metadata` on purpose.
+    /// The `sender_user_id` family went into that untyped bag and became a
+    /// stringly value with no declared type and no single authority over who
+    /// writes it; this stays typed, and a caller that does not set it gets
+    /// `None` from `Default` rather than a silently-wrong string.
+    ///
+    /// The agent loop only forwards it into tool dispatch. Nothing in the loop
+    /// branches on it.
+    pub acting_principal: Option<librefang_types::principal::Principal>,
     /// When true, this turn runs in **incognito mode**: session messages and
     /// proactive-memory writes are suppressed while memory *reads* remain
     /// fully operational. Incognito turns are useful for brainstorming,
@@ -110,6 +127,12 @@ pub struct LoopOptions {
     /// supported floor are clamped up at resolution time; values above the
     /// hard ceiling are clamped down.
     pub max_history_messages: Option<usize>,
+    /// Operator-level override for the share of the prompt memory section's character budget reserved for extracted facts, as a percentage.
+    ///
+    /// Kernel populates this from `KernelConfig.memory_fact_budget_percent`.
+    /// `None` → `prompt_builder::MEMORY_FACT_BUDGET_PERCENT` (70), the best arm of the A/B in #7920.
+    /// Values above 100 are clamped down at resolution time; 0 and 100 are legal and mean "one class only, until the other class's spill", since neither share is ever wasted.
+    pub memory_fact_budget_percent: Option<u8>,
     /// Auxiliary LLM client used for cheap-tier side tasks
     /// (context compression, title generation, search summarisation,
     /// vision captioning). When `None`, side tasks fall back to the

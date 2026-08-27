@@ -1,3 +1,4 @@
+use librefang_kernel::KernelApi;
 use librefang_kernel_handle::KernelHandle;
 
 mod common;
@@ -28,6 +29,83 @@ fn test_roster_roundtrip() {
     assert_eq!(members.len(), 1);
     assert_eq!(members[0]["user_id"].as_str().unwrap(), "user2");
     assert_eq!(members[0]["display_name"].as_str().unwrap(), "Bob");
+}
+
+/// The #7086 security boundary, exercised end to end against a real `MemorySubstrate` — so the assertion is over the store's SQL, not over a mock's willingness to agree with it.
+///
+/// `channel_members` reports everyone a platform enumerates into a channel; `channel_dm` may address only the people observed speaking there.
+/// The narrowing is the `AND source = 'observed'` predicate in `RosterStore::observed_members`.
+/// Delete that predicate and `U7` appears in both lists and this test fails, which is the point: bulk enumeration must never widen who an agent can privately message.
+#[test]
+fn enumerated_members_are_reportable_but_never_dm_authorized() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    kh.roster_upsert("slack", "C0DESIGN", "U1", "Ana", Some("ana"))
+        .expect("observed upsert failed");
+    kernel
+        .memory_substrate()
+        .roster()
+        .upsert_enumerated("slack", "C0DESIGN", "U7", "Never Spoken", None)
+        .expect("enumerated upsert failed");
+
+    let reported = kh
+        .roster_members("slack", "C0DESIGN")
+        .expect("roster_members failed");
+    let reported_ids: Vec<&str> = reported
+        .iter()
+        .map(|m| m["user_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reported_ids,
+        vec!["U1", "U7"],
+        "channel_members must be able to report the platform's full member list"
+    );
+    assert_eq!(reported[0]["source"], "observed");
+    assert_eq!(reported[1]["source"], "enumerated");
+
+    let authorized = kh
+        .roster_observed_members("slack", "C0DESIGN")
+        .expect("roster_observed_members failed");
+    let authorized_ids: Vec<&str> = authorized
+        .iter()
+        .map(|m| m["user_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        authorized_ids,
+        vec!["U1"],
+        "channel_dm's authorization set must exclude a member who has only ever been enumerated"
+    );
+}
+
+/// Speaking is what earns DM reachability, and it earns it immediately.
+/// The promotion has to survive a later enumeration sweep, or a security control would switch itself off on the member-list TTL.
+#[test]
+fn speaking_promotes_an_enumerated_member_and_a_later_sweep_does_not_revoke_it() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+    let roster = kernel.memory_substrate().roster();
+
+    roster
+        .upsert_enumerated("slack", "C0DESIGN", "U7", "U7", None)
+        .expect("enumerated upsert failed");
+    assert!(kh
+        .roster_observed_members("slack", "C0DESIGN")
+        .expect("roster_observed_members failed")
+        .is_empty());
+
+    kh.roster_upsert("slack", "C0DESIGN", "U7", "Nina", Some("nina"))
+        .expect("observed upsert failed");
+    roster
+        .upsert_enumerated("slack", "C0DESIGN", "U7", "Nina", None)
+        .expect("re-enumeration failed");
+
+    let authorized = kh
+        .roster_observed_members("slack", "C0DESIGN")
+        .expect("roster_observed_members failed");
+    assert_eq!(authorized.len(), 1);
+    assert_eq!(authorized[0]["user_id"], "U7");
+    assert_eq!(authorized[0]["display_name"], "Nina");
 }
 
 #[test]
