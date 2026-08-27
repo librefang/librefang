@@ -1037,6 +1037,56 @@
         }
       }
     },
+    "/api/agents/{id}/ephemeral-runs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/ephemeral-runs — what this agent delegated to ephemeral workers, and what each one cost (refs #7752).",
+        "description": "An ephemeral worker (`agent_spawn` with `ephemeral: true`) runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.\nIts spend reached the parent's ledger through `usage_events.billed_agent_id`, but the *work* behind the spend had no record, so an operator watching an agent misbehave through workers had nothing to inspect.\nThis endpoint is that record.\n\nThe rollup covers the same retained rows as `runs`, not all time: the store keeps a bounded number of runs per parent so a path designed to be called cheaply and often cannot grow the table without limit.",
+        "operationId": "list_agent_ephemeral_runs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Parent agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ephemeral worker runs spawned by this agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EphemeralRunsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent id"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/events": {
       "get": {
         "tags": [
@@ -4419,6 +4469,31 @@
         }
       }
     },
+    "/api/authz/whoami": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/authz/whoami — the calling credential's own resolved identity (#7746).",
+        "description": "# Why it is not `require_admin`\n\nThe two sibling endpoints in this module report on *another* user and are gated at `Admin`.\nThis one reports on the caller and nothing else, so it discloses to a `Viewer` only what that `Viewer` already presented, and gating it at `Admin` would withhold it from exactly the person most likely to need it — the SSO user whose claims mapped to less than they expected.\nAn unauthenticated caller never reaches the handler at all: `/api/authz/*` is on no public allowlist, so `middleware::auth` has already answered 401.\n\n# Why the IdP-derived membership is recomputed here\n\nIt is not stored anywhere to read.\n`IdpGroupMembership` is put into request extensions by the OIDC middleware from the token this request carried, and dies with the request; `KernelConfig::effective_groups_for` unions it with the declared `[[groups]]` at the moment of the call.\nThat is what makes a revocation in the identity provider visible here as soon as the caller's token stops carrying the claim, with no local cleanup step.",
+        "operationId": "whoami",
+        "responses": {
+          "200": {
+            "description": "The calling credential's resolved identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoamiView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credential established"
+          }
+        }
+      }
+    },
     "/api/auto-dream/agents/{id}/abort": {
       "post": {
         "tags": [
@@ -6470,6 +6545,257 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "list_groups",
+        "responses": {
+          "200": {
+            "description": "List of configured groups, ordered by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GroupView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "create_group",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Group created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "409": {
+            "description": "Group already exists"
+          }
+        }
+      }
+    },
+    "/api/groups/{name}": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "get_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Group detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "update_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupUpsert"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Group updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Rename collides with an existing group"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "delete_group",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Group deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/groups/{name}/members/{user}": {
+      "put": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "add_group_member",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "path",
+            "description": "User name to add (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Membership after the add",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error"
+          },
+          "404": {
+            "description": "Group not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "remove_group_member",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Group name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user",
+            "in": "path",
+            "description": "User name to remove (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Membership after the removal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GroupView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Group not found"
           }
         }
       }
@@ -12578,9 +12904,45 @@
         "summary": "GET /api/usage — Get per-agent usage statistics.",
         "description": "The per-agent rollup is materialized from the in-memory agent registry\nand returned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Per-agent usage statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12599,9 +12961,45 @@
         ],
         "summary": "GET /api/usage/by-model — Get usage grouped by model.",
         "operationId": "usage_by_model",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Usage grouped by model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12620,9 +13018,45 @@
         ],
         "summary": "GET /api/usage/by-model/performance — Get model performance metrics including latency statistics.",
         "operationId": "usage_by_model_performance",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Model performance metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12641,9 +13075,128 @@
         ],
         "summary": "GET /api/usage/daily — Get daily usage breakdown for the last 7 days.",
         "operationId": "usage_daily",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "How many days back from now to report on. Defaults to 7, capped at 366.\nMutually exclusive with `start_date` / `end_date`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Daily usage breakdown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed range, out-of-bounds `days`, or `days` combined with a date range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/export": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/export — Stream raw usage events for a date range as CSV.",
+        "operationId": "usage_export",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the export window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the export window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Output format. Only `csv` is supported; omitted means `csv`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV stream of usage events",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range, or unsupported format",
             "content": {
               "application/json": {
                 "schema": {
@@ -12662,9 +13215,45 @@
         ],
         "summary": "GET /api/usage/summary — Get overall usage summary from UsageStore.",
         "operationId": "usage_summary",
+        "parameters": [
+          {
+            "name": "start_date",
+            "in": "query",
+            "description": "Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "description": "Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Overall usage summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or inverted date range",
             "content": {
               "application/json": {
                 "schema": {
@@ -12858,11 +13447,42 @@
           }
         ],
         "responses": {
-          "200": {
+          "204": {
             "description": "User deleted"
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/users/{name}/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "user_groups",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "User name (case-sensitive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Groups the user belongs to and the roles that confers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserGroupsView"
+                }
+              }
+            }
           }
         }
       }
@@ -14485,6 +15105,159 @@
           }
         }
       },
+      "EphemeralRunRollupView": {
+        "type": "object",
+        "description": "Aggregate across the runs retained for one parent.",
+        "required": [
+          "runs",
+          "failed",
+          "cost_usd",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EphemeralRunView": {
+        "type": "object",
+        "description": "Wire-shape for one ephemeral worker run under a parent agent (refs #7752).\n\nMirrors [`librefang_memory::EphemeralRunRow`], defined here as a `utoipa::ToSchema` view so the OpenAPI doc and generated SDKs pick up the shape without forcing utoipa into the memory crate.",
+        "required": [
+          "id",
+          "label",
+          "worker_name",
+          "task",
+          "response",
+          "status",
+          "provider",
+          "model",
+          "iterations",
+          "tool_calls",
+          "input_tokens",
+          "output_tokens",
+          "cost_usd",
+          "latency_ms",
+          "started_at",
+          "finished_at"
+        ],
+        "properties": {
+          "agent_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Agent type whose template supplied the worker's persona, when one was named."
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Cost billed to the parent for this run."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the run failed, when it did."
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "label": {
+            "type": "string",
+            "description": "Caller-supplied mission label, before sanitization into a directory name."
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "response": {
+            "type": "string",
+            "description": "The worker's answer, clipped to the store's text cap. Empty for a failed run."
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`completed` or `failed`."
+          },
+          "task": {
+            "type": "string",
+            "description": "The task the parent delegated, clipped to the store's text cap."
+          },
+          "tool_calls": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "worker_name": {
+            "type": "string",
+            "description": "Uid-style name the worker ran under (`<label>-<8 hex>`)."
+          }
+        }
+      },
+      "EphemeralRunsResponse": {
+        "type": "object",
+        "required": [
+          "runs",
+          "rollup"
+        ],
+        "properties": {
+          "rollup": {
+            "$ref": "#/components/schemas/EphemeralRunRollupView"
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EphemeralRunView"
+            }
+          }
+        }
+      },
       "ExtensionInstallRequest": {
         "type": "object",
         "description": "Request to install an extension (integration).",
@@ -14512,6 +15285,77 @@
           }
         },
         "additionalProperties": false
+      },
+      "GroupUpsert": {
+        "type": "object",
+        "description": "Payload for creating or replacing a group.\n\n`deny_unknown_fields` matches the users surface: a typo'd key is a 422\nrather than a silently ignored field, which is the difference between an\noperator noticing that `member` should have been `members` and a group\nquietly having nobody in it.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupView": {
+        "type": "object",
+        "description": "Wire view of a group.\n\n`members` and `roles` are always sorted and de-duplicated — they are stored\nthat way, so this view does not re-sort; it just carries the invariant to\nthe client. `member_count` is redundant with `members.len()` and present\nbecause the dashboard's list renders a count per row and should not have to\ndepend on the full membership array staying in the list payload if it is\never trimmed.",
+        "required": [
+          "name",
+          "description",
+          "members",
+          "roles",
+          "member_count",
+          "unknown_members"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "member_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "unknown_members": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Members that do not resolve to a `[[users]]` entry. Not an error (see\nthe module doc-comment on dangling members) — surfaced so the dashboard\ncan badge the row rather than the operator discovering it by accident."
+          }
+        }
       },
       "HandsHubInstallRequest": {
         "type": "object",
@@ -15518,6 +16362,32 @@
         },
         "additionalProperties": false
       },
+      "UserGroupsView": {
+        "type": "object",
+        "description": "Response of `GET /api/users/{name}/groups`.\n\n`roles` is the resolved union that `KernelConfig::roles_for_user` computes:\neach group's own name plus every entry in its `roles` list. It deliberately\nexcludes `UserConfig.role` — that is the RBAC privilege level, a different\nladder, and #7746 is where an operator gets to connect the two under an\nexplicit mapping.",
+        "required": [
+          "name",
+          "groups",
+          "roles"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "UserUpsert": {
         "type": "object",
         "description": "Payload for creating or replacing a user. `api_key_hash` is accepted\npre-hashed (Argon2 phc string) — the dashboard hashes locally before\nsending. `None` clears any existing hash on update; absent on create.",
@@ -15591,6 +16461,60 @@
           },
           "role": {
             "type": "string"
+          }
+        }
+      },
+      "WhoamiView": {
+        "type": "object",
+        "description": "Response of `GET /api/authz/whoami`.\n\nThe four fields answer the four questions an operator debugging an SSO denial actually has, in the order they ask them: who does the daemon think I am, what privilege did that resolve to, which teams am I on, and what did those teams confer.",
+        "required": [
+          "name",
+          "user_id",
+          "role",
+          "groups",
+          "idp_groups",
+          "roles"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every `[[groups]]` entry the caller effectively belongs to: declared members unioned with the identity provider's mapped claims."
+          },
+          "idp_groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The subset of `groups` that came from this request's token rather than from `[[groups]] members`.\nEmpty for every non-OIDC credential.\n\nPresent as its own field because the difference is the thing an operator is trying to see: a name in `groups` but not here is something they have to remove from `config.toml` by hand, and a name in both is a grant that the identity provider can no longer retract."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name the credential resolved to.\n`root` for the master api key, a trusted loopback caller, or an `allow_no_auth` deployment."
+          },
+          "principal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's [`librefang_types::principal::Principal`] in canonical `kind:uuid` form, or `null` for the synthetic root credential — which names no `[[users]]` entry and is therefore not a principal that can own anything.\nMirrors `AuthenticatedApiUser::owner_principal`."
+          },
+          "role": {
+            "type": "string",
+            "description": "RBAC privilege level, `viewer` / `user` / `admin` / `owner`."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Group-conferred role strings — each effective group's own name plus its declared `roles`.\nThe channel-binding vocabulary, deliberately **not** the RBAC ladder: `role` above is a separate answer and no entry here contributes to it."
+          },
+          "user_id": {
+            "type": "string",
+            "description": "Canonical `UserId` — the value that reaches `authorize()` and every audit entry."
           }
         }
       }
@@ -15680,6 +16604,10 @@
     {
       "name": "users",
       "description": "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"
+    },
+    {
+      "name": "groups",
+      "description": "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"
     }
   ]
 }

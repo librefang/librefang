@@ -277,6 +277,9 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         version,
         description,
         author: _,
+        // Instance-specific: the principal an agent acts for names a `[[users]]` /
+        // `[[groups]]` entry in *this* deployment, which means nothing in another one.
+        owner: _,
         module,
         schedule,
         session_mode,
@@ -340,6 +343,7 @@ pub fn sanitize_for_publication(manifest: &AgentManifest) -> AgentManifest {
         version,
         description,
         author: String::new(),
+        owner: None,
         module,
         schedule,
         session_mode,

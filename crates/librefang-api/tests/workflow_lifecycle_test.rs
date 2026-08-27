@@ -853,6 +853,7 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = engine.register(wf).await;
     let run_id = engine
