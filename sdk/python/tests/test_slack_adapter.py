@@ -44,6 +44,9 @@ def _adapter(**env):
         "SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS": "",
         "SLACK_RESOLVE_DISPLAY_NAMES": "",
         "SLACK_DISPLAY_NAME_TTL": "",
+        "SLACK_ENUMERATE_MEMBERS": "",
+        "SLACK_MEMBER_LIST_TTL": "",
+        "SLACK_MEMBER_LIST_MAX": "",
     }
     for k, v in defaults.items():
         os.environ[k] = env.get(k, v)
@@ -2811,3 +2814,252 @@ def test_display_name_ttl_env_is_validated():
     assert a.display_name_ttl == float(sa.DEFAULT_DISPLAY_NAME_TTL_SECS)
     a2 = _adapter(SLACK_DISPLAY_NAME_TTL="60")
     assert a2.display_name_ttl == 60.0
+
+
+# ---- bulk member enumeration (#7086) -------------------------------
+
+
+def _members_page(members, cursor=""):
+    return (200, {
+        "ok": True,
+        "members": members,
+        "response_metadata": {"next_cursor": cursor},
+    })
+
+
+def test_conversations_members_parses_one_page():
+    members, cursor, err = sa.parse_conversations_members(
+        {"ok": True, "members": ["U1", "U2"],
+         "response_metadata": {"next_cursor": "c2"}})
+    assert err is None
+    assert members == ["U1", "U2"]
+    assert cursor == "c2"
+
+
+def test_conversations_members_treats_an_empty_cursor_as_the_end():
+    # Slack signals "last page" with an empty string, which would otherwise read
+    # as "keep paginating from the start" and loop forever.
+    _, cursor, err = sa.parse_conversations_members(
+        {"ok": True, "members": ["U1"], "response_metadata": {"next_cursor": ""}})
+    assert err is None and cursor is None
+    _, cursor, _ = sa.parse_conversations_members({"ok": True, "members": ["U1"]})
+    assert cursor is None
+
+
+def test_conversations_members_surfaces_platform_errors():
+    members, cursor, err = sa.parse_conversations_members(
+        {"ok": False, "error": "missing_scope"})
+    assert members == [] and cursor is None and err == "missing_scope"
+    _, _, err = sa.parse_conversations_members("not a dict")
+    assert err == "non-object response"
+
+
+def test_conversations_members_drops_non_string_entries():
+    members, _, err = sa.parse_conversations_members(
+        {"ok": True, "members": ["U1", None, 7, "", "U2"]})
+    assert err is None
+    assert members == ["U1", "U2"]
+
+
+def test_member_list_cache_hit_miss_and_expiry():
+    cache = sa._MemberListCache(ttl_secs=3600, max_entries=4)
+    assert cache.get("C1") == (False, ())
+    cache.put("C1", ("U1", "U2"))
+    assert cache.get("C1") == (True, ("U1", "U2"))
+    # An empty tuple is a real cached answer — a channel the bot cannot read must
+    # cost one sweep per cooldown, not one per message.
+    cache.put("C2", ())
+    assert cache.get("C2") == (True, ())
+    cache.put("C3", ("U9",), ttl_secs=0)
+    assert cache.get("C3") == (False, ())
+
+
+def test_member_list_cache_evicts_oldest_first_at_the_cap():
+    cache = sa._MemberListCache(ttl_secs=3600, max_entries=2)
+    cache.put("C1", ("U1",))
+    cache.put("C2", ("U2",))
+    cache.put("C3", ("U3",))
+    assert cache.get("C1") == (False, ())
+    assert cache.get("C2")[0] is True
+    assert cache.get("C3")[0] is True
+
+
+def test_members_are_not_enumerated_unless_the_operator_opts_in(monkeypatch):
+    # Default OFF, and for a larger reason than the display-name knob: this
+    # changes how many people the daemon stores, from those who addressed the
+    # agent to everyone the workspace lists in the channel.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter()
+    assert a.enumerate_members is False
+
+    ev = a._apply_enumerated_members(_group_event())
+    assert "group_members" not in ev["params"]["metadata"]
+    assert fake.calls == []
+
+
+def test_enumeration_stamps_group_members_metadata(monkeypatch):
+    fake = _FakeUrlopen([_members_page(["U2", "U1"])])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    ev = a._apply_enumerated_members(_group_event())
+    # Sorted, so the metadata is byte-identical across sweeps that return the
+    # same people in a different page order — this list reaches an LLM prompt
+    # through `channel_members` (#3298).
+    assert ev["params"]["metadata"]["group_members"] == [
+        {"user_id": "U1", "display_name": "U1"},
+        {"user_id": "U2", "display_name": "U2"},
+    ]
+    assert fake.calls[0]["url"].endswith("/conversations.members")
+    assert fake.calls[0]["params"]["channel"] == "C0DESIGN"
+
+
+def test_enumeration_paginates_until_the_cursor_runs_out(monkeypatch):
+    fake = _FakeUrlopen([
+        _members_page(["U1", "U2"], cursor="page2"),
+        _members_page(["U3"]),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    ev = a._apply_enumerated_members(_group_event())
+    ids = [m["user_id"] for m in ev["params"]["metadata"]["group_members"]]
+    assert ids == ["U1", "U2", "U3"]
+    assert len(fake.calls) == 2
+    assert fake.calls[1]["params"]["cursor"] == "page2"
+
+
+def test_enumeration_stops_at_the_configured_cap(monkeypatch):
+    # A general channel in a large workspace lists everyone, and every one of
+    # them would become a stored identity row in the daemon's roster.
+    fake = _FakeUrlopen([
+        _members_page(["U1", "U2", "U3"], cursor="more"),
+        _members_page(["U4", "U5"], cursor="more"),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true", SLACK_MEMBER_LIST_MAX="2")
+
+    ev = a._apply_enumerated_members(_group_event())
+    ids = [m["user_id"] for m in ev["params"]["metadata"]["group_members"]]
+    assert ids == ["U1", "U2"]
+    assert len(fake.calls) == 1
+
+
+def test_repeated_messages_cost_exactly_one_member_sweep(monkeypatch):
+    # `conversations.members` is rate-limited per call while membership changes
+    # a few times a week; the script holds one page, so a second sweep would
+    # fail loudly.
+    fake = _FakeUrlopen([_members_page(["U1", "U2"])])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    for i in range(4):
+        ev = a._apply_enumerated_members(_group_event(text=f"msg {i}"))
+        assert len(ev["params"]["metadata"]["group_members"]) == 2
+    assert len(fake.calls) == 1
+
+
+def test_enumeration_skips_direct_messages(monkeypatch):
+    # A one-to-one chat has no membership to enumerate, and spending a call to
+    # discover that would be one per DM.
+    fake = _FakeUrlopen([])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    dm = sa.parse_slack_event(
+        {"type": "message", "channel": "D0PRIVATE", "user": "U1",
+         "text": "hi", "ts": "1.0"},
+        bot_user_id="UBOT",
+        allowed_channels=[],
+        account_id=None,
+        file_policy=sa.SlackFilePolicy(),
+    )
+    ev = a._apply_enumerated_members(dm)
+    assert "group_members" not in ev["params"]["metadata"]
+    assert fake.calls == []
+
+
+def test_missing_scope_does_not_repeat_the_doomed_sweep(monkeypatch):
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "missing_scope"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    for _ in range(3):
+        ev = a._apply_enumerated_members(_group_event())
+        assert "group_members" not in ev["params"]["metadata"]
+    assert len(fake.calls) == 1
+
+
+def test_a_failed_sweep_uses_the_short_cooldown_not_the_full_ttl(monkeypatch):
+    fake = _FakeUrlopen([(200, {"ok": False, "error": "ratelimited"})])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+    a._apply_enumerated_members(_group_event())
+
+    expires_at, members = a._member_list_cache._entries["C0DESIGN"]
+    assert members == ()
+    remaining = expires_at - sa.time.monotonic()
+    assert 0 < remaining <= sa.NEGATIVE_TTL_SECS
+    assert remaining < a.member_list_ttl
+
+
+def test_transport_failure_leaves_the_message_unenumerated(monkeypatch):
+    def _boom(_req, timeout=None):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(sa.urllib.request, "urlopen", _boom)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+    ev = a._apply_enumerated_members(_group_event())
+    assert "group_members" not in ev["params"]["metadata"]
+
+
+def test_enumeration_names_come_from_the_cache_and_never_from_users_info(monkeypatch):
+    # A sweep is bulk by nature: resolving 500 members would spend the whole
+    # `users.info` budget naming people who have never spoken. Anyone who has
+    # spoken is already cached by `_apply_identity`, so in practice the people an
+    # agent can act on carry names and the rest carry ids.
+    fake = _FakeUrlopen([
+        (200, {"ok": True, "user": {"name": "ana", "profile": {"display_name": "Ana"}}}),
+        _members_page(["U1", "U2"]),
+    ])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true", SLACK_RESOLVE_DISPLAY_NAMES="true")
+
+    ev = a._apply_enumerated_members(a._apply_identity(_group_event(user="U1")))
+    assert ev["params"]["metadata"]["group_members"] == [
+        {"user_id": "U1", "display_name": "Ana", "username": "ana"},
+        {"user_id": "U2", "display_name": "U2"},
+    ]
+    # Exactly two calls: one `users.info` for the speaker, one members sweep.
+    # A third would mean the sweep resolved a name it should not have.
+    assert len(fake.calls) == 2
+
+
+def test_enumeration_records_ids_only_when_display_names_stay_off(monkeypatch):
+    # The least-data configuration that still answers "who is in this channel?".
+    fake = _FakeUrlopen([_members_page(["U1", "U2"])])
+    monkeypatch.setattr(sa.urllib.request, "urlopen", fake)
+    a = _adapter(SLACK_ENUMERATE_MEMBERS="true")
+
+    ev = a._apply_enumerated_members(a._apply_identity(_group_event(user="U1")))
+    assert ev["params"]["metadata"]["group_members"] == [
+        {"user_id": "U1", "display_name": "U1"},
+        {"user_id": "U2", "display_name": "U2"},
+    ]
+    assert len(fake.calls) == 1
+
+
+def test_member_list_env_is_validated():
+    with pytest.raises(SystemExit) as exc:
+        _adapter(SLACK_MEMBER_LIST_TTL="soon")
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        _adapter(SLACK_MEMBER_LIST_MAX="lots")
+    assert exc.value.code == 2
+    a = _adapter(SLACK_MEMBER_LIST_TTL="0", SLACK_MEMBER_LIST_MAX="0")
+    assert a.member_list_ttl == float(sa.DEFAULT_MEMBER_LIST_TTL_SECS)
+    assert a.member_list_max == sa.DEFAULT_MEMBER_LIST_MAX
+    a2 = _adapter(SLACK_MEMBER_LIST_TTL="90", SLACK_MEMBER_LIST_MAX="12")
+    assert a2.member_list_ttl == 90.0
+    assert a2.member_list_max == 12

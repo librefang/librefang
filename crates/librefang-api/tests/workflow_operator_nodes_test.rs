@@ -94,6 +94,7 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     }
 }
 
@@ -762,6 +763,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     }
 }
 
@@ -1048,6 +1050,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = workflow.id;
     engine.register(workflow).await;
@@ -1163,6 +1166,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let errs = wf.validate();
     assert!(
@@ -1251,6 +1255,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1337,6 +1342,7 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1437,6 +1443,7 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;

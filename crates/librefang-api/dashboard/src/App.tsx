@@ -98,6 +98,7 @@ type DashboardRoute =
   | "/runtime"
   | "/config"
   | "/users"
+  | "/groups"
   | "/settings";
 type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
 type NavGroup = { key: string; label: string; items: NavItem[] };
@@ -1106,6 +1107,7 @@ function DashboardApp() {
           { to: "/runtime", label: t("nav.runtime"), icon: Activity },
           { to: "/config", label: t("nav.config", { defaultValue: "Config" }), icon: FileText },
           { to: "/users", label: t("nav.users", { defaultValue: "Users" }), icon: User },
+          { to: "/groups", label: t("nav.groups", { defaultValue: "Groups" }), icon: Users },
           { to: "/settings", label: t("nav.settings"), icon: Settings },
         ],
       },

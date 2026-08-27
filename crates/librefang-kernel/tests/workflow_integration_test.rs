@@ -150,6 +150,7 @@ memory_write = ["self.*"]
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -236,6 +237,7 @@ memory_write = ["self.*"]
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -396,6 +398,7 @@ async fn test_workflow_e2e_with_groq() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -498,6 +501,7 @@ async fn workflow_describe_returns_explicit_input_schema() {
                 description: None,
             },
         ]),
+        owner: None,
     };
 
     let _wf_id = kernel.register_workflow(workflow).await;
@@ -577,6 +581,7 @@ async fn workflow_describe_auto_detects_from_template_placeholders() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
 
     let _wf_id = kernel.register_workflow(workflow).await;
@@ -646,6 +651,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
             required: true,
             description: None,
         }]),
+        owner: None,
     };
     kernel.register_workflow(explicit).await;
 
@@ -673,6 +679,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     kernel.register_workflow(implicit).await;
 
@@ -700,6 +707,7 @@ async fn workflow_list_reports_has_input_schema_for_both_paths() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     kernel.register_workflow(none).await;
 
@@ -788,6 +796,7 @@ async fn workflow_engine_substitutes_input_schema_vars_into_step_prompt() {
                 description: Some("Cover image artifact".to_string()),
             },
         ]),
+        owner: None,
     };
     let wf_id = kernel.register_workflow(workflow).await;
 
