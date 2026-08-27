@@ -1310,6 +1310,28 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
 mod tests {
     use super::*;
 
+    /// A filesystem-safe stand-in for the current thread's name, for tests that need a scratch directory of their own.
+    ///
+    /// Under the test harness the thread name is the test's full path — `release::tests::git_diff_change_detection_distinguishes_changes_from_errors`.
+    /// `:` is an ordinary character in a POSIX filename but is reserved on Windows, where it separates a drive letter or an NTFS alternate data stream, so joining the raw name into a temp path succeeds on Linux and macOS and fails on Windows with `InvalidFilename` (OS error 123).
+    /// That asymmetry is why the two tests using it were red on the Windows lane alone while every other lane stayed green.
+    ///
+    /// Process id still distinguishes concurrent runs; this only has to keep sibling tests in one process apart.
+    fn thread_scratch_slug() -> String {
+        std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
     /// The seam between the fold and the release commit: `collect_fragments_in`
     /// deletes the fragments it consumed, and only `stage_release_files` can get
     /// those deletions into the commit.
@@ -1659,7 +1681,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "lf-release-tags-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
+            thread_scratch_slug()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -1718,7 +1740,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "lf-release-diff-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("unnamed")
+            thread_scratch_slug()
         ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
