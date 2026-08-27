@@ -29,7 +29,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::UserId;
-use librefang_types::config::UserConfig;
+use librefang_types::config::{GroupConfig, UserConfig};
 use librefang_types::user_policy::{
     ChannelToolPolicy, UserMemoryAccess, UserToolCategories, UserToolPolicy,
 };
@@ -431,10 +431,11 @@ pub async fn update_user(
     // can serialize the post-merge view (incl. preserved RBAC M3 policy
     // fields). `persist_users` is generic over the closure's `Ok` type,
     // so this avoids the Arc<Mutex> capture pattern earlier drafts used.
-    match persist_users(
+    match persist_identity_sections(
         &state,
         caller_uid,
-        move |users| -> Result<UserConfig, PersistError> {
+        "users updated",
+        move |users, groups| -> Result<UserConfig, PersistError> {
             let idx = users
                 .iter()
                 .position(|u| u.name == target_existing)
@@ -471,6 +472,24 @@ pub async fn update_user(
                 memory_access: preserved.memory_access,
                 channel_tool_rules: preserved.channel_tool_rules,
             };
+            // Carry a rename into `[[groups]]` (#7745). Group membership names
+            // users by string, so without this a rename reads as "this person
+            // left every group they were on" — the old name lingers as a
+            // dangling member and the new one belongs to nothing, which is the
+            // silent loss of exactly the roles the rename was not supposed to
+            // touch. Done in the same config write as the user row so the two
+            // can never disagree.
+            if renamed_to_for_closure != target_existing {
+                for group in groups.iter_mut() {
+                    if group.has_member(&target_existing) {
+                        group.members.retain(|m| m != &target_existing);
+                        if !group.has_member(&renamed_to_for_closure) {
+                            group.members.push(renamed_to_for_closure.clone());
+                        }
+                        group.members.sort();
+                    }
+                }
+            }
             Ok(users[idx].clone())
         },
     )
@@ -504,14 +523,23 @@ pub async fn delete_user(
 ) -> impl IntoResponse {
     let target = name.clone();
     let caller_uid = caller.as_ref().map(|c| c.0.user_id);
-    match persist_users(&state, caller_uid, move |users| {
+    // Deleting a user also strips the name from every `[[groups]]` membership
+    // list (#7745). Without the cascade the deleted name keeps conferring
+    // whatever roles those groups grant, and the only thing that would have
+    // stopped it is that nothing consumes group roles *yet* — which stops
+    // being true the moment #7746 lands. Both sections are rewritten inside a
+    // single `persist_identity_sections` call so there is no window where the
+    // user is gone from `[[users]]` but still listed in a group.
+    match persist_identity_sections(&state, caller_uid, "users updated", move |users, groups| {
         let before = users.len();
         users.retain(|u| u.name != target);
         if users.len() == before {
-            Err(PersistError::NotFound(format!("user '{target}' not found")))
-        } else {
-            Ok(())
+            return Err(PersistError::NotFound(format!("user '{target}' not found")));
         }
+        for group in groups.iter_mut() {
+            group.members.retain(|m| m != &target);
+        }
+        Ok(())
     })
     .await
     {
@@ -1178,6 +1206,9 @@ pub(crate) enum PersistError {
 /// `update_user` uses this to surface the post-merge `UserConfig`
 /// (including preserved RBAC M3 policy fields) without an out-of-band
 /// `Arc<Mutex>` capture.
+///
+/// Thin wrapper over [`persist_identity_sections`] for the callers that
+/// only touch `[[users]]`.
 pub(crate) async fn persist_users<F, R>(
     state: &Arc<AppState>,
     caller: Option<UserId>,
@@ -1186,13 +1217,48 @@ pub(crate) async fn persist_users<F, R>(
 where
     F: FnOnce(&mut Vec<UserConfig>) -> Result<R, PersistError>,
 {
+    persist_identity_sections(state, caller, "users updated", |users, _groups| {
+        mutate(users)
+    })
+    .await
+}
+
+/// Read `config.toml`, run `mutate` on clones of the current `users` **and**
+/// `groups` vectors, rewrite both array-of-tables, and reload the kernel.
+///
+/// Both sections go through one write because they are one identity model and
+/// a mutation of one can require a mutation of the other in the same
+/// transaction: deleting a user has to strip that name from every group it
+/// appears in, and doing that as two sequential writes would leave a window in
+/// which the deleted user still confers group-derived roles (#7745). Sharing
+/// the path also means one config backup, one `validate_config_for_reload`,
+/// one kernel reload, and one refresh of the `ApiUserAuth` snapshot the auth
+/// middleware reads from — the ordering guarantees documented below are stated
+/// once and hold for every identity mutation rather than being re-derived per
+/// endpoint.
+///
+/// `audit_detail` is the text recorded against the `ConfigChange` audit action,
+/// so an operator reading the hash-chained log can tell a user edit from a
+/// group edit without diffing `config.toml`.
+pub(crate) async fn persist_identity_sections<F, R>(
+    state: &Arc<AppState>,
+    caller: Option<UserId>,
+    audit_detail: &str,
+    mutate: F,
+) -> Result<R, PersistError>
+where
+    F: FnOnce(&mut Vec<UserConfig>, &mut Vec<GroupConfig>) -> Result<R, PersistError>,
+{
     if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistError::Managed);
     }
     let _guard = state.config_write_lock.lock().await;
 
-    let mut users: Vec<UserConfig> = state.kernel.config_ref().users.clone();
-    let captured = mutate(&mut users)?;
+    let (mut users, mut groups) = {
+        let cfg = state.kernel.config_ref();
+        (cfg.users.clone(), cfg.groups.clone())
+    };
+    let captured = mutate(&mut users, &mut groups)?;
 
     // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
     // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
@@ -1252,6 +1318,23 @@ where
         doc.insert("users", toml_edit::Item::ArrayOfTables(aot));
     }
 
+    // Same treatment for `[[groups]]` (#7745). Written on every identity
+    // mutation, not only on group edits: the vector is re-serialized from the
+    // config the kernel already parsed, so a users-only edit round-trips the
+    // groups section byte-identically and the write stays idempotent.
+    if groups.is_empty() {
+        doc.remove("groups");
+    } else {
+        let mut aot = toml_edit::ArrayOfTables::new();
+        for g in &groups {
+            let single = toml_edit::ser::to_document(g).map_err(|e| {
+                PersistError::Internal(format!("serialize group '{}': {e}", g.name))
+            })?;
+            aot.push(single.as_table().clone());
+        }
+        doc.insert("groups", toml_edit::Item::ArrayOfTables(aot));
+    }
+
     let new_toml = doc.to_string();
     let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
         .map_err(|e| PersistError::Internal(format!("invalid config after edit: {e}")))?;
@@ -1298,7 +1381,7 @@ where
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
-        "users updated".to_string(),
+        audit_detail.to_string(),
         "completed",
         caller,
         Some("api".to_string()),

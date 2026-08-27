@@ -75,6 +75,7 @@ fn summarize_workflow(workflow: &crate::workflow::Workflow) -> kernel_handle::Wo
         workflow.description.clone(),
         workflow.steps.len(),
         has_discoverable_input_schema(workflow),
+        workflow.owner,
     )
 }
 
@@ -122,7 +123,10 @@ fn validate_created_workflow_name(name: &str) -> Result<(), String> {
 /// Pulled out of the trait method as a free function so every rejection branch is unit-testable without booting a kernel — the branches are the whole security surface of an always-available, LLM-driven creation tool.
 ///
 /// The returned `Err` is relayed to the model verbatim, so each one names the offending field and the limit it broke; a model that cannot see which ceiling it hit retries the same payload.
-fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::Workflow, String> {
+fn build_created_workflow(
+    spec: &serde_json::Value,
+    owner: Option<librefang_types::principal::Principal>,
+) -> Result<crate::workflow::Workflow, String> {
     use crate::workflow::{Workflow, WorkflowId};
 
     let spec: WorkflowCreateSpec = serde_json::from_value(spec.clone())
@@ -183,6 +187,9 @@ fn build_created_workflow(spec: &serde_json::Value) -> Result<crate::workflow::W
         name: spec.name,
         description: spec.description,
         steps: spec.steps,
+        // #7744: from the typed argument, never from `spec` — `WorkflowCreateSpec`
+        // has no `owner` field precisely so the model cannot name one.
+        owner,
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: spec.total_timeout_secs,
@@ -643,10 +650,11 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         &self,
         spec: &serde_json::Value,
         caller_agent_id: Option<&str>,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<kernel_handle::WorkflowSummary, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
 
-        let workflow = build_created_workflow(spec).map_err(KernelOpError::InvalidInput)?;
+        let workflow = build_created_workflow(spec, owner).map_err(KernelOpError::InvalidInput)?;
         // Built before the move into the engine; the engine returns only the id.
         let summary = summarize_workflow(&workflow);
         let name = workflow.name.clone();
@@ -659,15 +667,29 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             .await
             .map_err(|taken| KernelOpError::Conflict(taken.to_string()))?;
 
-        // Provenance trace, not an authorization gate: workflows have no ownership model, and an agent-authored one is executable by any agent the moment it is registered.
-        // Logging who asked for it is what makes that reviewable after the fact.
+        // Two different questions, both answered here. `caller_agent_id` is the executor — which agent's turn assembled the spec — and stays a log-only trace.
+        // `owner` is the principal that turn was acting for, and it is now recorded on the workflow itself (#7744): the log line rotates, the workflow does not.
+        // Neither is an authorization gate — an agent-authored workflow is still executable by any agent the moment it is registered.
         tracing::info!(
             workflow_id = %id,
             workflow_name = %name,
             caller_agent_id = caller_agent_id.unwrap_or("<unattributed>"),
+            owner = owner.map(|p| p.to_string()).unwrap_or_else(|| "<unowned>".to_string()),
             step_count = summary.step_count,
             "Agent created a workflow"
         );
+        if owner.is_none() {
+            // An unowned workflow is a supported state (unowned = visible to
+            // all), so this is not an error — but a fleet that meant to
+            // attribute its artifacts and has not configured anything should
+            // find that out from the log rather than from an audit. Loud once,
+            // quiet thereafter.
+            librefang_types::principal::warn_once_unowned("workflow");
+            tracing::debug!(
+                workflow_id = %id,
+                "Workflow recorded without an owner — the creating turn had no authenticated caller, the agent manifest declares no `owner`, and `config.toml` declares no `default_owner`"
+            );
+        }
 
         Ok(summary)
     }
@@ -698,6 +720,13 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
 mod tests {
     use super::*;
 
+    /// `build_created_workflow` with no owner — the ownership argument is exercised by its own test below, and every other test here is about spec validation, which the owner does not participate in.
+    fn build_created_workflow_for_test(
+        spec: &serde_json::Value,
+    ) -> Result<crate::workflow::Workflow, String> {
+        build_created_workflow(spec, None)
+    }
+
     /// A minimal spec that `build_created_workflow` accepts, as JSON, so each test below can mutate exactly the field it is about.
     fn spec(steps: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -716,8 +745,67 @@ mod tests {
     }
 
     #[test]
+    fn build_created_workflow_stamps_the_owner_it_is_given() {
+        let owner = librefang_types::principal::Principal::group_named("support");
+        let wf = build_created_workflow(&spec(one_step()), Some(owner)).expect("valid spec");
+        assert_eq!(wf.owner, Some(owner));
+    }
+
+    #[test]
+    fn build_created_workflow_ignores_an_owner_named_in_the_spec() {
+        // The decisive property: `owner` reaches the workflow only through the
+        // typed argument. A model that writes `"owner"` into its own tool input
+        // must not be able to choose who its workflow belongs to.
+        let mut s = spec(one_step());
+        s["owner"] = serde_json::json!({ "kind": "user", "id": uuid::Uuid::nil() });
+        let wf = build_created_workflow(&s, None).expect("an unknown spec key is ignored");
+        assert_eq!(wf.owner, None);
+
+        let real = librefang_types::principal::Principal::user_named("alice");
+        let wf = build_created_workflow(&s, Some(real)).expect("valid spec");
+        assert_eq!(wf.owner, Some(real));
+    }
+
+    #[test]
+    fn a_workflow_created_before_ownership_deserializes_as_unowned() {
+        // `None` means "unowned, visible to all", and it is what every
+        // `<id>.workflow.json` written before this field existed parses to —
+        // which is why no migration or backfill is needed.
+        let json = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "name": "legacy",
+            "description": "written before #7744",
+            "steps": [],
+            "created_at": "2020-01-01T00:00:00Z",
+        });
+        let wf: crate::workflow::Workflow =
+            serde_json::from_value(json).expect("a pre-ownership definition still parses");
+        assert_eq!(wf.owner, None);
+    }
+
+    #[test]
+    fn an_unowned_workflow_omits_the_key_entirely_when_serialized() {
+        // `skip_serializing_if` keeps the on-disk shape byte-identical for the
+        // unowned case, so adding the field does not rewrite every existing
+        // `<id>.workflow.json` on the next persist.
+        let wf = build_created_workflow_for_test(&spec(one_step())).expect("valid spec");
+        let v = serde_json::to_value(&wf).expect("serializable");
+        assert!(v.get("owner").is_none());
+    }
+
+    #[test]
+    fn a_stamped_owner_round_trips_through_the_persisted_json() {
+        let owner = librefang_types::principal::Principal::group_named("compliance");
+        let wf = build_created_workflow(&spec(one_step()), Some(owner)).expect("valid spec");
+        let text = serde_json::to_string(&wf).expect("serializable");
+        let back: crate::workflow::Workflow =
+            serde_json::from_str(&text).expect("round-trips through the on-disk form");
+        assert_eq!(back.owner, Some(owner));
+    }
+
+    #[test]
     fn build_created_workflow_accepts_a_minimal_spec() {
-        let wf = build_created_workflow(&spec(one_step())).expect("minimal spec is valid");
+        let wf = build_created_workflow_for_test(&spec(one_step())).expect("minimal spec is valid");
         assert_eq!(wf.name, "nightly-report");
         assert_eq!(wf.steps.len(), 1);
         // Bare-string `agent` is the documented shorthand for by-name routing.
@@ -741,7 +829,7 @@ mod tests {
             { "name": "cover", "param_type": "image", "required": false },
             { "name": "topic" },
         ]);
-        let wf = build_created_workflow(&s).expect("input schema is valid");
+        let wf = build_created_workflow_for_test(&s).expect("input schema is valid");
         let schema = wf.input_schema.expect("input_schema survives");
         assert_eq!(schema[0].param_type, "image");
         assert!(!schema[0].required);
@@ -752,7 +840,7 @@ mod tests {
 
     #[test]
     fn build_created_workflow_rejects_a_spec_without_steps() {
-        let err = build_created_workflow(&spec(serde_json::json!([])))
+        let err = build_created_workflow_for_test(&spec(serde_json::json!([])))
             .expect_err("a stepless workflow can never run");
         assert!(err.contains("at least one step"), "{err}");
     }
@@ -760,7 +848,7 @@ mod tests {
     #[test]
     fn build_created_workflow_rejects_a_step_without_an_agent() {
         let s = spec(serde_json::json!([{ "name": "write", "prompt_template": "go" }]));
-        let err = build_created_workflow(&s).expect_err("a step needs an agent");
+        let err = build_created_workflow_for_test(&s).expect_err("a step needs an agent");
         assert!(err.contains("not a valid workflow definition"), "{err}");
     }
 
@@ -781,8 +869,8 @@ mod tests {
                     .collect(),
             )
         };
-        assert!(build_created_workflow(&spec(steps(MAX_CREATED_WORKFLOW_STEPS))).is_ok());
-        let err = build_created_workflow(&spec(steps(MAX_CREATED_WORKFLOW_STEPS + 1)))
+        assert!(build_created_workflow_for_test(&spec(steps(MAX_CREATED_WORKFLOW_STEPS))).is_ok());
+        let err = build_created_workflow_for_test(&spec(steps(MAX_CREATED_WORKFLOW_STEPS + 1)))
             .expect_err("one step over the ceiling must be rejected");
         assert!(
             err.contains(&MAX_CREATED_WORKFLOW_STEPS.to_string()),
@@ -798,12 +886,12 @@ mod tests {
             "prompt_template": "go",
             "timeout_secs": MAX_CREATED_STEP_TIMEOUT_SECS + 1,
         }]));
-        let err = build_created_workflow(&s).expect_err("step timeout over the ceiling");
+        let err = build_created_workflow_for_test(&s).expect_err("step timeout over the ceiling");
         assert!(err.contains("per-step ceiling"), "{err}");
 
         s = spec(one_step());
         s["total_timeout_secs"] = serde_json::json!(MAX_CREATED_TOTAL_TIMEOUT_SECS + 1);
-        let err = build_created_workflow(&s).expect_err("total timeout over the ceiling");
+        let err = build_created_workflow_for_test(&s).expect_err("total timeout over the ceiling");
         assert!(err.contains("per-workflow ceiling"), "{err}");
     }
 
@@ -814,7 +902,7 @@ mod tests {
             { "name": "write", "agent": "writer", "prompt_template": "a" },
             { "name": "write", "agent": "writer", "prompt_template": "b" },
         ]));
-        let err = build_created_workflow(&dup).expect_err("duplicate step names");
+        let err = build_created_workflow_for_test(&dup).expect_err("duplicate step names");
         assert!(err.contains("used twice"), "{err}");
 
         let dangling = spec(serde_json::json!([{
@@ -823,7 +911,7 @@ mod tests {
             "prompt_template": "a",
             "depends_on": ["research"],
         }]));
-        let err = build_created_workflow(&dangling).expect_err("unknown dependency");
+        let err = build_created_workflow_for_test(&dangling).expect_err("unknown dependency");
         assert!(err.contains("not a step in this workflow"), "{err}");
     }
 
@@ -834,7 +922,7 @@ mod tests {
             { "name": "publish", "agent": "writer", "prompt_template": "a", "depends_on": ["research"] },
             { "name": "research", "agent": "analyst", "prompt_template": "b" },
         ]));
-        assert!(build_created_workflow(&s).is_ok());
+        assert!(build_created_workflow_for_test(&s).is_ok());
     }
 
     #[test]
@@ -860,7 +948,7 @@ mod tests {
             "prompt_template": "",
             "mode": { "wait": { "duration_secs": 0 } },
         }]));
-        let err = build_created_workflow(&s).expect_err("a zero-second wait is rejected");
+        let err = build_created_workflow_for_test(&s).expect_err("a zero-second wait is rejected");
         assert!(err.contains("wait.duration_secs"), "{err}");
     }
 
@@ -912,7 +1000,7 @@ mod tests {
         use crate::workflow::StepAgent;
         use librefang_types::agent::SessionMode;
 
-        let wf = build_created_workflow(&spec(serde_json::json!([{
+        let wf = build_created_workflow_for_test(&spec(serde_json::json!([{
             "name": "review",
             "agent": {"type": "code-reviewer"},
             "prompt_template": "Review {{input}}",

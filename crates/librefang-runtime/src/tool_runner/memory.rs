@@ -172,9 +172,11 @@ pub(super) fn tool_memory_list(
 // note on `MemoryAccess::memory_semantic_search`. The one thing this layer must
 // not do is resolve the guard itself, because that would skip PII redaction.
 
-/// Fragments returned by one `memory_semantic_search` call when the model does
-/// not ask for a limit. Matches `MEMORY_RECALL_LIMIT` in `agent_loop::prompt`,
-/// so a deliberate search sees the same breadth as an automatic recall.
+/// Fragments returned by one `memory_semantic_search` call when the model does not ask for a limit.
+///
+/// Matched `MEMORY_RECALL_LIMIT` in `agent_loop::prompt` until #7920 split that constant into a per-class pair and widened the fact half; it now matches `MEMORY_RECALL_LIMIT_DIALOGUE`, the half that kept the historical window.
+/// Deliberately not widened alongside the automatic recall: this is a tool call the model issues with a question in hand, and its results are read one at a time rather than budgeted per class into a section, so breadth here is straight context cost with none of the offsetting structure.
+/// The model can still ask for more, up to `MAX_SEMANTIC_SEARCH_LIMIT`.
 const DEFAULT_SEMANTIC_SEARCH_LIMIT: u64 = 5;
 /// Hard ceiling on `limit`. Each fragment is free-form text that lands in the
 /// prompt verbatim, so an unbounded limit is a context-window footgun.

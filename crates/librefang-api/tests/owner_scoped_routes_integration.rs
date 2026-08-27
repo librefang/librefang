@@ -451,6 +451,7 @@ fn spawn_cron_job(
         created_at: chrono::Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     state
         .kernel
