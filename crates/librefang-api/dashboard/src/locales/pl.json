@@ -51,7 +51,8 @@
     "skip_to_content": "Przejdź do treści",
     "more": "Więcej",
     "mobile_tabs": "Dolna nawigacja",
-    "console": "Konsola"
+    "console": "Konsola",
+    "groups": "Grupy"
   },
   "partner": {
     "everyapi_label": "Oficjalna integracja partnerska EveryAPI",
@@ -3715,6 +3716,40 @@
     "wizard_show_warning": "Dlaczego to ma znaczenie",
     "wizard_hide_warning": "Ukryj ostrzeżenie",
     "wizard_step_back_aria": "Wróć do kroku {{n}}"
+  },
+  "groups": {
+    "title": "Grupy",
+    "subtitle": "Nazwij zespół zamiast osoby. Członkostwo jest wiele-do-wielu i płaskie — grupy się nie zagnieżdżają.",
+    "help": "Role grupy są nadawane każdemu członkowi, w tym samym słowniku ról, którego używają już powiązania kanałów. Przechowywane jako [[groups]] w config.toml; zapis tylko dla właściciela.",
+    "create": "Nowa grupa",
+    "edit_title": "Edytuj grupę",
+    "search_label": "Szukaj",
+    "search_placeholder": "Grupa, opis, członek lub rola…",
+    "empty_title": "Brak grup",
+    "empty_desc": "Utwórz grupę dla dyżuru, zmiany lub zespołu projektowego, a następnie dodaj osoby, które ją obsadzają.",
+    "member_count": "członkowie: {{n}}",
+    "unknown_members_badge": "niezarejestrowani: {{n}}",
+    "unknown_members_title": "Ci członkowie nie mają jeszcze wpisu [[users]]. To celowe — dostawca tożsamości może wskazać osobę przed jej pierwszym logowaniem.",
+    "unknown_member_title": "Brak wpisu [[users]] dla tej nazwy.",
+    "no_members": "Brak członków.",
+    "add_member_label": "Dodaj członka",
+    "pick_user": "Wybierz użytkownika…",
+    "remove_member": "Usuń członka",
+    "delete_title": "Usuń grupę",
+    "delete_message": "Usunięcie grupy usuwa także jej członkostwo. Sami użytkownicy pozostają nietknięci.",
+    "name_label": "Nazwa",
+    "name_required": "Nazwa jest wymagana",
+    "description_label": "Opis",
+    "description_placeholder": "Dyżur wsparcia",
+    "roles_label": "Role (oddzielone przecinkami)",
+    "roles_help": "Nadawane każdemu członkowi. Nazwa samej grupy jest nadawana zawsze, więc nie trzeba jej tu powtarzać.",
+    "created": "Grupa utworzona",
+    "updated": "Grupa zaktualizowana",
+    "deleted": "Grupa usunięta",
+    "save_failed": "Nie udało się zapisać grupy",
+    "delete_failed": "Nie udało się usunąć grupy",
+    "member_add_failed": "Nie udało się dodać członka",
+    "member_remove_failed": "Nie udało się usunąć członka"
   },
   "userBudget": {
     "fields": {
