@@ -957,33 +957,21 @@ fn translate_slack_role(
     mapped.and_then(UserRole::try_from_str_role)
 }
 
-/// Translate the `roles` claim of a validated OIDC ID token into a LibreFang
-/// [`UserRole`] using `[external_auth.role_map]` (#7744).
+/// Translate the `roles` claim of a validated OIDC ID token into a LibreFang [`UserRole`] using `[external_auth.role_map]` (#7744).
 ///
-/// This is the same vocabulary as [`Action::required_role`] — `Viewer` <
-/// `User` < `Admin` < `Owner` — and deliberately not the free-form
-/// `BindingContext.roles` strings the channel router matches agent bindings
-/// on. Those two look alike and mean different things: the router's roles
-/// decide *which agent* answers a message, this one decides *what the caller
-/// may do*. Feeding IdP claims into the router's vocabulary would give an
-/// identity provider a say in agent routing and still leave authorization
-/// unanswered, so the claims are translated here, at the boundary, and only
-/// the resulting `UserRole` travels onward.
+/// This is the same vocabulary as [`Action::required_role`] — `Viewer` < `User` < `Admin` < `Owner` — and deliberately not the free-form `BindingContext.roles` strings the channel router matches agent bindings on.
+/// Those two look alike and mean different things: the router's roles decide *which agent* answers a message, this one decides *what the caller may do*.
+/// Feeding IdP claims into the router's vocabulary would give an identity provider a say in agent routing and still leave authorization unanswered, so the claims are translated here, at the boundary, and only the resulting `UserRole` travels onward.
 ///
 /// Returns `None` — meaning "no grant", not "least privilege" — when:
-/// - the operator declared no `role_map` (the default, so an OIDC bearer
-///   authorizes exactly nothing until an operator opts in),
+/// - the operator declared no `role_map` (the default, so an OIDC bearer authorizes exactly nothing until an operator opts in),
 /// - none of the caller's claim values appear in the map, or
 /// - every matching entry names an unrecognised LibreFang role.
 ///
-/// A caller holding several mapped roles gets the **highest-privilege**
-/// match, mirroring [`translate_discord_role`]. Claim ordering is the IdP's
-/// business; letting it decide the effective LibreFang role would move
-/// privilege outside operator control.
+/// A caller holding several mapped roles gets the **highest-privilege** match, mirroring [`translate_discord_role`].
+/// Claim ordering is the IdP's business; letting it decide the effective LibreFang role would move privilege outside operator control.
 ///
-/// A typo'd target (`"admn"`) is skipped rather than resolving to `User`,
-/// so an unrecognised role can never escalate — the caller keeps whatever
-/// the rest of the map granted them, and nothing at all if that was empty.
+/// A typo'd target (`"admn"`) is skipped rather than resolving to `User`, so an unrecognised role can never escalate — the caller keeps whatever the rest of the map granted them, and nothing at all if that was empty.
 pub fn translate_oidc_roles(
     role_map: &std::collections::BTreeMap<String, String>,
     claim_roles: &[String],
@@ -1005,13 +993,9 @@ pub fn translate_oidc_roles(
     best
 }
 
-/// Validate every target role string in `[external_auth.role_map]` and emit
-/// a `tracing::warn!` for each value that won't parse, returning the count.
+/// Validate every target role string in `[external_auth.role_map]` and emit a `tracing::warn!` for each value that won't parse, returning the count.
 ///
-/// Same rationale as [`validate_channel_role_mapping`]: the runtime already
-/// fails closed on a typo, so this exists purely so an operator who writes
-/// `"librefang-admins" = "admn"` learns about it at boot instead of
-/// wondering why SSO logins keep getting 401.
+/// Same rationale as [`validate_channel_role_mapping`]: the runtime already fails closed on a typo, so this exists purely so an operator who writes `"librefang-admins" = "admn"` learns about it at boot instead of wondering why SSO logins keep getting 401.
 pub fn validate_oidc_role_map(role_map: &std::collections::BTreeMap<String, String>) -> usize {
     let mut typos = 0usize;
     for (claim, mapped) in role_map {
