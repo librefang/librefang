@@ -271,6 +271,50 @@ async fn users_import_commit_persists_rows() {
     assert!(names.contains(&"Hank"));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn users_import_classifies_duplicate_rows_against_live_batch_state() {
+    for dry_run in [true, false] {
+        let h = boot().await;
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            "/api/users/import",
+            Some(serde_json::json!({
+                "dry_run": dry_run,
+                "rows": [
+                    {"name": "Duplicate", "role": "user"},
+                    {"name": "Duplicate", "role": "admin"}
+                ]
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "dry_run={dry_run}: {body:?}");
+        assert_eq!(body["created"], 1);
+        assert_eq!(body["updated"], 1);
+        assert_eq!(body["rows"][0]["status"], "created");
+        assert_eq!(body["rows"][1]["status"], "updated");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn users_reject_names_with_embedded_control_characters() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/users",
+        Some(serde_json::json!({"name": "alice\nforged", "role": "user"})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("control characters"));
+}
+
 /// PR #3209 review item — the wire `api_key_hash` must be a valid
 /// Argon2id PHC string. Without this check an Owner could paste an
 /// arbitrary value (constant, exfiltrated hash, empty-after-trim) into
@@ -546,10 +590,8 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
         StatusCode::INTERNAL_SERVER_ERROR,
         "expected 500 on corrupt config, got: {body:?}"
     );
-    assert!(
-        body["error"].as_str().unwrap_or("").contains("config.toml"),
-        "error should mention config.toml: {body:?}"
-    );
+    assert_eq!(body["message"], "Internal server error");
+    assert_eq!(body["error"]["message"], "Internal server error");
 
     // The corrupt file must still be on disk verbatim — we have NOT
     // silently replaced it with a stub document.
