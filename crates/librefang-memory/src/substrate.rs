@@ -334,6 +334,36 @@ impl MemorySubstrate {
         self.consolidation.set_duplicate_threshold(threshold);
     }
 
+    /// Record the embedding model the daemon resolved at boot, in
+    /// `provider/model` form (#7912).
+    ///
+    /// New vectors are stamped with it, and a recall skips scoring any
+    /// candidate whose stored vector carries a *different* stamp — cosine
+    /// between two embedding spaces is a number, not a similarity.
+    ///
+    /// Takes `&self` because the kernel resolves the effective model long after
+    /// the substrate is behind an `Arc`: auto-detection can substitute a
+    /// provider default for the configured string, so the value is not known
+    /// when the substrate is opened.
+    pub fn set_embedding_model(&self, model: &str) {
+        self.semantic.set_active_embedding_model(model);
+    }
+
+    /// The embedding model new vectors are stamped with, if any.
+    pub fn embedding_model(&self) -> Option<std::sync::Arc<str>> {
+        self.semantic.active_embedding_model()
+    }
+
+    /// Count live stored vectors by the model that produced them (#7912).
+    ///
+    /// Rows written before the v51 stamp are reported under
+    /// [`crate::semantic::UNSTAMPED_EMBEDDING_MODEL`].
+    pub fn embedding_model_census(
+        &self,
+    ) -> LibreFangResult<std::collections::BTreeMap<String, i64>> {
+        self.semantic.embedding_model_census()
+    }
+
     /// Get a clone of the connection pool (for constructing stores from outside).
     pub fn pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
