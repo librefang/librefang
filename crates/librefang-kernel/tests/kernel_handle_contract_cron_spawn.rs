@@ -39,7 +39,7 @@ async fn test_cron_create_preserves_peer_id() {
         "one_shot": false
     });
 
-    let result = kh.cron_create(&agent_id, job).await;
+    let result = kh.cron_create(&agent_id, job, None).await;
     assert!(result.is_ok(), "cron_create failed: {:?}", result.err());
 
     let jobs = kh.cron_list(&agent_id).await.expect("cron_list failed");
@@ -72,7 +72,7 @@ async fn test_cron_create_without_peer_id() {
         "one_shot": false
     });
 
-    let result = kh.cron_create(&agent_id, job).await;
+    let result = kh.cron_create(&agent_id, job, None).await;
     assert!(result.is_ok(), "cron_create failed: {:?}", result.err());
 
     let jobs = kh.cron_list(&agent_id).await.expect("cron_list failed");
@@ -138,4 +138,76 @@ async fn test_list_agents_returns_manifest_metadata() {
         missing.is_empty(),
         "find_agents(\"nonexistent\") should return empty"
     );
+}
+
+/// A cron job created with an acting principal records it, and it survives the
+/// round trip through `cron_list` — i.e. through the scheduler's own storage,
+/// not just the struct literal (#7744).
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_create_records_the_owner_and_it_survives_the_store() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    let (agent_id, _name) = kh
+        .spawn_agent(minimal_manifest(), None)
+        .await
+        .expect("spawn failed");
+
+    let owner = librefang_types::principal::Principal::group_named("oncall");
+    let job = serde_json::json!({
+        "name": "owned-cron",
+        "agent_id": agent_id,
+        "schedule": { "kind": "every", "every_secs": 60 },
+        "action": { "kind": "system_event", "text": "tick" },
+        "one_shot": false
+    });
+
+    let raw = kh
+        .cron_create(&agent_id, job, Some(owner))
+        .await
+        .expect("cron_create failed");
+    let created: serde_json::Value = serde_json::from_str(&raw).expect("cron_create returns JSON");
+    assert_eq!(created["owner"], serde_json::json!(owner.to_string()));
+
+    let jobs = kh.cron_list(&agent_id).await.expect("cron_list failed");
+    let stored = jobs
+        .iter()
+        .find(|j| j["name"] == "owned-cron")
+        .expect("the created job must be listed");
+    assert_eq!(
+        stored["owner"],
+        serde_json::to_value(owner).unwrap(),
+        "the owner must round-trip through the scheduler's store as the tagged struct"
+    );
+}
+
+/// The stated meaning of `None`: unowned, and the key is absent rather than
+/// null — so an existing `cron_jobs.json` is not rewritten by the upgrade.
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_create_without_a_principal_records_no_owner_key() {
+    let (kernel, _tmp) = boot();
+    let kh: &dyn KernelHandle = &kernel;
+
+    let (agent_id, _name) = kh
+        .spawn_agent(minimal_manifest(), None)
+        .await
+        .expect("spawn failed");
+
+    let job = serde_json::json!({
+        "name": "unowned-cron",
+        "agent_id": agent_id,
+        "schedule": { "kind": "every", "every_secs": 60 },
+        "action": { "kind": "system_event", "text": "tick" },
+        "one_shot": false
+    });
+    kh.cron_create(&agent_id, job, None)
+        .await
+        .expect("cron_create failed");
+
+    let jobs = kh.cron_list(&agent_id).await.expect("cron_list failed");
+    let stored = jobs
+        .iter()
+        .find(|j| j["name"] == "unowned-cron")
+        .expect("the created job must be listed");
+    assert!(stored.get("owner").is_none());
 }

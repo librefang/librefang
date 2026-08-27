@@ -136,6 +136,153 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    contributors_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "update-contributors.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if contributors_workflow.get("permissions") != {"contents": "read"}:
+        raise SystemExit("contributor updater has broader default permissions than read-only")
+    contributors_concurrency = contributors_workflow.get("concurrency", {})
+    if (
+        contributors_concurrency.get("group") != "${{ github.workflow }}"
+        or contributors_concurrency.get("cancel-in-progress") is not False
+    ):
+        raise SystemExit("contributor updater does not serialize complete mutating runs")
+    contributors_job = contributors_workflow.get("jobs", {}).get("update", {})
+    if contributors_job.get("timeout-minutes") != 15:
+        raise SystemExit("contributor updater does not retain its bounded runtime")
+    contributor_steps = contributors_job.get("steps", [])
+    expected_contributor_actions = {
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
+        "Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e",
+        "peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1",
+    }
+    actual_contributor_actions = {
+        step["uses"] for step in contributor_steps if isinstance(step.get("uses"), str)
+    }
+    if actual_contributor_actions != expected_contributor_actions:
+        raise SystemExit(
+            "contributor updater action pins drifted: "
+            f"{sorted(actual_contributor_actions)}"
+        )
+    if any(
+        FULL_SHA.fullmatch(uses.rsplit("@", 1)[1]) is None
+        for uses in actual_contributor_actions
+    ):
+        raise SystemExit("contributor updater has a non-SHA action pin")
+    cache_step = next(
+        (
+            step
+            for step in contributor_steps
+            if step.get("uses", "").startswith("Swatinem/rust-cache@")
+        ),
+        None,
+    )
+    if not isinstance(cache_step, dict) or cache_step.get("with", {}).get(
+        "shared-key"
+    ) != "contributors":
+        raise SystemExit("contributor updater lost its dedicated Rust cache key")
+
+    auto_merge_step = next(
+        (step for step in contributor_steps if step.get("name") == "Enable auto-merge"),
+        None,
+    )
+    auto_merge_script = (
+        auto_merge_step.get("run") if isinstance(auto_merge_step, dict) else None
+    )
+    auto_merge_env = (
+        auto_merge_step.get("env", {}) if isinstance(auto_merge_step, dict) else {}
+    )
+    if (
+        not isinstance(auto_merge_script, str)
+        or "${{" in auto_merge_script
+        or 'gh pr merge "$PR_NUMBER"' not in auto_merge_script
+        or "for attempt in 1 2 3" not in auto_merge_script
+        or auto_merge_env.get("PR_NUMBER")
+        != "${{ steps.cpr.outputs.pull-request-number }}"
+    ):
+        raise SystemExit("contributor auto-merge does not use a bounded trusted PR number")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        fake_bin = Path(temp_dir)
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "count=0\n"
+            "if [ -f \"$FAKE_GH_COUNT\" ]; then count=$(cat \"$FAKE_GH_COUNT\"); fi\n"
+            "count=$((count + 1))\n"
+            "printf '%s' \"$count\" > \"$FAKE_GH_COUNT\"\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_GH_LOG\"\n"
+            "[ \"$count\" -ge \"${FAKE_GH_SUCCEED_AT:-999}\" ]\n"
+        )
+        fake_gh.chmod(0o755)
+        fake_sleep = fake_bin / "sleep"
+        fake_sleep.write_text("#!/bin/sh\nexit 0\n")
+        fake_sleep.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                "GITHUB_REPOSITORY": "librefang/librefang",
+                "PR_NUMBER": "123",
+                "FAKE_GH_COUNT": str(fake_bin / "count"),
+                "FAKE_GH_LOG": str(fake_bin / "calls"),
+            }
+        )
+        environment["FAKE_GH_SUCCEED_AT"] = "3"
+        transient = subprocess.run(
+            ["bash", "-c", auto_merge_script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if transient.returncode != 0 or (fake_bin / "count").read_text() != "3":
+            raise SystemExit("contributor auto-merge did not recover on its third attempt")
+        expected_call = (
+            "pr merge 123 --repo librefang/librefang "
+            "--squash --delete-branch --auto"
+        )
+        calls = (fake_bin / "calls").read_text(encoding="utf-8").splitlines()
+        if calls != [expected_call, expected_call, expected_call]:
+            raise SystemExit(f"contributor auto-merge invoked gh unexpectedly: {calls}")
+
+        (fake_bin / "count").unlink()
+        (fake_bin / "calls").unlink()
+        environment["FAKE_GH_SUCCEED_AT"] = "999"
+        permanent = subprocess.run(
+            ["bash", "-c", auto_merge_script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (
+            permanent.returncode == 0
+            or (fake_bin / "count").read_text() != "3"
+            or "PR #123 remains open" not in permanent.stderr
+        ):
+            raise SystemExit("contributor auto-merge masks a permanent API failure")
+
+    secrets_documentation = (ROOT / ".github" / "SECRETS.md").read_text(
+        encoding="utf-8"
+    )
+    for required_secret_contract in (
+        "`WEBSITE_REPO_TOKEN`",
+        "Fine-grained PAT limited to `librefang/librefang`",
+        "Contents: read and write",
+        "Pull requests: read and write",
+    ):
+        if required_secret_contract not in secrets_documentation:
+            raise SystemExit(
+                "WEBSITE_REPO_TOKEN scope is missing from the secret inventory: "
+                + required_secret_contract
+            )
+    if "Fine-grained PAT or GitHub App token" in secrets_documentation:
+        raise SystemExit("secret inventory treats an expiring App token as persistent")
+
 
 def main() -> None:
     check_repository_automation()

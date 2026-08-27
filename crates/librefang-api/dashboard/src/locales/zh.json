@@ -51,7 +51,8 @@
     "skip_to_content": "跳转到内容",
     "more": "更多",
     "mobile_tabs": "底部导航",
-    "console": "控制台"
+    "console": "控制台",
+    "groups": "用户组"
   },
   "partner": {
     "everyapi_label": "EveryAPI 官方合作伙伴集成",
@@ -3709,6 +3710,40 @@
     "wizard_show_warning": "为什么重要",
     "wizard_hide_warning": "隐藏警告",
     "wizard_step_back_aria": "返回第 {{n}} 步"
+  },
+  "groups": {
+    "title": "用户组",
+    "subtitle": "用团队而不是个人来命名。成员关系是多对多且扁平的——用户组不支持嵌套。",
+    "help": "用户组的角色会授予每一位成员，使用的角色词汇与频道绑定一致。存储于 config.toml 的 [[groups]]；写操作仅限所有者。",
+    "create": "新建用户组",
+    "edit_title": "编辑用户组",
+    "search_label": "搜索",
+    "search_placeholder": "用户组、描述、成员或角色…",
+    "empty_title": "暂无用户组",
+    "empty_desc": "为值班表、班次或项目团队创建一个用户组，然后加入当前承担该职责的人。",
+    "member_count": "{{n}} 位成员",
+    "unknown_members_badge": "{{n}} 位未注册",
+    "unknown_members_title": "这些成员尚无 [[users]] 条目。这是有意为之——身份提供方可能在某人首次登录前就已列出该名字。",
+    "unknown_member_title": "该名字没有对应的 [[users]] 条目。",
+    "no_members": "暂无成员。",
+    "add_member_label": "添加成员",
+    "pick_user": "选择用户…",
+    "remove_member": "移除成员",
+    "delete_title": "删除用户组",
+    "delete_message": "删除用户组会同时删除其成员关系，用户本身不受影响。",
+    "name_label": "名称",
+    "name_required": "名称为必填项",
+    "description_label": "描述",
+    "description_placeholder": "支持值班",
+    "roles_label": "角色（以逗号分隔）",
+    "roles_help": "授予每一位成员。用户组自身的名称始终会被授予，因此无需在此重复。",
+    "created": "用户组已创建",
+    "updated": "用户组已更新",
+    "deleted": "用户组已删除",
+    "save_failed": "无法保存用户组",
+    "delete_failed": "无法删除用户组",
+    "member_add_failed": "无法添加成员",
+    "member_remove_failed": "无法移除成员"
   },
   "userBudget": {
     "fields": {
