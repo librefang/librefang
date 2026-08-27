@@ -692,6 +692,7 @@
       }
     },
     "clone_failed": "克隆智能体失败",
+    "clone_partial": "智能体已克隆，但初始化不完整：{{warnings}}",
     "clone_succeeded": "智能体已克隆",
     "clone_title": "克隆智能体",
     "clone_desc": "将 {{name}} 的清单复制为新智能体。名称必须唯一。",
