@@ -821,6 +821,10 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                // Targeted delivery (#7086): an agent allowed to reply into a shared group but not to reach one member privately has to broadcast a notice meant for one person.
+                "channel_dm",
+                // The read half of the channel surface (#7086): an agent that may reply into a shared group but cannot enumerate its members has no way to attribute a request to the person who made it.
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -835,6 +839,8 @@ impl ToolProfile {
                 "agent_send",
                 "agent_list",
                 "channel_send",
+                "channel_dm",
+                "channel_members",
                 "memory_store",
                 "memory_list",
                 "memory_recall",
@@ -859,12 +865,12 @@ impl ToolProfile {
             shell: if has_shell { vec!["*".into()] } else { vec![] },
             agent_spawn: has_agent,
             agent_message: if has_agent { vec!["*".into()] } else { vec![] },
-            memory_read: if has_memory {
+            memory_read: Some(if has_memory {
                 vec!["*".into()]
             } else {
                 vec!["self.*".into()]
-            },
-            memory_write: vec!["self.*".into()],
+            }),
+            memory_write: Some(vec!["self.*".into()]),
             ofp_discover: false,
             ofp_connect: vec![],
         }
@@ -1028,6 +1034,17 @@ pub struct ManifestTrigger {
     /// [`librefang_kernel::triggers::TriggerPattern`] for the variant set.
     /// Carried as a `serde_json::Value` so the manifest crate does not
     /// have to depend on the kernel.
+    ///
+    /// A `[[triggers]]` block that omits `pattern` deserializes to
+    /// `Value::Null` because of the struct-level `#[serde(default)]`, and
+    /// TOML has no representation for null — serializing such a manifest
+    /// fails with `unsupported unit type`, which took the *entire*
+    /// `agent.toml` write down with it.
+    /// The kernel already treats a null pattern as inert (`reconcile_manifest_triggers`
+    /// skips it with a `warn!` and moves on), so the honest round trip is to
+    /// emit nothing and read it back as null again — the alternative was an
+    /// agent whose every manifest field silently stopped being persistable.
+    #[serde(skip_serializing_if = "serde_json::Value::is_null")]
     pub pattern: serde_json::Value,
     /// Prompt template sent to the LLM when the trigger fires.
     /// `{{event}}` is replaced with the rendered event description.
@@ -1083,6 +1100,16 @@ pub struct AgentManifest {
     pub description: String,
     /// Author identifier.
     pub author: String,
+    /// The principal this agent acts for when no authenticated human is behind the turn (#7744).
+    ///
+    /// Written as an operator spec string — `user:alice`, `group:oncall`, or a bare `alice` meaning `user:alice` — and parsed by [`crate::principal::Principal::from_spec`].
+    /// It is deliberately **not** a required field: making it required would invalidate every existing `agent.toml`, and an ownership model that cannot be adopted incrementally is not adopted at all.
+    ///
+    /// This is a *fallback*, not an override.
+    /// A turn started by an authenticated caller is acting for that caller, and what it creates belongs to them; this value answers the other case — cron fires, triggers, workflow steps and autonomous ticks, where there is no human on the turn and the alternative is stamping nothing.
+    /// A malformed spec is reported as a `WARN` once at resolution and treated as absent rather than failing the turn, because an unparseable owner must not take an agent down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Path to the agent module (WASM or Python file).
     pub module: String,
     /// Scheduling mode.
@@ -1641,6 +1668,7 @@ impl Default for AgentManifest {
             version: crate::VERSION.to_string(),
             description: String::new(),
             author: String::new(),
+            owner: None,
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),
@@ -1750,12 +1778,27 @@ pub struct ManifestCapabilities {
     /// Allowed tool IDs.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub tools: Vec<String>,
-    /// Memory read scopes.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub memory_read: Vec<String>,
-    /// Memory write scopes.
-    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
-    pub memory_write: Vec<String>,
+    /// Memory read scopes, or `None` when the manifest never mentioned the key.
+    ///
+    /// The distinction is load-bearing (#7605).
+    /// Everywhere else in a manifest an empty list reads as "undeclared, therefore unrestricted" — `capabilities.tools = []` grants every tool — so an operator who writes `memory_read = []` to lock an agent out of memory gets the opposite of what they typed.
+    /// Keeping the tri-state lets `memory_read = []` mean "declared, and it grants nothing" while an absent key keeps the historical open default for the many manifests that never had a `[capabilities]` block.
+    ///
+    /// Read it through [`ManifestCapabilities::allows_own_memory_read`] rather than matching on the `Option` at call sites.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_read: Option<Vec<String>>,
+    /// Memory write scopes, or `None` when the manifest never mentioned the key.
+    /// See [`Self::memory_read`] for why this is an `Option` and not a plain `Vec`.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_compat::option_vec_lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_write: Option<Vec<String>>,
     /// Whether this agent can spawn sub-agents.
     pub agent_spawn: bool,
     /// Agent message patterns (e.g., ["*"] or ["agent-name"]).
@@ -1769,6 +1812,34 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+}
+
+impl ManifestCapabilities {
+    /// Whether this manifest permits reading the agent's own semantic-memory store (#7605).
+    ///
+    /// `None` — the manifest never declared `memory_read` — is permissive, matching how every other capability list in a manifest reads when absent.
+    /// A declared list must contain a scope that covers the store; `memory_read = []` therefore denies, which is the whole point of keeping the tri-state.
+    ///
+    /// This governs the **automatic** recall path.
+    /// The `memory_semantic_*` tool gate (#7808) answers the same question from the kernel-resolved `Capability::MemoryRead` list, where the declared-empty case has already collapsed into "no entries" and stays open for backwards compatibility.
+    pub fn allows_own_memory_read(&self) -> bool {
+        scope_list_covers_own_memory(self.memory_read.as_deref())
+    }
+
+    /// Whether this manifest permits writing the agent's own semantic-memory store (#7605).
+    /// See [`Self::allows_own_memory_read`]; `memory_write = []` blocks automatic memorization.
+    pub fn allows_own_memory_write(&self) -> bool {
+        scope_list_covers_own_memory(self.memory_write.as_deref())
+    }
+}
+
+fn scope_list_covers_own_memory(scopes: Option<&[String]>) -> bool {
+    match scopes {
+        None => true,
+        Some(scopes) => scopes
+            .iter()
+            .any(|s| crate::capability::scope_covers_own_memory(s)),
+    }
 }
 
 /// Per-agent override for the kernel-global `[rl_export]` policy (#3331).
@@ -2036,9 +2107,27 @@ pub struct AgentEntry {
     /// When the agent was last active.
     pub last_active: DateTime<Utc>,
     /// Parent agent (if spawned by another agent).
+    ///
+    /// Persisted since schema v54 (#7930) as the `agents.parent_id` column.
+    /// Read `None` together with [`Self::parent_unknown`]: `None` means "this agent has no parent" only when `parent_unknown` is `false`.
     pub parent: Option<AgentId>,
     /// Child agents spawned by this agent.
+    ///
+    /// **Derived, never stored.**
+    /// There is no `children` column; the store reconstructs this from the `parent_id` of every other row (`WHERE parent_id = ?`, served by `idx_agents_parent_id`).
+    /// Two stored copies of one relationship can disagree, and this pair already would have: `spawn_agent_inner` pushes onto the parent's in-memory list but persists only the child row.
+    /// Sorted by agent id so the list is byte-identical across reloads (#3298).
     pub children: Vec<AgentId>,
+    /// `true` when [`Self::parent`] is `None` because nothing was ever recorded, as opposed to because the agent genuinely has no parent.
+    ///
+    /// Set only by the store, and only for a row written before schema v54 (#7930) added `agents.parent_id`.
+    /// Such a row has `parent_recorded = 0` and its lineage is unrecoverable — it must not be reported as a root agent, which is what a bare `parent: None` would imply.
+    ///
+    /// The polarity is deliberate.
+    /// `false` (the `Default` / `#[serde(default)]` value) means "recorded and authoritative", which is correct for every entry built in memory by the kernel, since it knows the lineage it just assigned.
+    /// A `parent_recorded`-style field would have defaulted to the unsafe answer and silently mislabelled live agents as unknown.
+    #[serde(default)]
+    pub parent_unknown: bool,
     /// Active session ID.
     pub session_id: SessionId,
     /// Original TOML manifest path, if this agent was spawned from disk.
@@ -2116,6 +2205,9 @@ impl Default for AgentEntry {
             last_active: now,
             parent: None,
             children: Vec::new(),
+            // `false` = "parent is recorded and authoritative".
+            // Only the store's hydration path flips this, and only for a pre-v54 row (#7930).
+            parent_unknown: false,
             session_id: SessionId::default(),
             source_toml_path: None,
             tags: Vec::new(),
@@ -2474,20 +2566,97 @@ mod tests {
         assert!(tools.contains(&"agent_send".to_string()));
         assert!(tools.contains(&"channel_send".to_string()));
         assert!(tools.contains(&"memory_recall".to_string()));
-        assert_eq!(tools.len(), 6);
+        // Targeted delivery ships with the broadcast send (#7086).
+        assert!(tools.contains(&"channel_dm".to_string()));
+        // The roster read ships with the send (#7086).
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 8);
     }
 
     #[test]
     fn test_tool_profile_automation() {
         let tools = ToolProfile::Automation.tools();
         assert!(tools.contains(&"channel_send".to_string()));
-        assert_eq!(tools.len(), 12);
+        assert!(tools.contains(&"channel_dm".to_string()));
+        assert!(tools.contains(&"channel_members".to_string()));
+        assert_eq!(tools.len(), 14);
     }
 
     #[test]
     fn test_tool_profile_full() {
         let tools = ToolProfile::Full.tools();
         assert_eq!(tools, vec!["*"]);
+    }
+
+    /// #7605: `memory_read = []` in `agent.toml` must be distinguishable from
+    /// an absent key, or the operator's explicit lockout reads as the
+    /// permissive default that every other capability list uses when missing.
+    #[test]
+    fn declared_empty_memory_scopes_deny_while_an_absent_key_stays_open() {
+        let absent: ManifestCapabilities = toml::from_str("tools = []").expect("parse");
+        assert_eq!(absent.memory_read, None);
+        assert_eq!(absent.memory_write, None);
+        assert!(
+            absent.allows_own_memory_read(),
+            "a manifest with no [capabilities] memory keys keeps the historical open default"
+        );
+        assert!(absent.allows_own_memory_write());
+
+        let declared_empty: ManifestCapabilities =
+            toml::from_str("memory_read = []\nmemory_write = []").expect("parse");
+        assert_eq!(declared_empty.memory_read, Some(vec![]));
+        assert!(
+            !declared_empty.allows_own_memory_read(),
+            "regression #7605: memory_read = [] must block automatic recall"
+        );
+        assert!(
+            !declared_empty.allows_own_memory_write(),
+            "regression #7605: memory_write = [] must block automatic memorization"
+        );
+    }
+
+    #[test]
+    fn declared_memory_scopes_are_matched_against_the_agents_own_store() {
+        let wildcard: ManifestCapabilities =
+            toml::from_str("memory_read = [\"*\"]\nmemory_write = [\"self.*\"]").expect("parse");
+        assert!(wildcard.allows_own_memory_read());
+        assert!(wildcard.allows_own_memory_write());
+
+        // A grant that names an unrelated namespace is a declaration that
+        // does not reach this store.
+        let elsewhere: ManifestCapabilities =
+            toml::from_str("memory_read = [\"kv:*\"]\nmemory_write = [\"kv:*\"]").expect("parse");
+        assert!(!elsewhere.allows_own_memory_read());
+        assert!(!elsewhere.allows_own_memory_write());
+
+        let named: ManifestCapabilities =
+            toml::from_str("memory_read = [\"proactive\"]").expect("parse");
+        assert!(named.allows_own_memory_read());
+    }
+
+    /// The tri-state has to survive the msgpack / JSON round-trips a manifest
+    /// takes through the session store and the REST layer: an undeclared list
+    /// that came back as `Some([])` would silently switch memory off.
+    #[test]
+    fn undeclared_memory_scopes_survive_a_serde_roundtrip_as_undeclared() {
+        let caps = ManifestCapabilities::default();
+        let json = serde_json::to_string(&caps).expect("serialize");
+        assert!(
+            !json.contains("memory_read"),
+            "an undeclared list must not be emitted, or reading it back would declare it: {json}"
+        );
+        let back: ManifestCapabilities = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.memory_read, None);
+        assert!(back.allows_own_memory_read());
+
+        let declared = ManifestCapabilities {
+            memory_read: Some(vec![]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&declared).expect("serialize");
+        let back: ManifestCapabilities = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.memory_read, Some(vec![]));
+        assert!(!back.allows_own_memory_read());
     }
 
     #[test]
@@ -2506,7 +2675,10 @@ mod tests {
         assert!(caps.shell.is_empty());
         assert!(caps.agent_spawn);
         assert!(caps.agent_message.contains(&"*".to_string()));
-        assert!(caps.memory_read.contains(&"*".to_string()));
+        assert!(caps
+            .memory_read
+            .as_deref()
+            .is_some_and(|r| r.contains(&"*".to_string())));
     }
 
     #[test]
@@ -2515,7 +2687,10 @@ mod tests {
         assert!(caps.network.is_empty());
         assert!(caps.shell.is_empty());
         assert!(!caps.agent_spawn);
-        assert_eq!(caps.memory_read, vec!["self.*".to_string()]);
+        assert_eq!(
+            caps.memory_read.as_deref(),
+            Some(&["self.*".to_string()][..])
+        );
     }
 
     #[test]
@@ -3013,10 +3188,13 @@ memory_write = ["self.*"]
         let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.name, "brand-guardian");
         assert!(manifest.model.system_prompt.contains("Brand Guardian"));
-        assert_eq!(manifest.capabilities.memory_read, vec!["*".to_string()]);
+        assert_eq!(
+            manifest.capabilities.memory_read,
+            Some(vec!["*".to_string()])
+        );
         assert_eq!(
             manifest.capabilities.memory_write,
-            vec!["self.*".to_string()]
+            Some(vec!["self.*".to_string()])
         );
     }
 

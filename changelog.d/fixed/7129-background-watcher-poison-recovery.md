@@ -1,1 +1,0 @@
-- Recover poisoned background watcher state and close the stop-versus-registration race so stopping an agent aborts its in-flight tick and promptly releases the shared LLM concurrency permit. (#7129) (@houko)

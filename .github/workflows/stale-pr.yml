@@ -1,9 +1,14 @@
 name: Stale PR
 
-# Mark PRs with no activity for 14 days as stale.
-# Runs daily. Removes the label when new activity is detected.
+# Mark PRs with no activity for 14 days as stale. Runs daily.
+# New pushes remove the label immediately; other activity is reconciled daily.
 
 on:
+  pull_request:
+    paths:
+      - '.github/scripts/stale-pr.js'
+      - '.github/scripts/tests/stale-pr.test.js'
+      - '.github/workflows/stale-pr.yml'
   schedule:
     - cron: '23 3 * * *' # daily at 03:23 UTC
   pull_request_target:
@@ -11,46 +16,63 @@ on:
   workflow_dispatch:
 
 permissions:
-  pull-requests: write
+  contents: read
+
+# Two paths with different safety properties share this workflow.
+# The `pull_request_target` path only removes `stale-pr` from the single PR that was pushed to, so it is idempotent and safe to cancel — the newer push repeats the same removal.
+# The `schedule` / `workflow_dispatch` path sweeps up to 100 open PRs and adds or removes a label one PR at a time, so cancelling it mid-flight would leave a partially swept repository; every sweep shares the constant `sweep` group key and is never cancelled, which makes two overlapping cron fires serialise instead of racing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'sweep' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 jobs:
-  stale:
+  test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test stale PR API helpers
+        run: node .github/scripts/tests/stale-pr.test.js
+
+  stale:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: stale-pr-reconciliation
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
       - name: Manage stale-pr labels
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
+            const { applyEventPull, listOpenPulls, removeLabel } = require(
+              `${process.env.GITHUB_WORKSPACE}/.github/scripts/stale-pr.js`,
+            );
             const LABEL = 'stale-pr';
             const STALE_DAYS = 14;
             const now = Date.now();
             const cutoff = now - STALE_DAYS * 24 * 60 * 60 * 1000;
 
-            // On synchronize event: remove stale label from the pushed PR
-            if (context.eventName === 'pull_request_target') {
-              const pr = context.payload.pull_request;
-              const labels = pr.labels.map(l => l.name);
-              if (labels.includes(LABEL)) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: LABEL,
-                }).catch(() => {});
-                core.info(`#${pr.number}: removed "${LABEL}" (new push)`);
-              }
-              return;
-            }
-
-            // On schedule/dispatch: scan all open PRs
-            const { data: prs } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              sort: 'updated',
-              direction: 'asc',
-              per_page: 100,
-            });
+            // Every surviving event performs a full reconciliation. GitHub
+            // concurrency retains only one pending run, so this keeps a newer
+            // synchronize event from discarding another PR's pending cleanup.
+            // Prefer the event PR over a potentially stale list snapshot.
+            const prs = applyEventPull(
+              await listOpenPulls(github, context.repo),
+              context.payload.pull_request,
+            );
 
             for (const pr of prs) {
               const updatedAt = new Date(pr.updated_at).getTime();
@@ -68,12 +90,7 @@ jobs:
                 });
                 core.info(`#${pr.number}: added "${LABEL}" (last updated ${pr.updated_at})`);
               } else if (updatedAt >= cutoff && hasLabel) {
-                await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: pr.number,
-                  name: LABEL,
-                }).catch(() => {});
+                await removeLabel(github, context.repo, pr.number, LABEL, core);
                 core.info(`#${pr.number}: removed "${LABEL}" (recently updated)`);
               }
             }

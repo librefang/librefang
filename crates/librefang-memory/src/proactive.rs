@@ -31,11 +31,12 @@ use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    memory_scope_allows_recall, text_similarity, DefaultMemoryExtractor, Entity, EntityType,
-    ExtractionResult, GraphPattern, MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor,
-    MemoryFilter, MemoryFragment, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
-    ProactiveMemoryConfig, ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
-    CHAT_SCOPE_METADATA_KEY,
+    memory_scope_allows_recall, memory_session_scope_allows_recall, text_similarity,
+    DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern, MemoryAction,
+    MemoryAddResult, MemoryConflict, MemoryExtractor, MemoryFilter, MemoryFragment, MemoryId,
+    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
+    ProactiveMemoryHooks, Relation, RelationTriple, RelationType, CHAT_SCOPE_METADATA_KEY,
+    SESSION_SCOPE_METADATA_KEY,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -262,7 +263,28 @@ impl ProactiveMemoryStore {
     /// For each memory not accessed in the last day, applies:
     ///   `effective_rate = decay_rate / boost`, where
     ///   `boost = min(1 + log2(access_count), MAX_BOOST)`.
-    ///   `new_confidence = current_confidence * e^(-effective_rate * days_since_access)`
+    ///   `new_confidence = current_confidence * e^(-effective_rate * days_since_last_charge)`
+    ///
+    /// `days_since_last_charge` is measured from the later of `last_decayed_at`
+    /// and `accessed_at` — **not** from `accessed_at` alone (#7756).
+    /// Each tick writes `last_decayed_at = now` alongside the new confidence, so
+    /// every interval of idle time is charged exactly once and the total decay
+    /// over a span depends on the span, not on how many times the scheduler
+    /// happened to fire inside it.
+    /// Before this bookkeeping existed the `UPDATE` wrote `confidence` only,
+    /// nothing advanced, and each hourly tick re-applied the *whole* elapsed
+    /// idle span to an already-decayed value: the accumulated exponent grew
+    /// quadratically in idle time instead of linearly, driving a corpus
+    /// configured for a ~70-day half-life to ~1e-3 within weeks.
+    ///
+    /// Taking the *later* of the two timestamps is what keeps an actively
+    /// recalled memory safe. Such a row never matches the `accessed_at <
+    /// one_day_ago` gate, so its `last_decayed_at` stays stale for the whole
+    /// active period; charging from that stale stamp would hand the row one
+    /// large retroactive decay the first hour it finally goes idle.
+    /// `last_decayed_at IS NULL` — every row written before the v48 migration —
+    /// falls back to `accessed_at`, so a pre-migration memory takes exactly the
+    /// one-time decay this formula always intended rather than collapsing.
     ///
     /// Popular memories decay *slower* (rate divided by boost) instead of being
     /// multiplied back up. The previous formula multiplied by `boost` and
@@ -271,10 +293,10 @@ impl ProactiveMemoryStore {
     /// "popular memories stick around longer" intent while keeping decay
     /// strictly monotonic (per tick, confidence never increases).
     ///
-    /// Runs the decay pass immediately on every call — there is no internal
-    /// throttle. The once-per-hour cadence is enforced by the periodic
-    /// maintenance scheduler (see `run_periodic_maintenance`), so a direct
-    /// call (e.g. a manual `/decay` endpoint or a test) decays right away.
+    /// Runs the decay pass immediately on every call — there is no internal throttle.
+    /// The once-per-hour cadence lives in `maybe_decay_confidence`, which `maybe_run_maintenance` calls from the search / auto_retrieve / consolidate paths.
+    /// It is not a scheduler: nothing decays while an agent is idle, and a direct call (a manual `/decay` endpoint, a test) decays right away.
+    /// That throttle is also process-local, so a restart clears it — which no longer changes the total, because `last_decayed_at` is durable and an interval already charged cannot be charged again.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
         let decay_rate = self.read_config().confidence_decay_rate;
         if decay_rate <= 0.0 {
@@ -293,19 +315,20 @@ impl ProactiveMemoryStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT id, confidence, accessed_at, access_count
+                "SELECT id, confidence, accessed_at, access_count, last_decayed_at
                  FROM memories
                  WHERE deleted = 0 AND accessed_at < ?1",
             )
             .map_err(LibreFangError::memory)?;
 
-        let rows: Vec<(String, f64, String, i64)> = stmt
+        let rows: Vec<(String, f64, String, i64, Option<String>)> = stmt
             .query_map(rusqlite::params![one_day_ago.to_rfc3339()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, f64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })
             .map_err(LibreFangError::memory)?
@@ -318,7 +341,9 @@ impl ProactiveMemoryStore {
             })
             .collect();
 
-        for (id, current_confidence, accessed_str, access_count) in &rows {
+        let now_rfc3339 = now.to_rfc3339();
+
+        for (id, current_confidence, accessed_str, access_count, last_decayed_str) in &rows {
             let accessed_at = match chrono::DateTime::parse_from_rfc3339(accessed_str) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(e) => {
@@ -332,8 +357,43 @@ impl ProactiveMemoryStore {
                 }
             };
 
-            let days_since_access = (now - accessed_at).num_seconds() as f64 / 86400.0;
-            if days_since_access <= 0.0 {
+            // An unparseable `last_decayed_at` is treated as absent rather than
+            // fatal: falling back to `accessed_at` charges this row from its
+            // access clock, which is the same conservative path a pre-migration
+            // row takes. Failing the whole pass instead would let one corrupt
+            // stamp stop decay for every other memory.
+            let last_decayed_at = last_decayed_str.as_deref().and_then(|raw| {
+                match chrono::DateTime::parse_from_rfc3339(raw) {
+                    Ok(dt) => Some(dt.with_timezone(&Utc)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse last_decayed_at '{}' for memory {}, \
+                             falling back to accessed_at: {}",
+                            raw,
+                            id,
+                            e
+                        );
+                        None
+                    }
+                }
+            });
+
+            // Charge from the later of the two clocks — see the method doc for
+            // why `last_decayed_at` alone is not safe for a row that was
+            // actively recalled while it never qualified for a tick.
+            let charged_through = match last_decayed_at {
+                Some(dt) if dt > accessed_at => dt,
+                _ => accessed_at,
+            };
+
+            // Milliseconds, not seconds: at the hourly scheduler cadence the two
+            // agree, but truncating to whole seconds would silently drop the
+            // remainder of every interval and let a fast caller (a manual
+            // `/decay` request, a test) advance `last_decayed_at` without ever
+            // charging the sub-second span it skipped.
+            let days_since_last_charge =
+                (now - charged_through).num_milliseconds() as f64 / 86_400_000.0;
+            if days_since_last_charge <= 0.0 {
                 continue;
             }
 
@@ -346,12 +406,16 @@ impl ProactiveMemoryStore {
             let count = (*access_count).max(1) as f64;
             let boost = (1.0 + count.log2()).min(MAX_BOOST);
             let effective_rate = decay_rate / boost;
-            let new_confidence =
-                (current_confidence * (-effective_rate * days_since_access).exp()).clamp(0.0, 1.0);
+            let new_confidence = (current_confidence
+                * (-effective_rate * days_since_last_charge).exp())
+            .clamp(0.0, 1.0);
 
+            // `last_decayed_at` moves in the same statement as `confidence`.
+            // Writing one without the other is the bug this replaces: the next
+            // tick would charge the same span again.
             conn.execute(
-                "UPDATE memories SET confidence = ?1 WHERE id = ?2",
-                rusqlite::params![new_confidence, id],
+                "UPDATE memories SET confidence = ?1, last_decayed_at = ?2 WHERE id = ?3",
+                rusqlite::params![new_confidence, now_rfc3339, id],
             )
             .map_err(LibreFangError::memory)?;
         }
@@ -738,6 +802,7 @@ impl ProactiveMemoryStore {
         item: &MemoryItem,
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
         // Generate embedding for the new memory (if driver available)
         let query_embedding = if let Some(ref emb) = self.embedding {
@@ -860,6 +925,20 @@ impl ProactiveMemoryStore {
         if chat_scope_active && item.level != MemoryLevel::User {
             let want = chat_scope.unwrap();
             existing.retain(|frag| memory_scope_allows_recall(&frag.scope, &frag.metadata, want));
+        }
+        // Same treatment for the session scope (#7605), and for the same
+        // reason: a candidate belonging to ANOTHER session must not be
+        // reachable by the ADD/UPDATE/NOOP decision, or one visitor's turn
+        // would either NOOP against a stranger's memory (losing the fact) or
+        // UPDATE it in place (overwriting a stranger's memory with, and
+        // exposing it to, this turn's content).
+        //
+        // No `MemoryLevel::User` exemption here, unlike the chat filter
+        // above: two sessions of a public agent are two different people, so
+        // "this is a stable user fact" is a reason to keep the rows apart,
+        // not to merge them.
+        if let Some(want) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+            existing.retain(|frag| memory_session_scope_allows_recall(&frag.metadata, want));
         }
         // Truncate back to the extractor's expected window so we don't
         // hand it 20 candidates when it was tuned for 5.
@@ -1044,8 +1123,11 @@ impl ProactiveMemoryStore {
         }
     }
 
-    /// Evict the lowest-confidence memories for an agent if adding `new_count`
-    /// memories would exceed the configured `max_memories_per_agent` cap.
+    /// Evict memories for an agent if adding `new_count` would exceed the configured
+    /// `max_memories_per_agent` cap.
+    ///
+    /// Eviction order is decided by `SemanticStore::eviction_candidates`, which
+    /// ranks raw dialogue ahead of extracted facts before falling back to confidence.
     ///
     /// Does nothing when the cap is 0 (disabled) or when there is still room.
     fn evict_if_over_cap(&self, agent_id: AgentId, new_count: usize) -> LibreFangResult<()> {
@@ -1080,10 +1162,10 @@ impl ProactiveMemoryStore {
             new_count = new_count,
             max = max,
             evicting = to_evict,
-            "Per-agent memory cap exceeded, evicting lowest-confidence memories"
+            "Per-agent memory cap exceeded, evicting raw dialogue before extracted facts"
         );
 
-        let ids = self.semantic.lowest_confidence(agent_id, to_evict)?;
+        let ids = self.semantic.eviction_candidates(agent_id, to_evict)?;
         for id in &ids {
             self.semantic.forget(*id)?;
         }
@@ -1337,6 +1419,32 @@ impl ProactiveMemoryStore {
         })
     }
 
+    /// Count memories for every agent in one grouped SQL query.
+    pub fn count_by_agent(&self) -> LibreFangResult<HashMap<String, usize>> {
+        self.semantic.count_by_agent()
+    }
+
+    /// List one filtered dashboard page without a hidden candidate cap.
+    pub fn list_page(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<MemoryLevel>,
+        offset: usize,
+        limit: usize,
+    ) -> LibreFangResult<(Vec<MemoryItem>, usize)> {
+        let agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let scope = level.map(|value| value.scope_str());
+        let (fragments, total) = self
+            .semantic
+            .list_page(agent_id, category, scope, offset, limit)?;
+        let items = fragments
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .collect();
+        Ok((items, total))
+    }
+
     /// List memories across ALL agents, optionally filtered by category.
     ///
     /// Used by the dashboard to show all memories without agent scoping.
@@ -1384,6 +1492,74 @@ impl ProactiveMemoryStore {
             .take(limit)
             .collect();
 
+        Ok(items)
+    }
+
+    /// Search the dashboard memory corpus with optional agent and level filters.
+    ///
+    /// Filters are passed into semantic recall before its result limit is
+    /// applied. This prevents a level-scoped search from losing valid matches
+    /// merely because another level occupied the first `limit` candidates.
+    pub async fn search_dashboard_with_guard(
+        &self,
+        query: &str,
+        agent_id: Option<&str>,
+        level: Option<MemoryLevel>,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+
+        // Match the pre-existing maintenance behavior: agent-scoped search
+        // invokes it, while cross-agent dashboard search does not.
+        if agent_id.is_some() {
+            self.maybe_run_maintenance();
+        }
+        let parsed_agent_id = agent_id.map(Self::parse_agent_id).transpose()?;
+        let filter = if parsed_agent_id.is_some() || level.is_some() {
+            Some(MemoryFilter {
+                agent_id: parsed_agent_id,
+                scope: level.map(|value| value.scope_str().to_string()),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        let results = if let Some(ref embedding) = self.embedding {
+            if let Ok(query_embedding) = embedding.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&query_embedding))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
+
+        let mut items: Vec<MemoryItem> = results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .take(limit)
+            .collect();
+
+        // Preserve the existing agent-scoped graph enrichment, but never add
+        // an Agent-level synthetic item to a User/Session-filtered result set.
+        if parsed_agent_id.is_some()
+            && level.is_none_or(|value| value == MemoryLevel::Agent)
+            && items.len() < limit
+        {
+            if let Some(graph_context) = self.graph_context(query) {
+                items.push(
+                    MemoryItem::new(graph_context, MemoryLevel::Agent)
+                        .with_category("knowledge_graph"),
+                );
+            }
+        }
+
+        guard.redact_all(&mut items);
         Ok(items)
     }
 
@@ -1689,16 +1865,105 @@ impl ProactiveMemoryStore {
         query: &str,
         user_id: &str,
         limit: usize,
+        min_similarity: Option<f32>,
         guard: &crate::namespace_acl::MemoryNamespaceGuard,
     ) -> librefang_types::error::LibreFangResult<Vec<librefang_types::memory::MemoryItem>> {
         if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
             return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
         }
-        let mut items =
-            <Self as librefang_types::memory::ProactiveMemory>::search(self, query, user_id, limit)
-                .await?;
+        let mut items = match min_similarity {
+            // No per-call floor: take the trait path, which already applies the
+            // configured default.
+            None => {
+                <Self as librefang_types::memory::ProactiveMemory>::search(
+                    self, query, user_id, limit,
+                )
+                .await?
+            }
+            Some(floor) => self.search_with_floor(query, user_id, limit, floor).await?,
+        };
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Per-agent semantic search with an explicit cosine floor, overriding
+    /// [`ProactiveMemoryConfig::min_similarity`](librefang_types::memory::ProactiveMemoryConfig::min_similarity) for this one call (#7808).
+    ///
+    /// Deliberately *not* graph-enriched, unlike the trait `search`.
+    /// The synthetic knowledge-graph item that path appends carries no embedding and therefore no
+    /// similarity, so a caller who asked for "only fragments scoring at least `floor`" would get
+    /// back an item that was never measured against the floor at all — the one result guaranteed
+    /// to violate the guarantee they asked for.
+    async fn search_with_floor(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+        floor: f32,
+    ) -> librefang_types::error::LibreFangResult<Vec<MemoryItem>> {
+        self.maybe_run_maintenance();
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let filter = Some(MemoryFilter {
+            min_similarity: Some(floor),
+            ..MemoryFilter::agent(agent_id)
+        });
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&qe))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
+        Ok(results
+            .into_iter()
+            .map(MemoryItem::from_fragment)
+            .take(limit)
+            .collect())
+    }
+
+    /// Read-only duplicate inspection, gated on read access to the `proactive`
+    /// namespace (#7808).
+    ///
+    /// The counterpart to [`Self::consolidate_with_guard`] that changes nothing: it reports the
+    /// groups consolidation *would* merge, so an operator — or an agent that has not been granted
+    /// the destructive half — can see the pile of near-duplicates reinforcing a stale belief
+    /// without being able to act on it unattended.
+    /// PII redaction applies to every group, matching every other read wrapper.
+    pub async fn find_duplicates_with_guard(
+        &self,
+        user_id: &str,
+        level: Option<MemoryLevel>,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<Vec<Vec<MemoryItem>>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let mut groups = self.find_duplicates(user_id, level).await?;
+        for group in &mut groups {
+            guard.redact_all(group);
+        }
+        Ok(groups)
+    }
+
+    /// Consolidation wrapper. Requires the `delete` capability on the
+    /// `proactive` namespace, not merely `write` (#7808).
+    ///
+    /// Consolidation merges each near-duplicate group into its newest member and soft-deletes the
+    /// rest, so its effect on the store is deletion regardless of how the operation is named — and
+    /// the gate has to match the effect, not the name.
+    /// This is the same capability [`Self::reset_with_guard`] demands for the same reason.
+    pub async fn consolidate_with_guard(
+        &self,
+        user_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<u64> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_delete("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        self.consolidate(user_id).await
     }
 
     /// Delete wrapper that gates access to the `proactive` namespace and
@@ -1760,6 +2025,29 @@ impl ProactiveMemoryStore {
         let mut items = self.list_all(category).await?;
         guard.redact_all(&mut items);
         Ok(items)
+    }
+
+    /// Paginated dashboard listing wrapper.
+    ///
+    /// Applies namespace authorization before reading and PII redaction after
+    /// the SQL page is materialized, matching the existing list wrappers.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn list_page_with_guard(
+        &self,
+        agent_id: Option<&str>,
+        category: Option<&str>,
+        level: Option<librefang_types::memory::MemoryLevel>,
+        offset: usize,
+        limit: usize,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> librefang_types::error::LibreFangResult<(Vec<librefang_types::memory::MemoryItem>, usize)>
+    {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(librefang_types::error::LibreFangError::AuthDenied(reason));
+        }
+        let (mut items, total) = self.list_page(agent_id, category, level, offset, limit)?;
+        guard.redact_all(&mut items);
+        Ok((items, total))
     }
 
     /// Per-user list wrapper used by `/memory/user/{user_id}` and the
@@ -1910,8 +2198,13 @@ impl ProactiveMemory for ProactiveMemoryStore {
         self.maybe_run_maintenance();
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Filter by agent to avoid cross-agent leakage
-        let filter = Some(MemoryFilter::agent(agent_id));
+        // Filter by agent to avoid cross-agent leakage, and carry the
+        // deployment-wide similarity floor so automatic recall gets the same
+        // "nothing rather than noise" guarantee the search tool offers (#7808).
+        let filter = Some(MemoryFilter {
+            min_similarity: self.read_config().min_similarity,
+            ..MemoryFilter::agent(agent_id)
+        });
 
         // Use vector search if embedding driver available
         let results = if let Some(ref emb) = self.embedding {
@@ -1992,7 +2285,9 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Step 2-4: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
-            let result = self.add_with_decision(agent_id, item, None, None).await?;
+            let result = self
+                .add_with_decision(agent_id, item, None, None, None)
+                .await?;
             if let Some(r) = result {
                 results.push(r.item);
             }
@@ -2463,6 +2758,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         conversation: &[serde_json::Value],
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<ExtractionResult> {
         let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_memorize || conversation.is_empty() {
@@ -2540,9 +2836,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                     );
                 }
             }
+            // #7605: stamp the session the turn belongs to, so a memory
+            // extracted while serving one visitor cannot be recalled into
+            // another visitor's turn on the same agent. Every level is
+            // stamped, including `MemoryLevel::User` — see
+            // `memory_session_scope_allows_recall` for why that one has no
+            // exemption. A caller that wants the pre-#7605 agent-wide pool
+            // passes `None`.
+            if let Some(scope) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+                enriched.metadata.insert(
+                    SESSION_SCOPE_METADATA_KEY.to_string(),
+                    serde_json::Value::String(scope.to_string()),
+                );
+            }
 
             match self
-                .add_with_decision(agent_id, &enriched, peer_id, chat_scope)
+                .add_with_decision(agent_id, &enriched, peer_id, chat_scope, session_scope)
                 .await
             {
                 Ok(Some(result)) => {
@@ -2656,6 +2965,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         query: &str,
         peer_id: Option<&str>,
         chat_scope: Option<&str>,
+        session_scope: Option<&str>,
     ) -> LibreFangResult<Vec<MemoryItem>> {
         let cfg = self.read_config().clone();
         if !cfg.enabled || !cfg.auto_retrieve {
@@ -2684,7 +2994,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // bug reproducer (DM and group turns interleaving within minutes
         // for the same agent+peer).
         let chat_scope_active = chat_scope.map(str::trim).is_some_and(|s| !s.is_empty());
-        let fetch_limit = if chat_scope_active {
+        // #7605 widens the same window for the same reason: the session
+        // post-filter below also throws candidates away, and on a public
+        // agent it throws away far more of them than the chat filter does
+        // (every other visitor's rows), so the two share one inflated fetch.
+        let active_session_scope = session_scope.map(str::trim).filter(|s| !s.is_empty());
+        let fetch_limit = if chat_scope_active || active_session_scope.is_some() {
             (cfg.max_retrieve * 4).max(50)
         } else {
             cfg.max_retrieve
@@ -2714,16 +3029,23 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         //      chat-agnostic to avoid silently hiding existing data.
         //   3. Memories whose `chat_scope` equals the active scope —
         //      same chat, same context, safe to surface.
-        let filtered: Vec<MemoryItem> = if chat_scope_active {
-            let want = chat_scope.unwrap();
-            items
-                .into_iter()
-                .filter(|m| memory_chat_scope_allows(m, want))
-                .take(cfg.max_retrieve)
-                .collect()
-        } else {
-            items.into_iter().take(cfg.max_retrieve).collect()
-        };
+        //
+        // The #7605 session filter composes with it: a memory has to clear
+        // both, and it is applied to every level (no `MemoryLevel::User`
+        // exemption) because distinct sessions of a public agent are
+        // distinct people.
+        let filtered: Vec<MemoryItem> = items
+            .into_iter()
+            .filter(|m| match chat_scope.filter(|_| chat_scope_active) {
+                Some(want) => memory_chat_scope_allows(m, want),
+                None => true,
+            })
+            .filter(|m| match active_session_scope {
+                Some(want) => memory_session_scope_allows_recall(&m.metadata, want),
+                None => true,
+            })
+            .take(cfg.max_retrieve)
+            .collect();
 
         Ok(filtered)
     }
@@ -2847,6 +3169,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2874,6 +3197,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -2898,7 +3222,7 @@ mod tests {
 
         // Retrieve - should find content from this agent
         let results = store
-            .auto_retrieve(&agent_id, "dark mode", None, None)
+            .auto_retrieve(&agent_id, "dark mode", None, None, None)
             .await
             .unwrap();
         assert!(!results.is_empty());
@@ -2982,7 +3306,13 @@ mod tests {
 
         // DM-scoped recall must NOT see the group-scoped Atlas memory.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(dm_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(dm_scope),
+                None,
+            )
             .await
             .unwrap();
         for c in dm_hits.iter().map(|m| m.content.as_str()) {
@@ -3000,6 +3330,7 @@ mod tests {
                 "project Atlas",
                 Some(peer),
                 Some(group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3011,7 +3342,7 @@ mod tests {
 
         // Legacy unscoped memory crosses chats — both recalls hit it.
         let legacy_in_dm = store
-            .auto_retrieve(&agent_id_str, "dark mode", Some(peer), Some(dm_scope))
+            .auto_retrieve(&agent_id_str, "dark mode", Some(peer), Some(dm_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3022,7 +3353,7 @@ mod tests {
         // User-level memory crosses chats too — its stamped scope is
         // ignored because of the level-User exemption.
         let user_in_group = store
-            .auto_retrieve(&agent_id_str, "John", Some(peer), Some(group_scope))
+            .auto_retrieve(&agent_id_str, "John", Some(peer), Some(group_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3033,7 +3364,7 @@ mod tests {
         // When chat_scope is None (no channel context — e.g. dashboard,
         // direct API), the filter is a no-op and everything is visible.
         let unscoped = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), None)
+            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), None, None)
             .await
             .unwrap();
         assert!(
@@ -3042,13 +3373,176 @@ mod tests {
         );
     }
 
-    /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto
-    /// stored memories so the recall filter has something to act on.
-    /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a
-    /// `MemoryLevel::User` memory; that's fine — the assertion is only
-    /// about the metadata key being present and equal to the scope
-    /// supplied by the caller. (Level-User exemption is verified
-    /// separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
+    /// #7605 — the reported privacy leak, end to end through the store.
+    ///
+    /// A public agent serves every website visitor from one per-agent memory store.
+    /// Before this fix, a fact auto-memorized while serving visitor A was auto-retrieved into visitor B's turn even though the two turns were addressed to different `session_id`s and their message histories never touched — which is why the reporter was calling `DELETE /api/memory/agents/{id}` before every turn.
+    #[tokio::test]
+    async fn auto_memorize_then_retrieve_does_not_cross_sessions_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let stored = store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer dark mode and my customer code is PINE-77"
+                })],
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        assert!(stored.has_content, "extractor must produce a memory");
+
+        let in_b = store
+            .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session_b))
+            .await
+            .unwrap();
+        assert!(
+            in_b.is_empty(),
+            "regression #7605: session A's memories reached session B's turn: {:?}",
+            in_b.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+
+        let in_a = store
+            .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session_a))
+            .await
+            .unwrap();
+        assert!(
+            !in_a.is_empty(),
+            "the session that produced the memory must still recall it — the filter must not over-prune"
+        );
+    }
+
+    /// The isolation must not blank out an existing store on upgrade: rows
+    /// written before #7605 carry no session tag and stay recallable from
+    /// every session. And a caller that passes no session scope (the operator
+    /// turned `session_scoped_recall` off) gets the old agent-wide pool back.
+    #[tokio::test]
+    async fn untagged_memories_and_unscoped_callers_keep_pre_7605_recall() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new();
+        let agent_id_str = agent_id.to_string();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        // Legacy row: written with no session scope at all.
+        store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer dark mode in every editor"
+                })],
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        for session in [session_a, session_b] {
+            let hits = store
+                .auto_retrieve(&agent_id_str, "dark mode", None, None, Some(session))
+                .await
+                .unwrap();
+            assert!(
+                !hits.is_empty(),
+                "untagged legacy memory must stay recallable from session {session}"
+            );
+        }
+
+        // Now a session-A row, recalled by a caller that opted out of scoping.
+        store
+            .auto_memorize(
+                &agent_id_str,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I prefer tabs over spaces, customer code PINE-77"
+                })],
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        let unscoped = store
+            .auto_retrieve(&agent_id_str, "tabs over spaces", None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            unscoped
+                .iter()
+                .any(|m| m.content.contains("tabs over spaces")),
+            "with session scoping off the whole agent pool is a candidate again; got {:?}",
+            unscoped.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// The dedup decision runs over a candidate set fetched from the whole
+    /// agent's store. Without the same session filter there, session B's turn
+    /// could NOOP against a stranger's row (losing the fact) or UPDATE it in
+    /// place — overwriting one visitor's memory with another's content.
+    #[tokio::test]
+    async fn dedup_candidates_do_not_cross_sessions_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+        let make = |content: &str, session: &str| {
+            let mut item = MemoryItem::new(content.to_string(), MemoryLevel::Session);
+            item.metadata.insert(
+                SESSION_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(session.to_string()),
+            );
+            item
+        };
+
+        let first = store
+            .add_with_decision(
+                agent_id,
+                &make("Customer code is PINE-77", session_a),
+                None,
+                None,
+                Some(session_a),
+            )
+            .await
+            .unwrap();
+        assert!(first.is_some(), "the first write must land");
+
+        let second = store
+            .add_with_decision(
+                agent_id,
+                &make("Customer code is PINE-77", session_b),
+                None,
+                None,
+                Some(session_b),
+            )
+            .await
+            .unwrap();
+        let second = second.expect(
+            "an identical fact from a DIFFERENT session must ADD its own row, not dedupe against the other session's",
+        );
+        assert_ne!(
+            second.item.id,
+            first.unwrap().item.id,
+            "regression #7605: session B's write was folded into session A's memory"
+        );
+    }
+
+    /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto stored memories so the recall filter has something to act on.
+    /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a `MemoryLevel::User` memory; that's fine — the assertion is only about the metadata key being present and equal to the scope supplied by the caller.
+    /// (Level-User exemption is verified separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
     #[tokio::test]
     async fn test_auto_memorize_stamps_chat_scope_5227() {
         use librefang_types::memory::CHAT_SCOPE_METADATA_KEY;
@@ -3070,6 +3564,7 @@ mod tests {
                 })],
                 Some(peer),
                 Some(group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3225,7 +3720,13 @@ mod tests {
 
         // DM-scope recall must NOT see the group memory.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "project Atlas", Some(peer), Some(&dm_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "project Atlas",
+                Some(peer),
+                Some(&dm_scope),
+                None,
+            )
             .await
             .unwrap();
         for content in dm_hits.iter().map(|m| m.content.as_str()) {
@@ -3244,6 +3745,7 @@ mod tests {
                 "project Atlas",
                 Some(peer),
                 Some(&group_scope),
+                None,
             )
             .await
             .unwrap();
@@ -3305,7 +3807,7 @@ mod tests {
         // 1) First chat (DM): write the fact. Empty substrate → ADD.
         let dm_item = make_item("My deadline is Friday", &dm_scope);
         let dm_result = store
-            .add_with_decision(agent_id, &dm_item, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &dm_item, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(dm_result.is_some(), "first write must ADD");
@@ -3316,7 +3818,7 @@ mod tests {
         //    and the extractor picks ADD again.
         let group_item = make_item("My deadline is Friday", &group_scope);
         let group_result = store
-            .add_with_decision(agent_id, &group_item, Some(peer), Some(&group_scope))
+            .add_with_decision(agent_id, &group_item, Some(peer), Some(&group_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3328,7 +3830,7 @@ mod tests {
         // 3) Both scope-matching recalls must surface the fact for their
         //    chat.
         let dm_hits = store
-            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&dm_scope))
+            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(
@@ -3337,7 +3839,13 @@ mod tests {
             dm_hits.iter().map(|m| &m.content).collect::<Vec<_>>()
         );
         let group_hits = store
-            .auto_retrieve(&agent_id_str, "deadline", Some(peer), Some(&group_scope))
+            .auto_retrieve(
+                &agent_id_str,
+                "deadline",
+                Some(peer),
+                Some(&group_scope),
+                None,
+            )
             .await
             .unwrap();
         assert!(
@@ -3353,7 +3861,7 @@ mod tests {
         //    inside one chat.
         let same_chat_dupe = make_item("My deadline is Friday", &dm_scope);
         let dupe_result = store
-            .add_with_decision(agent_id, &same_chat_dupe, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &same_chat_dupe, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         // The DefaultMemoryExtractor decides NOOP for an exact-content
@@ -3399,7 +3907,7 @@ mod tests {
         // First write: ADD.
         let first = make_user_item("User's name is John Doe", &dm_scope);
         let r1 = store
-            .add_with_decision(agent_id, &first, Some(peer), Some(&dm_scope))
+            .add_with_decision(agent_id, &first, Some(peer), Some(&dm_scope), None)
             .await
             .unwrap();
         assert!(r1.is_some(), "first user-level write must ADD");
@@ -3409,7 +3917,7 @@ mod tests {
         // a second physical row.
         let second = make_user_item("User's name is John Doe", &group_scope);
         let r2 = store
-            .add_with_decision(agent_id, &second, Some(peer), Some(&group_scope))
+            .add_with_decision(agent_id, &second, Some(peer), Some(&group_scope), None)
             .await
             .unwrap();
         if let Some(r) = &r2 {
@@ -3699,6 +4207,7 @@ mod tests {
             image_url: None,
             image_embedding: None,
             modality: Default::default(),
+            similarity: None,
         };
 
         // A new memory with similar content + same category. With the
@@ -4128,6 +4637,7 @@ mod tests {
                 })],
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -4151,6 +4661,7 @@ mod tests {
                     "role": "user",
                     "content": "I use vim for editing"
                 })],
+                None,
                 None,
                 None,
             )
@@ -4336,6 +4847,14 @@ mod tests {
             Err(librefang_types::error::LibreFangError::AuthDenied(_))
         ));
 
+        let err = store
+            .search_dashboard_with_guard("topsecret", None, None, 10, &guard)
+            .await;
+        assert!(matches!(
+            err,
+            Err(librefang_types::error::LibreFangError::AuthDenied(_))
+        ));
+
         let err = store.list_all_with_guard(None, &guard).await;
         assert!(matches!(
             err,
@@ -4352,6 +4871,72 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_search_filters_agent_and_level_before_limit() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_a = AgentId::new().to_string();
+        let agent_b = AgentId::new().to_string();
+
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user A"})],
+                &agent_a,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+        for index in 0..60 {
+            store
+                .add_with_level(
+                    &[serde_json::json!({
+                        "role": "user",
+                        "content": format!("needle session {index}")
+                    })],
+                    &agent_a,
+                    MemoryLevel::Session,
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "needle user B"})],
+                &agent_b,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+
+        let guard = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            ..Default::default()
+        });
+        let scoped = store
+            .search_dashboard_with_guard(
+                "needle",
+                Some(&agent_a),
+                Some(MemoryLevel::User),
+                50,
+                &guard,
+            )
+            .await
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].content, "needle user A");
+        assert_eq!(scoped[0].level, MemoryLevel::User);
+
+        let global = store
+            .search_dashboard_with_guard("needle", None, Some(MemoryLevel::User), 50, &guard)
+            .await
+            .unwrap();
+        assert_eq!(global.len(), 2);
+        assert!(global.iter().all(|item| item.level == MemoryLevel::User));
     }
 
     /// PII redaction MUST replace fields when the guard's `pii_access=false`.
@@ -4383,7 +4968,7 @@ mod tests {
             ..Default::default()
         });
         let items = store
-            .search_all_with_guard("alice", 10, &guard)
+            .search_dashboard_with_guard("alice", None, None, 10, &guard)
             .await
             .unwrap();
         for item in items {
@@ -4452,6 +5037,219 @@ mod tests {
             "popular memory must decay below 1.0; got {after} (boost-immortality regression)"
         );
         assert!(after > 0.0, "confidence must remain positive; got {after}");
+    }
+
+    /// Seed one stale, non-popular memory: 10 days idle, `confidence = 1.0`,
+    /// `access_count = 1` (so `boost = 1 + log2(1) = 1` and the effective rate is
+    /// exactly the configured `confidence_decay_rate`), and `last_decayed_at`
+    /// left NULL as if the row predates the v48 migration.
+    fn seed_stale_memory(store: &ProactiveMemoryStore, idle_days: i64) -> String {
+        let agent = AgentId::new();
+        let mid = store
+            .semantic
+            .remember(
+                agent,
+                "the deploy key lives in the vault",
+                MemorySource::Conversation,
+                "agent_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        let id = mid.0.to_string();
+        let stale = (Utc::now() - chrono::Duration::days(idle_days)).to_rfc3339();
+        let db = store.semantic.pool().get().unwrap();
+        db.execute(
+            "UPDATE memories \
+             SET confidence = 1.0, access_count = 1, accessed_at = ?1, last_decayed_at = NULL \
+             WHERE id = ?2",
+            rusqlite::params![stale, id],
+        )
+        .unwrap();
+        id
+    }
+
+    fn read_confidence(store: &ProactiveMemoryStore, id: &str) -> f64 {
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT confidence FROM memories WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn read_last_decayed_at(store: &ProactiveMemoryStore, id: &str) -> Option<String> {
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT last_decayed_at FROM memories WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Rewind a row's decay clock, simulating wall-clock time passing between
+    /// two scheduler ticks without making the test sleep.
+    fn rewind_decay_clock(store: &ProactiveMemoryStore, id: &str, days: i64) {
+        let then = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        store
+            .semantic
+            .pool()
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET last_decayed_at = ?1 WHERE id = ?2",
+                rusqlite::params![then, id],
+            )
+            .unwrap();
+    }
+
+    /// The #7756 regression: total decay must be a function of elapsed time, not
+    /// of how many times the scheduler fired.
+    ///
+    /// Before the fix the `UPDATE` wrote `confidence` only, so `days_since_access`
+    /// was recomputed from an `accessed_at` that never moved and each tick
+    /// re-applied the *entire* 10-day span to an already-decayed value. Five
+    /// back-to-back ticks produced `exp(-0.01 * 10)^5 = 0.607` instead of
+    /// `exp(-0.01 * 10) = 0.905` — and the real scheduler fires hourly, which is
+    /// how a corpus configured for a ~70-day half-life reached ~1e-3 in weeks.
+    #[test]
+    fn decay_total_depends_on_elapsed_time_not_tick_count() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 10);
+
+        store.decay_confidence().unwrap();
+        let after_one_tick = read_confidence(&store, &id);
+
+        // Four more ticks with no wall-clock time to charge for.
+        for _ in 0..4 {
+            store.decay_confidence().unwrap();
+        }
+        let after_five_ticks = read_confidence(&store, &id);
+
+        let expected = (-rate * 10.0f64).exp();
+        assert!(
+            (after_one_tick - expected).abs() < 1e-6,
+            "one tick over a 10-day idle span must apply exp(-rate*10) = {expected}; got {after_one_tick}"
+        );
+        assert!(
+            (after_five_ticks - after_one_tick).abs() < 1e-6,
+            "five ticks in the same instant must equal one tick: \
+             got {after_five_ticks} after five vs {after_one_tick} after one \
+             (pre-fix this compounded to {})",
+            after_one_tick.powi(5)
+        );
+    }
+
+    /// The other half of the same property: when time *does* pass between ticks,
+    /// decay must accumulate for exactly that extra span.
+    #[test]
+    fn decay_accumulates_over_time_between_ticks() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 10);
+
+        store.decay_confidence().unwrap();
+        let after_first = read_confidence(&store, &id);
+
+        // Five more days of idleness elapse, then the scheduler fires again.
+        rewind_decay_clock(&store, &id, 5);
+        store.decay_confidence().unwrap();
+        let after_second = read_confidence(&store, &id);
+
+        assert!(
+            after_second < after_first,
+            "a tick after five more idle days must decay further: {after_second} !< {after_first}"
+        );
+        let expected = (-rate * 15.0f64).exp();
+        assert!(
+            (after_second - expected).abs() < 1e-6,
+            "10 idle days then 5 more must total exp(-rate*15) = {expected}; got {after_second}"
+        );
+    }
+
+    /// A row written before the v48 migration has `last_decayed_at IS NULL`. It
+    /// must fall back to `accessed_at` and take the single one-time decay the
+    /// formula always intended — not collapse to zero, and not be skipped.
+    #[test]
+    fn pre_migration_row_decays_once_without_collapsing() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let rate = store.config().confidence_decay_rate;
+        let id = seed_stale_memory(&store, 60);
+
+        assert_eq!(
+            read_last_decayed_at(&store, &id),
+            None,
+            "seed must reproduce a pre-migration row"
+        );
+
+        store.decay_confidence().unwrap();
+
+        let after = read_confidence(&store, &id);
+        let expected = (-rate * 60.0f64).exp();
+        assert!(
+            (after - expected).abs() < 1e-6,
+            "a 60-day-idle pre-migration row must decay to exp(-rate*60) = {expected}; got {after}"
+        );
+        assert!(
+            after > 0.5,
+            "60 days at the default rate must not collapse the row; got {after}"
+        );
+        assert!(
+            read_last_decayed_at(&store, &id).is_some(),
+            "the tick must stamp last_decayed_at so the next one charges only the new span"
+        );
+    }
+
+    /// Decay is monotonic and stays inside `[0, 1]` no matter how far it runs,
+    /// including once the exponential has underflowed to zero.
+    #[test]
+    fn decay_is_monotonic_and_clamped_to_unit_range() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let mut config = store.config();
+        // An aggressive rate so 20 charged intervals drive the value through the
+        // floor within the test rather than hovering near 1.0.
+        config.confidence_decay_rate = 2.0;
+        store.update_config(config);
+
+        let id = seed_stale_memory(&store, 10);
+
+        let mut previous = read_confidence(&store, &id);
+        for tick in 0..20 {
+            rewind_decay_clock(&store, &id, 10);
+            store.decay_confidence().unwrap();
+            let current = read_confidence(&store, &id);
+            assert!(
+                (0.0..=1.0).contains(&current),
+                "confidence must stay in [0,1]; tick {tick} gave {current}"
+            );
+            assert!(
+                current <= previous,
+                "confidence must never increase; tick {tick} went {previous} -> {current}"
+            );
+            previous = current;
+        }
+        assert!(
+            previous < 1e-100,
+            "200 idle days at rate 2.0 must drive confidence to the floor; got {previous}"
+        );
+        assert!(
+            previous >= 0.0,
+            "confidence must never go negative or NaN; got {previous}"
+        );
     }
 
     /// `metadata["confidence"]` written by the LLM extractor must be honored
@@ -4648,6 +5446,58 @@ mod tests {
         assert!(
             matches!(decay_err, Err(LibreFangError::AuthDenied(_))),
             "decay_confidence_with_guard must deny Viewer; got {decay_err:?}"
+        );
+
+        // #7808: consolidation reads like maintenance and behaves like a bulk
+        // delete — it merges near-duplicate groups and soft-deletes every
+        // member but the newest. The gate has to match the effect.
+        let consolidate_err = store.consolidate_with_guard(&agent, &viewer).await;
+        assert!(
+            matches!(consolidate_err, Err(LibreFangError::AuthDenied(_))),
+            "consolidate_with_guard must deny Viewer; got {consolidate_err:?}"
+        );
+
+        // Its read-only counterpart must NOT be denied to a Viewer: reporting
+        // which memories duplicate each other changes nothing, and withholding
+        // it would leave a read-only operator unable to see why recall is
+        // repeating itself.
+        let duplicates = store
+            .find_duplicates_with_guard(&agent, None, &viewer)
+            .await;
+        assert!(
+            duplicates.is_ok(),
+            "find_duplicates_with_guard is a read and must be allowed to Viewer; got {duplicates:?}"
+        );
+    }
+
+    /// #7808: the read half of the duplicate surface is still a memory read, so
+    /// an ACL that denies `proactive` reads must deny it — the failing-open
+    /// alternative would hand a caller barred from `list_with_guard` the same
+    /// contents grouped differently.
+    #[tokio::test]
+    async fn find_duplicates_with_guard_denies_unauthorised_read() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::error::LibreFangError;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let denied = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["kv:self".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        });
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new().to_string();
+
+        let err = store
+            .find_duplicates_with_guard(&agent, None, &denied)
+            .await;
+        assert!(
+            matches!(err, Err(LibreFangError::AuthDenied(_))),
+            "find_duplicates_with_guard must deny a caller with no proactive read; got {err:?}"
         );
     }
 }

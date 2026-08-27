@@ -33,6 +33,17 @@ describe('i18n completeness', () => {
     expect(languages.some(lang => lang.code === 'uk')).toBe(true)
   })
 
+  it('keeps homepage download copy in every raw locale catalog', () => {
+    for (const lang of languages) {
+      const downloads = rawTranslations[lang.code]?.downloads
+      expect(downloads?.title, `${lang.code} downloads.title`).toBeTruthy()
+      expect(downloads?.desc, `${lang.code} downloads.desc`).toBeTruthy()
+      expect(downloads?.onlineDeploy, `${lang.code} downloads.onlineDeploy`).toBeTruthy()
+      expect(downloads?.allReleases, `${lang.code} downloads.allReleases`).toBeTruthy()
+      expect(downloads?.sdk, `${lang.code} downloads.sdk`).toBeTruthy()
+    }
+  })
+
   it('falls back to English when a locale is unknown', () => {
     expect(getTranslation('missing-locale').hero.title1).toBe(rawTranslations.en!.hero.title1)
   })

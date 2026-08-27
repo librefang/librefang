@@ -3,7 +3,7 @@
 //! triggers, route the success path through proactive-memory writes, and
 //! periodically fold stale tool results to keep the context window viable.
 
-use super::message::sanitize_for_memory;
+use super::message::{budget_interaction_halves, sanitize_for_memory};
 use super::prompt::{remember_interaction_best_effort, reply_directives_from_parsed};
 use super::text_recovery::{looks_like_hallucinated_action, user_message_has_action_intent};
 use super::*;
@@ -33,6 +33,11 @@ pub(super) struct FinalizeEndTurnContext<'a> {
     /// `librefang_types::agent::compose_sender_scope` so the formula
     /// matches `SessionId::for_sender_scope`'s scope-string composition.
     pub(super) sender_chat_scope: Option<&'a str>,
+    /// Identity of the session this turn belongs to, when session-scoped recall is in effect for the agent (#7605).
+    /// Stamped onto every memory `auto_memorize` extracts, so a later turn in a different session will not recall it.
+    /// `None` stores session-agnostic memories, which is the pre-#7605 behaviour and what an operator gets back by setting `session_scoped_recall = false`.
+    /// Produced by [`session_recall_scope`].
+    pub(super) session_scope: Option<&'a str>,
     pub(super) streaming: bool,
     pub(super) opts: &'a LoopOptions,
 }
@@ -260,6 +265,13 @@ pub(super) async fn finalize_successful_end_turn(
             sanitize_for_memory(ctx.user_message),
             sanitize_for_memory(&end_turn.final_response),
         ) {
+            // Bound the row before it is composed, so the cap applies to what gets embedded as well as to what gets stored (#7911).
+            // A channel adapter that renders an attachment into the user message used to land here verbatim — the issue reports a single 201 765-character row that had been retrieved 63 times.
+            let (user_clean, resp_clean) = budget_interaction_halves(
+                &user_clean,
+                &resp_clean,
+                ctx.memory.max_episodic_chars(),
+            );
             let interaction_text =
                 format!("[Past exchange]\nThem: {user_clean}\nYou: {resp_clean}");
             // `sender_user_id` (SenderContext.user_id) is the platform user
@@ -333,6 +345,7 @@ pub(super) async fn finalize_successful_end_turn(
                     &messages_json,
                     ctx.sender_user_id,
                     ctx.sender_chat_scope,
+                    ctx.session_scope,
                 )
                 .await
             {
@@ -485,8 +498,14 @@ pub(super) async fn maybe_fold_stale_tool_results(
     folded
 }
 
-/// Gate the proactive-memory store for the *retrieve* side based on the
-/// per-agent override in `manifest.proactive_memory` (#4870).
+/// Gate the proactive-memory store for the *retrieve* side (#4870, #7605).
+///
+/// Two independent reasons to skip retrieval, checked in this order:
+///
+/// 1. `capabilities.memory_read` is declared and grants no scope covering the agent's own memory (#7605).
+///    An operator who writes `memory_read = []` into `agent.toml` is asking for exactly that, and until this gate existed they still got a populated `memories_used` on every turn.
+///    An absent `memory_read` key stays permissive, matching how every other capability list reads when it is not there.
+/// 2. The per-agent `[proactive_memory]` override disables `auto_retrieve` (#4870).
 ///
 /// Returns `Some(store)` when both the kernel-global config and the
 /// per-agent override allow `auto_retrieve`, else `None`. The store's
@@ -499,6 +518,13 @@ pub(super) fn gated_proactive_memory_for_retrieve<'a>(
     pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
 ) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
     let store = pm?;
+    if !manifest.capabilities.allows_own_memory_read() {
+        tracing::debug!(
+            agent = %manifest.name,
+            "capabilities.memory_read grants no scope over this agent's own memory; skipping proactive memory retrieval"
+        );
+        return None;
+    }
     if manifest.proactive_memory.is_empty() {
         return Some(store);
     }
@@ -514,14 +540,20 @@ pub(super) fn gated_proactive_memory_for_retrieve<'a>(
     }
 }
 
-/// Gate the proactive-memory store for the *memorize* side based on the
-/// per-agent override in `manifest.proactive_memory` (#4870). See
-/// [`gated_proactive_memory_for_retrieve`] for the rationale.
+/// Gate the proactive-memory store for the *memorize* side (#4870, #7605).
+/// `capabilities.memory_write` gates it the way `memory_read` gates the retrieve half; see [`gated_proactive_memory_for_retrieve`] for the rationale and for why a declared-empty list is not the same as an absent one.
 pub(super) fn gated_proactive_memory_for_memorize<'a>(
     manifest: &AgentManifest,
     pm: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
 ) -> Option<&'a Arc<librefang_memory::ProactiveMemoryStore>> {
     let store = pm?;
+    if !manifest.capabilities.allows_own_memory_write() {
+        tracing::debug!(
+            agent = %manifest.name,
+            "capabilities.memory_write grants no scope over this agent's own memory; skipping proactive memory extraction"
+        );
+        return None;
+    }
     if manifest.proactive_memory.is_empty() {
         return Some(store);
     }
@@ -534,5 +566,202 @@ pub(super) fn gated_proactive_memory_for_memorize<'a>(
             "Per-agent override disables auto_memorize; skipping proactive memory extraction"
         );
         None
+    }
+}
+
+/// Resolve the session identity that memory reads and writes are scoped to for this turn (#7605).
+///
+/// Returns `Some(session_id_string)` when session-scoped recall is in effect, which is the default, and `None` when the operator has turned it off — globally via `[proactive_memory] session_scoped_recall = false` in `config.toml`, or for one agent via the same key in the `[proactive_memory]` block of `agent.toml`.
+///
+/// The identity is the session the loop is already reading and writing, not a new one derived here: whatever the resolution ladder in `docs/architecture/session-mode-resolution.md` settled on for this invocation — the canonical session for a bare `librefang message`, the caller's `session_id` for a REST turn or `librefang message --session-id`, `SessionId::for_channel` for a channel message, the parent's session for a fork.
+///
+/// A consequence worth naming: an agent with `session_mode = "new"` gets a fresh session per invocation, so with this on it no longer auto-recalls what a previous invocation memorized.
+/// That is the intended reading of "new" — an isolated turn — but an agent that relied on the old agent-wide pool for continuity wants `session_scoped_recall = false` in its `agent.toml`.
+pub(super) fn session_recall_scope(
+    manifest: &AgentManifest,
+    session: &librefang_memory::session::Session,
+    pm: Option<&Arc<librefang_memory::ProactiveMemoryStore>>,
+) -> Option<String> {
+    let global = pm?.config();
+    if !manifest
+        .proactive_memory
+        .resolve_session_scoped_recall(&global)
+    {
+        return None;
+    }
+    Some(session.id.0.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_memory::{MemorySubstrate, ProactiveMemoryStore};
+    use librefang_types::agent::{AgentId, SessionId};
+    use librefang_types::memory::ProactiveMemoryConfig;
+
+    fn store(cfg: ProactiveMemoryConfig) -> Arc<ProactiveMemoryStore> {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        Arc::new(ProactiveMemoryStore::new(substrate, cfg))
+    }
+
+    fn manifest_from(capabilities_toml: &str) -> AgentManifest {
+        let toml_str = format!(
+            r#"
+name = "gate-test"
+version = "0.1.0"
+description = "d"
+author = "t"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "s"
+
+{capabilities_toml}
+"#
+        );
+        toml::from_str(&toml_str).expect("manifest parses")
+    }
+
+    fn session_for(agent_id: AgentId) -> librefang_memory::session::Session {
+        librefang_memory::session::Session {
+            id: SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        }
+    }
+
+    /// #7605 — the reporter set `memory_read = []` / `memory_write = []`,
+    /// reloaded the agent, and still got a populated `memories_used` on every
+    /// turn plus a growing store. Both gates must fail closed on a declared
+    /// empty list.
+    #[test]
+    fn declared_empty_memory_scopes_close_both_automatic_memory_gates() {
+        let pm = store(ProactiveMemoryConfig::default());
+        let manifest =
+            manifest_from("[capabilities]\ntools = []\nmemory_read = []\nmemory_write = []");
+
+        assert!(
+            gated_proactive_memory_for_retrieve(&manifest, Some(&pm)).is_none(),
+            "memory_read = [] must stop memories being injected into the prompt"
+        );
+        assert!(
+            gated_proactive_memory_for_memorize(&manifest, Some(&pm)).is_none(),
+            "memory_write = [] must stop the turn being auto-memorized"
+        );
+    }
+
+    /// The two halves are independent: an agent may read what it was given
+    /// without recording anything new, or the reverse.
+    #[test]
+    fn memory_read_and_write_scopes_gate_their_own_half_only() {
+        let pm = store(ProactiveMemoryConfig::default());
+
+        let read_only = manifest_from("[capabilities]\nmemory_read = [\"*\"]\nmemory_write = []");
+        assert!(gated_proactive_memory_for_retrieve(&read_only, Some(&pm)).is_some());
+        assert!(gated_proactive_memory_for_memorize(&read_only, Some(&pm)).is_none());
+
+        let write_only =
+            manifest_from("[capabilities]\nmemory_read = []\nmemory_write = [\"self.*\"]");
+        assert!(gated_proactive_memory_for_retrieve(&write_only, Some(&pm)).is_none());
+        assert!(gated_proactive_memory_for_memorize(&write_only, Some(&pm)).is_some());
+    }
+
+    /// An agent that never declared memory scopes keeps the behaviour it had
+    /// before #7605 — most manifests in the wild have no `[capabilities]`
+    /// block at all, and failing closed on them would silently switch memory
+    /// off across an upgrade.
+    #[test]
+    fn undeclared_memory_scopes_leave_both_gates_open() {
+        let pm = store(ProactiveMemoryConfig::default());
+        let manifest = manifest_from("");
+        assert!(gated_proactive_memory_for_retrieve(&manifest, Some(&pm)).is_some());
+        assert!(gated_proactive_memory_for_memorize(&manifest, Some(&pm)).is_some());
+    }
+
+    /// The #4870 per-agent override still gates each half on its own, and is
+    /// checked independently of the capability gate added by #7605.
+    #[test]
+    fn per_agent_proactive_memory_override_still_gates_each_half() {
+        let pm = store(ProactiveMemoryConfig::default());
+
+        let no_memorize = manifest_from("[proactive_memory]\nauto_memorize = false");
+        assert!(gated_proactive_memory_for_retrieve(&no_memorize, Some(&pm)).is_some());
+        assert!(gated_proactive_memory_for_memorize(&no_memorize, Some(&pm)).is_none());
+
+        let no_retrieve = manifest_from("[proactive_memory]\nauto_retrieve = false");
+        assert!(gated_proactive_memory_for_retrieve(&no_retrieve, Some(&pm)).is_none());
+        assert!(gated_proactive_memory_for_memorize(&no_retrieve, Some(&pm)).is_some());
+
+        let off = manifest_from("[proactive_memory]\nenabled = false");
+        assert!(gated_proactive_memory_for_retrieve(&off, Some(&pm)).is_none());
+        assert!(gated_proactive_memory_for_memorize(&off, Some(&pm)).is_none());
+    }
+
+    /// #7605 — the scope handed to the store is the session the turn belongs
+    /// to, and it is on by default.
+    #[test]
+    fn session_recall_scope_defaults_to_the_turns_own_session() {
+        let pm = store(ProactiveMemoryConfig::default());
+        let manifest = manifest_from("");
+        let session = session_for(AgentId::new());
+
+        assert_eq!(
+            session_recall_scope(&manifest, &session, Some(&pm)),
+            Some(session.id.0.to_string()),
+            "with nothing configured, memories are scoped to the session that produced them"
+        );
+
+        // Two turns of the same session agree; a different session does not.
+        let other = session_for(session.agent_id);
+        assert_ne!(
+            session_recall_scope(&manifest, &other, Some(&pm)),
+            session_recall_scope(&manifest, &session, Some(&pm))
+        );
+    }
+
+    #[test]
+    fn session_recall_scope_can_be_turned_off_per_agent_and_globally() {
+        let pm = store(ProactiveMemoryConfig::default());
+        let session = session_for(AgentId::new());
+
+        let opted_out = manifest_from("[proactive_memory]\nsession_scoped_recall = false");
+        assert_eq!(
+            session_recall_scope(&opted_out, &session, Some(&pm)),
+            None,
+            "a single-user agent must be able to keep one memory pool across its sessions"
+        );
+
+        let global_off = store(ProactiveMemoryConfig {
+            session_scoped_recall: false,
+            ..Default::default()
+        });
+        assert_eq!(
+            session_recall_scope(&manifest_from(""), &session, Some(&global_off)),
+            None
+        );
+        let opted_in = manifest_from("[proactive_memory]\nsession_scoped_recall = true");
+        assert_eq!(
+            session_recall_scope(&opted_in, &session, Some(&global_off)),
+            Some(session.id.0.to_string()),
+            "one agent must be able to isolate itself when the deployment default is off"
+        );
+    }
+
+    /// No store, no scope — and no panic on the `?` in `session_recall_scope`.
+    #[test]
+    fn session_recall_scope_is_none_without_a_proactive_store() {
+        let session = session_for(AgentId::new());
+        assert_eq!(
+            session_recall_scope(&manifest_from(""), &session, None),
+            None
+        );
     }
 }

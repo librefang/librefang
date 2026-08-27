@@ -32,6 +32,9 @@ api-error-template-parse-failed = 템플릿 분석에 실패했습니다: { $err
 api-error-template-required = 'manifest_toml' 또는 'template' 중 하나가 필요합니다
 api-error-template-invalid-manifest = 유효하지 않은 템플릿 매니페스트입니다
 api-error-template-read-failed = 템플릿을 읽는 데 실패했습니다
+api-error-agent-type-exists = '{ $name }' 에이전트 타입이 이미 존재합니다
+api-error-agent-type-name-taken = '{ $name }'은(는) 실행 중인 에이전트의 이름입니다. 다른 이름을 사용하세요
+api-error-agent-type-not-editable = 에이전트 타입 '{ $name }'은(는) 실행 중인 에이전트 워크스페이스에서 왔으며 /api/agents 에서 관리됩니다
 
 # Manifest errors
 api-error-manifest-too-large = 매니페스트가 너무 큽니다 (최대 1MB)
@@ -237,6 +240,10 @@ api-error-backup-finalize-failed = 백업을 완료하는 데 실패했습니다
 api-error-backup-open-failed = 백업을 여는 데 실패했습니다: { $error }
 api-error-backup-invalid-archive = 유효하지 않은 백업 아카이브입니다: { $error }
 api-error-backup-delete-failed = 백업을 삭제하는 데 실패했습니다: { $error }
+api-error-backup-invalid-keep-config = 'keep_config'가 유효하지 않습니다 — 불리언이어야 합니다
+api-error-backup-invalid-components = 'components'가 유효하지 않습니다 — 컴포넌트 이름 문자열의 배열이어야 합니다
+api-error-backup-empty-components = 'components'는 비어 있을 수 없습니다 — 모든 컴포넌트를 복원하려면 필드를 생략하세요
+api-error-backup-unknown-component = 알 수 없는 백업 컴포넌트 '{ $component }'입니다. 유효한 컴포넌트: { $valid }
 
 # Schedule errors
 api-error-schedule-not-found = 일정을 찾을 수 없습니다

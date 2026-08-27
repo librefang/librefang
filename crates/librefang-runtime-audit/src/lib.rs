@@ -12,6 +12,7 @@ use librefang_types::agent::UserId;
 use librefang_types::config::AuditRetentionConfig;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -112,6 +113,10 @@ pub enum AuditAction {
     /// carries the URL and agent name. Subsequent `/api/a2a/send` and
     /// `/api/a2a/tasks/.../status` calls to that URL are now permitted.
     A2aTrusted,
+    /// Bug #7702: an operator repaired a broken chain with [`recovery::reanchor_after_break`].
+    /// The entry is the first row of the repaired chain, linked to the last row that still verified, and its detail is a JSON document naming the break, the number of rows severed, and the archive file holding them together with that archive's SHA-256.
+    /// Committing the digest here is what makes the preserved rows tamper-evident too: altering the archive after the repair no longer matches the hash the chain vouches for.
+    ChainReanchored,
 }
 
 impl AuditAction {
@@ -147,6 +152,7 @@ impl AuditAction {
             AuditAction::RetentionTrim => "RetentionTrim",
             AuditAction::A2aDiscovered => "A2aDiscovered",
             AuditAction::A2aTrusted => "A2aTrusted",
+            AuditAction::ChainReanchored => "ChainReanchored",
         }
     }
 }
@@ -196,6 +202,7 @@ impl std::str::FromStr for AuditAction {
             "RetentionTrim" => AuditAction::RetentionTrim,
             "A2aDiscovered" => AuditAction::A2aDiscovered,
             "A2aTrusted" => AuditAction::A2aTrusted,
+            "ChainReanchored" => AuditAction::ChainReanchored,
             other => return Err(UnknownAuditAction(other.to_string())),
         })
     }
@@ -438,6 +445,13 @@ fn format_anchor_line(seq: u64, hash: &str) -> String {
     format!("{seq} {hash}\n")
 }
 
+/// The sentinel `prev_hash` of the first entry in a chain: 64 zero characters.
+///
+/// A chain that has had its prefix trimmed starts at the hash of the last dropped entry instead, so "is this the genesis?" is a real question at several boundaries — boot reload, reconciliation, verification and repair all ask it.
+pub(crate) fn genesis_hash() -> String {
+    "0".repeat(64)
+}
+
 /// A tip hash recovered from the anchor file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnchorRecord {
@@ -445,6 +459,103 @@ struct AnchorRecord {
     hash: String,
 }
 
+/// The `audit_entries` columns [`decode_audit_row`] expects, in order.
+/// Shared by the boot reload in [`AuditLog::with_db`] and the reconciliation re-read in [`AuditLog::read_reconcile_window`] so the two can never drift into decoding different column positions.
+const AUDIT_ROW_COLUMNS: &str =
+    "seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash";
+
+/// Decode one `audit_entries` row selected with [`AUDIT_ROW_COLUMNS`].
+///
+/// Schema v22 added the `user_id` / `channel` columns; rows persisted before that migration return NULL for both, which deserialises to `None` and keeps the original hash intact (the hash function omits absent fields, see `compute_entry_hash`).
+fn decode_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
+    let action_str: String = row.get(3)?;
+    // Decode via `FromStr` (exhaustive over every variant).
+    // A genuinely unknown string means the row was written by
+    // a newer daemon whose enum this binary does not know; we
+    // log it by name rather than silently coercing, because
+    // any coercion recomputes a different `action.to_string()`
+    // than the persisted one and would trip `verify_integrity`
+    // with a false hash mismatch on every subsequent boot.
+    let action = action_str.parse::<AuditAction>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let seq_raw: i64 = row.get(0)?;
+    let seq =
+        u64::try_from(seq_raw).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
+    let user_id_str: Option<String> = row.get(6)?;
+    let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
+    let channel: Option<String> = row.get(7)?;
+    Ok(AuditEntry {
+        seq,
+        timestamp: row.get(1)?,
+        agent_id: row.get(2)?,
+        action,
+        detail: row.get(4)?,
+        outcome: row.get(5)?,
+        user_id,
+        channel,
+        prev_hash: row.get(8)?,
+        hash: row.get(9)?,
+    })
+}
+
+/// Build an entry and its hash from a `(seq, prev_hash)` pair.
+///
+/// Kept separate from the append path because the pair is only known inside the write transaction (#7702) — the hash covers `seq` and `prev_hash`, so the entry cannot be assembled before the predecessor is read.
+#[allow(clippy::too_many_arguments)]
+fn build_entry(
+    seq: u64,
+    timestamp: &str,
+    agent_id: &str,
+    action: &AuditAction,
+    detail: &str,
+    outcome: &str,
+    user_id: Option<&UserId>,
+    channel: Option<&str>,
+    prev_hash: String,
+) -> AuditEntry {
+    let hash = compute_entry_hash(
+        seq, timestamp, agent_id, action, detail, outcome, user_id, channel, &prev_hash,
+    );
+    AuditEntry {
+        seq,
+        timestamp: timestamp.to_string(),
+        agent_id: agent_id.to_string(),
+        action: action.clone(),
+        detail: detail.to_string(),
+        outcome: outcome.to_string(),
+        user_id: user_id.copied(),
+        channel: channel.map(str::to_string),
+        prev_hash,
+        hash,
+    }
+}
+
+/// Outcome of one append attempt.
+enum Append {
+    /// The row is committed (or this is pure in-memory mode, where memory IS the store).
+    /// Boxed so the committed variant does not inflate every `Append` value by the size of a whole entry.
+    /// `reconcile` is `Some` when the durable tail had moved underneath this process and the in-memory window must be replaced before the entry is installed.
+    Committed {
+        entry: Box<AuditEntry>,
+        reconcile: Option<Reconcile>,
+    },
+    /// Nothing reached disk.
+    /// Chain state must not advance — see the note on `record_with_context`.
+    /// The hash is the one the entry would have carried, returned only to keep the success path's signature.
+    Dropped { would_be_hash: String },
+}
+
+/// In-memory state re-derived from the database when an append found the durable tail ahead of (or behind) this process's snapshot.
+struct Reconcile {
+    /// Tail rows as the write transaction saw them, ordered by `seq` ascending and ending at the row the pending entry chains onto.
+    window: Vec<AuditEntry>,
+    /// Hash of the row preceding `window`, or `None` when the window starts at the genesis sentinel.
+    /// Same rule `with_db` applies on boot.
+    anchor: Option<String>,
+    /// `COUNT(*)` taken inside the same transaction, before the pending INSERT.
+    persisted_rows: usize,
+}
 impl AuditLog {
     /// Creates a new empty audit log (in-memory only, no persistence).
     ///
@@ -644,47 +755,12 @@ impl AuditLog {
         // absent fields, see `compute_entry_hash`).
         match pool.get() {
             Ok(db) => {
-                let result = db.prepare(
-                "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash FROM audit_entries ORDER BY seq ASC",
-            );
+                let result = db.prepare(&format!(
+                    "SELECT {AUDIT_ROW_COLUMNS} FROM audit_entries ORDER BY seq ASC"
+                ));
                 match result {
                     Ok(mut stmt) => {
-                        let rows = stmt.query_map([], |row| {
-                            let action_str: String = row.get(3)?;
-                            // Decode via `FromStr` (exhaustive over every variant).
-                            // A genuinely unknown string means the row was written by
-                            // a newer daemon whose enum this binary does not know; we
-                            // log it by name rather than silently coercing, because
-                            // any coercion recomputes a different `action.to_string()`
-                            // than the persisted one and would trip `verify_integrity`
-                            // with a false hash mismatch on every subsequent boot.
-                            let action = action_str.parse::<AuditAction>().map_err(|e| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    3,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(e),
-                                )
-                            })?;
-                            let seq_raw: i64 = row.get(0)?;
-                            let seq = u64::try_from(seq_raw).map_err(|_| {
-                                rusqlite::Error::IntegralValueOutOfRange(0, seq_raw)
-                            })?;
-                            let user_id_str: Option<String> = row.get(6)?;
-                            let user_id = user_id_str.as_deref().and_then(|s| s.parse().ok());
-                            let channel: Option<String> = row.get(7)?;
-                            Ok(AuditEntry {
-                                seq,
-                                timestamp: row.get(1)?,
-                                agent_id: row.get(2)?,
-                                action,
-                                detail: row.get(4)?,
-                                outcome: row.get(5)?,
-                                user_id,
-                                channel,
-                                prev_hash: row.get(8)?,
-                                hash: row.get(9)?,
-                            })
-                        });
+                        let rows = stmt.query_map([], decode_audit_row);
                         match rows {
                             Ok(rows) => {
                                 for (row_index, result) in rows.enumerate() {
@@ -804,9 +880,21 @@ impl AuditLog {
 
     /// Records a new auditable event with optional user / channel attribution.
     ///
-    /// The entry is atomically appended to the chain with the current tip as
-    /// its `prev_hash`, and the tip is advanced to the new hash.
+    /// The entry is appended to the chain with the durable tail as its
+    /// `prev_hash`, and the tip is advanced to the new hash.
     /// If a database connection is available, the entry is also persisted.
+    ///
+    /// # The predecessor is read inside the write transaction (#7702)
+    ///
+    /// `seq` and `prev_hash` come from `SELECT seq, hash FROM audit_entries ORDER BY seq DESC LIMIT 1` issued inside the same `BEGIN IMMEDIATE` transaction as the INSERT — never from this process's in-memory snapshot.
+    /// Deriving them before the transaction opened was correct only by coincidence: `seq` and `prev_hash` came from the *same* stale snapshot, so a second writer's INSERT collided on the `seq INTEGER PRIMARY KEY` and failed closed.
+    /// That interlock evaporates the moment the row occupying the stale `seq` is deleted while higher rows survive, which the default 90-day retention prune (`DELETE FROM audit_entries WHERE seq < ?1`) does on a schedule with no operator involvement.
+    /// The stale writer's INSERT then succeeds carrying a `prev_hash` that names a row which is no longer its predecessor, and the chain forks at a single sequence number — everything below it verifying, one break, everything above it verifying.
+    ///
+    /// Reading the tail under the RESERVED lock the transaction already holds closes that window by construction: no other writer can commit between the read and the INSERT, because `BEGIN IMMEDIATE` admits one writer at a time across every pooled connection and every process on the file.
+    ///
+    /// It also un-wedges the loser of a collision.
+    /// Previously `entries.last()` never advanced on the drop path and nothing re-read the database, so a process that lost one race retried the same `seq` forever and silently discarded every subsequent audit event for its lifetime.
     pub fn record_with_context(
         &self,
         agent_id: impl Into<String>,
@@ -824,42 +912,16 @@ impl AuditLog {
         let mut entries = lock_audit_recover(&self.entries, "entries");
         let mut tip = lock_audit_recover(&self.tip, "tip");
 
+        // What this process believes the tail to be.
+        // It is authoritative only in pure in-memory mode and when the table holds no rows at all: after a `trim` / `prune` that dropped everything, `tip` carries the hash of the last dropped entry and the chain has to continue from it rather than restart at the genesis sentinel.
+        // Everywhere else it is a hint, and `append_durable` overrules it with what the database actually holds.
+        //
         // Derive the next seq from the last entry, not `entries.len()`,
         // because a retention trim may have dropped a prefix — using
-        // `len()` would re-issue a seq the surviving entries already
-        // hold and would also collide with the SQLite PRIMARY KEY.
-        let seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
-        let prev_hash = tip.clone();
+        // `len()` would re-issue a seq the surviving entries already hold.
+        let mem_seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
+        let mem_prev = tip.clone();
 
-        let hash = compute_entry_hash(
-            seq,
-            &timestamp,
-            &agent_id,
-            &action,
-            &detail,
-            &outcome,
-            user_id.as_ref(),
-            channel.as_deref(),
-            &prev_hash,
-        );
-
-        let entry = AuditEntry {
-            seq,
-            timestamp,
-            agent_id,
-            action,
-            detail,
-            outcome,
-            user_id,
-            channel,
-            prev_hash,
-            hash: hash.clone(),
-        };
-
-        // Persist to database if available. Schema v22 added the
-        // `user_id` / `channel` columns; old NULL rows keep working
-        // because the hash function omits absent fields.
-        //
         // CRITICAL: chain integrity requires that the in-memory tip and
         // the persisted tail agree at all times.  If the SQLite INSERT
         // fails but we still push the entry into `entries` and advance
@@ -877,72 +939,38 @@ impl AuditLog {
         // (graceful or otherwise) before the retry succeeded
         // committed the broken on-disk chain.
         //
-        // We invert the trade-off: a transient DB write failure drops
-        // the audit event and leaves chain state untouched.  The ERROR
-        // log below is the operator's signal to investigate.  The
-        // next call uses the same `seq` (since `entries.last()` did
-        // not advance) with a fresh timestamp and tries again.
-        // The append is wrapped in `BEGIN IMMEDIATE` so the chain stays
-        // intact even if a future refactor narrows the `entries` /
-        // `tip` Mutex scope, and so concurrent processes (or background
-        // jobs holding their own pooled connection) cannot interleave
-        // an append against the same `prev_hash`. IMMEDIATE acquires a
-        // RESERVED lock at the SQLite layer; under WAL the cost over a
-        // bare INSERT is negligible (a single fcntl on the lock byte
-        // page) but it means at most one writer is between
-        // `prev_hash` derivation and INSERT at any instant — which is
-        // the invariant the Merkle chain depends on. See the
-        // `audit_chain_holds_under_concurrent_record` test below for
-        // the regression bound.
-        let persisted = match self.db.as_ref() {
-            None => true, // pure in-memory mode: memory IS the source of truth
+        // We invert the trade-off: a transient DB write failure drops the audit event and leaves chain state untouched.
+        // The ERROR log inside `append_durable` is the operator's signal to investigate.
+        // The next call re-derives its predecessor from the database and tries again with a fresh timestamp.
+        let appended = match self.db.as_ref() {
+            // Pure in-memory mode: memory IS the source of truth.
+            None => Append::Committed {
+                entry: Box::new(build_entry(
+                    mem_seq,
+                    &timestamp,
+                    &agent_id,
+                    &action,
+                    &detail,
+                    &outcome,
+                    user_id.as_ref(),
+                    channel.as_deref(),
+                    mem_prev,
+                )),
+                reconcile: None,
+            },
             Some(db) => match db.get() {
-                Ok(mut conn) => {
-                    let tx_result =
-                        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
-                    match tx_result {
-                        Ok(tx) => {
-                            let exec_result = tx.execute(
-                                "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                                rusqlite::params![
-                                    entry.seq as i64,
-                                    &entry.timestamp,
-                                    &entry.agent_id,
-                                    entry.action.to_string(),
-                                    &entry.detail,
-                                    &entry.outcome,
-                                    entry.user_id.as_ref().map(|u| u.to_string()),
-                                    entry.channel.as_deref(),
-                                    &entry.prev_hash,
-                                    &entry.hash,
-                                ],
-                            );
-                            match exec_result.and_then(|_| tx.commit()) {
-                                Ok(_) => true,
-                                Err(e) => {
-                                    tracing::error!(
-                                        seq = entry.seq,
-                                        agent_id = %entry.agent_id,
-                                        action = %entry.action,
-                                        error = %e,
-                                        "Audit DB INSERT failed; chain NOT advanced. \
-                                         Entry dropped to preserve on-disk chain integrity. \
-                                         Investigate disk space, permissions, or DB state."
-                                    );
-                                    false
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                seq = entry.seq,
-                                error = %e,
-                                "Audit DB BEGIN IMMEDIATE failed; chain NOT advanced."
-                            );
-                            false
-                        }
-                    }
-                }
+                Ok(mut conn) => self.append_durable(
+                    &mut conn,
+                    mem_seq,
+                    &mem_prev,
+                    &timestamp,
+                    &agent_id,
+                    &action,
+                    &detail,
+                    &outcome,
+                    user_id.as_ref(),
+                    channel.as_deref(),
+                ),
                 Err(e) => {
                     metrics::counter!(
                         "librefang_memory_pool_get_failed_total",
@@ -951,23 +979,50 @@ impl AuditLog {
                     )
                     .increment(1);
                     tracing::error!(
-                        seq = entry.seq,
+                        seq = mem_seq,
                         "Audit DB pool get failed ({e:?}); chain NOT advanced."
                     );
-                    false
+                    Append::Dropped {
+                        would_be_hash: compute_entry_hash(
+                            mem_seq,
+                            &timestamp,
+                            &agent_id,
+                            &action,
+                            &detail,
+                            &outcome,
+                            user_id.as_ref(),
+                            channel.as_deref(),
+                            &mem_prev,
+                        ),
+                    }
                 }
             },
         };
 
-        if !persisted {
-            // Drop locks without mutating; caller's discarded return
-            // value is the (uncommitted) hash, mirroring the success
-            // path's signature.  The next record() will reuse the same
-            // `seq` because `entries.last()` is unchanged.
-            return hash;
-        }
+        let entry = match appended {
+            Append::Committed { entry, reconcile } => {
+                if let Some(reconcile) = reconcile {
+                    // The durable tail moved underneath us, so the window we were holding is no longer a suffix of what is on disk.
+                    // Replace it with the rows the write transaction actually saw.
+                    // `chain_anchor` becomes the hash of the row before the window (exactly the rule `with_db` uses on boot), so `verify_integrity` walks a true suffix instead of reporting a break that exists only in this process.
+                    *entries = reconcile.window;
+                    {
+                        let mut anchor = lock_audit_recover(&self.chain_anchor, "chain_anchor");
+                        *anchor = reconcile.anchor;
+                    }
+                    self.persisted_rows
+                        .store(reconcile.persisted_rows, Ordering::Relaxed);
+                }
+                entry
+            }
+            Append::Dropped { would_be_hash } => {
+                // Drop locks without mutating; the caller's (discarded) return value is the uncommitted hash, mirroring the success path's signature.
+                return would_be_hash;
+            }
+        };
 
-        entries.push(entry);
+        let hash = entry.hash.clone();
+        entries.push(*entry);
         *tip = hash.clone();
 
         // The row is now committed to SQLite (or this is pure in-memory
@@ -1031,6 +1086,224 @@ impl AuditLog {
         }
 
         hash
+    }
+
+    /// Derive the predecessor and append one row inside a single `BEGIN IMMEDIATE` transaction (#7702).
+    ///
+    /// `mem_seq` / `mem_prev` are this process's snapshot.
+    /// They are used only when the table holds no rows at all, where they carry the post-trim re-anchoring state the database itself cannot supply; whenever a tail row exists it wins, because it is the only value still true at INSERT time.
+    #[allow(clippy::too_many_arguments)]
+    fn append_durable(
+        &self,
+        conn: &mut rusqlite::Connection,
+        mem_seq: u64,
+        mem_prev: &str,
+        timestamp: &str,
+        agent_id: &str,
+        action: &AuditAction,
+        detail: &str,
+        outcome: &str,
+        user_id: Option<&UserId>,
+        channel: Option<&str>,
+    ) -> Append {
+        // The hash this entry *would* have carried, for the error paths that
+        // give up before a predecessor is known. Callers discard it; it exists
+        // so the drop paths keep the success path's signature.
+        let unpersisted = || Append::Dropped {
+            would_be_hash: compute_entry_hash(
+                mem_seq, timestamp, agent_id, action, detail, outcome, user_id, channel, mem_prev,
+            ),
+        };
+
+        // IMMEDIATE acquires a RESERVED lock at the SQLite layer; under WAL
+        // the cost over a bare INSERT is negligible (a single fcntl on the
+        // lock byte page) but it means at most one writer sits between the
+        // tail read and the INSERT at any instant — across pooled
+        // connections, background jobs and separate daemon processes alike.
+        // That is the invariant the Merkle chain depends on.
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::error!(
+                    seq = mem_seq,
+                    error = %e,
+                    "Audit DB BEGIN IMMEDIATE failed; chain NOT advanced."
+                );
+                return unpersisted();
+            }
+        };
+
+        // The durable predecessor, read under the write lock this transaction
+        // already holds. `ORDER BY seq DESC LIMIT 1` is a single seek to the
+        // last leaf of the `seq INTEGER PRIMARY KEY` btree.
+        let tail = tx
+            .query_row(
+                "SELECT seq, hash FROM audit_entries ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional();
+
+        let (seq, prev_hash, diverged) = match tail {
+            Ok(Some((tail_seq, tail_hash))) => {
+                let Ok(tail_seq) = u64::try_from(tail_seq) else {
+                    tracing::error!(
+                        tail_seq,
+                        "Audit tail row carries a negative seq; chain NOT advanced."
+                    );
+                    return unpersisted();
+                };
+                let next = tail_seq.saturating_add(1);
+                let diverged = next != mem_seq || tail_hash != mem_prev;
+                (next, tail_hash, diverged)
+            }
+            // Empty table. This is not a divergence: `trim` / `prune` can
+            // legitimately delete every row, and the chain then continues
+            // from the in-memory tip (the hash of the last dropped entry) so
+            // the recovered `chain_anchor` still links the surviving suffix.
+            // Restarting at the genesis sentinel here would silently rewrite
+            // history instead.
+            Ok(None) => (mem_seq, mem_prev.to_string(), false),
+            Err(e) => {
+                tracing::error!(
+                    seq = mem_seq,
+                    error = %e,
+                    "Audit tail read failed; chain NOT advanced."
+                );
+                return unpersisted();
+            }
+        };
+
+        // Re-read the window before the INSERT, so it holds exactly the rows
+        // this entry chains onto and `COUNT(*)` excludes the row we are about
+        // to add (the caller increments `persisted_rows` for that one).
+        let reconcile = if diverged {
+            tracing::warn!(
+                expected_seq = mem_seq,
+                durable_seq = seq,
+                expected_prev = %mem_prev,
+                durable_prev = %prev_hash,
+                "Audit chain tail moved underneath this process — another writer holds the same \
+                 database. Chaining onto the durable tail and re-reading the in-memory window."
+            );
+            Some(self.read_reconcile_window(&tx, &prev_hash))
+        } else {
+            None
+        };
+
+        let entry = build_entry(
+            seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash,
+        );
+
+        let inserted = tx.execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                entry.seq as i64,
+                &entry.timestamp,
+                &entry.agent_id,
+                entry.action.to_string(),
+                &entry.detail,
+                &entry.outcome,
+                entry.user_id.as_ref().map(|u| u.to_string()),
+                entry.channel.as_deref(),
+                &entry.prev_hash,
+                &entry.hash,
+            ],
+        );
+
+        match inserted.and_then(|_| tx.commit()) {
+            Ok(_) => Append::Committed {
+                entry: Box::new(entry),
+                reconcile,
+            },
+            Err(e) => {
+                tracing::error!(
+                    seq = entry.seq,
+                    agent_id = %entry.agent_id,
+                    action = %entry.action,
+                    error = %e,
+                    "Audit DB INSERT failed; chain NOT advanced. \
+                     Entry dropped to preserve on-disk chain integrity. \
+                     Investigate disk space, permissions, or DB state."
+                );
+                Append::Dropped {
+                    would_be_hash: entry.hash,
+                }
+            }
+        }
+    }
+
+    /// Read a bounded tail window plus the authoritative row count inside the append transaction, for the case where the durable tail no longer matches this process's in-memory view.
+    ///
+    /// `prev_hash` is the tail hash the pending entry chains onto.
+    /// It doubles as the fallback anchor when the window cannot be read, in which case the window is emptied rather than left stale — an empty window anchored at the real predecessor still verifies, a stale one does not.
+    fn read_reconcile_window(&self, tx: &rusqlite::Transaction<'_>, prev_hash: &str) -> Reconcile {
+        let genesis = "0".repeat(64);
+        let degraded = |error: rusqlite::Error| {
+            tracing::warn!(
+                %error,
+                "Audit window re-read failed; continuing with an empty in-memory window anchored \
+                 at the durable tail. The rows are still on disk and reload on the next boot."
+            );
+            Reconcile {
+                window: Vec::new(),
+                anchor: (prev_hash != genesis).then(|| prev_hash.to_string()),
+                persisted_rows: self.persisted_rows.load(Ordering::Relaxed),
+            }
+        };
+
+        // Bound the re-read by the same ceiling the append path enforces, so
+        // reconciliation can never allocate a larger window than steady-state
+        // operation would.
+        // `try_from` rather than `as`: a negative LIMIT means "unbounded" to
+        // SQLite, so a wrapping cast would quietly remove the bound it exists
+        // to impose.
+        let limit = i64::try_from(self.effective_soft_cap().max(1)).unwrap_or(i64::MAX);
+        let window = (|| -> rusqlite::Result<Vec<AuditEntry>> {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT {AUDIT_ROW_COLUMNS} FROM audit_entries ORDER BY seq DESC LIMIT ?1"
+            ))?;
+            let mut rows = stmt
+                .query_map(rusqlite::params![limit], decode_audit_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.reverse();
+            Ok(rows)
+        })();
+
+        let mut window = match window {
+            Ok(window) => window,
+            Err(e) => return degraded(e),
+        };
+
+        let persisted_rows = match tx.query_row("SELECT COUNT(*) FROM audit_entries", [], |r| {
+            r.get::<_, i64>(0)
+        }) {
+            Ok(count) => usize::try_from(count).unwrap_or(0),
+            Err(e) => return degraded(e),
+        };
+
+        // The window has to end at the row the pending entry chains onto,
+        // otherwise the in-memory chain would not be contiguous. Under
+        // `BEGIN IMMEDIATE` nothing can commit between the two reads, so a
+        // mismatch means a read we should not trust rather than a race.
+        if prev_hash != genesis && window.last().map(|e| e.hash.as_str()) != Some(prev_hash) {
+            tracing::warn!(
+                "Audit window re-read did not end at the durable tail; using an empty window."
+            );
+            window.clear();
+        }
+
+        let anchor = match window.first() {
+            Some(first) if first.prev_hash != genesis => Some(first.prev_hash.clone()),
+            Some(_) => None,
+            None => (prev_hash != genesis).then(|| prev_hash.to_string()),
+        };
+
+        Reconcile {
+            window,
+            anchor,
+            persisted_rows,
+        }
     }
 
     /// Walks the entire chain and recomputes every hash to detect tampering.
@@ -1197,6 +1470,123 @@ impl AuditLog {
         let entries = lock_audit_recover(&self.entries, "entries");
         let start = entries.len().saturating_sub(n);
         entries[start..].to_vec()
+    }
+
+    /// Counts every retained non-success outcome for one agent.
+    ///
+    /// Persistent logs use the `audit_entries(agent_id, timestamp)` index
+    /// instead of cloning and scanning the bounded in-memory window. An
+    /// in-memory-only log has no durable history, so its retained entries are
+    /// the authoritative source.
+    pub fn count_agent_errors(&self, agent_id: &str) -> Result<u64, String> {
+        let Some(pool) = self.db.as_ref() else {
+            let entries = lock_audit_recover(&self.entries, "entries");
+            return Ok(entries
+                .iter()
+                .filter(|entry| {
+                    entry.agent_id == agent_id
+                        && entry.outcome != "ok"
+                        && entry.outcome != "success"
+                })
+                .count() as u64);
+        };
+
+        let db = pool
+            .get()
+            .map_err(|error| format!("failed to acquire audit database connection: {error}"))?;
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_entries \
+                 WHERE agent_id = ?1 AND outcome != 'ok' AND outcome != 'success'",
+                [agent_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("failed to count agent audit errors: {error}"))?;
+        u64::try_from(count).map_err(|_| "agent audit error count was negative".to_string())
+    }
+
+    /// Returns one newest-first page of audit entries for an agent.
+    ///
+    /// Persistent logs are filtered and paginated in SQLite. Schema v41's
+    /// `(agent_id, timestamp)` index makes the work proportional to the
+    /// requested agent page rather than the global audit population.
+    pub fn recent_for_agent(
+        &self,
+        agent_id: &str,
+        outcome: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<AuditEntry>, String> {
+        let Some(pool) = self.db.as_ref() else {
+            let entries = lock_audit_recover(&self.entries, "entries");
+            return Ok(entries
+                .iter()
+                .rev()
+                .filter(|entry| entry.agent_id == agent_id)
+                .filter(|entry| {
+                    outcome.is_none_or(|value| entry.outcome.eq_ignore_ascii_case(value))
+                })
+                .skip(offset)
+                .take(limit)
+                .cloned()
+                .collect());
+        };
+
+        let db = pool
+            .get()
+            .map_err(|error| format!("failed to acquire audit database connection: {error}"))?;
+        let offset = i64::try_from(offset)
+            .map_err(|_| "agent audit offset exceeds SQLite range".to_string())?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| "agent audit limit exceeds SQLite range".to_string())?;
+        let sql = if outcome.is_some() {
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash \
+             FROM audit_entries WHERE agent_id = ?1 AND outcome = ?2 COLLATE NOCASE \
+             ORDER BY timestamp DESC, seq DESC LIMIT ?3 OFFSET ?4"
+        } else {
+            "SELECT seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash \
+             FROM audit_entries WHERE agent_id = ?1 \
+             ORDER BY timestamp DESC, seq DESC LIMIT ?2 OFFSET ?3"
+        };
+        let mut stmt = db
+            .prepare(sql)
+            .map_err(|error| format!("failed to prepare agent audit query: {error}"))?;
+        let decode = |row: &rusqlite::Row<'_>| {
+            let action_str: String = row.get(3)?;
+            let action = action_str.parse::<AuditAction>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            let seq_raw: i64 = row.get(0)?;
+            let seq = u64::try_from(seq_raw)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
+            let user_id_str: Option<String> = row.get(6)?;
+            Ok(AuditEntry {
+                seq,
+                timestamp: row.get(1)?,
+                agent_id: row.get(2)?,
+                action,
+                detail: row.get(4)?,
+                outcome: row.get(5)?,
+                user_id: user_id_str.as_deref().and_then(|value| value.parse().ok()),
+                channel: row.get(7)?,
+                prev_hash: row.get(8)?,
+                hash: row.get(9)?,
+            })
+        };
+        let rows = match outcome {
+            Some(outcome) => {
+                stmt.query_map(rusqlite::params![agent_id, outcome, limit, offset], decode)
+            }
+            None => stmt.query_map(rusqlite::params![agent_id, limit, offset], decode),
+        }
+        .map_err(|error| format!("failed to query agent audit entries: {error}"))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to decode agent audit entry: {error}"))
     }
 
     /// Returns every entry with `seq > cursor`, in insertion order.
@@ -1528,6 +1918,8 @@ impl Default for AuditLog {
         Self::new()
     }
 }
+
+pub mod recovery;
 
 #[cfg(test)]
 mod tests;

@@ -1,12 +1,8 @@
 //! Channel infrastructure for the LibreFang Agent OS.
 //!
-//! Every channel adapter is out-of-process — see `librefang.sidecar.adapters.*`
-//! in the SDK at `sdk/python/`. This crate owns the **trampoline** that
-//! connects the kernel to those sidecars (`sidecar.rs`), the shared bridge
-//! types every adapter speaks (`types`, `bridge`, `router`, `commands`,
-//! `formatter`, `sanitizer`, `roster`, `rate_limiter`, `thread_ownership`,
-//! `group_history`, `message_journal`, `message_truncator`,
-//! `attachment_enrich`), and the shared HTTP client (`http_client`).
+//! Every channel adapter is out-of-process — see `librefang.sidecar.adapters.*` in the SDK at `sdk/python/`.
+//! This crate owns the **trampoline** that connects the kernel to those sidecars (`sidecar.rs`), the shared bridge types every adapter speaks (`types`, `bridge`, `router`, `commands`, `formatter`, `sanitizer`, `roster`, `rate_limiter`, `thread_ownership`, `group_history`, `message_journal`, `message_truncator`, `attachment_enrich`), and the shared HTTP client (`http_client`).
+//! The `embedded_sdk` module bundles the Python `librefang-sdk` package and extracts it as a fallback for zero-setup sidecar startup.
 //!
 //! No in-process channel adapters live here. Re-introducing one requires
 //! editing `crates/librefang-channels/src/channels-allowlist.txt` — see

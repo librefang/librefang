@@ -18,6 +18,24 @@ redirect_url = "http://127.0.0.1:4545/api/auth/callback"
 scopes = ["openid", "profile", "email"]
 allowed_domains = ["example.com"]
 session_ttl_secs = 86400
+
+# Where in the token the identity attributes both maps below are matched
+# against are read from. Dotted paths; `<client>` is substituted with this
+# provider's client_id. Defaults to ["roles", "groups"].
+claim_paths = ["realm_access.roles", "resource_access.<client>.roles", "groups"]
+
+# Which IdP groups may call the API, and at what privilege.
+# Empty by default: without it an OIDC bearer authenticates nothing.
+[external_auth.role_map]
+"librefang-owners" = "owner"
+"librefang-operators" = "admin"
+"engineering" = "user"
+
+# Which IdP groups confer membership in a local [[groups]] entry.
+# Independent of role_map: membership carries no privilege.
+[external_auth.group_map]
+"platform-oncall" = "oncall"
+"sox-reviewers" = "compliance"
 ```
 
 | Field | Type | Default | Description |
@@ -31,7 +49,66 @@ session_ttl_secs = 86400
 | `allowed_domains` | list of strings | `[]` | Restrict login to these email domains. Empty = allow all. |
 | `audience` | string | `""` | JWT audience claim to validate. Defaults to `client_id` if empty. |
 | `session_ttl_secs` | u64 | `86400` | Session token lifetime in seconds (24 hours default). |
+| `require_email_verified` | bool | `true` | Reject logins whose ID token does not carry `email_verified = true`. Set to `false` only for a provider that does not issue the claim. |
 | `providers` | list of objects | `[]` | Multiple OIDC/OAuth2 providers. When configured, takes precedence over the single-provider fields above. |
+| `role_map` | table of string → string | `{}` | IdP role/group claim value → LibreFang role (`owner` / `admin` / `user` / `viewer` / `guest`). See below. |
+| `group_map` | table of string → string | `{}` | IdP group/role/scope claim value → the name of a `[[groups]]` entry the caller is treated as a member of. See below. |
+| `claim_paths` | list of strings | `["roles","groups"]` | Dotted paths to the claims both maps are matched against. `<client>` is substituted with the provider's `client_id`. See below. |
+
+#### `role_map`: turning an ID token into an API credential
+
+Until an entry exists here, a validated OIDC bearer authorizes nothing — the daemon verifies the token against the provider's JWKS and the caller still gets the same 401 they would get with no token at all.
+Declaring a mapping is what grants privilege, so the grant is always something an operator wrote down rather than something the identity provider decided on its own.
+
+The keys are values of whichever claims `claim_paths` resolves — the `roles` and `groups` claims by default — and the values are LibreFang roles in the same `viewer` < `user` < `admin` < `owner` ladder that `[[users]] role` and `[channel_role_mapping]` use.
+A caller holding several mapped groups gets the **highest-privilege** match, so claim ordering — which is the provider's business, not yours — cannot decide the effective role.
+
+Three things deliberately grant nothing rather than falling back to a default:
+
+- a claim value absent from the map,
+- a claim value present but mapped to an unrecognised role string (a typo like `"admn"`, which is reported as a `WARN` at boot and on config reload),
+- a token from a provider with neither `audience` nor `client_id` configured, because JWT audience validation is disabled in that case and any token signed by the issuer's keys would otherwise validate.
+
+`require_email_verified` applies here too: a token whose email the provider did not verify carries no role.
+
+The mapping is read live from the config swap, so `POST /api/config/reload` applies an edit on the next request with no restart.
+It is deliberately **not** writable through `POST /api/config/set` — a caller who could edit it could grant themselves `owner` by naming a group they already hold — but `GET /api/config` reads it back so you can confirm which groups currently carry privilege.
+
+#### `group_map`: putting an IdP group on a LibreFang team
+
+`[[groups]]` (see the identity section) names a team — an on-call rota, a project group, a department — that permissions and ownership can refer to instead of enumerating individuals.
+`group_map` is how membership in one of those teams comes from your identity provider instead of being typed in by hand and then going stale when someone changes roles.
+
+The keys are claim values, exactly as in `role_map`; the values are `[[groups]]` names.
+As with roles, membership is **mapped and never name-matched**: an IdP group called `oncall` does not join the local `oncall` group unless you wrote that entry.
+The reason is worth being explicit about — in a tenant where creating a group is self-service, name-matching would mean anyone who can create a group could pick a name and acquire whatever that team owns.
+
+What membership does and does not do:
+
+- It **does** confer the group's own name and every string in its `roles` list as binding-rule role strings, and it makes the caller a member of the group for ownership purposes.
+- It **does not** confer any RBAC privilege. A group named `owner` is a team named `owner`. If you want one IdP claim to carry both membership and privilege, write it into `role_map` **and** `group_map` — two entries, deliberately.
+
+Membership is recomputed from the presented token on every request and is **never written into `config.toml`**.
+That is what makes deprovisioning propagate: remove someone from the group in your identity provider and the membership disappears here when their current token expires, with nothing to clean up locally.
+It also means the reverse does not happen — an IdP that stops asserting a group does *not* remove that person from a `[[groups]] members` list you typed. A name in `members` is your own grant, and only you can withdraw it. When both sources name the same person, the result is simply the union.
+
+A `group_map` value naming a group that does not exist in `[[groups]]` confers nothing and is reported as a `WARN` at boot and on config reload — including when the group was deleted or renamed without the map being touched, which is the usual way this happens.
+
+`GET /api/authz/whoami` reports what the calling credential actually resolved to: role, principal, effective groups, which of those came from the token, and the group-conferred role strings. It is the first thing to check when an SSO login has less access than expected.
+
+#### `claim_paths`: where the claim values come from
+
+Both maps are matched against the same resolved set of claim values, and `claim_paths` decides which parts of the token that set is built from.
+Entries are dotted paths, so Keycloak's `realm_access.roles` and `resource_access.<client>.roles` are addressable; `<client>` is substituted with the provider's own `client_id`, so one entry works across providers and never picks up another client's roles from the same token.
+A path resolving to an array of strings contributes its elements; one resolving to a single string contributes its whitespace-separated words. A path that resolves to nothing is not an error — providers differ in what they emit.
+
+The default is `["roles", "groups"]`.
+`scope` is deliberately not included: `roles` and `groups` are assertions your identity provider makes about the *user*, while `scope` describes what a *client application* asked for and was granted, which a token minted for a different OAuth client in the same tenant also carries.
+Add `"scope"` to the list if you want it, and only where you have set `audience` — without audience binding the daemon refuses to derive any grant at all.
+
+Note that adding a path widens `role_map` as well as `group_map`, since both read the same set.
+
+`group_map` and `claim_paths` are read-only through `POST /api/config/set` for the same reason as `role_map`, and readable through `GET /api/config` for the same reason too.
 
 For multi-provider setups, use `[[external_auth.providers]]` with fields: `id`, `display_name`, `issuer_url`, `auth_url`, `token_url`, `userinfo_url`, `jwks_uri`, `client_id`, `client_secret_env`, `redirect_url`, `scopes`, `allowed_domains`, `audience`.
 
@@ -217,7 +294,7 @@ max_memories_per_agent = 1000
 | `session_ttl_hours` | u32 | `24` | Session memory TTL in hours. Memories older than this are cleaned up before each agent execution. |
 | `duplicate_threshold` | f32 | `0.5` | Similarity threshold for duplicate detection (0.0–1.0). Uses vector cosine similarity when embeddings are available, otherwise falls back to Jaccard word overlap. |
 | `confidence_decay_rate` | f64 | `0.01` | Confidence decay rate per day. Follows exponential decay: `conf × e^(−rate × days)`. Default of `0.01` takes ~70 days to halve. |
-| `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, oldest/lowest-confidence entries are evicted. `0` = no cap. |
+| `max_memories_per_agent` | usize | `1000` | Maximum memories per agent. When exceeded, raw dialogue rows are evicted before extracted facts, lowest-confidence first within each class. `0` = no cap. |
 
 ---
 

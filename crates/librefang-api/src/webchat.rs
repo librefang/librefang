@@ -303,14 +303,11 @@ fn is_safe_asset_path(path: &str) -> bool {
     if path.contains('\0') {
         return false;
     }
-    // Reject Windows UNC / authority-style prefixes outright. `\\server\share`
-    // and `//server/share` carry no `..` segment, so the per-segment check
-    // below passes them — but `Path::join` REPLACES the base with an absolute
-    // or UNC path on Windows, so `home/dashboard`.join("\\server\share")
-    // resolves to `\\server\share`, escaping the dashboard directory entirely.
-    // A legitimate dashboard asset is always a relative sub-path, never an
-    // authority reference, so refuse the prefix on every platform.
-    if path.starts_with("\\\\") || path.starts_with("//") {
+    // A legitimate dashboard asset is always a relative sub-path. Reject any
+    // separator-prefixed value, including Unix absolute paths, Windows rooted
+    // paths, UNC paths, and authority-style paths. Otherwise a future caller
+    // could let `Path::join` replace the dashboard base instead of extending it.
+    if path.starts_with('/') || path.starts_with('\\') {
         return false;
     }
     // Split on BOTH forward slash and backslash. Backslash is a path
@@ -353,6 +350,7 @@ fn is_safe_asset_path(path: &str) -> bool {
 /// scan over a handful of entries.
 const SPA_ROUTES: &[&str] = &[
     "a2a",
+    "agent-types",
     "agents",
     "analytics",
     "approvals",
@@ -364,6 +362,7 @@ const SPA_ROUTES: &[&str] = &[
     "config",
     "connect",
     "goals",
+    "groups",
     "hands",
     "logs",
     "mcp-servers",
@@ -820,6 +819,14 @@ mod tests {
         assert_eq!(decoded, "../etc/passwd");
         assert!(!is_safe_asset_path(&decoded));
 
+        let decoded = percent_decode("%2Fetc%2Fpasswd");
+        assert_eq!(decoded, "/etc/passwd");
+        assert!(!is_safe_asset_path(&decoded));
+
+        let decoded = percent_decode("%5CWindows%5CSystem32");
+        assert_eq!(decoded, "\\Windows\\System32");
+        assert!(!is_safe_asset_path(&decoded));
+
         let decoded = percent_decode("%2e%2e%2fetc%2fpasswd");
         assert_eq!(decoded, "../etc/passwd");
         assert!(!is_safe_asset_path(&decoded));
@@ -841,13 +848,15 @@ mod tests {
     }
 
     #[test]
-    fn safe_asset_path_rejects_unc_and_authority_prefix() {
+    fn safe_asset_path_rejects_absolute_unc_and_authority_prefixes() {
         // Windows UNC (`\\server\share`) and protocol-relative authority
         // (`//server/share`) carry no `..` segment, so the per-segment guard
         // alone lets them through — but `Path::join` REPLACES the dashboard
         // base with the UNC/absolute path on Windows, escaping the directory.
         // The explicit leading-prefix reject closes that on every platform.
         for p in [
+            "/etc/passwd",
+            "\\Windows\\System32\\config\\SAM",
             "\\\\server\\share",
             "\\\\server\\share\\file.js",
             "//server/share",

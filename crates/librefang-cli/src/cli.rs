@@ -362,6 +362,12 @@ pub(crate) enum Commands {
         long_about = "Manage paired devices and remote access tokens.\n\nExamples:\n  librefang devices list          # List paired devices\n  librefang devices pair          # Start pairing flow\n  librefang devices remove <ID>   # Remove a device"
     )]
     Devices(DevicesCommands),
+    /// Manage user groups.
+    #[command(
+        subcommand,
+        long_about = "Manage user groups.\n\nA group names a team instead of a person, so a permission or an ownership decision survives the people in it changing.\n\nMembership is many-to-many and FLAT — groups do not nest.\n\nExamples:\n  librefang group list\n  librefang group create oncall --description \"Support rota\" --role approver\n  librefang group add-member oncall alice\n  librefang group of alice"
+    )]
+    Group(GroupCommands),
     /// Generate device pairing QR code.
     #[command(
         long_about = "Generate a QR code for pairing a mobile device.\n\nDisplays a QR code in the terminal that can be scanned to pair a device.\n\nExamples:\n  librefang qr"
@@ -404,7 +410,7 @@ pub(crate) enum Commands {
     Configure,
     /// Send a one-shot message to an agent.
     #[command(
-        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito"
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\n--session-id addresses one conversation among many served by the same agent.\nWithout it every caller collapses onto the agent's single canonical session,\nso N unrelated end-users share one message history. Pass the same UUID again\nto continue that conversation; pass a different one to start an isolated one.\n\nAn explicit --session-id overrides the agent's `session_mode` either way: a\n`persistent` agent stops funnelling the turn into its canonical session, and a\n`new` agent stops minting a throwaway session, because the named session is\nreused across calls. The id must belong to this agent; the daemon rejects a\nsession owned by another agent rather than silently reading it.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json\n  librefang message coder \"Draft this email\" --incognito\n  librefang message sales \"What are your prices?\" --session-id 550e8400-e29b-41d4-a716-446655440000"
     )]
     Message {
         /// Agent name or ID.
@@ -418,6 +424,10 @@ pub(crate) enum Commands {
         /// suppressed while memory reads remain fully operational.
         #[arg(long)]
         incognito: bool,
+        /// Session UUID to address. Omit for the agent's canonical session
+        /// (today's behavior). Overrides the agent's `session_mode`.
+        #[arg(long, alias = "session")]
+        session_id: Option<String>,
     },
     /// System info and version [*].
     #[command(
@@ -1558,6 +1568,18 @@ pub(crate) enum SecurityCommands {
         #[arg(long)]
         confirm: bool,
     },
+    /// Repair a broken audit chain by severing the rows past the break, preserving them in an archive.
+    ///
+    /// Use instead of `audit-reset` whenever the pre-break history is worth keeping — which in a compliance or production environment is always.
+    /// Requires `--confirm` and refuses to run while a daemon holds the database.
+    #[command(
+        long_about = "Repair the audit trail after `librefang security verify` reports a chain break, without discarding history.\n\nA Merkle chain has one predecessor per row, so a repair has to sever one side of the break. This command archives the severed rows to `<data_dir>/audit-archive/` as JSON Lines before removing them, appends a `ChainReanchored` marker linked to the last row that still verified, and commits the archive's SHA-256 into that marker so the preserved copy is tamper-evident too. Rows below the break keep their original hashes.\n\nWithout `--confirm` it prints the break and what it would do, and exits non-zero. Refuses to run if the daemon is still holding the database.\n\nExamples:\n  librefang security audit-reanchor\n  librefang security audit-reanchor --confirm"
+    )]
+    AuditReanchor {
+        /// Required. Without this flag the command prints what it would do and exits non-zero.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1634,6 +1656,83 @@ pub(crate) enum DevicesCommands {
     Remove {
         /// Device ID.
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum GroupCommands {
+    /// List configured groups.
+    #[command(
+        long_about = "List every configured group with its member count, conferred roles and description.\n\nExamples:\n  librefang group list\n  librefang group list --json"
+    )]
+    List {
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one group in detail.
+    #[command(
+        long_about = "Show a group's description, conferred roles and full membership.\n\nMembers with no matching user entry are listed separately — that is expected when membership is synced from an external identity provider.\n\nExamples:\n  librefang group show oncall"
+    )]
+    Show {
+        /// Group name.
+        name: String,
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a group.
+    #[command(
+        long_about = "Create a group. Members are added afterwards with `group add-member`.\n\nA role given here is conferred on every member. The group's own name is always conferred too, so it does not need repeating.\n\nExamples:\n  librefang group create oncall\n  librefang group create oncall --description \"Support rota\" --role approver --role auditor"
+    )]
+    Create {
+        /// Group name.
+        name: String,
+        /// Free-text description of what the group is for.
+        #[arg(long)]
+        description: Option<String>,
+        /// Role conferred on every member. Repeat for several.
+        #[arg(long = "role")]
+        roles: Vec<String>,
+    },
+    /// Delete a group.
+    #[command(
+        long_about = "Delete a group. Its membership goes with it; the users themselves are untouched.\n\nExamples:\n  librefang group delete oncall"
+    )]
+    Delete {
+        /// Group name.
+        name: String,
+    },
+    /// Add a user to a group.
+    #[command(
+        long_about = "Add a user to a group. Idempotent — adding an existing member succeeds and changes nothing.\n\nExamples:\n  librefang group add-member oncall alice"
+    )]
+    AddMember {
+        /// Group name.
+        group: String,
+        /// User name.
+        user: String,
+    },
+    /// Remove a user from a group.
+    #[command(
+        long_about = "Remove a user from a group. Idempotent — removing someone who is not a member is a successful revocation, not an error.\n\nExamples:\n  librefang group remove-member oncall alice"
+    )]
+    RemoveMember {
+        /// Group name.
+        group: String,
+        /// User name.
+        user: String,
+    },
+    /// Show the groups a user belongs to, and the roles that confers.
+    #[command(
+        long_about = "Show which groups a user belongs to and the resolved role set that membership confers.\n\nExamples:\n  librefang group of alice\n  librefang group of alice --json"
+    )]
+    Of {
+        /// User name.
+        user: String,
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
     },
 }
 

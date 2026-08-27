@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Keyboard, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -30,7 +30,9 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   useFocusTrap(isOpen, dialogRef, true);
 
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -44,7 +46,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
+        <div className="fixed inset-0 z-100 flex items-end sm:items-center justify-center p-0 sm:p-4">
           <motion.div
             className="fixed inset-0 bg-black/60 backdrop-blur-sm"
             aria-hidden="true"
@@ -59,7 +61,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
             role="dialog"
             aria-modal="true"
             aria-labelledby="shortcuts-help-title"
-            className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden"
+            className="relative flex max-h-[90vh] w-full flex-col overflow-hidden rounded-t-2xl border border-border-subtle bg-surface shadow-2xl sm:max-w-2xl sm:rounded-2xl"
             variants={fadeInScale}
             initial="initial"
             animate="animate"
@@ -81,7 +83,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
           </button>
         </div>
 
-        <div className="max-h-[70vh] overflow-y-auto p-5 scrollbar-thin">
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 scrollbar-thin">
           <section className="mb-6">
             <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60 mb-3">{t("shortcuts_help.general_heading")}</h3>
             <div className="space-y-2">

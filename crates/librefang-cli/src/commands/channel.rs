@@ -369,8 +369,7 @@ pub(crate) fn cmd_channel_rm(name: &str) {
     // ~/.librefang/config.toml in-place, then trigger a daemon reload
     // (best-effort: if no daemon is running, the file edit is enough
     // — the next daemon start will pick up the changed config).
-    let home = cli_librefang_home();
-    let path = home.join("config.toml");
+    let path = cli_config_path();
     let original = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {

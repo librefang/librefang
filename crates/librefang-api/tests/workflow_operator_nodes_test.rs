@@ -88,11 +88,13 @@ fn workflow_with_op_step(name: &str, mode: StepMode) -> Workflow {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     }
 }
 
@@ -711,6 +713,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     Workflow {
         id: WorkflowId::new(),
@@ -760,6 +763,7 @@ fn branch_skip_workflow(literal: &str, target_name: &str, target_template: &str)
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     }
 }
 
@@ -1001,6 +1005,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let workflow = Workflow {
         id: WorkflowId::new(),
@@ -1045,6 +1050,7 @@ async fn branch_step_ambiguous_target_halts_with_recorded_reason() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = workflow.id;
     engine.register(workflow).await;
@@ -1134,6 +1140,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let op = WorkflowStep {
         name: "op".to_string(),
@@ -1148,6 +1155,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         inherit_context: None,
         depends_on: vec!["producer".to_string()],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let wf = Workflow {
         id: WorkflowId::new(),
@@ -1158,6 +1166,7 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let errs = wf.validate();
     assert!(
@@ -1201,6 +1210,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
         inherit_context: None,
         depends_on: vec![],
         session_mode: None,
+        required_skills: Vec::new(),
     };
     let wf = Workflow {
         id: WorkflowId::new(),
@@ -1245,6 +1255,7 @@ async fn dry_run_reports_operator_nodes_as_found_with_synthetic_agent_names() {
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1325,11 +1336,13 @@ async fn dry_run_marks_unparseable_transform_template_as_skipped() {
             inherit_context: None,
             depends_on: vec![],
             session_mode: None,
+            required_skills: Vec::new(),
         }],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;
@@ -1404,6 +1417,7 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
             WorkflowStep {
                 name: "after-transform".to_string(),
@@ -1422,12 +1436,14 @@ async fn dry_run_transform_advances_current_input_for_downstream_previews() {
                 inherit_context: None,
                 depends_on: vec![],
                 session_mode: None,
+                required_skills: Vec::new(),
             },
         ],
         created_at: chrono::Utc::now(),
         layout: None,
         total_timeout_secs: None,
         input_schema: None,
+        owner: None,
     };
     let wf_id = wf.id;
     engine.register(wf).await;

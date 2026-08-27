@@ -464,7 +464,8 @@ impl LibreFangKernel {
         // 128K GPT-4o, 1M Gemini) instead of the global 200K default that
         // `CompactionConfig::from_toml_…` would otherwise hand us.
         //
-        // Honours the agent.toml override, then the catalog (#6568).
+        // Honours the agent.toml override, then the per-model operator override
+        // (#7774), then the catalog (#6568).
         // `resolve_context_window` filters 0 out so image/audio entries (no
         // context window) fall back to the 200K default instead of feeding 0
         // into compaction math.
@@ -481,6 +482,7 @@ impl LibreFangKernel {
             &entry.manifest.model,
             None,
         )
+        .map(|resolved| resolved.tokens)
         .unwrap_or(200_000);
         config.context_window_tokens = agent_ctx_window;
 
@@ -645,27 +647,37 @@ impl LibreFangKernel {
 
         // Resolve context window through the shared helper so this read-only
         // report and the execution paths cannot disagree (#6568). Precedence:
-        // 1. agent.toml `model.context_window` explicit override
-        // 2. ModelCatalog lookup (provider-aware, prefix-reconciling, filters out 0)
-        // 3. Persisted session value (authoritative only when catalog has no entry)
-        // 4. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
+        // 1. agent.toml `model.context_window` explicit per-agent override
+        // 2. model_overrides.json `context_window` per-model operator override (#7774)
+        // 3. ModelCatalog lookup (provider-aware, prefix-reconciling, filters out 0)
+        // 4. Persisted session value (authoritative only when nothing above resolves)
+        // 5. Conservative fallback (8192) — matches UNKNOWN_MODEL_CONTEXT_WINDOW (#3349)
         //
         // Until #6568 the comment above claimed this mirrored "the same
         // precedence chain the agent loop uses", but the three execution paths
         // read only the catalog, so an operator who set `context_window` saw it
         // honoured in this report and ignored on every real turn.
-        let context_window: usize = super::manifest_helpers::resolve_context_window(
+        //
+        // The resolved value carries the layer that produced it, and the report
+        // carries that through to every surface (#7774 item 5): a window nobody
+        // knows is a guess, and a percentage measured against a guess is what
+        // turned a 16K conversation into an imaginary overflow in the report.
+        let resolved = super::manifest_helpers::resolve_context_window(
             &self.llm.model_catalog.load(),
             &entry.manifest.model,
             Some(session.context_window_tokens),
         )
-        .unwrap_or(librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW);
+        .unwrap_or(librefang_types::model_catalog::ResolvedContextWindow {
+            tokens: librefang_runtime::agent_loop::model::UNKNOWN_MODEL_CONTEXT_WINDOW,
+            source: librefang_types::model_catalog::ContextWindowSource::Fallback,
+        });
 
         Ok(generate_context_report(
             &session.messages,
             Some(system_prompt),
             Some(&tools),
-            context_window,
+            resolved.tokens,
+            resolved.source,
         ))
     }
 

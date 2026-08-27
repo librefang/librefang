@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
-import type { HealthCheck, AuditEntry, BackupItem, TaskQueueItem } from "../api";
+import type {
+  HealthCheck,
+  AuditEntry,
+  BackupItem,
+  TaskQueueItem,
+  ReloadConfigResult,
+} from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { isProviderAvailable } from "../lib/status";
@@ -41,10 +47,55 @@ import { StaggerList } from "../components/ui/StaggerList";
 
 const OK_STATUSES = new Set(["ok", "pass", "healthy"]);
 
+// Mirrors `BACKUP_LAYOUT` in `routes/backup.rs`. The list has to be restated
+// here because nothing publishes it to the browser, but it is no longer a
+// silent-failure risk: `POST /api/restore` validates every name against its own
+// table and answers `400` with the valid set, so a stale entry here surfaces as
+// an error the operator can read rather than a restore of nothing.
+const BACKUP_COMPONENTS = [
+  "config",
+  "cron_jobs",
+  "hand_state",
+  "custom_models",
+  "agents",
+  "skills",
+  "workflows",
+  "data",
+];
+
 type BackupConfirmState = {
   type: "restore" | "delete";
   filename: string;
+  keepConfig: boolean;
+  components: string[];
 };
+
+export function laneUtilizationColor(percent: number): string {
+  if (percent >= 80) return "bg-error";
+  if (percent >= 50) return "bg-warning";
+  return "bg-brand";
+}
+
+export function taskStatusVariant(status?: string) {
+  if (status === "failed") return "error";
+  if (status === "completed") return "success";
+  if (status === "in_progress") return "brand";
+  return "warning";
+}
+
+export function anchorStatusVariant(status: string) {
+  if (status === "ok") return "success";
+  if (status === "diverged") return "error";
+  return "warning";
+}
+
+function useSettledMutationReset(settled: boolean, reset: () => void) {
+  useEffect(() => {
+    if (!settled) return;
+    const timeout = setTimeout(reset, 5000);
+    return () => clearTimeout(timeout);
+  }, [reset, settled]);
+}
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds <= 0) return "-";
@@ -97,7 +148,13 @@ export function RuntimePage() {
   const addToast = useUIStore((s) => s.addToast);
   const [showShutdownConfirm, setShowShutdownConfirm] = useState(false);
   const [backupConfirm, setBackupConfirm] = useState<BackupConfirmState | null>(null);
-  const [reloadResult, setReloadResult] = useState<string | null>(null);
+
+  // Which components a restore is allowed to touch. Nothing ticked means
+  // "restore everything": `restoreBackup` omits the field rather than sending
+  // an empty list, which the API rejects.
+  const [restoreKeepConfig, setRestoreKeepConfig] = useState(false);
+  const [restoreComponents, setRestoreComponents] = useState<string[]>([]);
+  const [reloadResult, setReloadResult] = useState<ReloadConfigResult | null>(null);
   const reloadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -124,7 +181,7 @@ export function RuntimePage() {
   });
   const reloadMutation = useReloadConfig({
     onSuccess: (data) => {
-      setReloadResult(data.status);
+      setReloadResult(data);
       if (reloadTimeoutRef.current) {
         clearTimeout(reloadTimeoutRef.current);
       }
@@ -137,6 +194,22 @@ export function RuntimePage() {
   const deleteTaskMutation = useDeleteTask();
   const retryTaskMutation = useRetryTask();
   const cleanupMutation = useCleanupSessions();
+  const backupSettled = backupMutation.isSuccess || backupMutation.isError;
+  const restoreSettled = restoreMutation.isSuccess || restoreMutation.isError;
+  const reloadSettled = reloadMutation.isSuccess || reloadMutation.isError;
+  const cleanupSettled = cleanupMutation.isSuccess || cleanupMutation.isError;
+  const shutdownSettled = shutdownMutation.isSuccess || shutdownMutation.isError;
+  const resetBackup = backupMutation.reset;
+  const resetRestore = restoreMutation.reset;
+  const resetReload = reloadMutation.reset;
+  const resetCleanup = cleanupMutation.reset;
+  const resetShutdown = shutdownMutation.reset;
+
+  useSettledMutationReset(backupSettled, resetBackup);
+  useSettledMutationReset(restoreSettled, resetRestore);
+  useSettledMutationReset(reloadSettled, resetReload);
+  useSettledMutationReset(cleanupSettled, resetCleanup);
+  useSettledMutationReset(shutdownSettled, resetShutdown);
 
   // --- Derived data ---
   const snapshot = snapshotQuery.data ?? null;
@@ -145,6 +218,17 @@ export function RuntimePage() {
   const hd = healthDetailQuery.data ?? null;
   const security = securityQuery.data ?? null;
   const status = snapshot?.status;
+  const reloadDetails = reloadResult
+    ? [
+        ...(reloadResult.warnings ?? []),
+        ...(reloadResult.restart_required ? (reloadResult.restart_reasons ?? []) : []),
+      ].filter(Boolean)
+    : [];
+  const reloadIsPartial = reloadResult !== null && (
+    reloadResult.status === "partial"
+    || reloadResult.restart_required === true
+    || reloadDetails.length > 0
+  );
 
   const uptimeStr = formatUptime(status?.uptime_seconds);
   const healthChecks = snapshot?.health?.checks ?? [];
@@ -475,7 +559,7 @@ export function RuntimePage() {
                     const active = lane.active ?? 0;
                     const capacity = lane.capacity ?? 1;
                     const pct = capacity > 0 ? Math.min((active / capacity) * 100, 100) : 0;
-                    const color = pct >= 80 ? "bg-error" : pct >= 50 ? "bg-warning" : "bg-brand";
+                    const color = laneUtilizationColor(pct);
                     return (
                       <div key={lane.lane ?? "default"}>
                         <div className="flex items-center justify-between mb-1">
@@ -497,15 +581,27 @@ export function RuntimePage() {
                     const taskId = task.id;
                     return (
                       <div key={taskId ?? task.created_at ?? `${task.status}-${task.type ?? "task"}`} className="flex items-center gap-2 text-xs py-1 px-2 rounded-lg bg-main/30">
-                        <Badge variant={task.status === "failed" ? "error" : task.status === "completed" ? "success" : task.status === "in_progress" ? "brand" : "warning"}>
+                        <Badge variant={taskStatusVariant(task.status)}>
                           {task.status || "-"}
                         </Badge>
                         <span className="flex-1 truncate font-mono text-[10px]">{taskId?.slice(0, 12)}</span>
                         {task.status === "failed" && taskId && (
-                          <button onClick={() => retryTaskMutation.mutate(taskId)} className="text-brand hover:text-brand/80 text-[10px] font-bold">{t("runtime.retry")}</button>
+                          <button
+                            onClick={() => retryTaskMutation.mutate(taskId)}
+                            disabled={retryTaskMutation.isPending}
+                            className="text-brand hover:text-brand/80 text-[10px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("runtime.retry")}
+                          </button>
                         )}
                         {(task.status === "pending" || task.status === "in_progress") && taskId && (
-                          <button onClick={() => deleteTaskMutation.mutate(taskId)} className="text-error hover:text-error/80 text-[10px] font-bold">{t("runtime.cancel_task")}</button>
+                          <button
+                            onClick={() => deleteTaskMutation.mutate(taskId)}
+                            disabled={deleteTaskMutation.isPending}
+                            className="text-error hover:text-error/80 text-[10px] font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {t("runtime.cancel_task")}
+                          </button>
                         )}
                       </div>
                     );
@@ -583,13 +679,9 @@ export function RuntimePage() {
                     don't show stale or speculative status. */}
                 {auditVerifyQuery.data?.anchor_status && (
                   <Badge
-                    variant={
-                      auditVerifyQuery.data.anchor_status === "ok"
-                        ? "success"
-                        : auditVerifyQuery.data.anchor_status === "diverged"
-                          ? "error"
-                          : "warning"
-                    }
+                    variant={anchorStatusVariant(
+                      auditVerifyQuery.data.anchor_status,
+                    )}
                     title={auditVerifyQuery.data.anchor_path ?? undefined}
                   >
                     {t("runtime.audit_anchor", { defaultValue: "anchor" })}: {auditVerifyQuery.data.anchor_status}
@@ -704,15 +796,24 @@ export function RuntimePage() {
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Archive className="h-4 w-4 text-brand" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("runtime.backups")}</h2>
                 <div className="ml-auto">
-                  <Button variant="secondary" size="sm" leftIcon={<Download className="w-3 h-3" />} isLoading={backupMutation.isPending} onClick={() => backupMutation.mutate()}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    leftIcon={<Download className="w-3 h-3" />}
+                    isLoading={backupMutation.isPending}
+                    onClick={() =>
+                      backupMutation.mutate(undefined, {
+                        onSuccess: () =>
+                          addToast(t("runtime.backup_created"), "success"),
+                      })
+                    }
+                  >
                     {t("runtime.create_backup")}
                   </Button>
                 </div>
               </div>
 
-              {backupMutation.isSuccess && <p className="text-xs text-success mb-2">{t("runtime.backup_created")}</p>}
               {backupMutation.isError && <p className="text-xs text-error mb-2">{t("runtime.backup_error")}</p>}
-              {restoreMutation.isSuccess && <p className="text-xs text-success mb-2">{t("runtime.restore_success")}</p>}
               {restoreMutation.isError && <p className="text-xs text-error mb-2">{t("runtime.restore_error")}</p>}
 
               {backups.length > 0 ? (
@@ -730,7 +831,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setBackupConfirm({ type: "restore", filename: b.filename });
+                            setBackupConfirm({ type: "restore", filename: b.filename, keepConfig: restoreKeepConfig, components: restoreComponents });
                           }
                         }}
                         className="text-brand hover:text-brand/80 text-[10px] font-bold shrink-0"
@@ -741,7 +842,7 @@ export function RuntimePage() {
                       <button
                         onClick={() => {
                           if (b.filename) {
-                            setBackupConfirm({ type: "delete", filename: b.filename });
+                            setBackupConfirm({ type: "delete", filename: b.filename, keepConfig: false, components: [] });
                           }
                         }}
                         className="text-error hover:text-error/80 shrink-0"
@@ -795,16 +896,36 @@ export function RuntimePage() {
               <Button variant="secondary" size="sm" leftIcon={<RefreshCw className="w-3.5 h-3.5" />} isLoading={reloadMutation.isPending} onClick={() => reloadMutation.mutate()}>
                 {t("runtime.reload_config")}
               </Button>
-              <Button variant="secondary" size="sm" leftIcon={<Clock className="w-3.5 h-3.5" />} isLoading={cleanupMutation.isPending} onClick={() => cleanupMutation.mutate()}>
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<Clock className="w-3.5 h-3.5" />}
+                isLoading={cleanupMutation.isPending}
+                onClick={() =>
+                  cleanupMutation.mutate(undefined, {
+                    onSuccess: (data) =>
+                      addToast(
+                        t("runtime.sessions_deleted", {
+                          count: data?.sessions_deleted ?? 0,
+                        }),
+                        "success",
+                      ),
+                  })
+                }
+              >
                 {t("runtime.cleanup_sessions")}
               </Button>
               <Button variant="danger" size="sm" leftIcon={<Power className="w-3.5 h-3.5" />} onClick={() => setShowShutdownConfirm(true)}>
                 {t("runtime.shutdown")}
               </Button>
             </div>
-            {reloadResult && <p className="text-xs text-success mt-3">{t("runtime.reload_success", { status: reloadResult })}</p>}
+            {reloadResult && (
+              <p className={`text-xs mt-3 ${reloadIsPartial ? "text-warning" : "text-success"}`}>
+                {t("runtime.reload_success", { status: reloadResult.status })}
+                {reloadDetails.length > 0 ? ` — ${reloadDetails.join(" ")}` : ""}
+              </p>
+            )}
             {reloadMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.reload_error")}</p>}
-            {cleanupMutation.isSuccess && <p className="text-xs text-success mt-3">{t("runtime.sessions_deleted", { count: cleanupMutation.data?.sessions_deleted ?? 0 })}</p>}
             {shutdownMutation.isError && <p className="text-xs text-error mt-3">{t("runtime.shutdown_error")}</p>}
           </Card>
         </>
@@ -821,6 +942,35 @@ export function RuntimePage() {
         onClose={() => setShowShutdownConfirm(false)}
       />
 
+      {/* Restore options: keep the target's own config, and/or limit the
+           restore to chosen components. */}
+      <div className="flex flex-wrap items-center gap-3 text-xs mt-2">
+        <label className="flex items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={restoreKeepConfig}
+            onChange={(e) => setRestoreKeepConfig(e.target.checked)}
+          />
+          {t("runtime.restore_keep_config", { defaultValue: "Keep my config (clone mode)" })}
+        </label>
+        {BACKUP_COMPONENTS.map((c) => (
+          <label key={c} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={restoreComponents.includes(c)}
+              onChange={(e) =>
+                setRestoreComponents(
+                  e.target.checked
+                    ? [...restoreComponents, c]
+                    : restoreComponents.filter((x) => x !== c),
+                )
+              }
+            />
+            <span className="text-text-dim">{c}</span>
+          </label>
+        ))}
+      </div>
+
       {/* Restore Confirm Dialog */}
       <ConfirmDialog
         isOpen={backupConfirm?.type === "restore"}
@@ -830,7 +980,12 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "restore") {
-            await restoreMutation.mutateAsync(backupConfirm.filename);
+            await restoreMutation.mutateAsync({
+              filename: backupConfirm.filename,
+              keepConfig: backupConfirm.keepConfig,
+              components: backupConfirm.components,
+            });
+            addToast(t("runtime.restore_success"), "success");
           }
         }}
         onClose={() => setBackupConfirm(null)}

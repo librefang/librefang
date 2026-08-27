@@ -16,8 +16,22 @@ use super::*;
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // #7744: the workflow belongs to the authenticated caller who created it.
+    // Read from the auth extension, never from the request body — a body field
+    // naming its own owner is a field the caller can choose, which is the hole
+    // #7884 closed on the messaging route.
+    //
+    // `None` on an unauthenticated / `allow_no_auth` deployment falls back to
+    // `config.toml: default_owner`, and then to unowned. There is no manifest
+    // arm here: this route is a human creating a workflow directly, so there is
+    // no agent whose manifest could speak for it.
+    let owner = api_user
+        .as_ref()
+        .and_then(|u| u.0.owner_principal())
+        .or_else(|| state.kernel.config_ref().default_owner_principal());
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
     let description = req["description"].as_str().unwrap_or("").to_string();
 
@@ -31,18 +45,9 @@ pub async fn create_workflow(
     let mut steps = Vec::new();
     for s in steps_json {
         let step_name = s["name"].as_str().unwrap_or("step").to_string();
-        let agent = if let Some(id) = s["agent_id"].as_str() {
-            StepAgent::ById { id: id.to_string() }
-        } else if let Some(name) = s["agent_name"].as_str() {
-            StepAgent::ByName {
-                name: name.to_string(),
-            }
-        } else {
-            return ApiErrorResponse::bad_request(format!(
-                "Step '{}' needs 'agent_id' or 'agent_name'",
-                step_name
-            ))
-            .into_json_tuple();
+        let agent = match parse_step_agent(s, &step_name) {
+            Ok(agent) => agent,
+            Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
         };
 
         let mode = parse_step_mode(&s["mode"], s);
@@ -57,6 +62,11 @@ pub async fn create_workflow(
             })
             .unwrap_or_default();
 
+        let required_skills = match parse_required_skills(s, &step_name) {
+            Ok(v) => v,
+            Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+        };
+
         steps.push(WorkflowStep {
             name: step_name,
             agent,
@@ -68,6 +78,7 @@ pub async fn create_workflow(
             inherit_context: s["inherit_context"].as_bool(),
             depends_on,
             session_mode: parse_step_session_mode(s),
+            required_skills,
         });
     }
 
@@ -80,6 +91,7 @@ pub async fn create_workflow(
         name,
         description,
         steps,
+        owner,
         created_at: chrono::Utc::now(),
         layout,
         total_timeout_secs,
@@ -105,7 +117,12 @@ pub async fn create_workflow(
     let id = state.kernel.register_workflow(workflow).await;
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({"workflow_id": id.to_string()})),
+        Json(serde_json::json!({
+            "workflow_id": id.to_string(),
+            // Echoed so a client knows what was recorded without a follow-up
+            // GET; `null` when the workflow is unowned.
+            "owner": owner,
+        })),
     )
 }
 
@@ -263,7 +280,10 @@ pub async fn get_workflow(
         .get_workflow(workflow_id)
         .await
     {
-        Some(w) => (StatusCode::OK, Json(workflow_to_json(&w))),
+        Some(w) => (
+            StatusCode::OK,
+            Json(workflow_to_json(&w, &state.kernel.config_ref())),
+        ),
         None => {
             ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple()
         }
@@ -322,20 +342,9 @@ pub async fn update_workflow(
         let mut parsed_steps = Vec::new();
         for s in steps_json {
             let step_name = s["name"].as_str().unwrap_or("step").to_string();
-            let agent = if let Some(aid) = s["agent_id"].as_str() {
-                StepAgent::ById {
-                    id: aid.to_string(),
-                }
-            } else if let Some(aname) = s["agent_name"].as_str() {
-                StepAgent::ByName {
-                    name: aname.to_string(),
-                }
-            } else {
-                return ApiErrorResponse::bad_request(format!(
-                    "Step '{}' needs 'agent_id' or 'agent_name'",
-                    step_name
-                ))
-                .into_json_tuple();
+            let agent = match parse_step_agent(s, &step_name) {
+                Ok(agent) => agent,
+                Err(message) => return ApiErrorResponse::bad_request(message).into_json_tuple(),
             };
 
             let mode = parse_step_mode(&s["mode"], s);
@@ -350,6 +359,11 @@ pub async fn update_workflow(
                 })
                 .unwrap_or_default();
 
+            let required_skills = match parse_required_skills(s, &step_name) {
+                Ok(v) => v,
+                Err(e) => return ApiErrorResponse::bad_request(e).into_json_tuple(),
+            };
+
             parsed_steps.push(WorkflowStep {
                 name: step_name,
                 agent,
@@ -361,6 +375,7 @@ pub async fn update_workflow(
                 inherit_context: s["inherit_context"].as_bool(),
                 depends_on,
                 session_mode: parse_step_session_mode(s),
+                required_skills,
             });
         }
         parsed_steps
@@ -395,6 +410,13 @@ pub async fn update_workflow(
         name,
         description,
         steps,
+        // #7744: an edit is not a transfer. The owner is carried over from the
+        // stored workflow exactly as `created_at` is, and is deliberately not
+        // readable from `req` — otherwise any caller who may PATCH a workflow
+        // could reassign it to anyone, which would make the recorded owner
+        // worth less than the log line it replaced. Transfer, if it is ever
+        // wanted, belongs on its own route with its own authorization.
+        owner: existing.owner,
         created_at: existing.created_at,
         layout,
         total_timeout_secs,
@@ -436,8 +458,8 @@ pub async fn update_workflow(
         .get_workflow(workflow_id)
         .await
     {
-        Some(persisted) => workflow_to_json(&persisted),
-        None => workflow_to_json(&updated),
+        Some(persisted) => workflow_to_json(&persisted, &state.kernel.config_ref()),
+        None => workflow_to_json(&updated, &state.kernel.config_ref()),
     };
     (StatusCode::OK, Json(body))
 }
@@ -497,7 +519,10 @@ pub struct RunWorkflowQuery {
 ///
 /// Shared by the `run_workflow` async path and `rerun_workflow_run` so both drive `execute_run` with identical agent-resolver and message-sender wiring.
 /// The caller creates the `Pending` run and returns its id immediately; this drives it to completion, observable via `GET /api/workflows/runs/{run_id}`.
-fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
+fn spawn_background_run(
+    state: Arc<AppState>,
+    run_id: WorkflowRunId,
+) -> tokio::task::JoinHandle<Result<String, String>> {
     // Separate Arc clones for the resolver closure (Fn) and the sender closure (Fn) so neither moves out of the other.
     let state_for_resolver = state.clone();
     let state_for_sender = state.clone();
@@ -507,23 +532,7 @@ fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
             .workflow_engine()
             .execute_run(
                 run_id,
-                move |agent_ref| {
-                    use librefang_kernel::workflow::StepAgent;
-                    match agent_ref {
-                        StepAgent::ById { id } => {
-                            let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                            let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Some((agent_id, entry.name.clone(), inherit))
-                        }
-                        StepAgent::ByName { name } => {
-                            let entry =
-                                state_for_resolver.kernel.agent_registry().find_by_name(name)?;
-                            let inherit = entry.manifest.inherit_parent_context;
-                            Some((entry.id, entry.name.clone(), inherit))
-                        }
-                    }
-                },
+                move |agent_ref| state_for_resolver.kernel.resolve_step_agent(agent_ref),
                 move |agent_id: librefang_types::agent::AgentId,
                       message: String,
                       session_mode_override: Option<librefang_types::agent::SessionMode>| {
@@ -551,10 +560,60 @@ fn spawn_background_run(state: Arc<AppState>, run_id: WorkflowRunId) {
                 },
             )
             .await;
-        if let Err(e) = result {
+        if let Err(ref e) = result {
             tracing::warn!(run_id = %run_id, error = %e, "Background workflow run failed");
         }
-    });
+        result
+    })
+}
+
+fn workflow_running_response(run_id: WorkflowRunId) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "status": "running",
+            "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
+        })),
+    )
+}
+
+async fn workflow_completed_response(
+    state: &Arc<AppState>,
+    run_id: WorkflowRunId,
+    output: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let run = state.kernel.workflow_engine().get_run(run_id).await;
+    let step_results = run
+        .as_ref()
+        .map(|run| {
+            run.step_results
+                .iter()
+                .map(|step| {
+                    serde_json::json!({
+                        "step_name": step.step_name,
+                        "agent_name": step.agent_name,
+                        "prompt": step.prompt,
+                        "output": step.output,
+                        "input_tokens": step.input_tokens,
+                        "output_tokens": step.output_tokens,
+                        "duration_ms": step.duration_ms,
+                        "error": step.error,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "output": output,
+            "status": "completed",
+            "step_results": step_results,
+        })),
+    )
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
@@ -583,94 +642,67 @@ pub async fn run_workflow(
 
     let input = workflow_run_input_string(&req);
 
-    if query.wait {
-        // -- Synchronous path (backward-compatible) --
-        let run_fut = state.kernel.run_workflow_typed(workflow_id, input);
-        let result = if let Some(timeout_ms) = query.timeout_ms {
-            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run_fut)
-                .await
-                .ok() // None on timeout, Some(inner_result) on completion
-        } else {
-            Some(run_fut.await)
-        };
-
-        match result {
-            Some(Ok((run_id, output))) => {
-                let run = state.kernel.workflow_engine().get_run(run_id).await;
-                let step_results = run.as_ref().map(|r| {
-                    r.step_results
-                        .iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "step_name": s.step_name,
-                                "agent_name": s.agent_name,
-                                "prompt": s.prompt,
-                                "output": s.output,
-                                "input_tokens": s.input_tokens,
-                                "output_tokens": s.output_tokens,
-                                "duration_ms": s.duration_ms,
-                                "error": s.error,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                });
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "run_id": run_id.to_string(),
-                        "output": output,
-                        "status": "completed",
-                        "step_results": step_results.unwrap_or_default(),
-                    })),
-                )
-            }
-            Some(Err(e)) => {
+    if query.wait && query.timeout_ms.is_none() {
+        // Preserve the original fully synchronous kernel runner, including
+        // its global execution timeout and nested-agent depth accounting.
+        match state.kernel.run_workflow_typed(workflow_id, input).await {
+            Ok((run_id, output)) => workflow_completed_response(&state, run_id, output).await,
+            Err(e) => {
                 tracing::warn!("Workflow run failed for {id}: {e}");
-                let detail = e.to_string();
                 (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(serde_json::json!({
                         "error": "workflow_failed",
-                        "detail": detail,
-                    })),
-                )
-            }
-            None => {
-                // Timed out — run is still going in the background.
-                // We need a run_id to return, but run_workflow_typed already
-                // consumed the future and started the run inside the kernel.
-                // Surface a generic async response; the caller should poll.
-                (
-                    StatusCode::ACCEPTED,
-                    Json(serde_json::json!({
-                        "status": "running",
-                        "message": "workflow is still running; poll GET /api/workflows/runs/{run_id}",
+                        "detail": e.to_string(),
                     })),
                 )
             }
         }
     } else {
-        // -- Asynchronous path (default) --
-        // Create the run first so we have the run_id to return immediately,
-        // then spawn execute_run in the background.
+        // Timed waits and default-async requests need the id before execution
+        // finishes. The spawned task owns execution, so dropping the request
+        // or timing out its JoinHandle wait does not cancel the run.
         let engine = state.kernel.workflow_engine();
-        // Create the run synchronously so we can return its id in the 202, then drive it to completion in the background.
-        // Progress is observable via GET /api/workflows/runs/{run_id}.
-        let run_id = match engine.create_run(workflow_id, input.clone()).await {
-            Some(rid) => rid,
+        let run_id = match engine.create_run(workflow_id, input).await {
+            Some(run_id) => run_id,
             None => {
                 return ApiErrorResponse::not_found(format!("Workflow '{id}' not found"))
                     .into_json_tuple();
             }
         };
-        let run_id_str = run_id.to_string();
-        spawn_background_run(state.clone(), run_id);
-        (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "run_id": run_id_str,
-            })),
-        )
+        let mut run_task = spawn_background_run(state.clone(), run_id);
+
+        if query.wait {
+            let timeout_ms = query.timeout_ms.unwrap_or_default();
+            match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut run_task)
+                .await
+            {
+                Ok(Ok(Ok(output))) => workflow_completed_response(&state, run_id, output).await,
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!("Workflow run failed for {id}: {e}");
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(serde_json::json!({
+                            "error": "workflow_failed",
+                            "detail": e,
+                        })),
+                    )
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(run_id = %run_id, error = %e, "Workflow execution task failed");
+                    ApiErrorResponse::internal_scrub(e).into_json_tuple()
+                }
+                Err(_) => workflow_running_response(run_id),
+            }
+        } else {
+            drop(run_task);
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "run_id": run_id.to_string(),
+                })),
+            )
+        }
     }
 }
 
@@ -702,11 +734,16 @@ pub async fn dry_run_workflow(
 
     match state.kernel.dry_run_workflow(workflow_id, input).await {
         Ok(steps) => {
-            let all_agents_found = steps.iter().all(|s| s.agent_found);
+            // A step whose `required_skills` the resolved agent cannot use
+            // will fail the moment a real run reaches it, so it counts against
+            // `valid` exactly as an unresolvable agent does (#7721).
+            let valid = steps
+                .iter()
+                .all(|s| s.agent_found && s.skill_error.is_none());
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "valid": all_agents_found,
+                    "valid": valid,
                     "steps": steps.iter().map(|s| serde_json::json!({
                         "step_name": s.step_name,
                         "agent_name": s.agent_name,
@@ -714,6 +751,7 @@ pub async fn dry_run_workflow(
                         "resolved_prompt": s.resolved_prompt,
                         "skipped": s.skipped,
                         "skip_reason": s.skip_reason,
+                        "skill_error": s.skill_error,
                     })).collect::<Vec<_>>(),
                 })),
             )
@@ -760,6 +798,11 @@ pub async fn get_workflow_run(
                 "error": run.error,
                 "started_at": run.started_at.to_rfc3339(),
                 "completed_at": run.completed_at.map(|t| t.to_rfc3339()),
+                // #7714: the agent that asked for this run, `null` when an
+                // operator started it. Recording ownership is only useful if
+                // something can read it back, and this is the one endpoint
+                // that renders a single run in full.
+                "owner_agent_id": run.owner_agent_id.map(|a| a.to_string()),
                 "step_results": run.step_results.iter().map(|s| serde_json::json!({
                     "step_name": s.step_name,
                     "agent_id": s.agent_id,
@@ -806,8 +849,11 @@ pub async fn rerun_workflow_run(
 
     let engine = state.kernel.workflow_engine();
     // Read the workflow + input off the stored run rather than trusting the caller, so a re-run is always a faithful repeat of what executed.
-    let (workflow_id, input) = match engine.get_run(run_id).await {
-        Some(run) => (run.workflow_id, run.input),
+    // #7714: the owner is copied off the original run rather than re-derived.
+    // A re-run is a repeat of the same work on the same owner's behalf, and
+    // the operator who pressed re-run is not that owner.
+    let (workflow_id, input, owner) = match engine.get_run(run_id).await {
+        Some(run) => (run.workflow_id, run.input, run.owner_agent_id),
         None => {
             return ApiErrorResponse::not_found(format!("Run '{run_id}' not found"))
                 .into_json_tuple();
@@ -815,7 +861,7 @@ pub async fn rerun_workflow_run(
     };
 
     // `create_run` returns None when the workflow definition is gone (e.g. it was deleted after the original run); surface that as a 404.
-    let new_run_id = match engine.create_run(workflow_id, input).await {
+    let new_run_id = match engine.create_run_owned(workflow_id, input, owner).await {
         Some(rid) => rid,
         None => {
             return ApiErrorResponse::not_found(format!(
@@ -825,11 +871,27 @@ pub async fn rerun_workflow_run(
         }
     };
     let new_run_id_str = new_run_id.to_string();
-    spawn_background_run(state.clone(), new_run_id);
+    drop(spawn_background_run(state.clone(), new_run_id));
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "run_id": new_run_id_str })),
     )
+}
+
+#[cfg(test)]
+mod run_response_tests {
+    use super::*;
+
+    #[test]
+    fn timed_wait_response_includes_pollable_run_id() {
+        let run_id = WorkflowRunId(uuid::Uuid::new_v4());
+
+        let (status, Json(body)) = workflow_running_response(run_id);
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["run_id"], run_id.to_string());
+        assert_eq!(body["status"], "running");
+    }
 }
 
 /// POST /api/workflows/runs/:run_id/cancel — Cancel a workflow run.
@@ -1032,23 +1094,7 @@ pub async fn resume_workflow_run(
     let state_for_sender = state.clone();
 
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
+        state_for_resolver.kernel.resolve_step_agent(agent_ref)
     };
 
     // Validate the token synchronously (quick state check) before spawning.
@@ -1292,23 +1338,7 @@ pub async fn operator_action_workflow_run(
     let payload = payload_opt.clone();
     let state_for_resolver = state.clone();
     let agent_resolver = move |agent_ref: &librefang_kernel::workflow::StepAgent| {
-        use librefang_kernel::workflow::StepAgent;
-        match agent_ref {
-            StepAgent::ById { id } => {
-                let agent_id: librefang_types::agent::AgentId = id.parse().ok()?;
-                let entry = state_for_resolver.kernel.agent_registry().get(agent_id)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((agent_id, entry.name.clone(), inherit))
-            }
-            StepAgent::ByName { name } => {
-                let entry = state_for_resolver
-                    .kernel
-                    .agent_registry()
-                    .find_by_name(name)?;
-                let inherit = entry.manifest.inherit_parent_context;
-                Some((entry.id, entry.name.clone(), inherit))
-            }
-        }
+        state_for_resolver.kernel.resolve_step_agent(agent_ref)
     };
 
     // Drive the resolution in the background; respond 200 immediately.

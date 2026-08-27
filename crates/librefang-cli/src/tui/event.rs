@@ -1,5 +1,6 @@
 //! Event system: crossterm polling, tick timer, streaming bridges.
 
+use crate::commands::automation::WorkflowRunOutcome;
 use librefang_kernel::AgentSubsystemApi;
 use librefang_kernel::LibreFangKernel;
 use librefang_kernel::McpSubsystemApi;
@@ -16,15 +17,17 @@ use super::screens::{
     audit::AuditEntry,
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
+    groups::GroupInfo,
     hands::{HandInfo, HandInstanceInfo},
     logs::LogEntry,
     memory::{AgentEntry, KvPair},
+    models::ModelRow,
     peers::PeerInfo,
     security::SecurityFeature,
     sessions::SessionInfo,
-    settings::{ModelInfo, ProviderInfo, TestResult, ToolInfo},
+    settings::{BackupInfo, ModelInfo, ProviderInfo, TestResult, ToolInfo},
     skills::{ClawHubResult, McpServerInfo, SkillInfo},
-    templates::ProviderAuth,
+    templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
     workflows::{WorkflowInfo, WorkflowRun},
@@ -65,7 +68,10 @@ pub enum AppEvent {
     /// The kernel failed to boot.
     KernelError(String),
     /// An agent was successfully spawned (daemon mode).
-    AgentSpawned { id: String, name: String },
+    AgentSpawned {
+        id: String,
+        name: String,
+    },
     /// Agent spawn failed.
     AgentSpawnError(String),
     /// Daemon detection result from background thread.
@@ -107,7 +113,9 @@ pub enum AppEvent {
     /// Trigger deleted.
     TriggerDeleted(String),
     /// Agent killed successfully.
-    AgentKilled { id: String },
+    AgentKilled {
+        id: String,
+    },
     /// Agent kill failed.
     AgentKillError(String),
     /// Generic fetch error for any tab.
@@ -120,10 +128,13 @@ pub enum AppEvent {
     SessionDeleted(String),
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
+    MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
-    MemoryKvSaved { key: String },
+    MemoryKvSaved {
+        key: String,
+    },
     /// Memory KV deleted.
     MemoryKvDeleted(String),
     /// Skills loaded.
@@ -138,10 +149,21 @@ pub enum AppEvent {
     McpServersLoaded(Vec<McpServerInfo>),
     /// Templates providers loaded (auth status).
     TemplateProvidersLoaded(Vec<ProviderAuth>),
+    /// Manifest-backed agent types from `GET /api/templates` (#7760).
+    AgentTemplatesLoaded(Vec<TemplateInfo>),
+    /// The verbatim `agent.toml` for one manifest-backed agent type.
+    /// `None` means it could not be read; the screen reports that rather than spawning something it made up.
+    TemplateTomlLoaded {
+        name: String,
+        toml: Option<String>,
+    },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
     /// Security chain verification result.
-    SecurityChainVerified { valid: bool, message: String },
+    SecurityChainVerified {
+        valid: bool,
+        message: String,
+    },
     /// Audit entries loaded (full audit screen).
     AuditEntriesLoaded(Vec<AuditEntry>),
     /// Audit chain verified.
@@ -164,8 +186,29 @@ pub enum AppEvent {
     ProviderKeyDeleted(String),
     /// Provider test result.
     ProviderTestResult(TestResult),
+    /// Model catalogue loaded for the Models screen (refs #7774).
+    ModelCatalogLoaded(Vec<ModelRow>),
+    /// One model's operator capacity limits were persisted; carries the
+    /// `provider:model_id` override key.
+    ModelLimitsSaved(String),
+    /// One model's operator capacity limits were dropped back to the catalog.
+    ModelLimitsReset(String),
+    /// Backup archives listed.
+    BackupsLoaded(Vec<BackupInfo>),
+    /// A new archive was written.
+    BackupCreated(String),
+    /// An archive was deleted.
+    BackupDeleted(String),
+    /// A restore finished. `errors` counts entries the daemon could not write.
+    BackupRestored {
+        filename: String,
+        restored_files: u64,
+        errors: usize,
+    },
     /// Peers loaded.
     PeersLoaded(Vec<PeerInfo>),
+    /// User groups loaded (#7745).
+    GroupsLoaded(Vec<GroupInfo>),
     /// Log entries loaded.
     LogsLoaded(Vec<LogEntry>),
     /// Hand definitions loaded (marketplace).
@@ -204,6 +247,13 @@ pub enum AppEvent {
     AgentSkillsUpdated(String),
     /// Agent MCP servers updated.
     AgentMcpServersUpdated(String),
+    /// Agent channel allowlist loaded (for edit screen).
+    AgentChannelsLoaded {
+        assigned: Vec<String>,
+        available: Vec<String>,
+    },
+    /// Agent channel allowlist updated.
+    AgentChannelsUpdated(String),
     /// Comms topology loaded.
     CommsTopologyLoaded {
         nodes: Vec<super::screens::comms::CommsNode>,
@@ -218,7 +268,10 @@ pub enum AppEvent {
 
     // ── Async chat helpers (previously blocking on the event-loop thread) ──
     /// Agent model label fetched for chat header.
-    ChatModelLabelLoaded { agent_id: String, label: String },
+    ChatModelLabelLoaded {
+        agent_id: String,
+        label: String,
+    },
     /// Model list loaded for the model picker in chat.
     ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
     /// Agent list loaded for the /agents chat command.
@@ -882,6 +935,35 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// How long the daemon may hold the run request open before handing the run back as a background task.
+///
+/// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
+/// 45 s leaves 15 s of that budget for the response itself.
+const WORKFLOW_RUN_WAIT_MS: u64 = 45_000;
+
+/// The wait has to expire before this thread's own client does, or a slow run comes back as a disconnect instead of the 202 the screen knows how to render.
+const _: () = assert!(
+    WORKFLOW_RUN_WAIT_MS < 60_000,
+    "spawn_run_workflow builds a 60 s client; a longer wait can never return 202"
+);
+
+/// Render one workflow-run response for the Workflows screen.
+///
+/// Reading `output` and nothing else meant a 202 (still running) and a 422 (the run failed) both rendered the generic "completed" line, so the screen announced success on every failure.
+/// The classification is shared with `librefang workflow run` so the two surfaces cannot drift apart again.
+fn workflow_run_result_message(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    match crate::commands::automation::classify_workflow_run(status, body) {
+        WorkflowRunOutcome::Completed { output, .. } => output.to_string(),
+        WorkflowRunOutcome::Accepted { run_id } => {
+            crate::i18n::t_args("tui-event-workflow-still-running", &[("id", run_id)])
+        }
+        WorkflowRunOutcome::Failed { error } => crate::i18n::t_args(
+            "tui-event-workflow-run-failed",
+            &[("status", &status.to_string()), ("detail", error)],
+        ),
+    }
+}
+
 /// Run a workflow in background.
 pub fn spawn_run_workflow(
     backend: BackendRef,
@@ -895,17 +977,18 @@ pub fn spawn_run_workflow(
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
-                .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
+                .post(format!(
+                    "{base_url}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
+                ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
             {
                 Ok(resp) => {
+                    let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let result = body["output"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-workflow-completed"));
-                    let _ = tx.send(AppEvent::WorkflowRunResult(result));
+                    let _ = tx.send(AppEvent::WorkflowRunResult(
+                        workflow_run_result_message(status, &body),
+                    ));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::WorkflowRunResult(format!("Error: {e}")));
@@ -920,6 +1003,55 @@ pub fn spawn_run_workflow(
     });
 }
 
+/// Why the workflow creator's raw `steps` field could not become a request body.
+///
+/// Kept separate from its rendered message so the parser stays a pure
+/// function the unit tests can exercise without initialising the locale
+/// bundles.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StepsJsonError {
+    /// The operator advanced past the steps field without typing anything.
+    Empty,
+    /// The text is not JSON at all; carries serde's position-bearing message.
+    NotJson(String),
+    /// Valid JSON, but a scalar or an object where the API wants an array.
+    NotArray,
+}
+
+impl StepsJsonError {
+    fn message(&self) -> String {
+        match self {
+            StepsJsonError::Empty => crate::i18n::t("tui-event-workflow-steps-empty"),
+            StepsJsonError::NotJson(detail) => {
+                crate::i18n::t_args("tui-event-workflow-steps-invalid", &[("error", detail)])
+            }
+            StepsJsonError::NotArray => crate::i18n::t("tui-event-workflow-steps-not-array"),
+        }
+    }
+}
+
+/// Turn the creator's free-text `steps` field into the array
+/// `POST /api/workflows` expects.
+///
+/// The wizard collects the steps as a raw JSON string, and that string used
+/// to be forwarded as a JSON *string*. `create_workflow` reads
+/// `req["steps"].as_array()`, so every submission was rejected with
+/// `Missing 'steps' array` and the TUI could not create a workflow at all.
+/// Parsing here also turns a typo into a message naming the position of the
+/// mistake instead of a bare HTTP failure.
+pub(crate) fn parse_workflow_steps_json(raw: &str) -> Result<serde_json::Value, StepsJsonError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(StepsJsonError::Empty);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| StepsJsonError::NotJson(e.to_string()))?;
+    if !value.is_array() {
+        return Err(StepsJsonError::NotArray);
+    }
+    Ok(value)
+}
+
 /// Create a workflow in background.
 pub fn spawn_create_workflow(
     backend: BackendRef,
@@ -930,6 +1062,13 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
+            let steps = match parse_workflow_steps_json(&steps_json) {
+                Ok(steps) => steps,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(e.message()));
+                    return;
+                }
+            };
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
@@ -938,17 +1077,37 @@ pub fn spawn_create_workflow(
                 .json(&serde_json::json!({
                     "name": name,
                     "description": description,
-                    "steps": steps_json,
+                    "steps": steps,
                 }))
                 .send()
             {
-                Ok(resp) => {
+                Ok(resp) if resp.status().is_success() => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let id = body["id"].as_str().unwrap_or("created").to_string();
+                    // `create_workflow` answers with `workflow_id`; reading
+                    // `id` meant every success reported the placeholder.
+                    let id = body["workflow_id"]
+                        .as_str()
+                        .or_else(|| body["id"].as_str())
+                        .unwrap_or("created")
+                        .to_string();
                     let _ = tx.send(AppEvent::WorkflowCreated(id));
                 }
+                Ok(resp) => {
+                    // A 400 from the step parser used to be reported as a
+                    // successful creation, leaving the operator hunting for a
+                    // workflow that was never registered.
+                    let status = resp.status().to_string();
+                    let detail = resp.text().unwrap_or_default();
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-workflow-create-failed",
+                        &[("status", &status), ("detail", &detail)],
+                    )));
+                }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(format!("Create workflow: {e}")));
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-workflow-create-failed",
+                        &[("status", "-"), ("detail", &e.to_string())],
+                    )));
                 }
             }
         }
@@ -1332,6 +1491,123 @@ pub fn spawn_update_agent_mcp_servers(
     });
 }
 
+/// Fetch the channel allowlist for an agent (#7742).
+///
+/// `GET /api/agents/{id}/channels` had no client anywhere in the tree — not here, not in the
+/// dashboard — so assigning a channel to a running agent meant hand-editing `agent.toml`.
+/// The in-process branch reads the same two sources the HTTP handler does: the manifest for
+/// `assigned`, and `sidecar_channels` for the catalogue of `channel_type` strings to offer.
+pub fn spawn_fetch_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client
+                .get(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .send()
+            {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let read = |key: &str| -> Vec<String> {
+                        body[key]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                        assigned: read("assigned"),
+                        available: read("available"),
+                    });
+                    return;
+                }
+            }
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-fetch-failed",
+            )));
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                let assigned = kernel
+                    .agent_registry_ref()
+                    .get(aid)
+                    .map(|e| e.manifest.channels.clone())
+                    .unwrap_or_default();
+                let mut available: Vec<String> = kernel
+                    .config_ref()
+                    .sidecar_channels
+                    .iter()
+                    .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+                    .collect();
+                // A channel already on the manifest but no longer configured must still be
+                // offered, or opening the editor and saving would silently drop it.
+                for name in &assigned {
+                    if !available.contains(name) {
+                        available.push(name.clone());
+                    }
+                }
+                let _ = tx.send(AppEvent::AgentChannelsLoaded {
+                    assigned,
+                    available,
+                });
+            }
+        }
+    });
+}
+
+/// Update an agent's channel allowlist.
+///
+/// An empty list is a legitimate value, not a no-op: `AgentManifest::channels` treats empty as
+/// "every channel", so clearing the selection widens access rather than revoking it.
+pub fn spawn_update_agent_channels(
+    backend: BackendRef,
+    agent_id: String,
+    channels: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .put(format!("{base_url}/api/agents/{agent_id}/channels"))
+                .json(&serde_json::json!({"channels": channels}))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-channels-update-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            if let Ok(uuid) = uuid::Uuid::parse_str(&agent_id) {
+                let aid = librefang_types::agent::AgentId(uuid);
+                match kernel.set_agent_channels(aid, channels) {
+                    Ok(()) => {
+                        let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-channels-update-error",
+                            &[("error", &e.to_string())],
+                        )));
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 /// Build a blocking reqwest client for daemon calls.
@@ -1423,6 +1699,44 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 }
 
 /// Fetch agents for memory screen agent selector.
+/// Fetch the memory configuration for the terminal's config panel.
+///
+/// Reads `effective_extraction_model` and `extraction_model_source` rather
+/// than the raw `extraction_model`: unset means "inherit the kernel default",
+/// so the raw field answers "nobody chose one" instead of naming the model
+/// that runs after every reply.
+///
+/// Daemon-only. The in-process backend has no HTTP surface to ask, and the
+/// panel says so rather than showing a blank as if it were configuration.
+pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        if let BackendRef::Daemon { base_url, api_key } = backend {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/memory/config")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let pm = &body["proactive_memory"];
+                    let view = crate::tui::screens::memory::MemoryConfigView {
+                        embedding_provider: body["embedding_provider"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
+                        auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
+                        auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
+                        effective_extraction_model: pm["effective_extraction_model"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        extraction_model_inherited: pm["extraction_model_source"].as_str()
+                            == Some("inherited_default"),
+                    };
+                    let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+                }
+            }
+        }
+    });
+}
+
 pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -1746,6 +2060,192 @@ pub fn spawn_fetch_mcp_servers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) 
 }
 
 /// Fetch provider auth status for templates screen.
+/// Reject a template name that could escape the templates directory or the URL path.
+/// Mirrors `validate_template_name` in the API so a name the daemon would refuse fails here too instead of producing a confusing 404.
+/// Names only ever originate from a directory listing, so this is belt-and-braces.
+fn is_safe_template_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn workspace_agents_dir() -> std::path::PathBuf {
+    librefang_kernel::config::librefang_home()
+        .join("workspaces")
+        .join("agents")
+}
+
+/// Operator-authored agent types, one flat `{name}.toml` each — the same directory
+/// `POST`/`PUT /api/templates` writes (#7740).
+fn agent_types_dir() -> std::path::PathBuf {
+    librefang_kernel::config::librefang_home().join("agent-types")
+}
+
+/// Resolve one agent type's manifest path, agent-types first.
+///
+/// Mirrors the precedence `GET /api/templates/{name}` uses, so the in-process backend
+/// and the daemon backend spawn from the same document for the same row.
+fn local_agent_type_path(name: &str) -> Option<std::path::PathBuf> {
+    let own = agent_types_dir().join(format!("{name}.toml"));
+    if own.is_file() {
+        return Some(own);
+    }
+    let workspace = workspace_agents_dir().join(name).join("agent.toml");
+    workspace.is_file().then_some(workspace)
+}
+
+/// Read the agent types on disk.
+/// The in-process backend has no HTTP surface to ask, so it reads the same directory `GET /api/templates` serves.
+fn local_agent_templates() -> Vec<TemplateInfo> {
+    // Same two sources, and the same precedence, as `GET /api/templates`.
+    let mut out = Vec::new();
+    collect_agent_type_files(&agent_types_dir(), &mut out);
+    collect_workspace_agent_manifests(&workspace_agents_dir(), &mut out);
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// Read `agent-types/{name}.toml` — the documents the write verbs own.
+fn collect_agent_type_files(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_safe_template_name(name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        push_template_info(name.to_string(), &content, &path, out);
+    }
+}
+
+/// Read `workspaces/agents/{name}/agent.toml` — every live agent is spawnable-from too.
+fn collect_workspace_agent_manifests(dir: &std::path::Path, out: &mut Vec<TemplateInfo>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !is_safe_template_name(&name) {
+            continue;
+        }
+        let manifest_path = entry.path().join("agent.toml");
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        push_template_info(name, &content, &manifest_path, out);
+    }
+}
+
+fn push_template_info(
+    name: String,
+    content: &str,
+    path: &std::path::Path,
+    out: &mut Vec<TemplateInfo>,
+) {
+    match toml::from_str::<librefang_types::agent::AgentManifest>(content) {
+        Ok(manifest) => out.push(TemplateInfo {
+            name,
+            description: manifest.description,
+            category: templates::MANIFEST_CATEGORY.to_string(),
+            provider: manifest.model.provider,
+            model: manifest.model.model,
+            source: TemplateSource::Manifest,
+        }),
+        // Naming the file turns "my agent type vanished" into a one-line diagnosis instead of a silent absence.
+        Err(e) => tracing::warn!(
+            "skipping agent template {}: invalid manifest: {e}",
+            path.display()
+        ),
+    }
+}
+
+fn parse_api_templates(body: &serde_json::Value) -> Vec<TemplateInfo> {
+    body["templates"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let name = t["name"].as_str()?.to_string();
+                    Some(TemplateInfo {
+                        name,
+                        description: t["description"].as_str().unwrap_or_default().to_string(),
+                        category: templates::MANIFEST_CATEGORY.to_string(),
+                        provider: t["provider"].as_str().unwrap_or("default").to_string(),
+                        model: t["model"].as_str().unwrap_or("default").to_string(),
+                        source: TemplateSource::Manifest,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch the operator-created agent types (#7760).
+///
+/// The templates screen used to render a compiled-in list and nothing else, so `GET /api/templates` was never called and every agent type an operator created was invisible.
+pub fn spawn_fetch_agent_templates(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let templates = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/templates"))
+                    .send()
+                    .ok()
+                    .and_then(|resp| resp.json::<serde_json::Value>().ok())
+                    .map(|body| parse_api_templates(&body))
+                    .unwrap_or_default()
+            }
+            BackendRef::InProcess(_) => local_agent_templates(),
+        };
+        let _ = tx.send(AppEvent::AgentTemplatesLoaded(templates));
+    });
+}
+
+/// Fetch one agent type's `agent.toml` verbatim, for spawning.
+///
+/// The screen used to string-format a manifest from the row's name and description and pin a fixed tool list onto it, so every agent type spawned from there got shell plus filesystem write plus network regardless of what its real manifest declared (#7760).
+/// Reading the real file is the fix.
+pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let toml = if !is_safe_template_name(&name) {
+            None
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    client
+                        .get(format!("{base_url}/api/templates/{name}/toml"))
+                        .send()
+                        .ok()
+                        .filter(|resp| resp.status().is_success())
+                        .and_then(|resp| resp.text().ok())
+                }
+                BackendRef::InProcess(_) => {
+                    local_agent_type_path(&name).and_then(|p| std::fs::read_to_string(p).ok())
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateTomlLoaded { name, toml });
+    });
+}
+
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
@@ -2006,13 +2506,22 @@ pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 }
 
 /// Fetch settings models.
+///
+/// `GET /api/models` answers with `{ "models": [...], "total": n, "available": n }`.
+/// Reading the body as a bare array — which this did — yields `None` on every
+/// call, so the Settings > Models list rendered empty against a healthy daemon.
+/// The chat model picker below already reads `body["models"]`; this is the same
+/// shape.
+/// The cost keys are the API's own (`input_cost_per_m` / `output_cost_per_m`);
+/// the `cost_input` / `cost_output` names read here appear nowhere in the
+/// response, so the prices column was pinned to `$0.00/$0.00`.
 pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let models: Vec<ModelInfo> = body
+                    let models: Vec<ModelInfo> = body["models"]
                         .as_array()
                         .map(|arr| {
                             arr.iter()
@@ -2021,8 +2530,8 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
                                     provider: m["provider"].as_str().unwrap_or("").to_string(),
                                     tier: m["tier"].as_str().unwrap_or("").to_string(),
                                     context_window: m["context_window"].as_u64().unwrap_or(0),
-                                    cost_input: m["cost_input"].as_f64().unwrap_or(0.0),
-                                    cost_output: m["cost_output"].as_f64().unwrap_or(0.0),
+                                    cost_input: m["input_cost_per_m"].as_f64().unwrap_or(0.0),
+                                    cost_output: m["output_cost_per_m"].as_f64().unwrap_or(0.0),
                                 })
                                 .collect()
                         })
@@ -2035,6 +2544,198 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::SettingsModelsLoaded(Vec::new()));
         }
     });
+}
+
+/// Fetch the model catalogue for the Models screen, with each entry's effective
+/// and catalog-declared capacity limits side by side (refs #7774).
+///
+/// `context_window` / `max_output_tokens` on the row are the values in force
+/// after the operator override; `limits_catalog` carries what the registry or a
+/// discovery probe declared. The screen needs both — the difference is what
+/// tells an operator a model has been corrected, and what a reset restores.
+pub fn spawn_fetch_model_catalog(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/models")).send() {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>() {
+                        let mut models: Vec<ModelRow> = body["models"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .map(|m| ModelRow {
+                                        id: m["id"].as_str().unwrap_or("").to_string(),
+                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                        tier: m["tier"].as_str().unwrap_or("").to_string(),
+                                        context_window_effective: m["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        context_window_catalog: m["limits_catalog"]
+                                            ["context_window"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_effective: m["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        max_output_tokens_catalog: m["limits_catalog"]
+                                            ["max_output_tokens"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // The catalogue arrives in whatever order the providers
+                        // were merged in; a stable sort keeps the cursor from
+                        // landing on a different model after a refresh.
+                        models.sort_by(|a, b| {
+                            (a.provider.as_str(), a.id.as_str())
+                                .cmp(&(b.provider.as_str(), b.id.as_str()))
+                        });
+                        let _ = tx.send(AppEvent::ModelCatalogLoaded(models));
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-models-load-failed",
+                    )));
+                    let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+            let _ = tx.send(AppEvent::ModelCatalogLoaded(Vec::new()));
+        }
+    });
+}
+
+/// Read the stored override document for one model, so a write can merge into
+/// it instead of replacing it.
+///
+/// `PUT /api/models/overrides/{id}` takes a whole `ModelOverrides` document and
+/// clears every field the body omits, so submitting only the two capacity
+/// limits would silently drop the temperature, top-p and reasoning-effort
+/// settings stored under the same key.
+fn read_model_overrides(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    key: &str,
+) -> serde_json::Value {
+    client
+        .get(format!("{base_url}/api/models/overrides/{key}"))
+        .send()
+        .ok()
+        .and_then(|resp| resp.json::<serde_json::Value>().ok())
+        .filter(|doc| doc.is_object())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// Persist one model's operator capacity limits (refs #7774).
+///
+/// `None` for a limit removes that field, which lets the catalog answer again.
+/// Everything else already stored under the key is carried across untouched.
+pub fn spawn_save_model_limits(
+    backend: BackendRef,
+    key: String,
+    context_window: Option<u64>,
+    max_output_tokens: Option<u64>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", context_window);
+            set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
+            match client
+                .put(format!("{base_url}/api/models/overrides/{key}"))
+                .json(&doc)
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsSaved(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-save-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Drop one model's capacity-limit overrides so the catalog answers again.
+///
+/// Only the two limit fields are removed: the inference parameters under the
+/// same key are a different concern and this screen does not own them. When
+/// nothing is left, the whole entry is deleted so the file does not accumulate
+/// empty documents.
+pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let mut doc = read_model_overrides(&client, &base_url, &key);
+            set_or_clear(&mut doc, "context_window", None);
+            set_or_clear(&mut doc, "max_output_tokens", None);
+            let empty = doc.as_object().map(|o| o.is_empty()).unwrap_or(true);
+            let outcome = if empty {
+                client
+                    .delete(format!("{base_url}/api/models/overrides/{key}"))
+                    .send()
+            } else {
+                client
+                    .put(format!("{base_url}/api/models/overrides/{key}"))
+                    .json(&doc)
+                    .send()
+            };
+            match outcome {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ModelLimitsReset(key));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-model-limits-reset-failed",
+                        &[("model", &key)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-models-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Write `value` into `doc`, or remove the key entirely when it is `None`.
+///
+/// Removing rather than writing `null` matters: the field is
+/// `skip_serializing_if = "Option::is_none"` on the way out, and leaving a
+/// `null` behind would round-trip as a set-but-empty override.
+fn set_or_clear(doc: &mut serde_json::Value, field: &str, value: Option<u64>) {
+    let Some(obj) = doc.as_object_mut() else {
+        return;
+    };
+    match value {
+        Some(v) => {
+            obj.insert(field.to_string(), serde_json::json!(v));
+        }
+        None => {
+            obj.remove(field);
+        }
+    }
 }
 
 /// Fetch settings tools.
@@ -2133,6 +2834,186 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
     });
 }
 
+/// Fetch the backup archives the daemon holds.
+pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/backups")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let _ = tx.send(AppEvent::BackupsLoaded(parse_backup_list(&body)));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backups-list-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Read `GET /api/backups` into the rows the settings screen draws.
+///
+/// `created_at` and `components` are both `null` when the archive's
+/// `manifest.json` could not be read, so the file's own `modified_at` is the
+/// fallback timestamp and the component list stays empty — which the restore
+/// form reads as "restore everything", matching the endpoint's own default.
+fn parse_backup_list(body: &serde_json::Value) -> Vec<BackupInfo> {
+    body["backups"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|b| BackupInfo {
+                    filename: b["filename"].as_str().unwrap_or_default().to_string(),
+                    size_bytes: b["size_bytes"].as_u64().unwrap_or(0),
+                    created_at: b["created_at"]
+                        .as_str()
+                        .or_else(|| b["modified_at"].as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    components: b["components"]
+                        .as_array()
+                        .map(|c| {
+                            c.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Create a new backup archive.
+pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            // A backup walks the whole home directory, so it outlives the
+            // default client timeout on any non-trivial install.
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+            match client.post(format!("{base_url}/api/backup")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let filename = body["filename"].as_str().unwrap_or_default().to_string();
+                    let _ = tx.send(AppEvent::BackupCreated(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                        "tui-event-backup-create-failed",
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Delete one backup archive.
+pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client
+                .delete(format!("{base_url}/api/backups/{filename}"))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::BackupDeleted(filename));
+                }
+                _ => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-backup-delete-failed",
+                        &[("filename", &filename)],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Restore one backup archive.
+///
+/// `body` is built by `settings::restore_request_body`, which is what decides
+/// whether `components` is present at all — the endpoint reads an absent field
+/// as "everything" and rejects `[]`, so the shape must not be reassembled here.
+pub fn spawn_restore_backup(
+    backend: BackendRef,
+    body: serde_json::Value,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let filename = body["filename"].as_str().unwrap_or_default().to_string();
+        match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                // Restoring decompresses and writes the whole archive, so it
+                // gets the same generous timeout the create side does.
+                let client =
+                    make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+                match client
+                    .post(format!("{base_url}/api/restore"))
+                    .json(&body)
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let _ = tx.send(AppEvent::BackupRestored {
+                            filename,
+                            restored_files: payload["restored_files"].as_u64().unwrap_or(0),
+                            errors: payload["errors"].as_array().map_or(0, |e| e.len()),
+                        });
+                    }
+                    // The daemon's own message carries why (an unknown
+                    // component name, a missing manifest), so it is preferred
+                    // over the generic failure line.
+                    Ok(resp) => {
+                        let payload: serde_json::Value = resp.json().unwrap_or_default();
+                        let message = payload["error"]["message"]
+                            .as_str()
+                            .or_else(|| payload["message"].as_str())
+                            .map(|m| m.to_string())
+                            .unwrap_or_else(|| {
+                                crate::i18n::t_args(
+                                    "tui-event-backup-restore-failed",
+                                    &[("filename", &filename)],
+                                )
+                            });
+                        let _ = tx.send(AppEvent::FetchError(message));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-backup-restore-failed",
+                            &[("filename", &filename)],
+                        )));
+                    }
+                }
+            }
+            BackendRef::InProcess(_) => {
+                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                    "tui-event-backups-need-daemon",
+                )));
+            }
+        }
+    });
+}
+
 /// Test a provider connection.
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
@@ -2182,6 +3063,57 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
                 latency_ms: 0,
                 message: crate::i18n::t("tui-event-provider-test-not-available-in-process"),
             }));
+        }
+    });
+}
+
+/// Fetch user groups (#7745).
+///
+/// `GET /api/groups` is Admin-or-above; the write verbs are Owner-only and the
+/// screen does not offer them, so a Viewer-scoped TUI degrades to an empty list
+/// rather than a wall of permission errors.
+pub fn spawn_fetch_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/groups")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    let groups: Vec<GroupInfo> = body
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|g| GroupInfo {
+                                    name: g["name"].as_str().unwrap_or("").to_string(),
+                                    description: g["description"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    member_count: g["member_count"].as_u64().unwrap_or(0),
+                                    roles: g["roles"]
+                                        .as_array()
+                                        .map(|r| {
+                                            r.iter()
+                                                .filter_map(|v| v.as_str())
+                                                .collect::<Vec<_>>()
+                                                .join(",")
+                                        })
+                                        .unwrap_or_default(),
+                                    has_unregistered_members: g["unknown_members"]
+                                        .as_array()
+                                        .map(|u| !u.is_empty())
+                                        .unwrap_or(false),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(AppEvent::GroupsLoaded(groups));
+                }
+            }
+        }
+        // Groups live in `config.toml`, which the in-process backend has no
+        // HTTP surface for; the daemon path is the only one that can answer.
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::GroupsLoaded(Vec::new()));
         }
     });
 }
@@ -3073,6 +4005,154 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// `GET /api/backups` nests its rows under `backups`, and the settings
+    /// screen reads `created_at` and `components` straight out of each one.
+    #[test]
+    fn backup_rows_parse_out_of_the_listing_envelope() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "librefang-backup-20260101-000000.zip",
+                "path": "/home/u/.librefang/backups/librefang-backup-20260101-000000.zip",
+                "size_bytes": 8192,
+                "modified_at": "2026-01-02T00:00:00Z",
+                "components": ["config", "skills"],
+                "librefang_version": "2026.8.19",
+                "created_at": "2026-01-01T00:00:00Z"
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "librefang-backup-20260101-000000.zip");
+        assert_eq!(rows[0].size_bytes, 8192);
+        assert_eq!(
+            rows[0].created_at, "2026-01-01T00:00:00Z",
+            "the manifest timestamp must win over the file's mtime"
+        );
+        assert_eq!(rows[0].components, vec!["config", "skills"]);
+    }
+
+    /// An archive whose `manifest.json` could not be read reports `created_at`
+    /// and `components` as `null`. Falling back to the file's own mtime keeps
+    /// the row dated, and the empty component list is what makes the restore
+    /// form omit `components` — the endpoint's own "restore everything".
+    #[test]
+    fn a_manifestless_row_falls_back_to_the_file_mtime() {
+        let body = serde_json::json!({
+            "backups": [{
+                "filename": "hand-rolled.zip",
+                "size_bytes": 10,
+                "modified_at": "2026-03-04T05:06:07Z",
+                "components": null,
+                "librefang_version": null,
+                "created_at": null
+            }],
+            "total": 1
+        });
+        let rows = parse_backup_list(&body);
+        assert_eq!(rows[0].created_at, "2026-03-04T05:06:07Z");
+        assert!(rows[0].components.is_empty());
+    }
+
+    #[test]
+    fn an_empty_listing_parses_to_no_rows() {
+        let rows = parse_backup_list(&serde_json::json!({"backups": [], "total": 0}));
+        assert!(rows.is_empty());
+    }
+
+    /// The workflow creator's raw `steps` field must reach the API as a JSON
+    /// array. It used to be forwarded as a JSON string, which
+    /// `create_workflow` rejects with `Missing 'steps' array` — the wizard
+    /// could not create anything.
+    #[test]
+    fn workflow_steps_json_parses_into_an_array() {
+        let steps = parse_workflow_steps_json(
+            r#"[{"name":"draft","agent_name":"writer","prompt":"{{input}}","session_mode":"new"}]"#,
+        )
+        .expect("a JSON array must parse");
+        let array = steps.as_array().expect("must stay an array");
+        assert_eq!(array.len(), 1);
+        assert_eq!(array[0]["agent_name"], "writer");
+        assert_eq!(
+            array[0]["session_mode"], "new",
+            "the per-step session override must survive the parse untouched"
+        );
+    }
+
+    /// The Workflows screen used to read `output` and nothing else, so the generic "completed" line was printed for a 202 that had not finished and for a 422 that had failed.
+    /// A failure must never render as a completion.
+    #[test]
+    fn a_failed_run_is_not_rendered_as_completed() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            &serde_json::json!({"error": "workflow_failed", "detail": "step 'draft' timed out"}),
+        );
+
+        assert!(
+            message.contains("step 'draft' timed out"),
+            "the run's reason must reach the screen: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a failed run must not render as a completed one"
+        );
+    }
+
+    #[test]
+    fn an_accepted_run_names_the_run_id_to_poll() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::ACCEPTED,
+            &serde_json::json!({"run_id": "3f1c-run", "status": "running"}),
+        );
+
+        assert!(
+            message.contains("3f1c-run"),
+            "a still-running launch must name the run so it stays traceable: {message}"
+        );
+        assert_ne!(
+            message,
+            crate::i18n::t("tui-event-workflow-completed"),
+            "a run that has not finished must not claim to have completed"
+        );
+    }
+
+    #[test]
+    fn a_finished_run_shows_its_output_verbatim() {
+        let message = workflow_run_result_message(
+            reqwest::StatusCode::OK,
+            &serde_json::json!({"run_id": "3f1c-run", "output": "the summary"}),
+        );
+
+        assert_eq!(message, "the summary");
+    }
+
+    #[test]
+    fn workflow_steps_json_tolerates_surrounding_whitespace() {
+        assert!(parse_workflow_steps_json("  [ ]  \n").is_ok());
+    }
+
+    #[test]
+    fn workflow_steps_json_rejects_the_shapes_the_api_would_reject() {
+        assert_eq!(
+            parse_workflow_steps_json("   "),
+            Err(StepsJsonError::Empty),
+            "an untouched field must be named as empty, not sent as a doomed request"
+        );
+        assert_eq!(
+            parse_workflow_steps_json(r#"{"name":"draft"}"#),
+            Err(StepsJsonError::NotArray),
+            "a bare step object is the likeliest typo and must be caught here"
+        );
+        assert!(
+            matches!(
+                parse_workflow_steps_json("[{name: draft}]"),
+                Err(StepsJsonError::NotJson(_))
+            ),
+            "malformed JSON must carry serde's message rather than a bare failure"
+        );
+    }
 
     /// The TUI's sweep loops must survive the call that spawned them.
     ///

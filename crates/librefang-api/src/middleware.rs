@@ -203,6 +203,54 @@ pub struct AuthenticatedApiUser {
     pub user_id: UserId,
 }
 
+impl AuthenticatedApiUser {
+    /// The [`Principal`] this caller acts for, for stamping ownership on what a request creates (#7744).
+    ///
+    /// `None` for the synthetic root credential — the master api key, a trusted loopback caller, or an `allow_no_auth` deployment, all of which are admitted as `name: "root"` with the fixed [`ROOT_API_KEY_USER_ID`] sentinel.
+    /// That sentinel says "authentication is off or the caller holds the daemon's own key", not "a person called root"; it names no `[[users]]` entry, so recording it as an owner would write a principal that resolves to nothing and looks like a real one.
+    /// Returning `None` here lets the caller fall through to `config.toml: default_owner`, which is the key an operator actually reaches for when they want unattributed writes attributed.
+    pub fn owner_principal(&self) -> Option<librefang_types::principal::Principal> {
+        if self.user_id.0 == ROOT_API_KEY_USER_ID {
+            return None;
+        }
+        Some(librefang_types::principal::Principal::user(self.user_id))
+    }
+}
+
+/// A LibreFang identity resolved from a validated OIDC ID token (#7744).
+///
+/// Produced by [`crate::oauth::oidc_auth_middleware`], which is the only place that holds both the cryptographically validated `IdTokenClaims` and the `[external_auth]` config the grant is derived from, and consumed by [`auth`] at the two points where a request would otherwise be rejected as unauthenticated.
+///
+/// The extension exists **only** when an operator declared `[external_auth.role_map]` and the caller's `roles` claim matched an entry in it, so its mere presence is the authorization decision; `role` is the level that decision produced, in the same `Viewer < User < Admin < Owner` vocabulary every other credential path uses.
+/// Absent the extension nothing changes: a caller with no claims, with claims but no configured map, or with claims that map to nothing, takes exactly the path it took before this type existed.
+#[derive(Clone, Debug)]
+pub struct OidcRoleGrant {
+    /// Display name for audit and attribution — the `email` claim when the provider issued one, otherwise the `sub`.
+    pub name: String,
+    /// Highest-privilege role the caller's claims mapped to.
+    pub role: UserRole,
+    /// `UserId::from_name(&name)`, so an OIDC caller resolves to the same id as a `[[users]]` entry declared under that name and inherits its per-user tool policy and budget.
+    pub user_id: UserId,
+}
+
+/// The local `[[groups]]` an identity provider's claims placed this caller in, for the lifetime of one request (#7746).
+///
+/// Produced by [`crate::oauth::oidc_auth_middleware`] from `[external_auth.group_map]`, and read by handlers that need the caller's effective teams rather than their privilege level — `GET /api/authz/whoami` today, and any future check of `Principal::Group` ownership against the live caller.
+///
+/// **Ephemeral by design.** This never reaches `config.toml`. Membership is recomputed from the presented token on every request and dropped with it, so a revocation in the identity provider propagates when the caller's token expires, with no local cleanup and no stale row in operator-owned config. `ExternalAuthConfig::group_map` carries the full argument.
+///
+/// It is a separate extension from [`OidcRoleGrant`] rather than a field on it, because the two are independently configurable: an operator may declare `group_map` and no `role_map` — SSO identity for ownership and channel-binding roles, API privilege still on local keys — and folding membership into the role grant would silently disable it for exactly that deployment.
+///
+/// Presence carries no privilege. Membership confers group role strings and group-shaped ownership; it never contributes a [`UserRole`]. An IdP group called `owner` is a group called `owner`, nothing more.
+#[derive(Clone, Debug)]
+pub struct IdpGroupMembership {
+    /// Names of declared `[[groups]]` entries the caller matched. Always a
+    /// subset of the configured groups — `translate_oidc_groups` drops a map
+    /// target that names no declared group — and a `BTreeSet` so the order is
+    /// the same on every node and in every serialization (#3298).
+    pub groups: std::collections::BTreeSet<String>,
+}
+
 /// Marks requests admitted solely by the explicitly trusted loopback/no-auth deployment mode.
 /// Most routes treat these as Owner-equivalent for local single-user compatibility, while especially sensitive handlers (notably the audit ledger) can still require an actual credential.
 #[derive(Clone, Copy, Debug)]
@@ -298,6 +346,19 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // generic Admin-or-above gate so the dashboard's user list and
     // permission simulator stay usable for Admins.
     if path == "/api/users" || path.starts_with("/api/users/") {
+        return true;
+    }
+    // Group management (#7745) sits on the same side of the line as user
+    // management, and for a sharper reason: a group's `roles` list confers role
+    // strings on every member. An Admin per-user API key that could reach
+    // `POST /api/groups` would create a group carrying whatever role it likes,
+    // add itself as a member, and self-promote — the same escalation the
+    // `/api/users*` gate above exists to close, one indirection further out.
+    // Prefix-matched because the path can be `/api/groups`,
+    // `/api/groups/{name}`, or `/api/groups/{name}/members/{user}`. GET is left
+    // to the generic Admin-or-above gate so the dashboard's group list and the
+    // `/api/users/{name}/groups` reverse lookup stay usable for an Admin.
+    if path == "/api/groups" || path.starts_with("/api/groups/") {
         return true;
     }
     // Adding / updating / deleting an MCP server persists a config entry that
@@ -547,6 +608,61 @@ fn rbac_denied_response(
             .to_string(),
         ))
         .unwrap_or_default()
+}
+
+/// What consulting the OIDC role grant produced at a point where [`auth`] was about to reject the request (#7744).
+enum OidcOutcome {
+    /// No [`OidcRoleGrant`] in extensions — the caller is not an OIDC principal, or holds claims the operator mapped to nothing.
+    /// The rejection [`auth`] was about to perform stands, unchanged.
+    NoGrant,
+    /// The grant is good for this route; [`AuthenticatedApiUser`] has been inserted and the request should proceed.
+    Admitted,
+    /// The grant is real but its role may not reach this route.
+    /// Carries the localized 403, already recorded in the audit log.
+    Denied(Response<Body>),
+}
+
+/// Admit a request on a validated OIDC role grant, applying the same route/role gate every other credential path applies.
+///
+/// Called only from the two points in [`auth`] that were about to return 401 — the fail-closed branch for a deployment with no local credential configured, and the final fallthrough after every local credential missed.
+/// Placing it there rather than higher up is what makes the whole feature additive: an OIDC bearer cannot displace, outrank, or demote an identity that some other credential already established, because by the time this runs no other credential matched.
+///
+/// It cannot in practice compete with one either.
+/// The grant exists only when the `Authorization: Bearer` value was a JWT this daemon verified against a configured provider's JWKS, and a master `api_key` or a per-user key is an opaque secret rather than a signed token, so one header value cannot satisfy both.
+fn apply_oidc_grant(
+    request: &mut Request<Body>,
+    auth_state: &AuthState,
+    method: &axum::http::Method,
+    path: &str,
+) -> OidcOutcome {
+    let Some(grant) = request.extensions().get::<OidcRoleGrant>().cloned() else {
+        return OidcOutcome::NoGrant;
+    };
+    if !user_role_allows_request(grant.role, method, path) {
+        let lang = request
+            .extensions()
+            .get::<RequestLanguage>()
+            .map(|rl| rl.0)
+            .unwrap_or(i18n::DEFAULT_LANGUAGE);
+        return OidcOutcome::Denied(rbac_denied_response(
+            auth_state,
+            method,
+            path,
+            grant.role,
+            grant.user_id,
+            lang,
+        ));
+    }
+    debug!(
+        role = %grant.role,
+        "admitting request on an OIDC role claim mapped by external_auth.role_map"
+    );
+    request.extensions_mut().insert(AuthenticatedApiUser {
+        name: grant.name,
+        role: grant.role,
+        user_id: grant.user_id,
+    });
+    OidcOutcome::Admitted
 }
 
 /// Pull a caller-provided token from the standard locations the auth path
@@ -1760,6 +1876,18 @@ pub async fn auth(
             request.extensions_mut().insert(TrustedNoAuthCaller);
             return next.run(request).await;
         }
+        // A deployment whose only configured credential is `[external_auth]`
+        // lands here — no `api_key`, no `[[users]]`, no dashboard password —
+        // and used to be told to set an api_key even though the caller had
+        // just presented a token this daemon verified against the IdP's JWKS
+        // (#7744). Consulted after the loopback/`allow_no_auth` branch above,
+        // so a trusted local operator still gets Owner rather than whatever
+        // their IdP claims happen to map to.
+        match apply_oidc_grant(&mut request, &auth_state, &method, path) {
+            OidcOutcome::Admitted => return next.run(request).await,
+            OidcOutcome::Denied(resp) => return resp,
+            OidcOutcome::NoGrant => {}
+        }
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("www-authenticate", "Bearer")
@@ -1985,6 +2113,17 @@ pub async fn auth(
         }
     }
 
+    // Every local credential missed. Before rejecting, consult the OIDC role
+    // grant (#7744): `oidc_auth_middleware` runs ahead of this layer and, when
+    // the bearer token was a JWT it could verify and the operator declared
+    // `[external_auth.role_map]`, left a resolved role in extensions that no
+    // handler used to read.
+    match apply_oidc_grant(&mut request, &auth_state, &method, path) {
+        OidcOutcome::Admitted => return next.run(request).await,
+        OidcOutcome::Denied(resp) => return resp,
+        OidcOutcome::NoGrant => {}
+    }
+
     // Determine error message: was a credential provided but wrong, or missing entirely?
     // Use the request language (set by accept_language middleware) for i18n.
     let lang = request
@@ -2025,6 +2164,8 @@ pub async fn auth(
 }
 
 const LOGIN_PAGE_HTML: &str = include_str!("login_page.html");
+// If the inline script in login_page.html changes, recompute its script-src
+// SHA-256 below. dashboard_login_page_script_is_allowed_by_csp_hash enforces it.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'sha256-TDA4xCzDRyoMM+fopfpKCyivlfu44tSPBzidGFvUgNM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'";
 
 /// Security headers middleware — applied to ALL API responses.
@@ -3107,6 +3248,50 @@ mod tests {
                     "Owner must be allowed to {method} {path}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_user_role_admin_cannot_mutate_groups_endpoints() {
+        // #7745: a group's `roles` list confers role strings on its members, so
+        // an Admin that could write groups could grant itself whatever role it
+        // wanted and self-promote — the same escalation the `/api/users*` gate
+        // above closes, one indirection further out.
+        for method in [
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ] {
+            for path in [
+                "/api/groups",
+                "/api/groups/oncall",
+                "/api/groups/oncall/members/alice",
+            ] {
+                assert!(
+                    !user_role_allows_request(UserRole::Admin, &method, path),
+                    "Admin must NOT be allowed to {method} {path}"
+                );
+                assert!(
+                    user_role_allows_request(UserRole::Owner, &method, path),
+                    "Owner must be allowed to {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_group_reads_stay_at_the_generic_admin_gate() {
+        // The dashboard's group list and the `/api/users/{name}/groups` reverse
+        // lookup are reads, and locking them to Owner would make the surface
+        // unusable for the Admin who is expected to operate it.
+        let get = axum::http::Method::GET;
+        for path in [
+            "/api/groups",
+            "/api/groups/oncall",
+            "/api/users/alice/groups",
+        ] {
+            assert!(user_role_allows_request(UserRole::Admin, &get, path));
+            assert!(user_role_allows_request(UserRole::Owner, &get, path));
         }
     }
 

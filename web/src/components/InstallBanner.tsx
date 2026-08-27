@@ -21,9 +21,13 @@ export default function InstallBanner() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    if (localStorage.getItem(DISMISS_KEY) === '1') {
-      setDismissed(true)
-      return
+    try {
+      if (localStorage.getItem(DISMISS_KEY) === '1') {
+        setDismissed(true)
+        return
+      }
+    } catch {
+      // Storage can be unavailable in private browsing. Keep install UI usable.
     }
     const onPrompt = (e: Event) => {
       // Capture the event — Chrome suppresses its own mini-infobar only if
@@ -38,18 +42,24 @@ export default function InstallBanner() {
   if (dismissed || !event) return null
 
   const close = () => {
-    localStorage.setItem(DISMISS_KEY, '1')
+    try {
+      localStorage.setItem(DISMISS_KEY, '1')
+    } catch {
+      // Dismiss the in-memory banner even when persistence is unavailable.
+    }
     setDismissed(true)
   }
 
   const install = async () => {
+    const promptEvent = event
+    setEvent(null)
     try {
-      await event.prompt()
-      const outcome = await event.userChoice
-      if (outcome.outcome === 'accepted' || outcome.outcome === 'dismissed') {
-        close()
-      }
-    } catch { /* user cancelled */ }
+      await promptEvent.prompt()
+      await promptEvent.userChoice
+      close()
+    } catch (error) {
+      console.error('Install prompt failed:', error)
+    }
   }
 
   return (

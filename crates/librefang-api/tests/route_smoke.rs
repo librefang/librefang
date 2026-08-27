@@ -3,11 +3,13 @@
 //! Walks a hand-curated table of every GET path registered under
 //! `crates/librefang-api/src/routes/` (plus a few protocol-level routes mounted
 //! directly in `server::build_router`) and asserts that hitting each one with
-//! an empty body never produces a 5xx.  The point is to catch the failure
-//! mode the issue calls out: handlers that compile but panic / return 500 the
-//! moment they are actually invoked because their dependency on `AppState`
-//! is wrong, a feature flag silently disabled them, or an `unwrap()` fires on
-//! the empty-config path.
+//! an empty body never produces an unexpected 5xx.
+//! The point is to catch handlers that compile but panic or return 500 when
+//! invoked because their `AppState` dependency is wrong, a feature flag
+//! silently disabled them, or an `unwrap()` fires on the empty-config path.
+//! Exact service-availability responses are documented in the matrix test:
+//! disabled external login returns 503, and an unavailable ClawHub CN upstream
+//! returns 502.
 //!
 //! Companion focused tests cover the highest-risk POST surfaces from the
 //! issue body:
@@ -55,6 +57,7 @@ use librefang_api::server;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +69,8 @@ struct Harness {
     _tmp: tempfile::TempDir,
     state: Arc<AppState>,
 }
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Drop for Harness {
     fn drop(&mut self) {
@@ -111,6 +116,14 @@ async fn boot_router() -> Harness {
     }
 }
 
+async fn send_request(app: axum::Router, req: Request<Body>) -> axum::response::Response {
+    let request_name = format!("{} {}", req.method(), req.uri().path());
+    tokio::time::timeout(REQUEST_TIMEOUT, app.oneshot(req))
+        .await
+        .unwrap_or_else(|_| panic!("{request_name} timed out after {REQUEST_TIMEOUT:?}"))
+        .expect("oneshot")
+}
+
 /// Send a GET request through the live router and return the (status, content-type).
 async fn get(app: axum::Router, path: &str) -> (StatusCode, Option<String>) {
     // Inject a loopback ConnectInfo so the auth middleware's "fail closed for
@@ -127,7 +140,7 @@ async fn get(app: axum::Router, path: &str) -> (StatusCode, Option<String>) {
             [127, 0, 0, 1],
             0,
         ))));
-    let resp = app.oneshot(req).await.expect("oneshot");
+    let resp = send_request(app, req).await;
     let status = resp.status();
     let ct = resp
         .headers()
@@ -149,7 +162,7 @@ async fn post_json(app: axum::Router, path: &str, body: &str) -> StatusCode {
             [127, 0, 0, 1],
             0,
         ))));
-    app.oneshot(req).await.expect("oneshot").status()
+    send_request(app, req).await.status()
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +245,7 @@ const SMOKE_GET_ROUTES: &[&str] = &[
     "/api/usage/summary",
     "/api/usage/by-model",
     "/api/usage/daily",
+    "/api/usage/export",
     "/api/budget/agents",
     "/api/budget/users",
     // ── Audit / authz ────────────────────────────────────────────────────
@@ -303,36 +317,34 @@ const SMOKE_GET_ROUTES: &[&str] = &[
     "/api/v1/mcp/catalog",
 ];
 
-/// Smoke walk: every GET path must respond without a 5xx.  4xx is fine — a
-/// handler returning "not found" or "bad request" still proves the route is
-/// wired up and the handler executed without panicking.
+/// Smoke walk: every GET path must respond without an unexpected 5xx. 4xx is
+/// fine — a handler returning "not found" or "bad request" still proves the
+/// route is wired up and the handler executed without panicking. The two exact
+/// availability responses below are public handler contracts, not internal
+/// failures.
 #[tokio::test(flavor = "multi_thread")]
-async fn smoke_get_routes_never_500() {
+async fn smoke_get_routes_reject_unexpected_5xx() {
     let harness = boot_router().await;
 
     let mut failures: Vec<String> = Vec::new();
     for path in SMOKE_GET_ROUTES {
         let (status, ct) = get(harness.app.clone(), path).await;
-        if status.is_server_error() {
+        let expected_unavailable = matches!(
+            (*path, status),
+            ("/api/clawhub-cn/browse", StatusCode::BAD_GATEWAY)
+                | ("/api/auth/login", StatusCode::SERVICE_UNAVAILABLE)
+        );
+        if status.is_server_error() && !expected_unavailable {
             failures.push(format!("{path} -> {status} (content-type: {ct:?})"));
         }
     }
 
-    if !failures.is_empty() {
-        // Discovery, not regression: #3571 explicitly scopes this PR to
-        // surfacing 5xx-returning handlers as follow-up work, NOT fixing them
-        // in-place. Print to stderr (visible in CI logs + nextest summary) so
-        // the list is preserved for the follow-up checklist, but do not
-        // panic — that would block every unrelated PR until each downstream
-        // handler is fixed. Convert back to `panic!` once the discovery list
-        // on main is empty.
-        eprintln!(
-            "[smoke matrix discovery] {} GET route(s) returned 5xx — track as \
-             #3571 follow-ups (this assertion is non-blocking by design):\n  {}",
-            failures.len(),
-            failures.join("\n  ")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} GET route(s) returned unexpected 5xx:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
 }
 
 /// Successful (2xx) routes returning a body should advertise JSON.  This
@@ -349,12 +361,25 @@ async fn smoke_get_routes_with_2xx_advertise_json() {
         if !status.is_success() {
             continue;
         }
-        // Streaming endpoints (SSE) and metrics use other content types and are
-        // legitimately not JSON.
-        if matches!(
-            *path,
-            "/api/logs/stream" | "/api/comms/events" | "/api/metrics"
-        ) {
+        // Streaming endpoints, metrics, and config export intentionally use
+        // protocol-specific successful content types rather than JSON.
+        let expected_content_type = match *path {
+            "/api/logs/stream" => Some("text/event-stream"),
+            "/api/metrics" => Some("text/plain"),
+            "/api/config/export" => Some("application/toml"),
+            // A CSV export advertises CSV; #7891 added it alongside the JSON usage routes.
+            "/api/usage/export" => Some("text/csv"),
+            _ => None,
+        };
+        if let Some(expected) = expected_content_type {
+            if !ct
+                .as_deref()
+                .is_some_and(|actual| actual.starts_with(expected))
+            {
+                violations.push(format!(
+                    "{path} -> 2xx, content-type = {ct:?}, expected {expected}"
+                ));
+            }
             continue;
         }
         match ct.as_deref() {
@@ -363,19 +388,12 @@ async fn smoke_get_routes_with_2xx_advertise_json() {
         }
     }
 
-    if !violations.is_empty() {
-        // Same discovery-not-regression posture as `smoke_get_routes_never_500`
-        // above (#3571). Some currently-2xx routes legitimately return HTML
-        // (dashboard fallbacks) or other content types we haven't enumerated;
-        // surface them as a follow-up list rather than failing every PR.
-        eprintln!(
-            "[smoke matrix discovery] {} route(s) returned 2xx without an \
-             application/json content-type — track as #3571 follow-ups \
-             (this assertion is non-blocking by design):\n  {}",
-            violations.len(),
-            violations.join("\n  ")
-        );
-    }
+    assert!(
+        violations.is_empty(),
+        "{} route(s) returned 2xx without an expected content-type:\n  {}",
+        violations.len(),
+        violations.join("\n  ")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +442,7 @@ async fn openai_chat_completions_rejects_missing_model() {
     );
 }
 
-/// `/v1/chat/completions` — empty messages array must not 5xx.
+/// `/v1/chat/completions` — empty messages array must produce 4xx.
 #[tokio::test(flavor = "multi_thread")]
 async fn openai_chat_completions_rejects_empty_messages() {
     let harness = boot_router().await;
@@ -434,15 +452,12 @@ async fn openai_chat_completions_rejects_empty_messages() {
         r#"{"model": "definitely-not-a-real-model", "messages": []}"#,
     )
     .await;
-    assert!(
-        !status.is_server_error(),
-        "/v1/chat/completions with empty messages returned 5xx ({status})"
-    );
+    assert!(status.is_client_error(), "expected 4xx, got {status}");
 }
 
 /// `/api/approvals/{id}/approve` — bogus id must produce 4xx, not 5xx.
 #[tokio::test(flavor = "multi_thread")]
-async fn approvals_approve_with_bogus_id_does_not_500() {
+async fn approvals_approve_rejects_bogus_id() {
     let harness = boot_router().await;
     let status = post_json(
         harness.app.clone(),
@@ -450,15 +465,12 @@ async fn approvals_approve_with_bogus_id_does_not_500() {
         "{}",
     )
     .await;
-    assert!(
-        !status.is_server_error(),
-        "/api/approvals/<bogus>/approve returned 5xx ({status}) — handler did not validate id"
-    );
+    assert!(status.is_client_error(), "expected 4xx, got {status}");
 }
 
 /// `/api/a2a/discover` — non-URL string must produce 4xx, not 5xx.
 #[tokio::test(flavor = "multi_thread")]
-async fn a2a_discover_with_bad_url_does_not_500() {
+async fn a2a_discover_rejects_bad_url() {
     let harness = boot_router().await;
     let status = post_json(
         harness.app.clone(),
@@ -478,13 +490,10 @@ async fn a2a_discover_with_bad_url_does_not_500() {
 
 /// `/api/a2a/discover` — missing `url` field must produce 4xx, not 5xx.
 #[tokio::test(flavor = "multi_thread")]
-async fn a2a_discover_missing_url_does_not_500() {
+async fn a2a_discover_rejects_missing_url() {
     let harness = boot_router().await;
     let status = post_json(harness.app.clone(), "/api/a2a/discover", r#"{}"#).await;
-    assert!(
-        !status.is_server_error(),
-        "/api/a2a/discover without url returned 5xx ({status})"
-    );
+    assert!(status.is_client_error(), "expected 4xx, got {status}");
 }
 
 /// `/hooks/agent` — bad / missing signature must be a 4xx, not 5xx.
@@ -494,7 +503,7 @@ async fn a2a_discover_missing_url_does_not_500() {
 /// shape so a future change that enables webhook_triggers by accident fails
 /// loudly here instead of silently exposing the endpoint.
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_agent_with_bad_signature_does_not_500() {
+async fn hooks_agent_rejects_bad_signature() {
     let harness = boot_router().await;
     let mut req = Request::builder()
         .method(Method::POST)
@@ -510,21 +519,15 @@ async fn hooks_agent_with_bad_signature_does_not_500() {
             [127, 0, 0, 1],
             0,
         ))));
-    let resp = harness.app.clone().oneshot(req).await.expect("oneshot");
+    let resp = send_request(harness.app.clone(), req).await;
     let status = resp.status();
-    assert!(
-        !status.is_server_error(),
-        "/hooks/agent with bad signature returned 5xx ({status}) — handler should reject before doing work"
-    );
+    assert!(status.is_client_error(), "expected 4xx, got {status}");
 }
 
 /// `/hooks/agent` — completely empty body must be a 4xx, not 5xx.
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_agent_with_empty_body_does_not_500() {
+async fn hooks_agent_rejects_empty_body() {
     let harness = boot_router().await;
     let status = post_json(harness.app.clone(), "/hooks/agent", "{}").await;
-    assert!(
-        !status.is_server_error(),
-        "/hooks/agent with empty body returned 5xx ({status})"
-    );
+    assert!(status.is_client_error(), "expected 4xx, got {status}");
 }

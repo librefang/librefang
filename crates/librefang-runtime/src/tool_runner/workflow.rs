@@ -127,6 +127,7 @@ pub(super) fn build_workflow_run_result(
 pub(super) async fn tool_workflow_run(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> ToolResult {
     let workflow_id = input["workflow_id"]
         .as_str()
@@ -146,8 +147,11 @@ pub(super) async fn tool_workflow_run(
     // A nesting-depth refusal arrives as `CapabilityDenied` (refs #6659) and must stay a policy error rather than becoming `Upstream`.
     // Two reasons, the same ones spelled out in `tool_agent_send`: `Upstream` lifts to a 5xx-class `ToolExecution` that reads as a downstream crash to retry logic, and `PermissionDenied` classifies as `ToolExecutionStatus::Denied` — a soft failure — so a capped agent that keeps trying does not burn through `MAX_CONSECUTIVE_ALL_FAILED` and lose the turn to an abort.
     // Every other kernel failure stays `Upstream`.
+    // #7714: `run_workflow_owned` records the caller as the run's owner so
+    // the run carries attribution even though the step agent it resolves may
+    // be a canonical instance shared with every other owner of that type.
     let (run_id, output) = kh
-        .run_workflow(workflow_id, &input_str)
+        .run_workflow_owned(workflow_id, &input_str, caller_agent_id)
         .await
         .map_err(|e| match e {
             librefang_types::error::LibreFangError::CapabilityDenied(msg) => {
@@ -321,6 +325,74 @@ pub(super) async fn tool_workflow_cancel(
             )))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// workflow_create — define a new workflow from a conversation (#6934)
+// ---------------------------------------------------------------------------
+
+/// Register a new workflow from an agent-authored definition.
+///
+/// This handler stays deliberately thin.
+/// It checks only the two things it can name a parameter for — a payload missing `name` or `steps` — and forwards the spec to the kernel, which owns every real check: name legality, the resource ceilings, `Workflow::validate()`, and the atomic name reservation.
+/// Splitting those across the two layers is how the tool schema and the enforced rule drift apart, and the kernel is the only side that can make the uniqueness check atomic with the insert.
+///
+/// The whole `input` object is forwarded rather than a rebuilt subset, so a field added to the kernel-side spec is reachable from the tool the moment it exists.
+/// `acting_principal` is the owner recorded on the workflow: the identity the turn was acting for, not the agent that assembled it.
+/// It is a separate typed argument from `input` because the whole `input` object is forwarded to the kernel verbatim — a field the model could write would be a field the model could choose, and an owner the creating turn can name is not an owner.
+pub(super) async fn tool_workflow_create(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    acting_principal: Option<librefang_types::principal::Principal>,
+) -> ToolResult {
+    if !input["name"].is_string() {
+        return Err(ToolError::MissingParameter("name"));
+    }
+    let steps = input
+        .get("steps")
+        .ok_or(ToolError::MissingParameter("steps"))?;
+    if !steps.is_array() {
+        return Err(ToolError::InvalidParameter {
+            name: "steps",
+            reason: "must be an array of step objects".to_string(),
+        });
+    }
+
+    let kh = require_kernel_typed(kernel)?;
+    // `InvalidInput` (a spec that cannot become a workflow) and `Conflict` (the name is taken) both describe something the model can fix on its next turn, so the kernel's message is relayed as the reason rather than being flattened into an opaque upstream failure.
+    let summary = kh
+        .create_workflow(input, caller_agent_id, acting_principal)
+        .await
+        .map_err(|e| match e {
+            // The kernel's reason already names the offending field, so it is relayed whole rather than pinned to one schema parameter that may not be the one at fault.
+            librefang_types::error::LibreFangError::InvalidInput(reason) => {
+                ToolError::InvalidParameter {
+                    name: "workflow",
+                    reason,
+                }
+            }
+            librefang_types::error::LibreFangError::Conflict(reason) => {
+                ToolError::InvalidParameter {
+                    name: "name",
+                    reason,
+                }
+            }
+            other => ToolError::upstream(other),
+        })?;
+
+    Ok(serde_json::json!({
+        "id": summary.id,
+        "name": summary.name,
+        "description": summary.description,
+        "step_count": summary.step_count,
+        "has_input_schema": summary.has_input_schema,
+        // Echoed back in the canonical `kind:uuid` form so the model can see
+        // who the workflow was recorded for and say so, rather than inferring
+        // it. Absent when the turn resolved no principal.
+        "owner": summary.owner.map(|p| p.to_string()),
+    })
+    .to_string())
 }
 
 // ---------------------------------------------------------------------------

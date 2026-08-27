@@ -182,7 +182,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
 /// entity in the same shape the dashboard already consumes for GET, letting
 /// the caller patch caches in place via `setQueryData` instead of a follow-up
 /// refetch (#3832).
-fn workflow_to_json(w: &Workflow) -> serde_json::Value {
+/// `cfg` is the live kernel config, consulted only to turn a recorded principal id back into the name an operator declared.
+fn workflow_to_json(
+    w: &Workflow,
+    cfg: &librefang_types::config::KernelConfig,
+) -> serde_json::Value {
     serde_json::json!({
         "id": w.id.to_string(),
         "name": w.name,
@@ -193,6 +197,7 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "agent": match &s.agent {
                     StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
                     StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
+                    StepAgent::ByType { template } => serde_json::json!({"agent_type": template}),
                 },
                 "prompt_template": s.prompt_template,
                 "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
@@ -201,12 +206,91 @@ fn workflow_to_json(w: &Workflow) -> serde_json::Value {
                 "output_var": s.output_var,
                 "depends_on": s.depends_on,
                 "session_mode": serde_json::to_value(s.session_mode).unwrap_or(serde_json::Value::Null),
+                "required_skills": s.required_skills,
             })
         }).collect::<Vec<_>>(),
         "created_at": w.created_at.to_rfc3339(),
         "layout": w.layout,
         "total_timeout_secs": w.total_timeout_secs,
         "input_schema": w.input_schema.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
+        // #7744. Two shapes on purpose. `owner` is the machine-readable
+        // tagged struct — `{"kind":"user","id":"…"}` — and `null` for an
+        // unowned workflow, which means "visible to all". `owner_name` is the
+        // display name resolved back out of `[[users]]` / `[[groups]]`, and is
+        // `null` both when the workflow is unowned and when the principal it
+        // names has since been deleted or renamed; a client that finds
+        // `owner` set and `owner_name` null should render the canonical
+        // `kind:uuid` string rather than claiming the workflow is unowned.
+        "owner": w.owner,
+        "owner_name": w.owner.and_then(|p| cfg.principal_name(&p).map(|s| s.to_string())),
+    })
+}
+
+/// The mutually exclusive routing keys a step carries in the HTTP payload,
+/// paired with the [`StepAgent`] variant each selects.
+///
+/// Fixed order so the "exactly one of" rejection reads identically on every
+/// host and every request.
+const STEP_AGENT_KEYS: [&str; 3] = ["agent_id", "agent_name", "agent_type"];
+
+/// Parse the agent reference of one step in a `POST` / `PUT /api/workflows`
+/// payload, requiring **exactly one** routing key (#7712).
+///
+/// The previous `if let Some(id) … else if let Some(name) …` chain accepted a
+/// payload carrying several keys and silently took the first one it matched.
+/// A workflow author who renames a step's target by adding `agent_name` while
+/// leaving the old `agent_id` in place gets a workflow bound to the agent they
+/// stopped naming, with nothing in the response or the run output saying so —
+/// the definition on disk and the agent that actually runs disagree. The same
+/// contract the kernel's `StepAgent` deserializer enforces for TOML/JSON
+/// definitions is therefore enforced here for the HTTP surface.
+///
+/// A key present but not a string is a rejection, not an absence: treating a
+/// mistyped `agent_id` as unset is exactly the silent re-binding above.
+fn parse_step_agent(step: &serde_json::Value, step_name: &str) -> Result<StepAgent, String> {
+    // An explicit JSON `null` counts as absent so a client that serializes
+    // unset fields rather than omitting them still round-trips.
+    let present: Vec<&str> = STEP_AGENT_KEYS
+        .iter()
+        .copied()
+        .filter(|k| step.get(*k).is_some_and(|v| !v.is_null()))
+        .collect();
+
+    let key = match present.as_slice() {
+        [only] => *only,
+        [] => {
+            return Err(format!(
+                "Step '{step_name}' needs exactly one of 'agent_id', 'agent_name' or 'agent_type'"
+            ))
+        }
+        many => {
+            return Err(format!(
+                "Step '{step_name}' sets {} of 'agent_id', 'agent_name', 'agent_type' ({}); \
+                 exactly one is allowed — a step with several agent references would bind to \
+                 whichever one the server happened to read first",
+                many.len(),
+                many.join(", ")
+            ))
+        }
+    };
+
+    let value = step[key]
+        .as_str()
+        .ok_or_else(|| format!("Step '{step_name}': '{key}' must be a string"))?;
+    if value.is_empty() {
+        return Err(format!("Step '{step_name}': '{key}' must not be empty"));
+    }
+
+    Ok(match key {
+        "agent_id" => StepAgent::ById {
+            id: value.to_string(),
+        },
+        "agent_name" => StepAgent::ByName {
+            name: value.to_string(),
+        },
+        _ => StepAgent::ByType {
+            template: value.to_string(),
+        },
     })
 }
 
@@ -488,6 +572,56 @@ fn parse_step_session_mode(
             None
         }
     }
+}
+
+/// Hard cap on `required_skills` entries per workflow step.
+///
+/// Same bounding rationale as [`MAX_INPUT_SCHEMA_PARAMS`]: a step legitimately requires a handful of skills, and a hostile array within the 8 MiB body cap must not pre-allocate an unbounded `Vec`.
+const MAX_REQUIRED_SKILLS_PER_STEP: usize = 64;
+
+/// Parse a workflow step's optional `required_skills` array (#7721).
+///
+/// Deliberately **strict**, unlike [`parse_step_session_mode`] and [`parse_input_schema`]: those degrade to a default that is merely less specific, whereas silently dropping a `required_skills` entry turns off a gate the workflow author asked for and hands back a workflow that looks like it validates something it does not.
+/// A rejected payload is a loud, fixable 400; a filtered one is a silent hole.
+///
+/// Accepts an absent key, an explicit `null`, or an array of non-blank strings; anything else is an error naming the step and the offending entry.
+/// Names are trimmed, deduplicated and sorted so the persisted workflow — and therefore every error message derived from it — is stable regardless of authoring order.
+fn parse_required_skills(step: &serde_json::Value, step_name: &str) -> Result<Vec<String>, String> {
+    let Some(raw) = step.get("required_skills") else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(arr) = raw.as_array() else {
+        return Err(format!(
+            "Step '{step_name}': 'required_skills' must be an array of skill names"
+        ));
+    };
+    if arr.len() > MAX_REQUIRED_SKILLS_PER_STEP {
+        return Err(format!(
+            "Step '{step_name}': 'required_skills' has {} entries (max {MAX_REQUIRED_SKILLS_PER_STEP})",
+            arr.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let Some(name) = entry.as_str() else {
+            return Err(format!(
+                "Step '{step_name}': every 'required_skills' entry must be a string, got {entry}"
+            ));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "Step '{step_name}': 'required_skills' contains an empty skill name"
+            ));
+        }
+        out.push(name.to_string());
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// Hard cap on declared workflow input parameters.

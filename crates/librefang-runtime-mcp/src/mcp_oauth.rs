@@ -174,7 +174,7 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 /// * Exact hostnames:   `localhost`, `ip6-localhost`, `metadata.google.internal`,
 ///   `metadata.aws.internal`, `instance-data`
 /// * IPv4 loopback      127.0.0.0/8
-/// * IPv4 unspecified   0.0.0.0
+/// * IPv4 "this" net   0.0.0.0/8
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
 /// * IPv4 CGNAT         100.64.0.0/10 (incl. Alibaba Cloud IMDS 100.100.100.200)
 /// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
@@ -192,7 +192,7 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 ///   essential. This is the historical behaviour for every caller.
 /// * `true`  — block only the cloud-metadata pivots that are *never* a
 ///   legitimate operator-configured backend (IMDS hostnames,
-///   `0.0.0.0`, `169.254/16`, `100.64/10`, `192.0.0.192`, and their
+///   `0.0.0.0/8`, `169.254/16`, `100.64/10`, `192.0.0.192`, and their
 ///   IPv6-embedded forms). Loopback / RFC1918 are allowed. Used by the
 ///   operator-configured MCP connect URL (`McpConnection::check_ssrf`),
 ///   where pointing at a local MCP server on `127.0.0.1` /
@@ -216,8 +216,8 @@ fn is_ssrf_blocked_host_impl(host: &str, metadata_only: bool) -> bool {
         // Cloud-metadata pivots — never a legitimate operator backend,
         // blocked on every path including connect.
         let meta =
-            // 0.0.0.0 unspecified — connects to every interface incl. loopback
-            (o[0] == 0 && o[1] == 0 && o[2] == 0 && o[3] == 0)
+            // 0.0.0.0/8 "this" network — can resolve to a local interface
+            o[0] == 0
             // 100.64.0.0/10 CGNAT (also Alibaba Cloud IMDS at 100.100.100.200)
             || (o[0] == 100 && (o[1] & 0xc0) == 64)
             // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
@@ -1603,6 +1603,17 @@ mod tests {
     fn is_ssrf_blocked_url_allows_plain_public() {
         assert!(is_ssrf_blocked_url("https://auth.example.com/token").is_ok());
         assert!(is_ssrf_blocked_url("http://auth.example.com:8443/authorize").is_ok());
+    }
+
+    #[test]
+    fn is_ssrf_blocked_url_rejects_ipv4_zero_network() {
+        for url in ["http://0.1.2.3/", "http://[::ffff:0.1.2.3]/"] {
+            assert!(is_ssrf_blocked_url(url).is_err(), "must reject {url}");
+            assert!(
+                is_ssrf_blocked_url_for_connect(url).is_err(),
+                "connect mode must reject {url}"
+            );
+        }
     }
 
     #[test]

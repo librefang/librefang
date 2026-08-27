@@ -232,7 +232,8 @@ impl FallbackChain {
 #[async_trait]
 impl LlmDriver for FallbackChain {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
+        let mut last_exhaustion_error: Option<LlmError> = None;
+        let mut last_unaccounted_error: Option<LlmError> = None;
         // Tracks why each slot was skipped, for `AllProvidersExhausted`
         // when nothing in the chain succeeds. Keyed by provider_name so
         // duplicate provider entries collapse — the most recent reason
@@ -277,6 +278,7 @@ impl LlmDriver for FallbackChain {
                     // Record the slot in the shared exhaustion store so
                     // subsequent requests within the backoff window skip
                     // it (#4807).
+                    let mut accounted_as_exhaustion = false;
                     if let Some(store) = &self.exhaustion_store {
                         if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
                             let until = exhaustion_until_for(&e, &reason);
@@ -286,6 +288,7 @@ impl LlmDriver for FallbackChain {
                                 until,
                             );
                             skip_reasons.insert(entry.provider_name.clone(), exhaust_reason);
+                            accounted_as_exhaustion = true;
                         }
                     }
 
@@ -297,7 +300,11 @@ impl LlmDriver for FallbackChain {
                         | FailoverReason::HttpError
                         | FailoverReason::AuthError
                         | FailoverReason::RateLimit(_) => {
-                            last_error = Some(e);
+                            if accounted_as_exhaustion {
+                                last_exhaustion_error = Some(e);
+                            } else {
+                                last_unaccounted_error = Some(e);
+                            }
                             continue;
                         }
                         // Propagate immediately. `ChainExhausted`
@@ -336,6 +343,9 @@ impl LlmDriver for FallbackChain {
         // and callers depend on the distinction to route the failure
         // (a 500 reaches the human; an exhaustion event reaches the
         // operator). Review blocking issue #5.
+        if let Some(err) = last_unaccounted_error {
+            return Err(err);
+        }
         if self.exhaustion_store.is_some() && skip_reasons.len() == self.entries.len() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
@@ -345,11 +355,11 @@ impl LlmDriver for FallbackChain {
                         reason,
                     })
                     .collect(),
-                cause: last_error.map(Box::new),
+                cause: last_exhaustion_error.map(Box::new),
             });
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
+        Err(last_exhaustion_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain: all providers exhausted".to_string(),
             code: None,
@@ -361,7 +371,8 @@ impl LlmDriver for FallbackChain {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
+        let mut last_exhaustion_error: Option<LlmError> = None;
+        let mut last_unaccounted_error: Option<LlmError> = None;
         let mut skip_reasons: std::collections::BTreeMap<String, ExhaustionReason> =
             std::collections::BTreeMap::new();
 
@@ -462,6 +473,7 @@ impl LlmDriver for FallbackChain {
 
                     // Mark the slot exhausted so subsequent calls skip it
                     // within the backoff window (#4807).
+                    let mut accounted_as_exhaustion = false;
                     if let Some(store) = &self.exhaustion_store {
                         if let Some(exhaust_reason) = exhaustion_reason_for(&reason) {
                             let until = exhaustion_until_for(&e, &reason);
@@ -471,6 +483,7 @@ impl LlmDriver for FallbackChain {
                                 until,
                             );
                             skip_reasons.insert(entry.provider_name.clone(), exhaust_reason);
+                            accounted_as_exhaustion = true;
                         }
                     }
 
@@ -481,7 +494,11 @@ impl LlmDriver for FallbackChain {
                         | FailoverReason::HttpError
                         | FailoverReason::AuthError
                         | FailoverReason::RateLimit(_) => {
-                            last_error = Some(e);
+                            if accounted_as_exhaustion {
+                                last_exhaustion_error = Some(e);
+                            } else {
+                                last_unaccounted_error = Some(e);
+                            }
                             continue;
                         }
                         FailoverReason::ContextTooLong
@@ -501,6 +518,9 @@ impl LlmDriver for FallbackChain {
         // exhaustion failure (e.g. genuine 500) propagates verbatim
         // so the caller can distinguish "chain dry" from "slot
         // broken".
+        if let Some(err) = last_unaccounted_error {
+            return Err(err);
+        }
         if self.exhaustion_store.is_some() && skip_reasons.len() == self.entries.len() {
             return Err(LlmError::AllProvidersExhausted {
                 details: skip_reasons
@@ -510,11 +530,11 @@ impl LlmDriver for FallbackChain {
                         reason,
                     })
                     .collect(),
-                cause: last_error.map(Box::new),
+                cause: last_exhaustion_error.map(Box::new),
             });
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
+        Err(last_exhaustion_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain(stream): all providers exhausted".to_string(),
             code: None,
@@ -1394,11 +1414,8 @@ mod tests {
     // `AllProvidersExhausted`. The chain isn't actually "dry" — the
     // slot is broken — and callers depend on the distinction.
     #[tokio::test]
-    async fn non_exhaustion_failure_propagates_raw_error() {
-        // Driver that returns a plain HTTP 500 — failover_reason
-        // classifies it as HttpError, which is transient and not
-        // exhaustion-class, so the chain must NOT mark the slot in
-        // the store and must NOT wrap into AllProvidersExhausted.
+    async fn later_exhaustion_does_not_overwrite_non_exhaustion_failure() {
+        // A plain HTTP 500 is transient and not exhaustion-class. A later rate-limit must not overwrite it merely because the chain continued trying other slots.
         struct ServerErrorDriver;
 
         #[async_trait]
@@ -1416,10 +1433,15 @@ mod tests {
         }
 
         let store = ProviderExhaustionStore::new();
+        let rate_limited = Arc::new(RateLimitedCountingDriver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            retry_after_ms: 1,
+        });
         let chain = FallbackChain::new(vec![
             entry(Arc::new(ServerErrorDriver), "p1"),
-            entry(Arc::new(ServerErrorDriver), "p2"),
+            entry(rate_limited as Arc<dyn LlmDriver>, "p2"),
         ])
+        .with_rate_limit_sleep_ms(0)
         .with_exhaustion_store(store.clone());
 
         let err = chain.complete(test_request()).await.unwrap_err();
@@ -1427,15 +1449,13 @@ mod tests {
             LlmError::Api { status, .. } => assert_eq!(*status, 500),
             other => panic!("expected raw Api(500), got {other:?}"),
         }
-        // Neither slot should be marked in the store — HTTP 500 is
-        // transient, the slot may serve the next request fine.
         assert!(
             store.is_exhausted("p1").is_none(),
             "p1 must not be flagged exhausted on a transient HTTP 500"
         );
         assert!(
-            store.is_exhausted("p2").is_none(),
-            "p2 must not be flagged exhausted on a transient HTTP 500"
+            store.is_exhausted("p2").is_some(),
+            "p2 must be flagged exhausted after its rate-limit"
         );
     }
 
