@@ -6,6 +6,9 @@ import {
   type ClawHubBrowseItem,
   type FangHubSkill,
   type HandDefinitionItem,
+  type SkillEvolutionMeta,
+  type SkillItem,
+  type SkillVersionEntry,
 } from "../api";
 import {
   useSkills,
@@ -49,7 +52,9 @@ import {
   hubHealthFrom,
   type HubFilter,
   type HubCounts,
+  type HubHealth,
   type HubHealthMap,
+  type HubQueryState,
 } from "../components/SkillHubBar";
 import { getSkillHub, SKILL_HUBS } from "../lib/skillHubs";
 import { isMarketplaceUnavailable } from "../lib/http/errors";
@@ -92,7 +97,11 @@ import {
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 type ViewMode = "installed" | "browse" | "pending";
-type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
+export type MarketplaceSource =
+  | "fanghub"
+  | "clawhub"
+  | "clawhub-cn"
+  | "skillhub";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -111,19 +120,18 @@ const CATEGORIES = [
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function isRateLimitError(err: unknown): boolean {
+export function isRateLimitError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const obj = err as Record<string, unknown>;
   const msg = String(obj.message ?? "").toLowerCase();
   return (
     msg.includes("429") ||
     msg.includes("rate limit") ||
-    msg.includes("rate") ||
     obj.status === 429
   );
 }
 
-function filterByCategory<
+export function filterByCategory<
   T extends { name: string; description?: string; tags?: string[] },
 >(items: T[], category: string | null): T[] {
   if (!category) return items;
@@ -138,6 +146,79 @@ function filterByCategory<
         s.tags?.some((tag) => tag.toLowerCase().includes(kw)),
     ),
   );
+}
+
+export function buildInstalledSlugSet(
+  installedSkills: SkillItem[],
+): Set<string> {
+  const set = new Set<string>();
+  for (const skill of installedSkills) {
+    const sourceType = skill.source?.type ?? "";
+    const sourceSlug = skill.source?.slug;
+    if (sourceSlug) {
+      if (sourceType === "clawhub" || sourceType === "clawhub-cn") {
+        set.add(`clawhub:${sourceSlug}`);
+        set.add(`clawhub-cn:${sourceSlug}`);
+      } else {
+        set.add(`${sourceType}:${sourceSlug}`);
+      }
+    }
+    if (sourceType === "" || sourceType === "local") {
+      set.add(`name:${skill.name}`);
+    }
+  }
+  return set;
+}
+
+export function isInstalledFromMarketplace(
+  installedSlugSet: Set<string>,
+  slug: string,
+  source: MarketplaceSource,
+): boolean {
+  if (source === "clawhub" || source === "clawhub-cn") {
+    return (
+      installedSlugSet.has(`clawhub:${slug}`) ||
+      installedSlugSet.has(`clawhub-cn:${slug}`)
+    );
+  }
+  return (
+    installedSlugSet.has(`${source}:${slug}`) ||
+    installedSlugSet.has(`name:${slug}`)
+  );
+}
+
+/**
+ * Fold several queries that back the same hub into one health value.
+ *
+ * Each query is mapped through `hubHealthFrom`, so the never-run state survives the fold: a hub whose queries are all disabled reports `"unknown"` rather than collapsing to `"live"` and lighting a green dot on a marketplace nobody has contacted (#7387).
+ * Severity wins over recency — one errored query makes the hub `"down"` even while a sibling is mid-flight — and `"live"` needs only one query to have actually resolved, which is what SkillHub's browse/search pair gives us: exactly one of the two is enabled at a time.
+ */
+export function combinedQueryHealth(...queries: HubQueryState[]): HubHealth {
+  const healths = queries.map(hubHealthFrom);
+  if (healths.includes("down")) return "down";
+  if (healths.includes("checking")) return "checking";
+  if (healths.includes("live")) return "live";
+  return "unknown";
+}
+
+export function canRollbackSkill(evolution: SkillEvolutionMeta): boolean {
+  return evolution.mutation_count > 0;
+}
+
+export function isCurrentSkillVersion(
+  entry: SkillVersionEntry,
+  currentVersion: string,
+): boolean {
+  return entry.version === currentVersion;
+}
+
+export function tryStartInstall(
+  installing: { current: string | null },
+  slug: string,
+): boolean {
+  if (installing.current !== null) return false;
+  installing.current = slug;
+  return true;
 }
 
 // ─── Grid skeleton ────────────────────────────────────────────────────────────
@@ -1291,9 +1372,9 @@ function SkillDetailModal({
               size="sm"
               onClick={handleRollback}
               leftIcon={<RotateCcw className="w-3.5 h-3.5" />}
-              disabled={busy || detail.evolution.versions.length < 1}
+              disabled={busy || !canRollbackSkill(detail.evolution)}
               title={
-                detail.evolution.versions.length < 1
+                !canRollbackSkill(detail.evolution)
                   ? t("skills.evo_no_rollback", {
                       defaultValue: "No prior version to roll back to",
                     })
@@ -1483,12 +1564,16 @@ function SkillDetailModal({
                 {t("skills.evo_history", { defaultValue: "Version History" })}
               </h3>
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {[...detail.evolution.versions].reverse().map((v, i) => (
+                {[...detail.evolution.versions].reverse().map((v) => (
                   <div
-                    key={i}
+                    key={`${v.version}:${v.timestamp}`}
                     className="flex items-start gap-3 px-3 py-2 rounded bg-surface-2 text-xs"
                   >
-                    <Badge variant={i === 0 ? "success" : "default"}>
+                    <Badge
+                      variant={
+                        isCurrentSkillVersion(v, detail.version) ? "success" : "default"
+                      }
+                    >
                       v{v.version}
                     </Badge>
                     <div className="flex-1 min-w-0">
@@ -1593,6 +1678,7 @@ export function SkillsPage() {
   const [detailsSource, setDetailsSource] = useState<MarketplaceSource>("clawhub");
   const [detailsFangHub, setDetailsFangHub] = useState<FangHubSkill | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const installingRef = useRef<string | null>(null);
   const [targetHand, setTargetHand] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [detailSkillName, setDetailSkillName] = useState<string | null>(null);
@@ -1674,33 +1760,12 @@ export function SkillsPage() {
   // ── Filtered data ─────────────────────────────────────────────────────────
 
   const installedSlugSet = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of installedSkills) {
-      const src = s.source;
-      const srcType = src?.type ?? "";
-      const srcSlug = src?.slug;
-      if (srcSlug) {
-        if (srcType === "clawhub" || srcType === "clawhub-cn") {
-          set.add(`clawhub:${srcSlug}`);
-          set.add(`clawhub-cn:${srcSlug}`);
-        } else {
-          set.add(`${srcType}:${srcSlug}`);
-        }
-      }
-      if (srcType === "" || srcType === "local") {
-        set.add(`name:${s.name}`);
-      }
-    }
-    return set;
+    return buildInstalledSlugSet(installedSkills);
   }, [installedSkills]);
 
-  const isInstalledFromMarketplace = useCallback(
-    (slug: string, src: MarketplaceSource) => {
-      if (src === "clawhub" || src === "clawhub-cn") {
-        return installedSlugSet.has(`clawhub:${slug}`) || installedSlugSet.has(`clawhub-cn:${slug}`) || installedSlugSet.has(`name:${slug}`);
-      }
-      return installedSlugSet.has(`${src}:${slug}`) || installedSlugSet.has(`name:${slug}`);
-    },
+  const marketplaceSkillIsInstalled = useCallback(
+    (slug: string, src: MarketplaceSource) =>
+      isInstalledFromMarketplace(installedSlugSet, slug, src),
     [installedSlugSet],
   );
 
@@ -1710,19 +1775,22 @@ export function SkillsPage() {
    *  merged "all" list stay in sync without repeating the predicate. */
   const buildRemoteItems = useCallback(
     (items: ClawHubBrowseItem[] | undefined, src: MarketplaceSource) =>
-      (items ?? [])
-        .map((s) => ({
-          ...s,
-          is_installed: isInstalledFromMarketplace(s.slug, src),
-          _hub: src,
-        }))
-        .filter(
-          (s) =>
-            !search ||
-            s.name.toLowerCase().includes(search.toLowerCase()) ||
-            (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false),
-        ),
-    [isInstalledFromMarketplace, search],
+      filterByCategory(
+        (items ?? [])
+          .map((s) => ({
+            ...s,
+            is_installed: marketplaceSkillIsInstalled(s.slug, src),
+            _hub: src,
+          }))
+          .filter(
+            (s) =>
+              !search ||
+              s.name.toLowerCase().includes(search.toLowerCase()) ||
+              (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false),
+          ),
+        selectedCategory,
+      ),
+    [marketplaceSkillIsInstalled, search, selectedCategory],
   );
 
   const fanghubItems = useMemo(
@@ -1749,12 +1817,8 @@ export function SkillsPage() {
     [buildRemoteItems, clawhubCnQuery.data],
   );
   const skillhubItems = useMemo(
-    () =>
-      filterByCategory(
-        buildRemoteItems(activeSkillhubQuery.data?.items, "skillhub"),
-        selectedCategory,
-      ),
-    [buildRemoteItems, activeSkillhubQuery.data, selectedCategory],
+    () => buildRemoteItems(activeSkillhubQuery.data?.items, "skillhub"),
+    [buildRemoteItems, activeSkillhubQuery.data],
   );
 
   /** What the grid actually renders, narrowed to the active hub or
@@ -1783,17 +1847,24 @@ export function SkillsPage() {
   /**
    * Wire health per hub, straight off the query results.
    *
-   * `hubHealthFrom` reports `"unknown"` rather than `"live"` for a query that has never run, which is the normal state for every hub the filter is not pointing at.
+   * `combinedQueryHealth` maps each query through `hubHealthFrom`, which reports `"unknown"` rather than `"live"` for a query that has never run — the normal state for every hub the filter is not pointing at.
    * The old inline mapping had no such state, so a disabled query — `isError: false`, `isFetching: false` — collapsed to `"live"` and lit a green dot on a marketplace nobody had contacted (#7387).
+   * SkillHub goes through both of its queries rather than `activeSkillhubQuery`, because browse and search are separate queries and whichever one is idle must not mask the other's state.
    */
   const hubHealth: HubHealthMap = useMemo(
     () => ({
-      fanghub: hubHealthFrom(fanghubQuery),
-      clawhub: hubHealthFrom(clawhubQuery),
-      "clawhub-cn": hubHealthFrom(clawhubCnQuery),
-      skillhub: hubHealthFrom(activeSkillhubQuery),
+      fanghub: combinedQueryHealth(fanghubQuery),
+      clawhub: combinedQueryHealth(clawhubQuery),
+      "clawhub-cn": combinedQueryHealth(clawhubCnQuery),
+      skillhub: combinedQueryHealth(skillhubBrowseQuery, skillhubSearchQuery),
     }),
-    [fanghubQuery, clawhubQuery, clawhubCnQuery, activeSkillhubQuery],
+    [
+      fanghubQuery,
+      clawhubQuery,
+      clawhubCnQuery,
+      skillhubBrowseQuery,
+      skillhubSearchQuery,
+    ],
   );
 
   /**
@@ -1827,12 +1898,12 @@ export function SkillsPage() {
     slug: string,
     src: MarketplaceSource,
   ) => {
+    if (!tryStartInstall(installingRef, slug)) return;
     setInstallingId(slug);
     const hand = targetHand || undefined;
     const opts = {
       onSuccess: () => {
         addToast(t("common.success"), "success");
-        setInstallingId(null);
         setDetailsSkill(null);
       },
       onError: (error: unknown) => {
@@ -1841,6 +1912,9 @@ export function SkillsPage() {
           msg.includes("abort") ? t("skills.install_timeout") : msg,
           "error",
         );
+      },
+      onSettled: () => {
+        installingRef.current = null;
         setInstallingId(null);
       },
     };
@@ -2134,7 +2208,8 @@ export function SkillsPage() {
         const body = isLoading ? (
           <SkillGridSkeleton count={hubFilter === "fanghub" ? 4 : 6} />
         ) : queryError && isMarketplaceUnavailable(queryError) ? (
-          // Checked ahead of the rate-limit branch on purpose: `isRateLimitError` matches the bare substring "rate", which any hub URL containing "accelerate" satisfies, and a dead marketplace would otherwise be reported as throttling.
+          // Checked ahead of the rate-limit branch on purpose: an unreachable marketplace is the more specific diagnosis, and reporting it as throttling sends the user off to wait out a limit that was never hit.
+          // `isRateLimitError` used to match the bare substring "rate" — satisfied by any hub URL containing "accelerate" — which made that misreport routine; the substring is gone, and this ordering keeps the two verdicts from competing at all.
           <EmptyState
             title={t("skills.hub_unavailable")}
             description={t("skills.hub_unavailable_desc", { hub: activeHubName })}
@@ -2231,7 +2306,7 @@ export function SkillsPage() {
           source={detailsSource}
           pendingId={installingId}
           onClose={() => setDetailsSkill(null)}
-          onInstall={() => handleInstall(detailsSkill.slug, detailsSource)}
+          onInstall={() => handleInstall(skillWithDetails.slug, detailsSource)}
           t={t}
         />
       )}

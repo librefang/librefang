@@ -35,6 +35,11 @@ Behaviour parity with the Rust adapter:
 * **Thread context**: ``thread_ts`` is surfaced as ``thread_id`` so
   replies thread under the originating message.
 * **DM vs group**: ``is_group = not channel.startswith('D')``.
+* **Bulk member enumeration** (#7086): with ``SLACK_ENUMERATE_MEMBERS=true`` every inbound group message carries the channel's full ``conversations.members`` list as ``group_members`` metadata, so an agent can answer "who is in this channel?" for people who have never spoken rather than only for those who have.
+  Cached per channel for ``SLACK_MEMBER_LIST_TTL`` seconds and capped at ``SLACK_MEMBER_LIST_MAX`` members; needs ``channels:read`` / ``groups:read``.
+  Names on this path come from the display-name cache only — a sweep never issues ``users.info``, because resolving hundreds of people who have not spoken would spend the whole per-method budget.
+  Off by default, and for a larger reason than the display-name knob: this changes *how many people* the daemon stores, from those who addressed the agent to everyone the workspace lists in the channel.
+  The daemon keeps those rows classified apart from the observational ones, so ``channel_dm`` still refuses anyone who has never addressed the agent — enumeration widens what can be *reported*, never what can be *messaged*.
 * **Block Kit interactive**: ``block_actions`` payloads → first
   action's ``value`` becomes ``ButtonCallback.action``; ``action_id``,
   ``trigger_id``, and the ``block_action`` flag ride in metadata.
@@ -68,6 +73,9 @@ Configure via ``[[sidecar_channels]]``::
     # SLACK_FILE_DOWNLOAD_EXCLUDE_CHANNELS = "C0789"
     # SLACK_RESOLVE_DISPLAY_NAMES = "false"
     # SLACK_DISPLAY_NAME_TTL = "21600"
+    # SLACK_ENUMERATE_MEMBERS = "false"
+    # SLACK_MEMBER_LIST_TTL = "3600"
+    # SLACK_MEMBER_LIST_MAX = "500"
     # SLACK_ACCOUNT_ID = "workspace-prod"
 
 Secrets via ``~/.librefang/secrets.env``: ``SLACK_APP_TOKEN`` (the
@@ -154,6 +162,21 @@ NEGATIVE_TTL_SECS = 60.0
 
 # Ceiling on the identity cache. A workspace larger than this degrades into extra lookups, never into unbounded memory.
 MAX_CACHED_IDENTITIES = 5_000
+
+# Bulk member enumeration (#7086).
+#
+# How long a channel's member list is trusted. An hour rather than the display-name TTL's six: joins and leaves are the thing this list is *about*, so a stale one is wrong in a way a stale display name is not.
+DEFAULT_MEMBER_LIST_TTL_SECS = 60 * 60
+
+# Members requested per `conversations.members` page. 200 is Slack's comfortable page size; the method is rate-limited per call, not per member, so larger pages mean fewer calls.
+MEMBER_LIST_PAGE_SIZE = 200
+
+# Ceiling on how many members one channel contributes, across all pages.
+# A general channel in a large workspace lists everyone, and every one of them becomes a stored identity row in the daemon's roster — so the default answers "who is in this channel?" for team-sized channels and declines to for company-sized ones, rather than quietly persisting ten thousand people.
+DEFAULT_MEMBER_LIST_MAX = 500
+
+# Ceiling on the number of channels whose member lists are cached at once.
+MAX_CACHED_MEMBER_LISTS = 256
 
 
 def _resolve_public_url(
@@ -527,6 +550,74 @@ class _IdentityCache:
             while len(self._entries) >= self.max_entries:
                 self._entries.pop(next(iter(self._entries)))
             self._entries[user_id] = (time.monotonic() + ttl, identity)
+
+
+# ---------------------------------------------------------------------------
+# Bulk member enumeration (#7086)
+# ---------------------------------------------------------------------------
+
+
+def parse_conversations_members(
+    body: dict,
+) -> tuple[list[str], Optional[str], Optional[str]]:
+    """Translate one ``conversations.members`` page into ``(user_ids, next_cursor, error)``.
+
+    ``next_cursor`` is ``None`` when the page is the last one — Slack signals that with an empty string, which is easy to mistake for "keep going with an empty cursor" and would loop forever.
+    ``error`` carries the platform error string; the common ones are ``missing_scope`` (no ``channels:read`` / ``groups:read``), ``channel_not_found`` (the bot is not in the channel) and ``ratelimited``.
+    """
+    if not isinstance(body, dict):
+        return [], None, "non-object response"
+    if body.get("ok") is not True:
+        return [], None, str(body.get("error") or "unknown error")
+    raw = body.get("members")
+    members = [m for m in raw if isinstance(m, str) and m] if isinstance(raw, list) else []
+    metadata = body.get("response_metadata")
+    cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
+    if not isinstance(cursor, str) or not cursor.strip():
+        cursor = None
+    return members, cursor, None
+
+
+class _MemberListCache:
+    """Bounded, TTL'd ``channel_id`` → member-id tuple cache.
+
+    Same shape as :class:`_IdentityCache`, and load-bearing for the same reason: ``conversations.members`` is rate-limited per call, and a busy channel produces many messages per minute while its membership changes a few times a week.
+    Without the cache, enumeration would re-walk every page of a 500-person channel on every inbound message.
+
+    An empty tuple is a legitimate cached value (a channel the bot cannot read, or one it is alone in); ``hit`` distinguishes it from a miss, so a failure costs one sweep per TTL rather than one per message.
+    """
+
+    def __init__(self, *, ttl_secs: float, max_entries: int) -> None:
+        self.ttl_secs = ttl_secs
+        self.max_entries = max_entries
+        self._entries: dict[str, tuple[float, tuple[str, ...]]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, channel_id: str) -> tuple[bool, tuple[str, ...]]:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(channel_id)
+            if entry is None:
+                return False, ()
+            expires_at, members = entry
+            if expires_at <= now:
+                del self._entries[channel_id]
+                return False, ()
+            return True, members
+
+    def put(
+        self,
+        channel_id: str,
+        members: tuple[str, ...],
+        *,
+        ttl_secs: Optional[float] = None,
+    ) -> None:
+        ttl = self.ttl_secs if ttl_secs is None else ttl_secs
+        with self._lock:
+            self._entries.pop(channel_id, None)
+            while len(self._entries) >= self.max_entries:
+                self._entries.pop(next(iter(self._entries)))
+            self._entries[channel_id] = (time.monotonic() + ttl, members)
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1132,24 @@ class SlackAdapter(SidecarAdapter):
                   "number",
                   placeholder=str(DEFAULT_DISPLAY_NAME_TTL_SECS),
                   advanced=True),
+            Field("SLACK_ENUMERATE_MEMBERS",
+                  "List every channel member via conversations.members, not "
+                  "only those who have spoken (needs channels:read / "
+                  "groups:read; off by default)",
+                  "bool",
+                  placeholder="false",
+                  advanced=True),
+            Field("SLACK_MEMBER_LIST_TTL",
+                  "How long an enumerated channel member list is cached, in "
+                  "seconds",
+                  "number",
+                  placeholder=str(DEFAULT_MEMBER_LIST_TTL_SECS),
+                  advanced=True),
+            Field("SLACK_MEMBER_LIST_MAX",
+                  "Maximum members enumerated per channel",
+                  "number",
+                  placeholder=str(DEFAULT_MEMBER_LIST_MAX),
+                  advanced=True),
             Field("SLACK_ACCOUNT_ID",
                   "Account ID (multi-bot routing)",
                   "text",
@@ -1115,6 +1224,47 @@ class SlackAdapter(SidecarAdapter):
         self._identity_cache = _IdentityCache(
             ttl_secs=display_name_ttl,
             max_entries=MAX_CACHED_IDENTITIES,
+        )
+
+        # Bulk member enumeration (#7086).
+        #
+        # Default OFF, and for a strictly larger version of the reason `SLACK_RESOLVE_DISPLAY_NAMES` is.
+        # That knob changes the *quality* of what is stored about the handful of people who have spoken to the agent; this one changes *how many people* are stored at all, from "those who addressed the bot" to "everyone the workspace lists in this channel", most of whom have never interacted with it and did not choose to.
+        # It also needs `channels:read` / `groups:read`, which a bot installed before this existed does not have, so enabling it by default would turn every group message into a logged `missing_scope`.
+        #
+        # The two knobs are independent: enumeration on with resolution off records opaque ids, which is the least-data configuration that still answers "who is in this channel?".
+        self.enumerate_members = _bool_env(
+            os.environ.get("SLACK_ENUMERATE_MEMBERS", ""), default=False,
+        )
+        member_ttl_raw = os.environ.get("SLACK_MEMBER_LIST_TTL", "").strip()
+        try:
+            member_list_ttl = float(member_ttl_raw or DEFAULT_MEMBER_LIST_TTL_SECS)
+        except (TypeError, ValueError):
+            log.error("SLACK_MEMBER_LIST_TTL invalid (must be a number of seconds)",
+                      value=member_ttl_raw)
+            raise SystemExit(2) from None
+        if member_list_ttl <= 0:
+            log.warn("SLACK_MEMBER_LIST_TTL <= 0; using the default instead",
+                     requested=member_list_ttl,
+                     default=DEFAULT_MEMBER_LIST_TTL_SECS)
+            member_list_ttl = float(DEFAULT_MEMBER_LIST_TTL_SECS)
+        self.member_list_ttl = member_list_ttl
+        member_max_raw = os.environ.get("SLACK_MEMBER_LIST_MAX", "").strip()
+        try:
+            member_list_max = int(member_max_raw or DEFAULT_MEMBER_LIST_MAX)
+        except (TypeError, ValueError):
+            log.error("SLACK_MEMBER_LIST_MAX invalid (must be an integer)",
+                      value=member_max_raw)
+            raise SystemExit(2) from None
+        if member_list_max < 1:
+            log.warn("SLACK_MEMBER_LIST_MAX < 1; using the default instead",
+                     requested=member_list_max,
+                     default=DEFAULT_MEMBER_LIST_MAX)
+            member_list_max = DEFAULT_MEMBER_LIST_MAX
+        self.member_list_max = member_list_max
+        self._member_list_cache = _MemberListCache(
+            ttl_secs=member_list_ttl,
+            max_entries=MAX_CACHED_MEMBER_LISTS,
         )
 
         # Inbound attachment policy (#7087).
@@ -1336,6 +1486,110 @@ class SlackAdapter(SidecarAdapter):
             params["user_name"] = identity.display_name
         if identity.username:
             metadata["sender_username"] = identity.username
+        return ev
+
+    def _lookup_channel_members(self, channel_id: str) -> tuple[str, ...]:
+        """Walk ``conversations.members`` for one channel, at most once per TTL.
+
+        Paginates until Slack stops handing back a cursor or :attr:`member_list_max` is reached, whichever comes first.
+        Every exit path writes the cache, failures included: a channel the bot cannot read must cost one sweep per TTL, not one per message.
+        A partial result (the cap, or a page that failed mid-walk) is cached and used — an incomplete answer to "who is in this channel?" is still an answer, and re-walking on the next message would only spend more of the same rate limit.
+        """
+        hit, cached = self._member_list_cache.get(channel_id)
+        if hit:
+            return cached
+
+        collected: list[str] = []
+        cursor: Optional[str] = None
+        while True:
+            params = {
+                "channel": channel_id,
+                "limit": str(min(MEMBER_LIST_PAGE_SIZE, self.member_list_max)),
+            }
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                status, body, raw = self._http(
+                    f"{self.api_base}/conversations.members",
+                    method="POST",
+                    body=urllib.parse.urlencode(params).encode("utf-8"),
+                    headers={
+                        **self._auth_headers(),
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                )
+            except Exception as e:  # transport failure — keep what we have, retry after the cooldown
+                log.warn("slack conversations.members transport error",
+                         channel=channel_id, error=str(e))
+                break
+
+            if status != 200 or not isinstance(body, dict):
+                snippet = raw[:200].decode("utf-8", "replace") if raw else ""
+                log.warn("slack conversations.members non-200",
+                         channel=channel_id, status=status, body=snippet)
+                break
+
+            page, cursor, err = parse_conversations_members(body)
+            if err is not None:
+                # `missing_scope` is the one an operator most needs to see: enumeration is switched on but the bot was never granted `channels:read` / `groups:read`, and every channel will otherwise silently report only the people who have spoken.
+                log.warn("slack conversations.members rejected",
+                         channel=channel_id, error=err)
+                break
+            collected.extend(page)
+            if len(collected) >= self.member_list_max:
+                log.warn("slack channel member list truncated at the configured cap",
+                         channel=channel_id, cap=self.member_list_max)
+                collected = collected[:self.member_list_max]
+                break
+            if cursor is None:
+                break
+
+        # Sorted so the metadata the daemon receives is byte-identical across sweeps that return the same people in a different page order.
+        # The list reaches an LLM prompt through `channel_members`, where an unstable order invalidates the provider prompt cache on unchanged content (#3298).
+        members = tuple(sorted(set(collected)))
+        ttl = None if members else NEGATIVE_TTL_SECS
+        self._member_list_cache.put(channel_id, members, ttl_secs=ttl)
+        return members
+
+    def _apply_enumerated_members(self, ev: Optional[dict]) -> Optional[dict]:
+        """Stamp the channel's full member list onto an inbound group event as ``group_members`` metadata (#7086).
+
+        This is the bulk half of the roster the reporter asked for: ``channel_members`` could only ever report people who had spoken, because the per-sender upsert was the only thing writing rows.
+
+        The daemon stores what lands here as ``source = 'enumerated'``, deliberately apart from the observational rows, so ``channel_dm`` still refuses anyone who has never addressed the agent.
+        Widening the DM authorization set is the failure mode this whole shape exists to avoid, and it would be invisible from here — the adapter cannot tell what the daemon does with the key, which is exactly why the split lives on the daemon side and not in this file.
+
+        Display names come from the identity cache only; **no ``users.info`` call is made on this path**.
+        A sweep is bulk by nature, and resolving 500 members would spend the workspace's entire per-method budget to name people who have never spoken.
+        Anyone who has spoken is already cached by :meth:`_apply_identity`, so in practice the people an agent can act on carry names and the rest carry ids until they say something.
+        """
+        if not self.enumerate_members or not isinstance(ev, dict):
+            return ev
+        params = ev.get("params")
+        if not isinstance(params, dict) or params.get("is_group") is not True:
+            return ev
+        channel_id = params.get("user_id")
+        if not isinstance(channel_id, str) or not channel_id:
+            return ev
+        member_ids = self._lookup_channel_members(channel_id)
+        if not member_ids:
+            return ev
+        metadata = params.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            params["metadata"] = metadata
+
+        members: list[dict] = []
+        for member_id in member_ids:
+            entry: dict[str, Any] = {"user_id": member_id, "display_name": member_id}
+            _, identity = self._identity_cache.get(member_id)
+            if identity is not None:
+                if identity.display_name:
+                    entry["display_name"] = identity.display_name
+                if identity.username:
+                    entry["username"] = identity.username
+            members.append(entry)
+        metadata["group_members"] = members
         return ev
 
     def _fetch_socket_mode_url(self) -> str:
@@ -1724,7 +1978,7 @@ class SlackAdapter(SidecarAdapter):
             )
             if ev is None:
                 return
-            ev = self._apply_identity(ev)
+            ev = self._apply_enumerated_members(self._apply_identity(ev))
             # No reaction here (#6731). Receiving a message is not the same as answering it: the daemon may decline the turn for any of ~two dozen reasons (mention-only group gating, an `[allowed_channels]`-adjacent RBAC denial, a per-user rate limit, a slash command it handles itself), all of which return before any adapter-visible lifecycle signal.
             # The receipt is added from the `queued` phase in `_on_phase` instead, which fires only for a turn that is actually run.
             emit(ev)
@@ -1742,7 +1996,7 @@ class SlackAdapter(SidecarAdapter):
                 account_id=self.account_id,
             )
             if ev is not None:
-                emit(self._apply_identity(ev))
+                emit(self._apply_enumerated_members(self._apply_identity(ev)))
             return
         # Unknown envelope types — slack adds new ones occasionally
         # (slash_commands, etc.). Forward-compat: log and ignore.

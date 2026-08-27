@@ -642,6 +642,19 @@ fn main() {
             DevicesCommands::Pair => cmd_devices_pair(),
             DevicesCommands::Remove { id } => cmd_devices_remove(&id),
         },
+        Some(Commands::Group(sub)) => match sub {
+            GroupCommands::List { json } => cmd_group_list(json),
+            GroupCommands::Show { name, json } => cmd_group_show(&name, json),
+            GroupCommands::Create {
+                name,
+                description,
+                roles,
+            } => cmd_group_create(&name, description.as_deref(), &roles),
+            GroupCommands::Delete { name } => cmd_group_delete(&name),
+            GroupCommands::AddMember { group, user } => cmd_group_member(&group, &user, true),
+            GroupCommands::RemoveMember { group, user } => cmd_group_member(&group, &user, false),
+            GroupCommands::Of { user, json } => cmd_group_of(&user, json),
+        },
         Some(Commands::Qr) => cmd_devices_pair(),
         Some(Commands::Webhooks(sub)) => match sub {
             WebhooksCommands::List { json } => cmd_webhooks_list(json),

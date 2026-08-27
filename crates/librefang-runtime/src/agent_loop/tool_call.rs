@@ -1108,6 +1108,9 @@ pub(super) async fn execute_single_tool_call_core(
             // their `memory_*` tool calls bypass the RBAC guest gate instead
             // of hitting NeedsApproval every cycle.
             ctx.opts.system_call,
+            // #7744: the principal the turn acts for, so `workflow_create` /
+            // `cron_create` can stamp an owner on what they persist.
+            ctx.opts.acting_principal,
         ),
     )
     .await
