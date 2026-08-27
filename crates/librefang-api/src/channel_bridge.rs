@@ -1100,6 +1100,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .map_err(|error| error.to_string())
     }
 
+    async fn roster_upsert_enumerated(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.kernel
+            .memory_substrate()
+            .roster()
+            .upsert_enumerated(channel, chat_id, user_id, display_name, username)
+            .map_err(|error| error.to_string())
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();
@@ -1513,6 +1528,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     delivery_targets: Vec::new(),
                     peer_id: None,
                     session_mode: None,
+                    // #7744: `/schedule add` arrives over a chat channel and
+                    // carries no LibreFang-authenticated principal — the
+                    // platform sender is a routing key, not a credential —
+                    // so the job is recorded unowned rather than attributed
+                    // to whoever the bridge guessed.
+                    owner: None,
                     created_at: chrono::Utc::now(),
                     last_run: None,
                     next_run: None,

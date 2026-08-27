@@ -16,7 +16,8 @@ Usage:
     kubectl kustomize deploy/kubernetes/base | scripts/check-k8s-manifests.py
     scripts/check-k8s-manifests.py rendered.yaml
 
-Exits 0 when every check passes, 1 with one line per failure otherwise.
+Exits 0 when every check passes, 1 for manifest policy failures, and 2 for
+usage or unreadable/invalid input.
 """
 
 from __future__ import annotations
@@ -110,11 +111,6 @@ class Failures:
 
 def load_documents(source: str) -> list[dict[str, Any]]:
     return [doc for doc in yaml.safe_load_all(source) if isinstance(doc, dict)]
-
-
-def find_one(docs: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
-    matches = [d for d in docs if d.get("kind") == kind]
-    return matches[0] if len(matches) == 1 else None
 
 
 def check_statefulset(sts: dict[str, Any], failures: Failures) -> None:
@@ -334,7 +330,13 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
         if probe is None:
             failures.fail(f"{probe_name} is missing.")
             continue
+        if not isinstance(probe, dict):
+            failures.fail(f"{probe_name} must be a mapping, got {probe!r}.")
+            continue
         http_get = probe.get("httpGet", {})
+        if not isinstance(http_get, dict):
+            failures.fail(f"{probe_name}.httpGet must be a mapping, got {http_get!r}.")
+            continue
         actual = http_get.get("path")
         if probe_name == "livenessProbe" and actual == "/api/ready":
             failures.fail(
@@ -355,8 +357,21 @@ def check_probes(container: dict[str, Any], failures: Failures) -> None:
         )
 
     startup = container.get("startupProbe", {})
-    period = startup.get("periodSeconds") or 10
-    threshold = startup.get("failureThreshold") or 3
+    if not isinstance(startup, dict):
+        return
+    period = startup.get("periodSeconds", 10)
+    threshold = startup.get("failureThreshold", 3)
+    if (
+        not isinstance(period, int)
+        or isinstance(period, bool)
+        or not isinstance(threshold, int)
+        or isinstance(threshold, bool)
+    ):
+        failures.fail(
+            "startupProbe periodSeconds and failureThreshold must be integers, "
+            f"got {period!r} and {threshold!r}."
+        )
+        return
     failures.check(
         period * threshold >= 60,
         f"startupProbe budget is only {period * threshold}s "
@@ -579,21 +594,24 @@ def check_checksum_annotation(
     )
 
 
-def check_services(docs: list[dict[str, Any]], failures: Failures) -> None:
+def check_services(
+    docs: list[dict[str, Any]],
+    statefulset: dict[str, Any] | None,
+    failures: Failures,
+) -> None:
     services = [d for d in docs if d.get("kind") == "Service"]
     if not failures.check(
         len(services) >= 1, "expected at least one Service exposing the daemon."
     ):
         return
 
-    sts = find_one(docs, "StatefulSet")
-    governing = (sts or {}).get("spec", {}).get("serviceName")
+    governing = (statefulset or {}).get("spec", {}).get("serviceName")
     by_name = {s.get("metadata", {}).get("name"): s for s in services}
 
     failures.check(
         governing in by_name,
         f"StatefulSet.spec.serviceName {governing!r} does not name a Service in "
-        f"this kustomization (have {sorted(by_name)!r}).",
+        f"this kustomization (have {sorted(by_name, key=repr)!r}).",
     )
     if governing in by_name:
         failures.check(
@@ -639,26 +657,48 @@ def check_no_inline_secrets(docs: list[dict[str, Any]], failures: Failures) -> N
 
 def main(argv: list[str]) -> int:
     if len(argv) > 2:
-        return int(bool(sys.stderr.write(f"usage: {argv[0]} [rendered.yaml]\n")) or 2)
+        sys.stderr.write(f"usage: {argv[0]} [rendered.yaml]\n")
+        return 2
 
-    source = Path(argv[1]).read_text() if len(argv) == 2 else sys.stdin.read()
+    input_label = repr(argv[1]) if len(argv) == 2 else "from stdin"
+    try:
+        source = (
+            Path(argv[1]).read_text(encoding="utf-8")
+            if len(argv) == 2
+            else sys.stdin.read()
+        )
+    except (OSError, UnicodeError) as error:
+        sys.stderr.write(f"error: cannot read manifest input {input_label}: {error}\n")
+        return 2
     if not source.strip():
         sys.stderr.write("error: no manifest input (stdin was empty)\n")
         return 2
 
-    docs = load_documents(source)
+    try:
+        docs = load_documents(source)
+    except yaml.YAMLError as error:
+        sys.stderr.write(f"error: invalid YAML manifest input: {error}\n")
+        return 2
     failures = Failures()
 
-    sts = find_one(docs, "StatefulSet")
-    if sts is None:
-        kinds = sorted({d.get("kind") for d in docs})
-        failures.fail(f"expected exactly one StatefulSet; rendered kinds: {kinds!r}")
-    else:
-        check_statefulset(sts, failures)
-        check_managed_config(docs, sts, failures)
+    try:
+        statefulsets = [doc for doc in docs if doc.get("kind") == "StatefulSet"]
+        sts = statefulsets[0] if len(statefulsets) == 1 else None
+        if len(statefulsets) != 1:
+            kinds = sorted({d.get("kind") for d in docs}, key=repr)
+            failures.fail(
+                f"expected exactly one StatefulSet, found {len(statefulsets)}; "
+                f"rendered kinds: {kinds!r}"
+            )
+        else:
+            check_statefulset(sts, failures)
+            check_managed_config(docs, sts, failures)
 
-    check_services(docs, failures)
-    check_no_inline_secrets(docs, failures)
+        check_services(docs, sts, failures)
+        check_no_inline_secrets(docs, failures)
+    except (AttributeError, TypeError) as error:
+        sys.stderr.write(f"error: invalid Kubernetes manifest structure: {error}\n")
+        return 2
 
     if failures.items:
         sys.stderr.write(
