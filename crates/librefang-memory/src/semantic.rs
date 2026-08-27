@@ -19,8 +19,8 @@ use r2d2_sqlite::SqliteConnectionManager;
 // existing `librefang_memory::semantic::cosine_similarity` callers keep
 // working without three independently-edited copies drifting (see PR #4125).
 pub use librefang_types::memory::cosine_similarity;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use tracing::{debug, error, warn};
 
 /// Upper bound on how many candidate rows the in-process (SQLite) semantic
@@ -61,7 +61,28 @@ const MAX_FTS_TERMS: usize = 32;
 pub struct SemanticStore {
     pool: Pool<SqliteConnectionManager>,
     vector_store: Option<Arc<dyn VectorStore>>,
+    /// Identity of the embedding model the daemon is currently configured with,
+    /// in `provider/model` form (#7912).
+    ///
+    /// Shared through an `Arc` so a clone of the store — `MemorySubstrate` holds
+    /// one by value, and callers clone it freely — observes a value pushed in
+    /// after construction. The kernel resolves the *effective* model late in
+    /// boot (auto-detection can substitute a provider default for the configured
+    /// string), long after the substrate itself exists, and by then it holds only
+    /// `Arc<MemorySubstrate>`, so the setter cannot take `&mut self`.
+    ///
+    /// `None` means "the daemon does not know what it is embedding with" — every
+    /// test store, and any deployment with no embedding driver. In that state
+    /// nothing is stamped and nothing is treated as stale.
+    active_embedding_model: Arc<RwLock<Option<Arc<str>>>>,
 }
+
+/// Census key used for rows whose `embedding` predates the `embedding_model`
+/// column (v51) and therefore carries no provenance.
+///
+/// Deliberately not a valid `provider/model` string so it can never collide
+/// with a real model identity in the census map.
+pub const UNSTAMPED_EMBEDDING_MODEL: &str = "(unstamped, pre-v51)";
 
 impl SemanticStore {
     /// Create a new semantic store wrapping the given connection pool.
@@ -69,6 +90,7 @@ impl SemanticStore {
         Self {
             pool,
             vector_store: None,
+            active_embedding_model: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -80,12 +102,78 @@ impl SemanticStore {
         Self {
             pool,
             vector_store: Some(vector_store),
+            active_embedding_model: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Set or replace the vector store backend at runtime.
     pub fn set_vector_store(&mut self, store: Arc<dyn VectorStore>) {
         self.vector_store = Some(store);
+    }
+
+    /// Record the embedding model the daemon is currently configured with, in
+    /// `provider/model` form (#7912).
+    ///
+    /// Takes `&self` because the kernel resolves the effective model after the
+    /// substrate is already behind an `Arc`. Passing an empty string clears the
+    /// identity and restores the unstamped, unguarded behaviour.
+    pub fn set_active_embedding_model(&self, model: &str) {
+        let value: Option<Arc<str>> = if model.is_empty() {
+            None
+        } else {
+            Some(Arc::from(model))
+        };
+        match self.active_embedding_model.write() {
+            Ok(mut guard) => *guard = value,
+            // A poisoned lock here would mean a panic while swapping a string.
+            // Recover rather than propagate: the alternative is that one
+            // unrelated panic permanently disables embedding provenance.
+            Err(poisoned) => *poisoned.into_inner() = value,
+        }
+    }
+
+    /// The embedding model identity stamped onto new vectors, if the daemon
+    /// has one. `None` disables both stamping and the staleness guard.
+    pub fn active_embedding_model(&self) -> Option<Arc<str>> {
+        match self.active_embedding_model.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Count the stored vectors by the model that produced them (#7912).
+    ///
+    /// Only live rows (`deleted = 0`) that actually carry an `embedding` are
+    /// counted — a row with no vector has nothing to be stale. Rows written
+    /// before the v51 stamp are reported under
+    /// [`UNSTAMPED_EMBEDDING_MODEL`].
+    ///
+    /// Returns a `BTreeMap` so the census renders in a stable order in logs and
+    /// in any future operator-facing surface, regardless of the order SQLite
+    /// hands back the groups.
+    pub fn embedding_model_census(&self) -> LibreFangResult<BTreeMap<String, i64>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT embedding_model, COUNT(*) FROM memories \
+                 WHERE deleted = 0 AND embedding IS NOT NULL \
+                 GROUP BY embedding_model",
+            )
+            .map_err(LibreFangError::memory)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(LibreFangError::memory)?;
+        let mut census: BTreeMap<String, i64> = BTreeMap::new();
+        for row in rows {
+            let (model, count) = row.map_err(LibreFangError::memory)?;
+            let key = model
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| UNSTAMPED_EMBEDDING_MODEL.to_string());
+            *census.entry(key).or_insert(0) += count;
+        }
+        Ok(census)
     }
 
     /// Get a reference to the underlying connection for advanced operations.
@@ -180,9 +268,19 @@ impl SemanticStore {
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
 
+        // Stamp the vector with the model that produced it (#7912). Only when
+        // there is a vector to attribute: a text-only row has no embedding
+        // space to belong to, and stamping it would inflate the census with
+        // rows a model change cannot affect.
+        let embedding_model: Option<Arc<str>> = if embedding_bytes.is_some() {
+            self.active_embedding_model()
+        } else {
+            None
+        };
+
         conn.execute(
-            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding, image_url, image_embedding, modality, peer_id, embedding_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13, ?14)",
             rusqlite::params![
                 id.0.to_string(),
                 agent_id.0.to_string(),
@@ -197,6 +295,7 @@ impl SemanticStore {
                 image_embedding_bytes,
                 modality_str,
                 peer_id,
+                embedding_model.as_deref(),
             ],
         )
         .map_err(LibreFangError::memory)?;
@@ -337,7 +436,7 @@ impl SemanticStore {
         };
 
         let mut sql = String::from(
-            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality
+            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding, image_url, image_embedding, modality, embedding_model
              FROM memories WHERE deleted = 0",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -501,6 +600,7 @@ impl SemanticStore {
                 let image_url: Option<String> = row.get(11)?;
                 let image_embedding_bytes: Option<Vec<u8>> = row.get(12)?;
                 let modality_str: Option<String> = row.get(13)?;
+                let embedding_model: Option<String> = row.get(14)?;
                 Ok((
                     id_str,
                     agent_str,
@@ -516,12 +616,20 @@ impl SemanticStore {
                     image_url,
                     image_embedding_bytes,
                     modality_str,
+                    embedding_model,
                 ))
             })
             .map_err(LibreFangError::memory)?;
 
         let mut fragments = Vec::new();
         let mut candidate_count = 0usize;
+        // Ids whose stored vector was produced by a model other than the one
+        // the daemon is configured with (#7912). Keyed by id rather than held
+        // as a parallel `Vec` because the bm25 re-ordering below permutes
+        // `fragments` and the corrupt-metadata `continue` skips rows, so
+        // positional alignment does not survive.
+        let mut stale_vector_ids: HashSet<String> = HashSet::new();
+        let active_embedding_model = self.active_embedding_model();
         for row_result in rows {
             let (
                 id_str,
@@ -538,8 +646,23 @@ impl SemanticStore {
                 image_url,
                 image_embedding_bytes,
                 modality_str,
+                row_embedding_model,
             ) = row_result.map_err(LibreFangError::memory)?;
             candidate_count += 1;
+
+            // #7912: a vector produced by a different embedding model does not
+            // live in the active model's space, so cosine against it is a
+            // meaningless number rather than a weak match. Record the row here
+            // and skip scoring it below. A `NULL` stamp is a row written before
+            // v51 and is treated as comparable — see `migrate_v51`.
+            if let (Some(active), Some(stored)) = (
+                active_embedding_model.as_deref(),
+                row_embedding_model.as_deref(),
+            ) {
+                if !stored.is_empty() && stored != active {
+                    stale_vector_ids.insert(id_str.clone());
+                }
+            }
 
             let id = uuid::Uuid::parse_str(&id_str)
                 .map(MemoryId)
@@ -646,10 +769,25 @@ impl SemanticStore {
         // where O(n) suffices.
         if let Some(qe) = query_embedding {
             for frag in &mut fragments {
+                if stale_vector_ids.contains(&frag.id.0.to_string()) {
+                    frag.similarity = None;
+                    continue;
+                }
                 frag.similarity = frag
                     .embedding
                     .as_deref()
                     .and_then(|e| cosine_similarity(qe, e));
+            }
+            // #7912: one line per recall, not per row, so an operator who
+            // changed `[memory] embedding_model` without re-embedding sees the
+            // consequence in the logs rather than only in worse answers.
+            if !stale_vector_ids.is_empty() {
+                warn!(
+                    stale = stale_vector_ids.len(),
+                    candidates = candidate_count,
+                    active_model = %active_embedding_model.as_deref().unwrap_or("unknown"),
+                    "Vector recall: candidates were embedded by a different model and were not scored; re-embed them or restore the previous embedding_model"
+                );
             }
             fragments.sort_by(|a, b| {
                 let sim_a = a.similarity.unwrap_or(f32::NEG_INFINITY);
@@ -967,12 +1105,19 @@ impl SemanticStore {
     }
 
     /// Update the embedding for an existing memory.
+    ///
+    /// Re-stamps `embedding_model` with the active model (#7912). This is the
+    /// re-embedding path: leaving the previous stamp in place would leave a row
+    /// that has just been rebuilt in the current space permanently marked as
+    /// belonging to the old one, and therefore permanently excluded from
+    /// scoring.
     pub fn update_embedding(&self, id: MemoryId, embedding: &[f32]) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let bytes = embedding_to_bytes(embedding);
+        let model = self.active_embedding_model();
         conn.execute(
-            "UPDATE memories SET embedding = ?1 WHERE id = ?2",
-            rusqlite::params![bytes, id.0.to_string()],
+            "UPDATE memories SET embedding = ?1, embedding_model = ?2 WHERE id = ?3",
+            rusqlite::params![bytes, model.as_deref(), id.0.to_string()],
         )
         .map_err(LibreFangError::memory)?;
 
@@ -1038,21 +1183,53 @@ impl SemanticStore {
         }
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
+        // #7912: a vector produced by a different embedding model is withheld
+        // rather than handed out. The only caller is `find_duplicates`, which
+        // compares two *stored* vectors and merges the rows when they score
+        // above the threshold — a merge is destructive, and a cosine across two
+        // embedding spaces is a number rather than a similarity. Withholding
+        // the vector drops that pair to the Jaccard word-overlap fallback,
+        // which is weaker but cannot merge two unrelated memories on the
+        // strength of a meaningless score. A `NULL` stamp is a pre-v51 row and
+        // stays available; see `migrate_v51`.
+        let active = self.active_embedding_model();
+
         // SQLite doesn't support IN with parameterized lists easily for large N,
         // so we query one at a time for safety (N ≤ 100 in find_duplicates).
         let mut map = HashMap::new();
+        let mut withheld = 0usize;
         let mut stmt = conn
-            .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
+            .prepare(
+                "SELECT embedding, embedding_model FROM memories WHERE id = ?1 AND deleted = 0",
+            )
             .map_err(LibreFangError::memory)?;
         for id in ids {
-            if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
+            if let Ok((Some(b), stored_model)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
-                Ok(b)
+                let m: Option<String> = row.get(1)?;
+                Ok((b, m))
             }) {
-                if !b.is_empty() {
+                if b.is_empty() {
+                    continue;
+                }
+                let comparable = match (active.as_deref(), stored_model.as_deref()) {
+                    (Some(a), Some(stored)) if !stored.is_empty() => stored == a,
+                    _ => true,
+                };
+                if comparable {
                     map.insert(id.to_string(), embedding_from_bytes(&b));
+                } else {
+                    withheld += 1;
                 }
             }
+        }
+        if withheld > 0 {
+            warn!(
+                withheld,
+                requested = ids.len(),
+                active_model = %active.as_deref().unwrap_or("unknown"),
+                "Withheld stored vectors embedded by a different model; dedup falls back to text similarity for them"
+            );
         }
         Ok(map)
     }
@@ -1972,6 +2149,265 @@ mod tests {
                 metadata,
             )
             .unwrap()
+    }
+
+    /// Read a row's `embedding_model` stamp straight out of SQLite.
+    fn stamped_model(store: &SemanticStore, id: MemoryId) -> Option<String> {
+        store
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT embedding_model FROM memories WHERE id = ?1",
+                rusqlite::params![id.0.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+    }
+
+    /// Write a row carrying a vector, under whatever model the store is
+    /// currently configured with.
+    fn remember_with_vector(
+        store: &SemanticStore,
+        agent_id: AgentId,
+        body: &str,
+        embedding: &[f32],
+    ) -> MemoryId {
+        store
+            .remember_with_embedding(
+                agent_id,
+                body,
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(embedding),
+                None,
+                None,
+                MemoryModality::default(),
+            )
+            .unwrap()
+    }
+
+    /// #7912: `memories.embedding` was a bare BLOB, so nothing recorded which
+    /// model produced a vector.
+    #[test]
+    fn a_stored_vector_records_the_model_that_produced_it() {
+        let store = setup();
+        store.set_active_embedding_model("ollama/bge-m3");
+        let id = remember_with_vector(&store, AgentId::new(), "hello", &[1.0, 0.0, 0.0]);
+        assert_eq!(stamped_model(&store, id).as_deref(), Some("ollama/bge-m3"));
+    }
+
+    /// A row with no vector has no embedding space to belong to, so stamping it
+    /// would inflate the census with rows a model change cannot affect.
+    #[test]
+    fn a_text_only_row_is_not_stamped() {
+        let store = setup();
+        store.set_active_embedding_model("ollama/bge-m3");
+        let id = remember_raw_dialogue(&store, AgentId::new(), "no vector here");
+        assert_eq!(stamped_model(&store, id), None);
+    }
+
+    /// With no configured model — every test store, and any deployment without
+    /// an embedding driver — nothing is stamped and nothing is guarded.
+    #[test]
+    fn no_configured_model_means_no_stamp() {
+        let store = setup();
+        let id = remember_with_vector(&store, AgentId::new(), "hello", &[1.0, 0.0, 0.0]);
+        assert_eq!(stamped_model(&store, id), None);
+    }
+
+    /// The failure the issue describes: two 1024-d models, so the length check
+    /// inside `cosine_similarity` never fires and the swap is silent.
+    /// A vector from the old model must not be scored as if it lived in the new
+    /// model's space — it gets no similarity at all, which is the same
+    /// treatment a dimension-mismatched vector already got.
+    #[test]
+    fn recall_does_not_score_a_vector_from_a_different_model() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        store.set_active_embedding_model("ollama/bge-m3");
+        let stale = remember_with_vector(&store, agent_id, "stale space", &[1.0, 0.0, 0.0]);
+
+        store.set_active_embedding_model("ollama/multilingual-e5-large");
+        let fresh = remember_with_vector(&store, agent_id, "current space", &[1.0, 0.0, 0.0]);
+
+        // Identical vectors, so without the guard both would score 1.0 and the
+        // stale row would be indistinguishable from a perfect match.
+        let hits = store
+            .recall_with_embedding("", 10, None, Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+
+        let stale_hit = hits.iter().find(|f| f.id == stale).expect("stale present");
+        let fresh_hit = hits.iter().find(|f| f.id == fresh).expect("fresh present");
+        assert_eq!(
+            stale_hit.similarity, None,
+            "a vector from another embedding space must not carry a similarity"
+        );
+        assert_eq!(fresh_hit.similarity, Some(1.0));
+        assert_eq!(
+            hits.first().map(|f| f.id),
+            Some(fresh),
+            "the row in the active space must rank above the unscored one"
+        );
+    }
+
+    /// A similarity floor is the caller asking for a measured minimum, and an
+    /// unscored row cannot clear it — so a stale-model row is dropped outright
+    /// rather than surfacing as a weak match.
+    #[test]
+    fn a_similarity_floor_drops_vectors_from_a_different_model() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        store.set_active_embedding_model("ollama/bge-m3");
+        remember_with_vector(&store, agent_id, "stale space", &[1.0, 0.0, 0.0]);
+        store.set_active_embedding_model("ollama/multilingual-e5-large");
+        let fresh = remember_with_vector(&store, agent_id, "current space", &[1.0, 0.0, 0.0]);
+
+        let filter = MemoryFilter {
+            min_similarity: Some(0.5),
+            ..Default::default()
+        };
+        let hits = store
+            .recall_with_embedding("", 10, Some(filter), Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, fresh);
+    }
+
+    /// Rows written before the v51 stamp carry `NULL` and stay comparable.
+    /// The overwhelmingly common case is an operator who never changed the
+    /// model, and dropping every historical vector out of retrieval would be a
+    /// far worse default than the risk it removes.
+    #[test]
+    fn a_pre_stamp_vector_is_still_scored() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Written with no active model, exactly as a pre-v51 binary would.
+        let legacy = remember_with_vector(&store, agent_id, "legacy row", &[1.0, 0.0, 0.0]);
+        assert_eq!(stamped_model(&store, legacy), None);
+
+        store.set_active_embedding_model("ollama/multilingual-e5-large");
+        let hits = store
+            .recall_with_embedding("", 10, None, Some(&[1.0, 0.0, 0.0]))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].similarity, Some(1.0));
+    }
+
+    /// The census is what turns a silent corruption into something an operator
+    /// can be told about at boot.
+    #[test]
+    fn the_census_counts_live_vectors_by_producing_model() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // One unstamped, two from an old model, one from the current one.
+        remember_with_vector(&store, agent_id, "legacy", &[1.0, 0.0]);
+        store.set_active_embedding_model("ollama/bge-m3");
+        remember_with_vector(&store, agent_id, "old a", &[1.0, 0.0]);
+        remember_with_vector(&store, agent_id, "old b", &[0.0, 1.0]);
+        store.set_active_embedding_model("openai/text-embedding-3-small");
+        remember_with_vector(&store, agent_id, "new", &[0.0, 1.0]);
+        // A text-only row must not appear at all — it has no vector to attribute.
+        remember_raw_dialogue(&store, agent_id, "no vector");
+
+        let census = store.embedding_model_census().unwrap();
+        assert_eq!(census.get("ollama/bge-m3"), Some(&2));
+        assert_eq!(census.get("openai/text-embedding-3-small"), Some(&1));
+        assert_eq!(census.get(UNSTAMPED_EMBEDDING_MODEL), Some(&1));
+        assert_eq!(census.len(), 3);
+    }
+
+    /// Re-embedding is the repair for a stale vector, so it has to clear the
+    /// stale stamp too — otherwise a row rebuilt in the current space stays
+    /// permanently excluded from scoring.
+    #[test]
+    fn re_embedding_a_row_restamps_it_with_the_active_model() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        store.set_active_embedding_model("ollama/bge-m3");
+        let id = remember_with_vector(&store, agent_id, "row", &[1.0, 0.0, 0.0]);
+
+        store.set_active_embedding_model("ollama/multilingual-e5-large");
+        store.update_embedding(id, &[0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(
+            stamped_model(&store, id).as_deref(),
+            Some("ollama/multilingual-e5-large")
+        );
+
+        let hits = store
+            .recall_with_embedding("", 10, None, Some(&[0.0, 1.0, 0.0]))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].similarity,
+            Some(1.0),
+            "the rebuilt vector must be scored again"
+        );
+    }
+
+    /// `find_duplicates` compares two *stored* vectors and merges the rows that
+    /// score above the threshold. A merge is destructive, so a vector from
+    /// another embedding space is withheld and that pair drops to the Jaccard
+    /// fallback instead of being merged on a meaningless score.
+    #[test]
+    fn get_embeddings_batch_withholds_vectors_from_a_different_model() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        store.set_active_embedding_model("ollama/bge-m3");
+        let stale = remember_with_vector(&store, agent_id, "stale", &[1.0, 0.0]);
+        let legacy = remember_with_vector(&store, agent_id, "legacy", &[0.0, 1.0]);
+        // Clear the legacy row's stamp so it looks like a pre-v51 write.
+        store
+            .pool
+            .get()
+            .unwrap()
+            .execute(
+                "UPDATE memories SET embedding_model = NULL WHERE id = ?1",
+                rusqlite::params![legacy.0.to_string()],
+            )
+            .unwrap();
+
+        store.set_active_embedding_model("ollama/multilingual-e5-large");
+        let fresh = remember_with_vector(&store, agent_id, "fresh", &[1.0, 1.0]);
+
+        let stale_s = stale.0.to_string();
+        let legacy_s = legacy.0.to_string();
+        let fresh_s = fresh.0.to_string();
+        let got = store
+            .get_embeddings_batch(&[stale_s.as_str(), legacy_s.as_str(), fresh_s.as_str()])
+            .unwrap();
+
+        assert!(
+            got.contains_key(&fresh_s),
+            "the active model's vector is returned"
+        );
+        assert!(
+            got.contains_key(&legacy_s),
+            "an unstamped pre-v51 vector stays available"
+        );
+        assert!(
+            !got.contains_key(&stale_s),
+            "a vector stamped with a different model is withheld"
+        );
+    }
+
+    /// A soft-deleted row is on its way out and must not make an operator think
+    /// they have a re-embedding problem they do not have.
+    #[test]
+    fn the_census_ignores_soft_deleted_rows() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store.set_active_embedding_model("ollama/bge-m3");
+        let id = remember_with_vector(&store, agent_id, "going away", &[1.0, 0.0]);
+        store.forget(id).unwrap();
+        assert!(store.embedding_model_census().unwrap().is_empty());
     }
 
     #[test]

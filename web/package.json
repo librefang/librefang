@@ -41,6 +41,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@lhci/cli": "0.15.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/react": "^19.2.18",

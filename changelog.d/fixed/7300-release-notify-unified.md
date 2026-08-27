@@ -1,0 +1,1 @@
+Restore consolidated release notifications against the unified Release workflow, with paginated per-channel idempotency, verified and redacted external failures, exact Discord bounds, and fail-closed job aggregation. (#7300) (@xiaomo)
