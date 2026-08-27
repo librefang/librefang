@@ -1,0 +1,1 @@
+Alert on every actionable main-CI failure, reconcile out-of-order completions by their latest conclusive Rust state, exclude PRs from alert issues, render untrusted job metadata as inert single-line Markdown, and bound runtime. (#7290) (@xiaomo)

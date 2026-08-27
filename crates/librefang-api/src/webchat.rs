@@ -362,6 +362,7 @@ const SPA_ROUTES: &[&str] = &[
     "config",
     "connect",
     "goals",
+    "groups",
     "hands",
     "logs",
     "mcp-servers",

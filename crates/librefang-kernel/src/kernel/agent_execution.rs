@@ -1229,6 +1229,7 @@ impl LibreFangKernel {
             interrupt: Some(session_interrupt),
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
+            memory_fact_budget_percent: cfg.memory_fact_budget_percent,
             aux_client: Some(self.llm.aux_client.load_full()),
             parent_session_id: None,
             tool_results_config: Some(cfg.tool_results.clone()),
@@ -1239,6 +1240,16 @@ impl LibreFangKernel {
             // `execute_llm_agent` never runs a fork (see the peer_id
             // invariant test) — always a user-facing / trigger turn.
             system_call: false,
+            // #7744: the principal this turn acts for, resolved once, here,
+            // from the same authenticated `owner` that already chose the
+            // provider credential at `resolve_driver_for_owner` above and
+            // attributes the spend at `billed_user_id` below. One identity,
+            // three consumers, rather than three that can disagree.
+            acting_principal: librefang_types::principal::resolve_acting_principal(
+                owner,
+                manifest.owner.as_deref(),
+                cfg.default_owner_principal(),
+            ),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as
