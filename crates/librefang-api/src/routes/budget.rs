@@ -14,6 +14,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(usage_by_model_performance),
         )
         .route("/usage/daily", axum::routing::get(usage_daily))
+        // #7891 — bulk CSV extract for archival / external BI. Streamed, so a
+        // multi-month range does not materialize in the daemon's heap.
+        .route("/usage/export", axum::routing::get(usage_export))
         .route(
             "/budget",
             axum::routing::get(budget_status).put(update_budget),
@@ -47,9 +50,76 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use librefang_memory::usage::DateRange;
 use librefang_types::agent::UserId;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Usage date-range filtering (#7891)
+// ---------------------------------------------------------------------------
+
+/// Optional `start_date` / `end_date` filter shared by every `/api/usage*` endpoint.
+///
+/// Both fields are `Option`, so a request with no query string deserializes to
+/// the unbounded range and every endpoint answers exactly as it did before
+/// #7891. That backward-compatibility property is locked in by a dedicated test
+/// per endpoint in `crates/librefang-api/tests/usage_date_range_test.rs`.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageRangeQuery {
+    /// Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+}
+
+/// `/api/usage/daily` additionally accepts a relative window size.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageDailyQuery {
+    /// Inclusive start of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the reporting window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+    /// How many days back from now to report on. Defaults to 7, capped at 366.
+    /// Mutually exclusive with `start_date` / `end_date`.
+    pub days: Option<u32>,
+}
+
+/// Default size of the relative `/api/usage/daily` window.
+///
+/// This is the value the handler hard-coded before #7891, kept as the default
+/// so an existing caller sees no change.
+const DEFAULT_DAILY_DAYS: u32 = 7;
+
+/// Upper bound on the relative `/api/usage/daily` window.
+///
+/// 366 is one leap year: the longest window for which "a row per day" is still
+/// a report a human reads rather than a bulk extract, and the point past which
+/// `GET /api/usage/export` is the right tool. It also bounds the response at
+/// 366 rows regardless of how many events back them, so the endpoint cannot be
+/// turned into a memory amplifier by a large `days` value.
+const MAX_DAILY_DAYS: u32 = 366;
+
+/// Parse the shared date-range parameters, mapping any failure to a 400 whose
+/// message names the offending parameter and the accepted form.
+///
+/// Returning an error rather than an empty result set is deliberate: a
+/// mistyped `start_date` that silently yields zero rows reads as "we spent
+/// nothing last month", which is the specific way a cost report goes wrong
+/// without anyone noticing.
+//
+// `ApiErrorResponse` trips clippy's `result_large_err` lint (see the same
+// suppression on `consume_oauth_nonce` in `oauth.rs` and the closure at
+// budget.rs:1599); every call site here is `Err(e) => return
+// e.into_response()`, not a hot loop, so one allocation on the rare
+// malformed-input path is fine.
+#[allow(clippy::result_large_err)]
+fn parse_range(
+    start_date: Option<&str>,
+    end_date: Option<&str>,
+) -> Result<DateRange, ApiErrorResponse> {
+    DateRange::parse(start_date, end_date).map_err(|e| ApiErrorResponse::bad_request(e.to_string()))
+}
 
 // ---------------------------------------------------------------------------
 // Audit-detail diff formatters
@@ -151,9 +221,20 @@ fn usage_query_error(error: impl std::fmt::Display) -> Response {
     get,
     path = "/api/usage",
     tag = "budget",
-    responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_stats(State(state): State<Arc<AppState>>) -> Response {
+pub async fn usage_stats(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
     let usage_store = state.kernel.memory_substrate().usage();
     let items = state
         .kernel
@@ -163,7 +244,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> Response {
         .map(
             |e| -> librefang_types::error::LibreFangResult<serde_json::Value> {
                 // Read from persistent SQLite store (survives restarts)
-                let summary = usage_store.query_summary(Some(e.id))?;
+                let summary = usage_store.query_summary_ranged(Some(e.id), &range)?;
                 Ok(serde_json::json!({
                     "agent_id": e.id.to_string(),
                     "name": e.name,
@@ -202,10 +283,26 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> Response {
     get,
     path = "/api/usage/summary",
     tag = "budget",
-    responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Overall usage summary", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_summary(State(state): State<Arc<AppState>>) -> Response {
-    match state.kernel.memory_substrate().usage().query_summary(None) {
+pub async fn usage_summary(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_summary_ranged(None, &range)
+    {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
             "total_output_tokens": s.total_output_tokens,
@@ -223,10 +320,26 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> Response {
     get,
     path = "/api/usage/by-model",
     tag = "budget",
-    responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Usage grouped by model", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> Response {
-    match state.kernel.memory_substrate().usage().query_by_model() {
+pub async fn usage_by_model(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_by_model_ranged(&range)
+    {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
                 .iter()
@@ -251,14 +364,25 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> Response {
     get,
     path = "/api/usage/by-model/performance",
     tag = "budget",
-    responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
+    params(UsageRangeQuery),
+    responses(
+        (status = 200, description = "Model performance metrics", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed or inverted date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> Response {
+pub async fn usage_by_model_performance(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageRangeQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
     match state
         .kernel
         .memory_substrate()
         .usage()
-        .query_model_performance()
+        .query_model_performance_ranged(&range)
     {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -289,14 +413,44 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> R
     get,
     path = "/api/usage/daily",
     tag = "budget",
-    responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
+    params(UsageDailyQuery),
+    responses(
+        (status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject),
+        (status = 400, description = "Malformed range, out-of-bounds `days`, or `days` combined with a date range", body = crate::types::JsonObject)
+    )
 )]
-pub async fn usage_daily(State(state): State<Arc<AppState>>) -> Response {
-    let days = state
-        .kernel
-        .memory_substrate()
-        .usage()
-        .query_daily_breakdown(7);
+pub async fn usage_daily(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageDailyQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    // `days` and an explicit range answer the same question two different
+    // ways, so honouring one and dropping the other would give a caller a
+    // window they did not ask for and no signal that it happened.
+    if !range.is_unbounded() && q.days.is_some() {
+        return ApiErrorResponse::bad_request(
+            "`days` cannot be combined with `start_date` / `end_date`; use `days` for a rolling window or the dates for a calendar range",
+        )
+        .into_response();
+    }
+
+    let usage = state.kernel.memory_substrate().usage();
+    let days = if range.is_unbounded() {
+        let requested = q.days.unwrap_or(DEFAULT_DAILY_DAYS);
+        if requested == 0 || requested > MAX_DAILY_DAYS {
+            return ApiErrorResponse::bad_request(format!(
+                "`days` must be between 1 and {MAX_DAILY_DAYS} (got {requested}); for a longer window use GET /api/usage/export"
+            ))
+            .into_response();
+        }
+        usage.query_daily_breakdown(requested)
+    } else {
+        usage.query_daily_breakdown_ranged(&range)
+    };
     let today_cost = state.kernel.memory_substrate().usage().query_today_cost();
     let first_event = state
         .kernel
@@ -333,6 +487,220 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> Response {
         "first_event_date": first_event,
     }))
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// CSV export (#7891)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /api/usage/export`.
+#[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
+pub struct UsageExportQuery {
+    /// Inclusive start of the export window, `YYYY-MM-DD` (UTC calendar day).
+    pub start_date: Option<String>,
+    /// Inclusive end of the export window, `YYYY-MM-DD` (UTC calendar day).
+    pub end_date: Option<String>,
+    /// Output format. Only `csv` is supported; omitted means `csv`.
+    pub format: Option<String>,
+}
+
+/// Header row of the CSV export. Column order is part of the endpoint's
+/// contract — archived files are re-read months later by tools that bind to
+/// position, so appending is safe but reordering is not.
+const CSV_HEADER: &str = "timestamp,agent_id,agent_name,billed_agent_id,provider,model,input_tokens,output_tokens,cost_usd,tool_calls,latency_ms,user_id,channel,session_id\n";
+
+/// Flush the row buffer to the response stream once it reaches this size.
+///
+/// Chunking amortizes the per-send channel and framing overhead across many
+/// rows while keeping resident memory flat regardless of how many events the
+/// range covers — the point of streaming the export in the first place.
+const CSV_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Render one field as an RFC 4180 CSV value, defusing spreadsheet formula
+/// injection on the way.
+///
+/// Two separate concerns, both of which a naive `join(",")` gets wrong:
+///
+/// 1. **Quoting.** A value containing a comma, a double quote, CR or LF has to
+///    be wrapped in double quotes with interior quotes doubled. Agent names,
+///    model ids and provider strings are free text, so any of these can and do
+///    appear; without quoting the row silently gains columns and every
+///    downstream field shifts.
+/// 2. **Formula injection.** Excel, LibreOffice and Google Sheets evaluate a
+///    cell whose text begins with `=`, `+`, `-`, `@`, or a leading tab / CR as
+///    a formula. An agent named `=HYPERLINK("http://evil","click")` therefore
+///    becomes live content in the reviewer's spreadsheet — a real risk here
+///    precisely because this export exists to be opened in Excel. The guard is
+///    the documented OWASP one: prefix the value with a single quote, which
+///    spreadsheets strip on display and treat as "this is text".
+///
+/// The guard applies only to text columns. Numeric columns are formatted by
+/// this module from typed values, so they carry no attacker-controlled prefix,
+/// and applying the guard there would corrupt legitimate negative numbers.
+fn csv_text_field(raw: &str) -> String {
+    // Formula-injection guard, applied before quoting so the prefix is itself
+    // inside the quotes when quoting is needed.
+    let guarded = if raw
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{raw}")
+    } else {
+        raw.to_string()
+    };
+
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
+    }
+}
+
+/// Append one usage event to the CSV buffer.
+fn append_csv_row(
+    buf: &mut String,
+    row: &librefang_memory::usage::UsageExportRow,
+    agent_names: &std::collections::HashMap<String, String>,
+) {
+    use std::fmt::Write as _;
+
+    let agent_name = agent_names
+        .get(&row.agent_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    // `write!` to a String is infallible; the Result is discarded deliberately.
+    let _ = writeln!(
+        buf,
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        csv_text_field(&row.timestamp),
+        csv_text_field(&row.agent_id),
+        csv_text_field(agent_name),
+        csv_text_field(row.billed_agent_id.as_deref().unwrap_or("")),
+        csv_text_field(&row.provider),
+        csv_text_field(&row.model),
+        row.input_tokens,
+        row.output_tokens,
+        row.cost_usd,
+        row.tool_calls,
+        row.latency_ms,
+        csv_text_field(row.user_id.as_deref().unwrap_or("")),
+        csv_text_field(row.channel.as_deref().unwrap_or("")),
+        csv_text_field(row.session_id.as_deref().unwrap_or("")),
+    );
+}
+
+/// GET /api/usage/export — Stream raw usage events for a date range as CSV.
+#[utoipa::path(
+    get,
+    path = "/api/usage/export",
+    tag = "budget",
+    params(UsageExportQuery),
+    responses(
+        (status = 200, description = "CSV stream of usage events", content_type = "text/csv", body = String),
+        (status = 400, description = "Malformed or inverted date range, or unsupported format", body = crate::types::JsonObject)
+    )
+)]
+pub async fn usage_export(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UsageExportQuery>,
+) -> Response {
+    let range = match parse_range(q.start_date.as_deref(), q.end_date.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    match q.format.as_deref() {
+        None | Some("") | Some("csv") => {}
+        Some(other) => {
+            return ApiErrorResponse::bad_request(format!(
+                "unsupported `format` {other:?}; the only supported export format is `csv`"
+            ))
+            .into_response()
+        }
+    }
+
+    // Resolve agent ids to names once, before streaming. The map is bounded by
+    // the number of registered agents (not by the size of the export), so it
+    // does not reintroduce the memory cost that streaming the rows avoids.
+    let agent_names: std::collections::HashMap<String, String> = state
+        .kernel
+        .agent_registry()
+        .list()
+        .iter()
+        .map(|e| (e.id.to_string(), e.name.clone()))
+        .collect();
+
+    let store = state.kernel.memory_substrate().usage().clone();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+
+    tokio::task::spawn_blocking(move || {
+        let mut buf = String::with_capacity(CSV_CHUNK_BYTES + 1024);
+        buf.push_str(CSV_HEADER);
+
+        let mut client_gone = false;
+        let result = store.for_each_event_in_range(&range, |row| {
+            append_csv_row(&mut buf, &row, &agent_names);
+            if buf.len() >= CSV_CHUNK_BYTES {
+                let chunk = std::mem::take(&mut buf);
+                if tx
+                    .blocking_send(Ok(axum::body::Bytes::from(chunk)))
+                    .is_err()
+                {
+                    // Receiver dropped: the client hung up. Stop walking the
+                    // cursor instead of draining the table into a dead socket.
+                    client_gone = true;
+                    return std::ops::ControlFlow::Break(());
+                }
+            }
+            std::ops::ControlFlow::Continue(())
+        });
+
+        if client_gone {
+            return;
+        }
+
+        if let Err(e) = result {
+            tracing::warn!("usage export failed mid-stream: {e}");
+            // Headers (and probably some rows) are already on the wire, so the
+            // status code can no longer say 500. Terminating the body with an
+            // error aborts the chunked stream, which surfaces to the client as
+            // a truncated download rather than a silently short archive.
+            let _ = tx.blocking_send(Err(std::io::Error::other(format!(
+                "usage export failed: {e}"
+            ))));
+            return;
+        }
+
+        if !buf.is_empty() {
+            let _ = tx.blocking_send(Ok(axum::body::Bytes::from(buf)));
+        }
+    });
+
+    let filename = match (range.start(), range.end()) {
+        (Some(s), Some(e)) => format!("librefang-usage-{s}-to-{e}.csv"),
+        (Some(s), None) => format!("librefang-usage-from-{s}.csv"),
+        (None, Some(e)) => format!("librefang-usage-through-{e}.csv"),
+        (None, None) => "librefang-usage-all.csv".to_string(),
+    };
+
+    let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
+
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -43,7 +43,17 @@ struct WorkflowWriteStubKernel {
     cancel_result: StubCancelResult,
     create_result: StubCreateResult,
     /// The `(spec, caller_agent_id)` pair the last create_workflow call received, so the tests can assert what actually crossed the trait boundary rather than only what came back.
-    create_seen: Mutex<Option<(serde_json::Value, Option<String>)>>,
+    /// `(spec, caller_agent_id, owner)` — the owner is captured separately from
+    /// the spec so a test can assert it reached the kernel *and* that it did not
+    /// arrive inside the spec, where the model could have written it (#7744).
+    #[allow(clippy::type_complexity)]
+    create_seen: Mutex<
+        Option<(
+            serde_json::Value,
+            Option<String>,
+            Option<librefang_types::principal::Principal>,
+        )>,
+    >,
 }
 
 impl WorkflowWriteStubKernel {
@@ -294,9 +304,10 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
         &self,
         spec: &serde_json::Value,
         caller_agent_id: Option<&str>,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<WorkflowSummary, librefang_kernel_handle::KernelOpError> {
         *self.create_seen.lock().unwrap() =
-            Some((spec.clone(), caller_agent_id.map(str::to_string)));
+            Some((spec.clone(), caller_agent_id.map(str::to_string), owner));
         match &self.create_result {
             StubCreateResult::Ok => Ok(WorkflowSummary::new(
                 "11111111-1111-1111-1111-111111111111".to_string(),
@@ -304,6 +315,10 @@ impl WorkflowRunner for WorkflowWriteStubKernel {
                 spec["description"].as_str().unwrap_or_default().to_string(),
                 spec["steps"].as_array().map(|a| a.len()).unwrap_or(0),
                 spec.get("input_schema").is_some(),
+                // Echoed back so the tool's own response can be asserted:
+                // the real kernel stamps the owner it was handed onto the
+                // workflow and reports it in the summary.
+                owner,
             )),
             StubCreateResult::Invalid(reason) => Err(
                 librefang_kernel_handle::KernelOpError::InvalidInput(reason.to_string()),
@@ -366,6 +381,7 @@ fn make_ctx(kernel: &Arc<dyn KernelHandle>) -> ToolExecContext<'_> {
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
+        acting_principal: None,
     }
 }
 
@@ -676,7 +692,7 @@ async fn workflow_create_forwards_the_whole_spec_and_the_caller() {
     assert_eq!(v["step_count"], 2);
     assert_eq!(v["has_input_schema"], true);
 
-    let (seen_spec, seen_caller) = stub
+    let (seen_spec, seen_caller, seen_owner) = stub
         .create_seen
         .lock()
         .unwrap()
@@ -690,6 +706,95 @@ async fn workflow_create_forwards_the_whole_spec_and_the_caller() {
         seen_caller.as_deref(),
         Some("test-agent"),
         "the caller must be forwarded so the registration can be traced back to a turn"
+    );
+    assert_eq!(
+        seen_owner, None,
+        "a context with no acting principal must forward `None`, not a synthesized owner"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ownership (#7744)
+// ---------------------------------------------------------------------------
+
+fn make_ctx_owned<'a>(
+    kernel: &'a Arc<dyn KernelHandle>,
+    acting_principal: Option<librefang_types::principal::Principal>,
+) -> ToolExecContext<'a> {
+    ToolExecContext {
+        acting_principal,
+        ..make_ctx(kernel)
+    }
+}
+
+#[tokio::test]
+async fn workflow_create_forwards_the_acting_principal_to_the_kernel() {
+    // The end of the thread this PR adds. Without it the kernel would stamp
+    // `None` on every agent-created workflow and every other test here would
+    // still pass.
+    let stub = Arc::new(WorkflowWriteStubKernel::with_create(StubCreateResult::Ok));
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let principal = librefang_types::principal::Principal::group_named("support");
+    let ctx = make_ctx_owned(&kernel, Some(principal));
+
+    let payload = json!({
+        "name": "nightly-report",
+        "description": "summarise the day",
+        "steps": [{"name": "write", "agent": "writer", "prompt_template": "Summarise {{input}}"}],
+    });
+    let result = execute_tool_raw("own1", "workflow_create", &payload, &ctx).await;
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+
+    let (seen_spec, _, seen_owner) = stub
+        .create_seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the kernel handle must have been called");
+    assert_eq!(seen_owner, Some(principal));
+    assert!(
+        seen_spec.get("owner").is_none(),
+        "the owner must not travel inside the spec — that is the model's own tool input"
+    );
+
+    // The tool reports what was recorded, in the canonical `kind:uuid` form,
+    // so the model can say who it belongs to instead of inferring it.
+    let v: serde_json::Value = serde_json::from_str(&result.content).expect("valid JSON");
+    assert_eq!(v["owner"], serde_json::json!(principal.to_string()));
+}
+
+#[tokio::test]
+async fn a_model_supplied_owner_in_the_spec_cannot_choose_the_principal() {
+    // The security property: `workflow_create` forwards its whole input to the
+    // kernel, so a model that writes `"owner"` into it must not be able to
+    // decide who its workflow belongs to.
+    let stub = Arc::new(WorkflowWriteStubKernel::with_create(StubCreateResult::Ok));
+    let kernel: Arc<dyn KernelHandle> = stub.clone();
+    let real = librefang_types::principal::Principal::user_named("alice");
+    let ctx = make_ctx_owned(&kernel, Some(real));
+
+    let payload = json!({
+        "name": "nightly-report",
+        "description": "summarise the day",
+        "steps": [{"name": "write", "agent": "writer", "prompt_template": "go"}],
+        "owner": { "kind": "group", "id": "00000000-0000-0000-0000-000000000000" },
+    });
+    let result = execute_tool_raw("own2", "workflow_create", &payload, &ctx).await;
+    assert!(
+        !result.is_error,
+        "workflow_create failed: {}",
+        result.content
+    );
+
+    let (_, _, seen_owner) = stub.create_seen.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        seen_owner,
+        Some(real),
+        "the typed argument decides the owner, not the model's payload"
     );
 }
 

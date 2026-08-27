@@ -264,6 +264,18 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
         "memory set",
         "memory delete",
         "devices list",
+        // `require_daemon(...)` labels for the `librefang group` commands
+        // (#7745). These name a CLI invocation in an operator-facing error
+        // (`start the daemon first, then re-run: librefang group list`), so the
+        // literal is the command, not prose — translating it would print a
+        // command that does not exist.
+        "group list",
+        "group show",
+        "group create",
+        "group delete",
+        "group add-member",
+        "group remove-member",
+        "group of",
         "devices remove",
         "webhooks list",
         "webhooks create",

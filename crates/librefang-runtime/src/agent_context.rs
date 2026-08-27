@@ -469,6 +469,17 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Serializes the tests that touch the process-global context cache.
+    ///
+    /// [`poisoned_cache_lock_recovers_cached_context`] asserts on `cache().is_poisoned()`, and *any* cache access clears that flag by design — so a cache-touching test running concurrently on another libtest thread fails that assertion for reasons that have nothing to do with the behaviour under test.
+    /// Under `cargo nextest`, which CI runs, every test owns its own process and the question never arises; under `cargo test` they share one, so the tests take this guard rather than depending on the scheduler.
+    static CACHE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`CACHE_SERIAL`], recovering it when a previous test panicked while holding it.
+    fn cache_serial() -> std::sync::MutexGuard<'static, ()> {
+        CACHE_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn fresh_workspace(tag: &str) -> PathBuf {
         // Unique temp dir per test to avoid cross-test cache pollution.
         let dir = std::env::temp_dir().join(format!(
@@ -486,6 +497,7 @@ mod tests {
 
     #[test]
     fn poisoned_cache_lock_recovers_cached_context() {
+        let _serial = cache_serial();
         let poison = std::thread::spawn(|| {
             let _guard = cache().lock().unwrap();
             panic!("poison agent context cache lock");
@@ -507,6 +519,7 @@ mod tests {
 
     #[test]
     fn reread_picks_up_external_update() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("reread");
         let path = ws.join(CONTEXT_FILENAME);
 
@@ -529,6 +542,7 @@ mod tests {
 
     #[test]
     fn cache_context_true_freezes_first_read() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("cache");
         let path = ws.join(CONTEXT_FILENAME);
 
@@ -546,6 +560,7 @@ mod tests {
 
     #[test]
     fn missing_file_returns_none() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("missing");
         assert!(load_context_md(&ws, false).is_none());
         assert!(load_context_md(&ws, true).is_none());
@@ -554,6 +569,7 @@ mod tests {
 
     #[test]
     fn read_failure_falls_back_to_cache() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("fallback");
         let path = ws.join(CONTEXT_FILENAME);
 
@@ -577,6 +593,7 @@ mod tests {
 
     #[test]
     fn empty_file_treated_as_absent() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("empty");
         let path = ws.join(CONTEXT_FILENAME);
         fs::write(&path, "   \n\n  ").unwrap();
@@ -586,6 +603,7 @@ mod tests {
 
     #[test]
     fn identity_dir_takes_precedence_over_root() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("identity");
         let identity_dir = ws.join(".identity");
         fs::create_dir_all(&identity_dir).unwrap();
@@ -603,6 +621,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_root_when_identity_dir_missing() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("rootonly");
         fs::write(ws.join(CONTEXT_FILENAME), "root only payload").unwrap();
 
@@ -617,6 +636,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_symlink_context_file() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("symlink");
         let real = ws.join("real.md");
         fs::write(&real, "would-be-leaked content").unwrap();
@@ -634,6 +654,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn context_file_opener_does_not_follow_symlinks() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("nofollow_open");
         let real = ws.join("real.md");
         let link = ws.join(CONTEXT_FILENAME);
@@ -649,6 +670,7 @@ mod tests {
 
     #[test]
     fn windows_handle_path_containment_is_exact_and_component_bounded() {
+        let _serial = cache_serial();
         let root: Vec<u16> = r"\\?\C:\work\Foo".encode_utf16().collect();
         let child: Vec<u16> = r"\\?\C:\work\Foo\context.md".encode_utf16().collect();
         let case_distinct_sibling: Vec<u16> =
@@ -663,6 +685,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn context_reader_does_not_block_on_fifo() {
+        let _serial = cache_serial();
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         use std::sync::mpsc;
@@ -691,6 +714,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_context_file_opener_rejects_file_symlink() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("windows_file_symlink");
         let target = ws.join("target.md");
         let link = ws.join(CONTEXT_FILENAME);
@@ -712,6 +736,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_context_file_opener_rejects_symlinked_identity_directory() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("windows_identity_dir_symlink");
         let outside = fresh_workspace("windows_identity_dir_target");
         fs::write(outside.join(CONTEXT_FILENAME), "must not load").unwrap();
@@ -735,6 +760,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn identity_symlink_falls_back_to_regular_root_context() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("identity_symlink_fallback");
         let identity_dir = ws.join(".identity");
         fs::create_dir_all(&identity_dir).unwrap();
@@ -753,6 +779,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn identity_directory_symlink_falls_back_to_regular_root_context() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("identity_dir_symlink_fallback");
         let target_dir = ws.join("untrusted-identity");
         fs::create_dir_all(&target_dir).unwrap();
@@ -770,6 +797,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_replacement_falls_back_to_cached_context() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("symlink_cache_fallback");
         let context = ws.join(CONTEXT_FILENAME);
         let target = ws.join("untrusted-target.md");
@@ -792,6 +820,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn identity_symlink_replacement_falls_back_to_cached_context() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("identity_symlink_cache_fallback");
         let identity_dir = ws.join(".identity");
         let context = identity_dir.join(CONTEXT_FILENAME);
@@ -816,8 +845,11 @@ mod tests {
     /// Async variant must yield identical content for the standard read
     /// path. This pins the byte-for-byte equivalence with the sync API
     /// — if a future refactor diverges, this test will catch it.
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_matches_sync_for_basic_read() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("async_basic");
         fs::write(ws.join(CONTEXT_FILENAME), "async-ok payload").unwrap();
 
@@ -829,8 +861,11 @@ mod tests {
 
     /// Async API must honour the symlink rejection identically to sync.
     #[cfg(unix)]
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_rejects_symlink_context_file() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("async_symlink");
         let real = ws.join("real.md");
         fs::write(&real, "would-be-leaked content").unwrap();
@@ -847,8 +882,11 @@ mod tests {
 
     /// Async API picks up `.identity/context.md` over the legacy root
     /// fallback — same precedence rule as the sync version.
+    // The guard is held across the awaits below on purpose: serializing these tests against the sync ones is the whole point of it, and `#[tokio::test]` drives them on a current-thread runtime, so there is no other task to block.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn async_variant_identity_dir_takes_precedence() {
+        let _serial = cache_serial();
         let ws = fresh_workspace("async_identity");
         let identity_dir = ws.join(".identity");
         fs::create_dir_all(&identity_dir).unwrap();

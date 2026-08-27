@@ -1355,6 +1355,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
         created_at: Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     let job_id = h
         ._state
@@ -1426,6 +1427,7 @@ async fn cron_job_get_response_has_session_size_fields() {
         created_at: Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     let job_id = kernel
         .cron()
@@ -1509,6 +1511,7 @@ async fn cron_job_get_response_session_fields_default_zero_when_no_session() {
         created_at: Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     let job_id = kernel.cron().add_job(job, false).unwrap();
 
@@ -1552,6 +1555,7 @@ async fn seed_cron_job(h: &Harness) -> String {
         created_at: Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     let id = h
         ._state
@@ -1993,6 +1997,7 @@ async fn seed_cron_job_with_routing_fields(h: &Harness) -> String {
         created_at: Utc::now(),
         last_run: None,
         next_run: None,
+        owner: None,
     };
     h._state
         .kernel

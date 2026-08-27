@@ -51,7 +51,8 @@
     "skip_to_content": "콘텐츠로 건너뛰기",
     "more": "더",
     "mobile_tabs": "하단 탐색",
-    "console": "콘솔"
+    "console": "콘솔",
+    "groups": "그룹"
   },
   "partner": {
     "everyapi_label": "EveryAPI 공식 파트너 통합",
@@ -3709,6 +3710,40 @@
     "wizard_show_warning": "이것이 중요한 이유",
     "wizard_hide_warning": "경고 숨기기",
     "wizard_step_back_aria": "{{n}}단계로 돌아가기"
+  },
+  "groups": {
+    "title": "그룹",
+    "subtitle": "개인이 아니라 팀을 지정합니다. 구성원 관계는 다대다이며 계층 구조가 없습니다.",
+    "help": "그룹의 역할은 모든 구성원에게 부여되며, 채널 바인딩이 이미 사용하는 역할 어휘와 동일합니다. config.toml의 [[groups]]에 저장되고 쓰기는 소유자 전용입니다.",
+    "create": "새 그룹",
+    "edit_title": "그룹 편집",
+    "search_label": "검색",
+    "search_placeholder": "그룹, 설명, 구성원 또는 역할…",
+    "empty_title": "아직 그룹이 없습니다",
+    "empty_desc": "당번, 교대조 또는 프로젝트 팀을 위한 그룹을 만들고 현재 담당자를 추가하세요.",
+    "member_count": "구성원 {{n}}명",
+    "unknown_members_badge": "미등록 {{n}}명",
+    "unknown_members_title": "이 구성원에게는 아직 [[users]] 항목이 없습니다. 의도된 동작이며, 신원 공급자가 최초 로그인 전에 사용자를 지정할 수 있습니다.",
+    "unknown_member_title": "이 이름에 해당하는 [[users]] 항목이 없습니다.",
+    "no_members": "아직 구성원이 없습니다.",
+    "add_member_label": "구성원 추가",
+    "pick_user": "사용자 선택…",
+    "remove_member": "구성원 제거",
+    "delete_title": "그룹 삭제",
+    "delete_message": "그룹을 삭제하면 구성원 관계도 함께 사라집니다. 사용자 자체는 그대로 유지됩니다.",
+    "name_label": "이름",
+    "name_required": "이름은 필수입니다",
+    "description_label": "설명",
+    "description_placeholder": "지원 당번",
+    "roles_label": "역할(쉼표로 구분)",
+    "roles_help": "모든 구성원에게 부여됩니다. 그룹 이름 자체도 항상 부여되므로 여기에 다시 적을 필요는 없습니다.",
+    "created": "그룹이 생성되었습니다",
+    "updated": "그룹이 업데이트되었습니다",
+    "deleted": "그룹이 삭제되었습니다",
+    "save_failed": "그룹을 저장하지 못했습니다",
+    "delete_failed": "그룹을 삭제하지 못했습니다",
+    "member_add_failed": "구성원을 추가하지 못했습니다",
+    "member_remove_failed": "구성원을 제거하지 못했습니다"
   },
   "userBudget": {
     "fields": {
