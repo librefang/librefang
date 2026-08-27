@@ -3779,12 +3779,7 @@ async fn test_audit_export_csv_emits_documented_headers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_user_budget_detail_includes_enforced_true() {
-    // Per-user budget enforcement landed in commit 4a00a646 ("RBAC M5 —
-    // wire per-user budget enforcement"): AuthManager::budget_for,
-    // MeteringEngine::check_user_budget, and the post-call arm in
-    // kernel::execute_llm_agent now actually deny over-budget calls.
-    // `/api/budget/users/{id}` reports `enforced: true` accordingly.
+async fn test_user_budget_detail_marks_missing_limits_unenforced() {
     let server =
         start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
             .await;
@@ -3799,8 +3794,8 @@ async fn test_user_budget_detail_includes_enforced_true() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         body["enforced"],
-        serde_json::json!(true),
-        "enforced flag must be `true` now that per-user budget enforcement is wired"
+        serde_json::json!(false),
+        "a user without configured limits must not be reported as enforced"
     );
     // Defensive: the spend numerics must also be present so the
     // dashboard can render even on an empty database.
@@ -3808,6 +3803,49 @@ async fn test_user_budget_detail_includes_enforced_true() {
     assert!(body["daily"]["spend"].is_number());
     assert!(body["monthly"]["spend"].is_number());
     assert!(body["alert_breach"].is_boolean());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_detail_returns_404_for_unknown_user() {
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/budget/users/Unknown", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_user_budget_detail_fails_closed_when_storage_is_unavailable() {
+    // #6971 — `user_budget_detail` reads `query_user_hourly` /
+    // `query_user_daily` / `query_user_monthly` and, before that fix,
+    // `.unwrap_or(0.0)`'d a query failure into a silent zero-spend
+    // response. Dropping the backing table forces every one of those
+    // three queries to fail, so a regression here would report success
+    // with fabricated zero spend numbers instead of failing closed.
+    let server =
+        start_test_server_with_rbac_users("any-key", vec![("Alice", "admin", "alice-admin-key")])
+            .await;
+    let conn = server.state.kernel.memory_substrate().pool().get().unwrap();
+    conn.execute("DROP TABLE usage_events", []).unwrap();
+    drop(conn);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/api/budget/users/Alice", server.base_url))
+        .header("authorization", "Bearer alice-admin-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "usage_query_failed");
+    assert_eq!(body["message"], "Internal server error");
+    assert!(!body.to_string().contains("usage_events"), "body: {body}");
 }
 
 // ───────────────────────────────────────────────────────────────────────
