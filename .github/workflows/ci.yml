@@ -1179,7 +1179,10 @@ jobs:
     env:
       # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
       LIBREFANG_REGISTRY_OFFLINE: "1"
-    timeout-minutes: 60
+    # 90 minutes, matching `test-windows`. The lane runs 43-57 minutes in practice, so a 60-minute cap left 3-17 minutes of headroom and a slow runner spends it outright.
+    # `f7130c1` stopped at 60:28, `efa84ea` at 60:41 and `2b871dd` at 60:23 — three of the last ten pushes to main, every other lane green in each.
+    # GitHub reports a timeout as `cancelled`, and `CI Gate` fails on `cancelled` without re-evaluating, so each one files a `[main red]` issue against a tree that is fine and no re-run of the merged commit can clear it.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
