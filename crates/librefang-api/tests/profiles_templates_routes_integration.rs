@@ -200,6 +200,10 @@ impl Drop for TemplateFixture {
     }
 }
 
+/// The returned guard owns the template directory on disk.
+/// Dropping it runs `remove_template`, so a caller that discards the return value deletes the fixture it just wrote and every later read of that template answers 404.
+/// `#[must_use]` turns that mistake into a compile error rather than a failure that surfaces in an unrelated assertion.
+#[must_use = "bind the guard to keep the template on disk; discarding it deletes the fixture immediately"]
 fn write_template(name: &str, body: &str) -> TemplateFixture {
     let root = templates_root();
     let dir = root.join(name);
@@ -290,7 +294,7 @@ async fn templates_list_carries_provider_and_model_from_the_manifest() {
     let _ = templates_root();
 
     let unique = "tmpl_list_provider";
-    write_template(
+    let _fixture = write_template(
         unique,
         r#"name = "delta"
 version = "0.1.0"
@@ -332,8 +336,8 @@ async fn templates_list_skips_a_malformed_manifest_instead_of_failing() {
 
     let good = "tmpl_skip_good";
     let bad = "tmpl_skip_bad";
-    write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
-    write_template(bad, "this is not = = valid toml [[[");
+    let _good_fixture = write_template(good, &minimal_manifest_toml("echo", "Echo survives"));
+    let _bad_fixture = write_template(bad, "this is not = = valid toml [[[");
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -363,7 +367,7 @@ async fn templates_list_omits_names_the_detail_routes_reject() {
     let _ = templates_root();
 
     let unusable = "tmpl.dotted.name";
-    write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
+    let _fixture = write_template(unusable, &minimal_manifest_toml("dotted", "Dotted"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/templates").await;
@@ -531,7 +535,7 @@ async fn templates_get_reports_what_promotion_would_strip() {
     let _ = templates_root();
 
     let unique = "tmpl_promo_leaky";
-    write_template(unique, &leaky_manifest_toml("researcher"));
+    let _fixture = write_template(unique, &leaky_manifest_toml("researcher"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -592,7 +596,7 @@ async fn templates_get_promotion_preview_omits_host_specifics_and_keeps_the_port
     let _ = templates_root();
 
     let unique = "tmpl_promo_scrub";
-    write_template(unique, &leaky_manifest_toml("researcher"));
+    let _fixture = write_template(unique, &leaky_manifest_toml("researcher"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
@@ -655,7 +659,7 @@ async fn templates_get_promotion_preview_flags_a_secret_inside_a_retained_prompt
     // A credential pasted into the system prompt sits inside a field promotion has to keep, so the operator has to edit it by hand.
     // The detector exists to say so rather than to silently keep it.
     let unique = "tmpl_promo_review";
-    write_template(
+    let _fixture = write_template(
         unique,
         r#"name = "leaky-prompt"
 version = "0.1.0"
@@ -698,7 +702,7 @@ async fn templates_get_promotion_preview_is_quiet_for_an_already_portable_templa
     let _ = templates_root();
 
     let unique = "tmpl_promo_clean";
-    write_template(unique, &minimal_manifest_toml("charlie", "Charlie type"));
+    let _fixture = write_template(unique, &minimal_manifest_toml("charlie", "Charlie type"));
 
     let h = boot().await;
     let (status, body) = get_json(&h, &format!("/api/templates/{unique}")).await;
