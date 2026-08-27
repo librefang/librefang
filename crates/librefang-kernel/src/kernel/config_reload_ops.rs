@@ -134,6 +134,21 @@ impl LibreFangKernel {
                     );
                 }
             }
+            // Same for `[external_auth.group_map]` (#7746), and additionally when `[[groups]]` itself moved: deleting or renaming a group is the most likely way a previously valid map target becomes dangling, and that edit does not touch `group_map` at all.
+            if old_cfg.external_auth.group_map != new_config.external_auth.group_map
+                || old_cfg.groups != new_config.groups
+            {
+                let dangling = crate::auth::validate_oidc_group_map(
+                    &new_config.external_auth.group_map,
+                    &new_config.groups,
+                );
+                if dangling > 0 {
+                    warn!(
+                        "Hot-reload: external_auth.group_map has {dangling} target(s) that name \
+                         no [[groups]] entry — see WARN lines above"
+                    );
+                }
+            }
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits

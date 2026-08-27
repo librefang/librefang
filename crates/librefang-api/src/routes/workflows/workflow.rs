@@ -16,8 +16,22 @@ use super::*;
 )]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // #7744: the workflow belongs to the authenticated caller who created it.
+    // Read from the auth extension, never from the request body — a body field
+    // naming its own owner is a field the caller can choose, which is the hole
+    // #7884 closed on the messaging route.
+    //
+    // `None` on an unauthenticated / `allow_no_auth` deployment falls back to
+    // `config.toml: default_owner`, and then to unowned. There is no manifest
+    // arm here: this route is a human creating a workflow directly, so there is
+    // no agent whose manifest could speak for it.
+    let owner = api_user
+        .as_ref()
+        .and_then(|u| u.0.owner_principal())
+        .or_else(|| state.kernel.config_ref().default_owner_principal());
     let name = req["name"].as_str().unwrap_or("unnamed").to_string();
     let description = req["description"].as_str().unwrap_or("").to_string();
 
@@ -77,6 +91,7 @@ pub async fn create_workflow(
         name,
         description,
         steps,
+        owner,
         created_at: chrono::Utc::now(),
         layout,
         total_timeout_secs,
@@ -102,7 +117,12 @@ pub async fn create_workflow(
     let id = state.kernel.register_workflow(workflow).await;
     (
         StatusCode::CREATED,
-        Json(serde_json::json!({"workflow_id": id.to_string()})),
+        Json(serde_json::json!({
+            "workflow_id": id.to_string(),
+            // Echoed so a client knows what was recorded without a follow-up
+            // GET; `null` when the workflow is unowned.
+            "owner": owner,
+        })),
     )
 }
 
@@ -260,7 +280,10 @@ pub async fn get_workflow(
         .get_workflow(workflow_id)
         .await
     {
-        Some(w) => (StatusCode::OK, Json(workflow_to_json(&w))),
+        Some(w) => (
+            StatusCode::OK,
+            Json(workflow_to_json(&w, &state.kernel.config_ref())),
+        ),
         None => {
             ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple()
         }
@@ -387,6 +410,13 @@ pub async fn update_workflow(
         name,
         description,
         steps,
+        // #7744: an edit is not a transfer. The owner is carried over from the
+        // stored workflow exactly as `created_at` is, and is deliberately not
+        // readable from `req` — otherwise any caller who may PATCH a workflow
+        // could reassign it to anyone, which would make the recorded owner
+        // worth less than the log line it replaced. Transfer, if it is ever
+        // wanted, belongs on its own route with its own authorization.
+        owner: existing.owner,
         created_at: existing.created_at,
         layout,
         total_timeout_secs,
@@ -428,8 +458,8 @@ pub async fn update_workflow(
         .get_workflow(workflow_id)
         .await
     {
-        Some(persisted) => workflow_to_json(&persisted),
-        None => workflow_to_json(&updated),
+        Some(persisted) => workflow_to_json(&persisted, &state.kernel.config_ref()),
+        None => workflow_to_json(&updated, &state.kernel.config_ref()),
     };
     (StatusCode::OK, Json(body))
 }

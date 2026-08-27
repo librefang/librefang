@@ -51,7 +51,8 @@
     "skip_to_content": "Skip to content",
     "more": "More",
     "mobile_tabs": "Bottom navigation",
-    "console": "Console"
+    "console": "Console",
+    "groups": "Groups"
   },
   "partner": {
     "everyapi_label": "EveryAPI official partner integration",
@@ -3709,6 +3710,40 @@
     "wizard_show_warning": "Why this matters",
     "wizard_hide_warning": "Hide warning",
     "wizard_step_back_aria": "Go back to step {{n}}"
+  },
+  "groups": {
+    "title": "Groups",
+    "subtitle": "Name a team instead of a person. Membership is many-to-many and flat — groups do not nest.",
+    "help": "A group's roles are conferred on every member, in the same role vocabulary channel bindings already use. Stored as [[groups]] in config.toml; writes are Owner-only.",
+    "create": "New group",
+    "edit_title": "Edit group",
+    "search_label": "Search",
+    "search_placeholder": "Group, description, member or role…",
+    "empty_title": "No groups yet",
+    "empty_desc": "Create a group for a rota, a shift, or a project team, then add the people currently filling it.",
+    "member_count": "{{n}} member(s)",
+    "unknown_members_badge": "{{n}} unregistered",
+    "unknown_members_title": "These members have no [[users]] entry yet. Accepted on purpose — an identity provider can name someone before they first sign in.",
+    "unknown_member_title": "No [[users]] entry for this name.",
+    "no_members": "No members yet.",
+    "add_member_label": "Add member",
+    "pick_user": "Pick a user…",
+    "remove_member": "Remove member",
+    "delete_title": "Delete group",
+    "delete_message": "Deleting a group removes its membership with it. The users themselves are untouched.",
+    "name_label": "Name",
+    "name_required": "Name is required",
+    "description_label": "Description",
+    "description_placeholder": "Support rota",
+    "roles_label": "Roles (comma-separated)",
+    "roles_help": "Conferred on every member. The group's own name is always conferred too, so it does not need to be repeated here.",
+    "created": "Group created",
+    "updated": "Group updated",
+    "deleted": "Group deleted",
+    "save_failed": "Could not save group",
+    "delete_failed": "Could not delete group",
+    "member_add_failed": "Could not add member",
+    "member_remove_failed": "Could not remove member"
   },
   "userBudget": {
     "fields": {
