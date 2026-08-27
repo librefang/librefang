@@ -94,6 +94,12 @@ pub struct MemoryItem {
     /// conflating the two makes an unranked result look like a measured miss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
+    /// The storage `scope` string of the fragment this item came from, carried out of the conversion instead of being discarded (#7920).
+    ///
+    /// [`level`](Self::level) is not a substitute: `MemoryLevel::from` folds every scope it does not recognise — [`EPISODIC_SCOPE`] among them — into `MemoryLevel::Session`, so a raw-dialogue row round-tripped through `MemoryItem` came back labelled `session_memory` and any consumer that classifies by scope filed it as an extracted fact.
+    /// `None` means the item was not built from a stored fragment (a freshly extracted candidate, a sidecar reply) and has no storage scope yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl MemoryItem {
@@ -112,6 +118,7 @@ impl MemoryItem {
             access_count: None,
             agent_id: None,
             similarity: None,
+            scope: None,
         }
     }
 
@@ -165,6 +172,7 @@ impl MemoryItem {
             created_at: frag.created_at,
             similarity: frag.similarity,
             metadata: frag.metadata,
+            scope: Some(frag.scope),
         }
     }
 }
@@ -1015,6 +1023,7 @@ fn push_memory(
         access_count: None,
         agent_id: None,
         similarity: None,
+        scope: None,
     });
 }
 
@@ -1390,6 +1399,15 @@ pub struct MemoryFragment {
     /// embedding, or a non-comparable pair (dimension mismatch, zero magnitude).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
+}
+
+impl MemoryFragment {
+    /// Whether this fragment is raw dialogue rather than an extracted fact.
+    ///
+    /// Thin wrapper over [`memory_is_raw_dialogue`]; see there for the predicate and why the two classes are budgeted separately.
+    pub fn is_raw_dialogue(&self) -> bool {
+        memory_is_raw_dialogue(&self.scope, &self.source, &self.metadata)
+    }
 }
 
 /// Filter criteria for memory recall.
@@ -1801,6 +1819,40 @@ pub fn memory_scope_allows_recall(
 ///
 /// Distinct from [`CHAT_SCOPE_METADATA_KEY`], which answers "which chat on which channel" and is `None` for every non-channel caller (dashboard, REST, CLI) — precisely the callers a multi-user deployment uses.
 pub const SESSION_SCOPE_METADATA_KEY: &str = "session_scope";
+
+/// Scope string under which the unconditional per-turn writer files a whole exchange verbatim.
+///
+/// `agent_loop::prompt::remember_interaction_best_effort` writes one such row per turn; nothing distils them and they carry no TTL, which is why they dominate a mature store (794 of 999 live rows on the installation measured in #7920).
+pub const EPISODIC_SCOPE: &str = "episodic";
+
+/// Metadata key an extractor stamps on a fact it distilled, and the marker that separates an extracted fact from raw dialogue.
+///
+/// `ProactiveMemoryStore::add_with_decision` always sets it; the per-turn dialogue writer never does.
+pub const MEMORY_CATEGORY_METADATA_KEY: &str = "category";
+
+/// Whether a stored memory is **raw dialogue** — a whole exchange written verbatim by the per-turn writer — rather than an extracted fact.
+///
+/// The predicate is the exact write signature of `agent_loop::prompt::remember_interaction_best_effort`: [`MemorySource::Conversation`], scope [`EPISODIC_SCOPE`], and no [`MEMORY_CATEGORY_METADATA_KEY`].
+/// Extracted facts always carry a category and always land in a `*_memory` scope, so they can never match; imported and system-sourced rows differ in `source`.
+/// It is the same three-part test `SemanticStore::eviction_candidates` applies in SQL (`librefang-memory`, #7756 §1.2), lifted here so the prompt builder and the eviction cap agree on what a class is instead of each carrying its own copy.
+///
+/// The two classes differ by an order of magnitude in size — 1167 characters against 133 on the measured corpus — which is why the prompt memory section budgets them separately (#7920).
+pub fn memory_is_raw_dialogue(
+    scope: &str,
+    source: &MemorySource,
+    metadata: &HashMap<String, serde_json::Value>,
+) -> bool {
+    if scope != EPISODIC_SCOPE || !matches!(source, MemorySource::Conversation) {
+        return false;
+    }
+    // Mirrors `COALESCE(json_extract(metadata, '$.category'), '') = ''`: a JSON null
+    // and a missing key are both "no category", and a non-string value counts as one.
+    match metadata.get(MEMORY_CATEGORY_METADATA_KEY) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::String(s)) => s.is_empty(),
+        Some(_) => false,
+    }
+}
 
 /// Decide whether a memory may surface in a recall running under session `current` (#7605).
 ///
@@ -2392,5 +2444,59 @@ mod tests {
         let b = vec![1.0, 2.0, 3.0];
         assert_eq!(cosine_similarity(&a, &b), None);
         assert_eq!(cosine_similarity(&b, &a), None);
+    }
+
+    /// The prompt builder and the eviction cap must agree on what raw dialogue is.
+    ///
+    /// This is the Rust side of the predicate `SemanticStore::eviction_candidates` applies in SQL: scope `episodic`, source `Conversation`, no `category` in the metadata.
+    #[test]
+    fn raw_dialogue_is_the_per_turn_writer_signature() {
+        let none: HashMap<String, serde_json::Value> = HashMap::new();
+        assert!(memory_is_raw_dialogue(
+            EPISODIC_SCOPE,
+            &MemorySource::Conversation,
+            &none
+        ));
+
+        // An extracted fact: `*_memory` scope, and a category either way.
+        assert!(!memory_is_raw_dialogue(
+            MemoryLevel::User.scope_str(),
+            &MemorySource::Conversation,
+            &none
+        ));
+        let mut categorised = HashMap::new();
+        categorised.insert(
+            MEMORY_CATEGORY_METADATA_KEY.to_string(),
+            serde_json::json!("preference"),
+        );
+        assert!(!memory_is_raw_dialogue(
+            EPISODIC_SCOPE,
+            &MemorySource::Conversation,
+            &categorised
+        ));
+
+        // An imported row lands in `episodic` with empty metadata but a different source, and the
+        // eviction predicate does not class it as raw dialogue either.
+        assert!(!memory_is_raw_dialogue(
+            EPISODIC_SCOPE,
+            &MemorySource::Document,
+            &none
+        ));
+
+        // `COALESCE(json_extract(metadata, '$.category'), '') = ''`: a null and an empty string are
+        // both "no category", a non-string value is not.
+        for (value, expected) in [
+            (serde_json::Value::Null, true),
+            (serde_json::json!(""), true),
+            (serde_json::json!(7), false),
+        ] {
+            let mut md = HashMap::new();
+            md.insert(MEMORY_CATEGORY_METADATA_KEY.to_string(), value.clone());
+            assert_eq!(
+                memory_is_raw_dialogue(EPISODIC_SCOPE, &MemorySource::Conversation, &md),
+                expected,
+                "category={value:?}"
+            );
+        }
     }
 }

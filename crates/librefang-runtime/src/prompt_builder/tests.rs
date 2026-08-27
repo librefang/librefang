@@ -398,6 +398,190 @@ fn memory_section_budget_holds_for_arbitrary_key_and_content_lengths() {
     }
 }
 
+/// `(key, content)` pairs as the memory formatters take them.
+type MemoryPairs = Vec<(String, String)>;
+
+/// A corpus shaped like the one measured in #7920: many long raw-dialogue rows, a few short extracted facts, dialogue ranked first.
+fn class_split_fixture() -> (MemoryPairs, MemoryPairs) {
+    // 1200-ish characters each, the way a row that inlines a whole exchange looks (measured mean: 1167).
+    let dialogue: MemoryPairs = (0..10)
+        .map(|i| {
+            (
+                String::new(),
+                format!(
+                    "zzdialogue {i} {}",
+                    "Them: how did the rollout go? You: it finished green on the third attempt. "
+                        .repeat(16)
+                ),
+            )
+        })
+        .collect();
+    // ~130 characters each, the way a distilled fact looks (measured mean: 133).
+    let facts: MemoryPairs = (0..8)
+        .map(|i| {
+            (
+                String::new(),
+                format!(
+                    "zzfact {i} the user prefers concise answers, works in Rust, and asks for no emoji in commit messages at all."
+                ),
+            )
+        })
+        .collect();
+    (facts, dialogue)
+}
+
+fn bullets_containing(ctx: &str, marker: &str) -> usize {
+    ctx.lines()
+        .filter(|l| l.starts_with("- ") && l.contains(marker))
+        .count()
+}
+
+#[test]
+fn memory_section_class_split_admits_facts_a_mixed_list_crowds_out() {
+    // Ranking was never the problem: raw dialogue took slightly *under* its base rate of the slots.
+    // Size was — a dialogue row outweighs a fact by roughly nine to one in characters, so ten slots filled in rank order go entirely to dialogue and no extracted fact reaches the prompt at all, which is what happened in 29 % of the turns measured (#7920).
+    let (facts, dialogue) = class_split_fixture();
+
+    let mixed: Vec<(String, String)> = dialogue.iter().chain(facts.iter()).cloned().collect();
+    let before = format_memory_items_as_personal_context(&mixed);
+    assert_eq!(
+        bullets_containing(&before, "zzfact"),
+        0,
+        "fixture does not reproduce the reported shape: a fact reached the class-blind section"
+    );
+
+    let after = format_memory_items_by_class(&facts, &dialogue, None);
+    assert_eq!(
+        bullets_containing(&after, "zzfact"),
+        facts.len(),
+        "class split did not admit the extracted facts: {after}"
+    );
+    // A split, not an exclusion: dropping dialogue entirely scored worse than the split.
+    assert!(
+        bullets_containing(&after, "zzdialogue") > 0,
+        "class split starved raw dialogue: {after}"
+    );
+    // Facts are grouped ahead of dialogue, each class in its own rank order — a fixed arrangement of a fixed input, so the section stays byte-identical across processes (#3298).
+    let first_dialogue = after.find("zzdialogue").expect("dialogue rendered");
+    let last_fact = after.rfind("zzfact").expect("facts rendered");
+    assert!(last_fact < first_dialogue, "classes interleaved: {after}");
+    assert_eq!(
+        after,
+        format_memory_items_by_class(&facts, &dialogue, None),
+        "section is not reproducible for identical input"
+    );
+}
+
+#[test]
+fn memory_section_class_split_stays_inside_the_total_budget() {
+    // The split divides the section budget; it does not raise it.
+    // Whatever the share, both classes charge one running counter against the same ceiling #7910 made hard.
+    let facts: Vec<(String, String)> = (0..60)
+        .map(|i| {
+            (
+                format!("k{i}"),
+                format!("zzfact {i} {}", "detail ".repeat(20)),
+            )
+        })
+        .collect();
+    let dialogue: Vec<(String, String)> = (0..20)
+        .map(|i| {
+            (
+                format!("d{i}"),
+                format!("zzdialogue {i} {}", "exchange ".repeat(200)),
+            )
+        })
+        .collect();
+
+    for percent in [
+        None,
+        Some(0),
+        Some(30),
+        Some(50),
+        Some(70),
+        Some(100),
+        Some(250),
+    ] {
+        let ctx = format_memory_items_by_class(&facts, &dialogue, percent);
+        let spent =
+            rendered_bullet_chars(&ctx, "zzfact") + rendered_bullet_chars(&ctx, "zzdialogue");
+        assert!(
+            spent <= MEMORY_SECTION_MAX_CHARS,
+            "percent={percent:?}: section budget blown: {spent} > {MEMORY_SECTION_MAX_CHARS}"
+        );
+    }
+}
+
+#[test]
+fn memory_section_class_split_spills_an_unused_share_to_the_other_class() {
+    // A share reserved for a class that is not there must not be a hole in the section.
+    // A turn that recalled only facts, or only dialogue, still gets to spend the whole budget.
+    let fact_share = MEMORY_SECTION_MAX_CHARS * MEMORY_FACT_BUDGET_PERCENT as usize / 100;
+    let dialogue_share = MEMORY_SECTION_MAX_CHARS - fact_share;
+
+    let facts: Vec<(String, String)> = (0..60)
+        .map(|i| {
+            (
+                String::new(),
+                format!("zzfact {i} {}", "detail ".repeat(20)),
+            )
+        })
+        .collect();
+    let dialogue: Vec<(String, String)> = (0..20)
+        .map(|i| {
+            (
+                String::new(),
+                format!("zzdialogue {i} {}", "exchange ".repeat(200)),
+            )
+        })
+        .collect();
+
+    let facts_only = format_memory_items_by_class(&facts, &[], None);
+    let facts_spent = rendered_bullet_chars(&facts_only, "zzfact");
+    assert!(
+        facts_spent > fact_share,
+        "dialogue's share was wasted: facts spent {facts_spent}, own share is {fact_share}"
+    );
+    assert!(facts_spent <= MEMORY_SECTION_MAX_CHARS);
+
+    let dialogue_only = format_memory_items_by_class(&[], &dialogue, None);
+    let dialogue_spent = rendered_bullet_chars(&dialogue_only, "zzdialogue");
+    assert!(
+        dialogue_spent > dialogue_share,
+        "the fact share was wasted: dialogue spent {dialogue_spent}, own share is {dialogue_share}"
+    );
+    assert!(dialogue_spent <= MEMORY_SECTION_MAX_CHARS);
+
+    // And the same in the other direction *within* a mixed turn: facts held back by their own ceiling get a second pass over whatever a short dialogue class left behind.
+    let one_short_row = vec![(String::new(), "zzdialogue only one short row".to_string())];
+    let mixed = format_memory_items_by_class(&facts, &one_short_row, None);
+    let mixed_facts_spent = rendered_bullet_chars(&mixed, "zzfact");
+    assert!(
+        mixed_facts_spent > fact_share,
+        "facts did not reclaim the unused dialogue share: {mixed_facts_spent} <= {fact_share}"
+    );
+}
+
+#[test]
+fn memory_section_class_split_empty_on_both_classes_empty() {
+    assert!(format_memory_items_by_class(&[], &[], None).is_empty());
+    let section = build_memory_section_by_class(&[], &[], None);
+    assert!(section.contains("## Memory"));
+    assert!(!section.contains("understanding of this person"));
+}
+
+#[test]
+fn fact_budget_percent_falls_back_and_clamps() {
+    // `None` is "no operator override", not "zero" — an unset knob must keep the measured default rather than starve a class, and a nonsensical override must not compute a ceiling above the section budget.
+    assert_eq!(
+        resolve_fact_budget_percent(None),
+        MEMORY_FACT_BUDGET_PERCENT
+    );
+    assert_eq!(resolve_fact_budget_percent(Some(30)), 30);
+    assert_eq!(resolve_fact_budget_percent(Some(0)), 0);
+    assert_eq!(resolve_fact_budget_percent(Some(255)), 100);
+}
+
 #[test]
 fn test_skills_section_omitted_when_empty() {
     let ctx = basic_ctx();

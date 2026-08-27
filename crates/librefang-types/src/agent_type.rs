@@ -133,6 +133,11 @@ impl AgentTypeSpec {
             // Identity and provenance the flat shape does not carry.
             version: crate::VERSION.to_string(),
             author: String::new(),
+            // An agent *type* is a template, not an instance: the principal a
+            // spawned agent acts for is a property of the deployment that
+            // spawns it, so it starts unset and is edited in the type's
+            // `agent.toml` (#7744).
+            owner: None,
             module: "builtin:chat".to_string(),
             tags: Vec::new(),
             metadata: std::collections::HashMap::new(),
