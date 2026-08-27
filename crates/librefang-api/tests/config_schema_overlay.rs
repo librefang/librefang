@@ -229,6 +229,9 @@ fn every_kernel_config_struct_field_is_exposed_via_overlay() {
         "network_enabled",
         "agent_max_iterations",
         "max_history_messages",
+        // Root-level prompt-shaping scalar like the line above: rendered as a
+        // `general` root_level entry, not as its own section (#7920).
+        "memory_fact_budget_percent",
         "default_routing",
         "require_auth_for_reads",
         // auth-posture scalar gating require_auth_for_reads=false (#5357);
