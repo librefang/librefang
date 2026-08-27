@@ -55,13 +55,22 @@ describe("buildModelConfigPatch", () => {
     expect(patch).toEqual({ temperature: 0.9 });
   });
 
-  it("sends both provider and model together when either changes", () => {
+  it("sends only model when the provider is unchanged", () => {
     const persisted = { provider: "openai", model: "gpt-4o", max_tokens: 4096, temperature: 0.7 };
     const draft = seededDraft({ provider: "openai", model: "gpt-4o-mini" });
 
     const { patch } = buildModelConfigPatch(draft, persisted);
 
-    expect(patch).toEqual({ provider: "openai", model: "gpt-4o-mini" });
+    expect(patch).toEqual({ model: "gpt-4o-mini" });
+  });
+
+  it("sends model with a provider change because the API applies them together", () => {
+    const persisted = { provider: "openai", model: "gpt-4o", max_tokens: 4096, temperature: 0.7 };
+    const draft = seededDraft({ provider: "openrouter", model: "gpt-4o" });
+
+    const { patch } = buildModelConfigPatch(draft, persisted);
+
+    expect(patch).toEqual({ provider: "openrouter", model: "gpt-4o" });
   });
 
   it("persists the global-default sentinel as a provider/model pair", () => {
@@ -88,6 +97,15 @@ describe("buildModelConfigPatch", () => {
     expect(buildModelConfigPatch(seededDraft({ max_tokens: "0" }), persisted).patch).toBeNull();
     expect(buildModelConfigPatch(seededDraft({ temperature: "3" }), persisted).patch).toBeNull();
     expect(buildModelConfigPatch(seededDraft({ max_tokens: "abc" }), persisted).patch).toBeNull();
+    expect(buildModelConfigPatch(seededDraft({ max_tokens: "4096abc" }), persisted).patch).toBeNull();
+    expect(buildModelConfigPatch(seededDraft({ temperature: "0.7xyz" }), persisted).patch).toBeNull();
+  });
+
+  it("normalizes persisted provider and model whitespace before comparing", () => {
+    const persisted = { provider: " openai ", model: " gpt-4o " };
+    const draft = seededDraft({ provider: "openai", model: "gpt-4o" });
+
+    expect(buildModelConfigPatch(draft, persisted).patch).toEqual({});
   });
 
   it("treats an entirely-undefined persisted model as all-default baseline", () => {

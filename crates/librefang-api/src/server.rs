@@ -1049,6 +1049,43 @@ pub(crate) struct ChangePasswordRequest {
     pub new_username: Option<String>,
 }
 
+fn change_password_internal_error(
+    operation: &'static str,
+    error: &impl std::fmt::Display,
+) -> axum::response::Response {
+    tracing::error!(%error, operation, "dashboard credential update failed");
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "Internal server error"
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod change_password_error_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn internal_change_password_errors_are_scrubbed_from_http_body() {
+        let sensitive_error = "permission denied: /srv/librefang/config.toml";
+        let response = change_password_internal_error("write config", &sensitive_error);
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains("/srv/librefang/config.toml"));
+        assert!(!body.contains("permission denied"));
+    }
+}
+
 /// Change the dashboard password and/or username.
 ///
 /// Verifies the current password, then updates whichever credentials are
@@ -1080,6 +1117,12 @@ pub(crate) async fn change_password(
         return locked.into_response();
     }
 
+    // Serialize credential verification together with the read-modify-write
+    // transaction. Otherwise two concurrent requests can both verify the old
+    // password before either acquires the write lock, allowing the later one
+    // to overwrite the first change with credentials that are already stale.
+    let _config_guard = state.config_write_lock.lock().await;
+
     let cfg = state.kernel.config_snapshot();
 
     let cfg_user = resolve_credential(
@@ -1094,7 +1137,7 @@ pub(crate) async fn change_password(
         &cfg.home_dir,
     );
     let cfg_pass = cfg_pass.trim().to_string();
-    let pass_hash = cfg.dashboard_pass_hash.trim();
+    let pass_hash = cfg.dashboard_pass_hash.trim().to_string();
 
     // Must have credential-based auth configured
     let has_password = !pass_hash.is_empty() || !cfg_pass.is_empty();
@@ -1110,13 +1153,24 @@ pub(crate) async fn change_password(
     }
 
     // Verify current password
-    let verify = crate::password_hash::verify_dashboard_password(
-        &cfg_user,
-        &body.current_password,
-        &cfg_user,
-        &cfg_pass,
-        pass_hash,
-    );
+    let verify_user = cfg_user.clone();
+    let verify_pass = cfg_pass.clone();
+    let verify_hash = pass_hash.clone();
+    let current_password = body.current_password.clone();
+    let verify = match tokio::task::spawn_blocking(move || {
+        crate::password_hash::verify_dashboard_password(
+            &verify_user,
+            &current_password,
+            &verify_user,
+            &verify_pass,
+            &verify_hash,
+        )
+    })
+    .await
+    {
+        Ok(verify) => verify,
+        Err(error) => return change_password_internal_error("verify current password", &error),
+    };
     if matches!(verify, crate::password_hash::VerifyResult::Denied) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -1179,15 +1233,21 @@ pub(crate) async fn change_password(
         }
     }
 
-    // Load config.toml for writing
+    // Load config.toml off the async worker. Invalid or unreadable existing
+    // configuration must fail closed instead of being replaced with a new,
+    // mostly-empty document.
     let config_path = state.kernel.config_path().to_path_buf();
-    let mut table: toml::value::Table = if config_path.exists() {
-        match std::fs::read_to_string(&config_path) {
-            Ok(content) => toml::from_str(&content).unwrap_or_default(),
-            Err(_) => toml::value::Table::new(),
-        }
-    } else {
-        toml::value::Table::new()
+    let read_path = config_path.clone();
+    let existing =
+        match tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path)).await {
+            Ok(Ok(content)) => content,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Ok(Err(error)) => return change_password_internal_error("read config", &error),
+            Err(error) => return change_password_internal_error("join config read task", &error),
+        };
+    let mut table: toml::value::Table = match toml::from_str(&existing) {
+        Ok(table) => table,
+        Err(error) => return change_password_internal_error("parse config", &error),
     };
 
     // Update username if requested
@@ -1200,19 +1260,15 @@ pub(crate) async fn change_password(
 
     // Update password if requested
     if let Some(np) = new_pass_trimmed {
-        let new_hash = match crate::password_hash::hash_password(np) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!("Failed to hash new password: {e}");
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::response::Json(serde_json::json!({
-                        "ok": false,
-                        "error": "Failed to hash new password"
-                    })),
-                )
-                    .into_response();
-            }
+        let password = np.to_string();
+        let new_hash = match tokio::task::spawn_blocking(move || {
+            crate::password_hash::hash_password(&password)
+        })
+        .await
+        {
+            Ok(Ok(hash)) => hash,
+            Ok(Err(error)) => return change_password_internal_error("hash new password", &error),
+            Err(error) => return change_password_internal_error("join password hash task", &error),
         };
         table.insert(
             "dashboard_pass_hash".to_string(),
@@ -1224,26 +1280,17 @@ pub(crate) async fn change_password(
 
     let toml_string = match toml::to_string_pretty(&table) {
         Ok(s) => s,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                axum::response::Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("Failed to serialize config: {e}")
-                })),
-            )
-                .into_response();
-        }
+        Err(error) => return change_password_internal_error("serialize config", &error),
     };
-    if let Err(e) = std::fs::write(&config_path, &toml_string) {
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::response::Json(serde_json::json!({
-                "ok": false,
-                "error": format!("Failed to write config: {e}")
-            })),
-        )
-            .into_response();
+    let write_path = config_path.clone();
+    let write_result = tokio::task::spawn_blocking(move || {
+        crate::atomic_write(&write_path, toml_string.as_bytes())
+    })
+    .await;
+    match write_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return change_password_internal_error("write config", &error),
+        Err(error) => return change_password_internal_error("join config write task", &error),
     }
 
     // Trigger config reload so the kernel picks up the new credentials
