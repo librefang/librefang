@@ -448,6 +448,7 @@ fn make_ctx<'a>(
         checkpoint_manager: None,
         interrupt: None,
         dangerous_command_checker: None,
+        acting_principal: None,
     }
 }
 

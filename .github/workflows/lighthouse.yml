@@ -13,12 +13,13 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   lighthouse:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Repository-wide migration guard from #6675. Pinned actions currently
+    # support Node 24; keep them off the runner's legacy Node 20 fallback.
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -50,9 +51,21 @@ jobs:
       - name: Build
         run: cd web && pnpm build
 
+      - name: Report Lighthouse annotation mode
+        env:
+          # PR-controlled install/build scripts run earlier in this job.
+          # Expose the annotation credential only on trusted manual runs.
+          LHCI_GITHUB_APP_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.LHCI_GITHUB_APP_TOKEN || '' }}
+        run: |
+          if [ -z "$LHCI_GITHUB_APP_TOKEN" ]; then
+            echo "::warning::LHCI_GITHUB_APP_TOKEN is unavailable; running assertions without GitHub annotations"
+          else
+            echo "Lighthouse GitHub annotations are enabled"
+          fi
+
       - name: Run Lighthouse CI
         run: |
           cd web
-          npx --yes @lhci/cli@0.15.x autorun --config=lighthouserc.json
+          pnpm exec lhci autorun --config=lighthouserc.json
         env:
-          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          LHCI_GITHUB_APP_TOKEN: ${{ github.event_name == 'workflow_dispatch' && secrets.LHCI_GITHUB_APP_TOKEN || '' }}

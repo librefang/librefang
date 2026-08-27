@@ -1,0 +1,4 @@
+The Analytics endpoints can now answer "what did we spend last month, per model" without a client-side workaround.
+  Every `/api/usage*` endpoint takes optional `start_date` / `end_date` (`YYYY-MM-DD`, inclusive, UTC), `/api/usage/daily` takes a `days` window of up to 366 instead of a hard-coded 7, and a new `GET /api/usage/export?format=csv` streams raw events for archival.
+  Omitting the new parameters leaves every endpoint answering exactly what it answered before, and a malformed or inverted range now returns 400 rather than an empty result set that reads as "we spent nothing".
+  How far back any of this can reach is bounded by the retention sweep that has always hard-deleted `usage_events` older than 90 days; that horizon is now configurable as `[usage] retention_days`, so operators who need quarterly or annual reporting can raise it before the data is gone rather than after (#7895) (@houko)

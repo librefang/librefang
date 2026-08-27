@@ -13,6 +13,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
+        owner: Option<librefang_types::principal::Principal>,
     ) -> Result<String, kernel_handle::KernelOpError> {
         use kernel_handle::KernelOpError;
         use librefang_types::scheduler::{
@@ -78,6 +79,11 @@ impl kernel_handle::CronControl for LibreFangKernel {
             delivery,
             delivery_targets,
             peer_id: job_json["peer_id"].as_str().map(|s| s.to_string()),
+            // #7744: the principal the creating turn acted for. Note it is
+            // read from the typed parameter and never from `job_json`, which
+            // is the model's own input — the same reason `peer_id` above is
+            // overwritten by the caller rather than trusted.
+            owner,
             session_mode,
             enabled: true,
             created_at: chrono::Utc::now(),
@@ -87,6 +93,17 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         let id = self.workflows.cron_scheduler.add_job(job, one_shot)?;
 
+        // Same contract as the workflow path: unowned is supported, and worth
+        // saying out loud exactly once so an operator who meant to attribute
+        // their artifacts finds out from the log (#7744).
+        if owner.is_none() {
+            librefang_types::principal::warn_once_unowned("cron job");
+            tracing::debug!(
+                cron_job_id = %id,
+                "Cron job recorded without an owner — the creating turn had no authenticated caller, the agent manifest declares no `owner`, and `config.toml` declares no `default_owner`"
+            );
+        }
+
         // Persist after adding
         if let Err(e) = self.workflows.cron_scheduler.persist() {
             tracing::warn!("Failed to persist cron jobs: {e}");
@@ -94,7 +111,10 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
         Ok(serde_json::json!({
             "job_id": id.to_string(),
-            "status": "created"
+            "status": "created",
+            // Canonical `kind:uuid`, so the model can report who the job was
+            // recorded for instead of guessing. Absent when unowned.
+            "owner": owner.map(|p| p.to_string()),
         })
         .to_string())
     }

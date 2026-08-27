@@ -2365,3 +2365,35 @@ tui-wizard-status-saved = Конфігурацію збережено — { $pro
 tui-wizard-status-save-fail = Не вдалося зберегти конфігурацію: { $error }
 tui-wizard-status-continuing = Продовження...
 
+
+# ── Групи користувачів (#7745) ──────────────────────────────────────────────
+group-none = Груп не налаштовано.
+group-section-detail = Група
+group-label-name = Назва
+group-label-description = Опис
+group-label-roles = Ролі
+group-label-members = Учасники
+group-label-groups = Групи
+group-label-unregistered = Незареєстровані учасники
+group-header-members = УЧАСНИКИ
+group-header-roles = РОЛІ
+group-header-description = ОПИС
+group-created = Групу { $name } створено.
+group-create-failed = Не вдалося створити групу: { $error }
+group-deleted = Групу { $name } видалено.
+group-delete-failed = Не вдалося видалити групу: { $error }
+group-show-failed = Не вдалося прочитати групу: { $error }
+group-member-added = { $user } додано до { $group }.
+group-member-removed = { $user } вилучено з { $group }.
+group-member-failed = Не вдалося змінити склад групи: { $error }
+group-user-none = { $user } не належить до жодної групи.
+tui-tab-groups = Групи
+tui-groups-title = Групи
+tui-groups-count = груп: { $count }
+tui-groups-header-name = НАЗВА
+tui-groups-header-members = УЧАСНИКИ
+tui-groups-header-roles = РОЛІ
+tui-groups-header-description = ОПИС
+tui-groups-loading = Завантаження груп…
+tui-groups-empty = Груп не налаштовано. Створіть за допомогою `librefang group create <name>`.
+tui-groups-hints = ↑/↓ навігація · r оновити
