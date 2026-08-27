@@ -221,7 +221,7 @@ describe("runtime mutation options", () => {
     const onSuccess = vi.fn();
     const { wrapper } = createQueryClientWrapper();
     const { result } = renderHook(() => useRestoreBackup({ onSuccess }), { wrapper });
-    await result.current.mutateAsync("backup-1");
+    await result.current.mutateAsync({ filename: "backup-1" });
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 

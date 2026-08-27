@@ -112,8 +112,26 @@ pub trait ChannelSender: Send + Sync {
         Ok(())
     }
 
-    /// List group roster members for a (channel, chat_id) pair.
+    /// List **every** group roster member for a `(channel, chat_id)` pair — observed and platform-enumerated alike.
+    ///
+    /// Each entry carries `user_id`, `display_name`, `username` and `source` (`"observed"` / `"enumerated"`).
+    ///
+    /// This is the `channel_members` read and it is **not** an authorization set: it includes people a platform listed who have never interacted with the agent (#7086).
+    /// Anything deciding who may be privately addressed must call [`KernelHandle::roster_observed_members`].
     fn roster_members(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
+        Ok(Vec::new())
+    }
+
+    /// List only the roster members the daemon has **observed speaking** in a `(channel, chat_id)` pair.
+    ///
+    /// This is the set `channel_dm` authorizes a private message against, and the reason it is a separate method rather than a filter applied at the call site: an authorization check must not be able to reach the wider list by forgetting an argument (#7086).
+    ///
+    /// The default returns nothing, which is the fail-closed direction — a handle that has not implemented the roster authorizes nobody.
+    fn roster_observed_members(
         &self,
         _channel: &str,
         _chat_id: &str,
