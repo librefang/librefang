@@ -367,6 +367,8 @@ async fn smoke_get_routes_with_2xx_advertise_json() {
             "/api/logs/stream" => Some("text/event-stream"),
             "/api/metrics" => Some("text/plain"),
             "/api/config/export" => Some("application/toml"),
+            // A CSV export advertises CSV; #7891 added it alongside the JSON usage routes.
+            "/api/usage/export" => Some("text/csv"),
             _ => None,
         };
         if let Some(expected) = expected_content_type {
