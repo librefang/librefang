@@ -1654,10 +1654,8 @@ pub async fn oidc_auth_middleware(
                             .into_response();
                     }
                 }
-                // Resolve `[external_auth.role_map]` before the claims are
-                // moved into extensions. See `role_grant_from_claims` for the
-                // two provider-level gates that have no representation in the
-                // claims struct and therefore cannot be checked downstream.
+                // Resolve `[external_auth.role_map]` before the claims are moved into extensions.
+                // See `role_grant_from_claims` for the two provider-level gates that have no representation in the claims struct and therefore cannot be checked downstream.
                 if let Some(grant) = role_grant_from_claims(&claims, provider, &config.role_map) {
                     request.extensions_mut().insert(grant);
                 }
@@ -1711,11 +1709,8 @@ fn role_grant_from_claims(
         return None;
     }
     let role = librefang_kernel::auth::translate_oidc_roles(role_map, &claims.roles)?;
-    // `email` is the operator-recognisable identity and the one `[[users]]`
-    // entries are normally named after; `sub` is the fallback for providers
-    // that issue no email claim. Either way the id is `UserId::from_name`, the
-    // same derivation every other credential path uses, so an OIDC caller and
-    // a declared user of the same name are one principal rather than two.
+    // `email` is the operator-recognisable identity and the one `[[users]]` entries are normally named after; `sub` is the fallback for providers that issue no email claim.
+    // Either way the id is `UserId::from_name`, the same derivation every other credential path uses, so an OIDC caller and a declared user of the same name are one principal rather than two.
     let name = claims
         .email
         .clone()
