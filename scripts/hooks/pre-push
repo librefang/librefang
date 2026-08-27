@@ -32,15 +32,22 @@ if [ "${LIBREFANG_PREPUSH_SKIP:-0}" = "1" ]; then
     exit 0
 fi
 
-# Only check: refuse direct push to protected branches. GitHub branch
-# protection rules also enforce this on the server, but rejecting
-# locally saves the round-trip and avoids a confusing "fetch first" /
-# "branch is protected" error after a long clippy wait.
-PROTECTED='main master'
+# Only check: refuse direct push to protected branches. GitHub remains the
+# authoritative gate; this local exact-name list only saves a failed network
+# round-trip. Override it per invocation with LIBREFANG_PROTECTED_BRANCHES or
+# per clone with `git config hook.protectedBranches 'main release'`.
+PROTECTED="${LIBREFANG_PROTECTED_BRANCHES:-$(git config --get hook.protectedBranches 2>/dev/null || true)}"
+PROTECTED="${PROTECTED:-main master}"
+ZERO40=0000000000000000000000000000000000000000
+ZERO64=0000000000000000000000000000000000000000000000000000000000000000
+set -f
 while read -r local_ref local_sha remote_ref remote_sha; do
-    # Standard sentinel for branch deletion — let it through; GitHub
-    # will refuse if the branch is protected.
-    [ "$local_sha" = '0000000000000000000000000000000000000000' ] && continue
+    # The deletion sentinel is an all-zero object ID in the repository's hash
+    # width (40 for SHA-1, 64 for SHA-256). Let deletion through for GitHub's
+    # authoritative protection rules to decide.
+    case "$local_sha" in
+        "$ZERO40" | "$ZERO64") continue ;;
+    esac
 
     for p in $PROTECTED; do
         if [ "$remote_ref" = "refs/heads/$p" ]; then
