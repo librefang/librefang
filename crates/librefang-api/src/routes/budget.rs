@@ -137,6 +137,12 @@ fn fmt_global_budget_diff(
 // Usage endpoint
 // ---------------------------------------------------------------------------
 
+fn usage_query_error(error: impl std::fmt::Display) -> Response {
+    ApiErrorResponse::internal_scrub(error)
+        .with_code("usage_query_failed")
+        .into_response()
+}
+
 /// GET /api/usage — Get per-agent usage statistics.
 ///
 /// The per-agent rollup is materialized from the in-memory agent registry
@@ -147,30 +153,36 @@ fn fmt_global_budget_diff(
     tag = "budget",
     responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
 )]
-pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_stats(State(state): State<Arc<AppState>>) -> Response {
     let usage_store = state.kernel.memory_substrate().usage();
-    let items: Vec<serde_json::Value> = state
+    let items = state
         .kernel
         .agent_registry()
         .list()
         .iter()
-        .map(|e| {
-            // Read from persistent SQLite store (survives restarts)
-            let summary = usage_store.query_summary(Some(e.id)).unwrap_or_default();
-            serde_json::json!({
-                "agent_id": e.id.to_string(),
-                "name": e.name,
-                "is_hand": e.is_hand,
-                "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
-                "input_tokens": summary.total_input_tokens,
-                "output_tokens": summary.total_output_tokens,
-                "total_cost_usd": summary.total_cost_usd,
-                "cost": summary.total_cost_usd,
-                "call_count": summary.call_count,
-                "tool_calls": summary.total_tool_calls,
-            })
-        })
-        .collect();
+        .map(
+            |e| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                // Read from persistent SQLite store (survives restarts)
+                let summary = usage_store.query_summary(Some(e.id))?;
+                Ok(serde_json::json!({
+                    "agent_id": e.id.to_string(),
+                    "name": e.name,
+                    "is_hand": e.is_hand,
+                    "total_tokens": summary.total_input_tokens + summary.total_output_tokens,
+                    "input_tokens": summary.total_input_tokens,
+                    "output_tokens": summary.total_output_tokens,
+                    "total_cost_usd": summary.total_cost_usd,
+                    "cost": summary.total_cost_usd,
+                    "call_count": summary.call_count,
+                    "tool_calls": summary.total_tool_calls,
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let items = match items {
+        Ok(items) => items,
+        Err(error) => return usage_query_error(error),
+    };
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,
@@ -178,6 +190,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +204,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     tag = "budget",
     responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
 )]
-pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_summary(State(state): State<Arc<AppState>>) -> Response {
     match state.kernel.memory_substrate().usage().query_summary(None) {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
@@ -199,14 +212,9 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "total_cost_usd": s.total_cost_usd,
             "call_count": s.call_count,
             "total_tool_calls": s.total_tool_calls,
-        })),
-        Err(_) => Json(serde_json::json!({
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cost_usd": 0.0,
-            "call_count": 0,
-            "total_tool_calls": 0,
-        })),
+        }))
+        .into_response(),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -217,7 +225,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     tag = "budget",
     responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
 )]
-pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> Response {
     match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
@@ -232,9 +240,9 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -245,7 +253,7 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     tag = "budget",
     responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
 )]
-pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> Response {
     match state
         .kernel
         .memory_substrate()
@@ -270,9 +278,9 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
                     })
                 })
                 .collect();
-            Json(serde_json::json!({"models": list}))
+            Json(serde_json::json!({"models": list})).into_response()
         }
-        Err(_) => Json(serde_json::json!({"models": []})),
+        Err(error) => usage_query_error(error),
     }
 }
 
@@ -283,7 +291,7 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     tag = "budget",
     responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
 )]
-pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn usage_daily(State(state): State<Arc<AppState>>) -> Response {
     let days = state
         .kernel
         .memory_substrate()
@@ -308,14 +316,23 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 })
             })
             .collect::<Vec<_>>(),
-        Err(_) => vec![],
+        Err(error) => return usage_query_error(error),
+    };
+    let today_cost = match today_cost {
+        Ok(cost) => cost,
+        Err(error) => return usage_query_error(error),
+    };
+    let first_event = match first_event {
+        Ok(date) => date,
+        Err(error) => return usage_query_error(error),
     };
 
     Json(serde_json::json!({
         "days": days_list,
-        "today_cost_usd": today_cost.unwrap_or(0.0),
-        "first_event_date": first_event.unwrap_or(None),
+        "today_cost_usd": today_cost,
+        "first_event_date": first_event,
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -381,12 +398,6 @@ pub async fn update_budget(
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    // Capture OLD config BEFORE the mutation so the audit row can carry
-    // an old→new diff. Without this the chain only records the forward
-    // state, forcing forensics to scan multiple rows to reconstruct
-    // what the operator actually changed.
-    let old_budget = state.kernel.budget_config();
-
     // Build the target budget by merging body fields onto the live snapshot.
     // Accept both the config-side keys (`max_hourly_usd`) and the GET-shape
     // aliases (`hourly_limit`) so a read-modify-write client that pipes GET
@@ -422,22 +433,18 @@ pub async fn update_budget(
         Ok(Some(n))
     };
 
-    let mut new_budget = old_budget.clone();
-    match parse_cap("max_hourly_usd", "hourly_limit") {
-        Ok(Some(v)) => new_budget.max_hourly_usd = v,
-        Ok(None) => {}
+    let hourly_cap = match parse_cap("max_hourly_usd", "hourly_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
-    match parse_cap("max_daily_usd", "daily_limit") {
-        Ok(Some(v)) => new_budget.max_daily_usd = v,
-        Ok(None) => {}
+    };
+    let daily_cap = match parse_cap("max_daily_usd", "daily_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
-    match parse_cap("max_monthly_usd", "monthly_limit") {
-        Ok(Some(v)) => new_budget.max_monthly_usd = v,
-        Ok(None) => {}
+    };
+    let monthly_cap = match parse_cap("max_monthly_usd", "monthly_limit") {
+        Ok(value) => value,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
-    }
+    };
     // alert_threshold: reject out-of-range explicitly instead of silently
     // clamping. A clamped 2.5 → 1.0 returns 200 + the dashboard shows 1.0,
     // which looks like the operator's edit took effect when the typed value
@@ -445,6 +452,7 @@ pub async fn update_budget(
     // persists to `config.toml`, so a clamp would burn an operator's typo
     // into disk indefinitely. The reject-with-400 path mirrors the cap-
     // field validator above: bad input → loud failure, never quiet coercion.
+    let mut alert_threshold = None;
     if let Some(raw) = body.get("alert_threshold") {
         if !raw.is_null() {
             let n = match raw.as_f64() {
@@ -468,9 +476,10 @@ pub async fn update_budget(
                 ))
                 .into_response();
             }
-            new_budget.alert_threshold = n;
+            alert_threshold = Some(n);
         }
     }
+    let mut token_cap = None;
     if let Some(raw) = body.get("default_max_llm_tokens_per_hour") {
         if !raw.is_null() {
             let v = match raw.as_u64() {
@@ -482,8 +491,31 @@ pub async fn update_budget(
                     .into_response();
                 }
             };
-            new_budget.default_max_llm_tokens_per_hour = v;
+            token_cap = Some(v);
         }
+    }
+
+    // Serialize snapshot + partial merge with every other budget writer.
+    // Taking the snapshot before this guard lets two disjoint concurrent
+    // PUTs both merge from the same baseline and makes the later write erase
+    // the earlier one.
+    let config_guard = state.config_write_lock.lock().await;
+    let old_budget = state.kernel.budget_config();
+    let mut new_budget = old_budget.clone();
+    if let Some(value) = hourly_cap {
+        new_budget.max_hourly_usd = value;
+    }
+    if let Some(value) = daily_cap {
+        new_budget.max_daily_usd = value;
+    }
+    if let Some(value) = monthly_cap {
+        new_budget.max_monthly_usd = value;
+    }
+    if let Some(value) = alert_threshold {
+        new_budget.alert_threshold = value;
+    }
+    if let Some(value) = token_cap {
+        new_budget.default_max_llm_tokens_per_hour = value;
     }
 
     // Persist the new `[budget]` table to `config.toml` and reload so the
@@ -492,7 +524,7 @@ pub async fn update_budget(
     // then synchronises the in-memory `MeteringSubsystem.budget_config`
     // ArcSwap (via `HotAction::UpdateBudget`) without us having to mutate
     // it twice.
-    if let Err(e) = persist_budget(&state, &new_budget).await {
+    if let Err(e) = persist_budget_locked(&state, &new_budget, &config_guard).await {
         // Audit the *attempt* even on failure. Without this row, the
         // chain only records successful budget edits — forensics has
         // no trace that an operator tried to set caps that the kernel
@@ -529,23 +561,24 @@ pub async fn update_budget(
         };
     }
 
-    // `persist_budget` already ran `reload_config()`, which routed
-    // `HotAction::UpdateBudget` into `MeteringSubsystem.update_budget`.
-    // The local `new_budget` variable IS what's now in the ArcSwap, so
-    // skip the extra `kernel.budget_config()` round-trip.
+    // Build the response and audit diff from the reloaded snapshot. The TOML
+    // round-trip runs `clamp_bounds`, so the requested struct is not the
+    // authoritative enforcement state.
+    let live_budget = state.kernel.budget_config();
+    drop(config_guard);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "global_budget updated: {}",
-            fmt_global_budget_diff(&old_budget, &new_budget)
+            fmt_global_budget_diff(&old_budget, &live_budget)
         ),
         "ok",
         api_user_ref.map(|u| u.user_id),
         Some("api".to_string()),
     );
 
-    match state.kernel.metering_ref().budget_status(&new_budget) {
+    match state.kernel.metering_ref().budget_status(&live_budget) {
         Ok(status) => Json(status).into_response(),
         Err(error) => ApiErrorResponse::internal_scrub(error).into_response(),
     }
@@ -591,15 +624,14 @@ impl std::fmt::Display for PersistBudgetError {
 /// validate → atomic write → reload). The validate step rejects writes
 /// that would produce a TOML the kernel can't parse; on error neither the
 /// disk file nor the in-memory snapshot move forward.
-async fn persist_budget(
+async fn persist_budget_locked(
     state: &Arc<AppState>,
     new_budget: &librefang_types::config::BudgetConfig,
+    _guard: &tokio::sync::MutexGuard<'_, ()>,
 ) -> Result<(), PersistBudgetError> {
     if crate::routes::guard_config_write(state.kernel.config_path()).is_some() {
         return Err(PersistBudgetError::Managed);
     }
-    let _guard = state.config_write_lock.lock().await;
-
     // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
     // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
     let config_path = state.kernel.config_path().to_path_buf();
@@ -713,9 +745,18 @@ pub async fn agent_budget_status(
     let quota = &entry.manifest.resources;
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
-    let hourly = usage_store.query_hourly(agent_id).unwrap_or(0.0);
-    let daily = usage_store.query_daily(agent_id).unwrap_or(0.0);
-    let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_hourly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let daily = match usage_store.query_daily(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
+    let monthly = match usage_store.query_monthly(agent_id) {
+        Ok(value) => value,
+        Err(error) => return crate::extensions::with_agent_id(agent_id, usage_query_error(error)),
+    };
 
     // Token usage from scheduler
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
@@ -775,11 +816,10 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 
     // Fetch all per-agent daily costs in a single GROUP BY query, then build a
     // lookup map so the registry join below is O(n) not O(n²).
-    let daily_costs: std::collections::HashMap<_, _> = usage_store
-        .query_all_agents_daily()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let daily_costs: std::collections::HashMap<_, _> = match usage_store.query_all_agents_daily() {
+        Ok(costs) => costs.into_iter().collect(),
+        Err(error) => return usage_query_error(error),
+    };
 
     // Use `list_arcs()` instead of `list()` so we get `Vec<Arc<AgentEntry>>`
     // back rather than a fresh owned clone of every entry. Each
@@ -819,6 +859,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         offset: 0,
         limit: None,
     })
+    .into_response()
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.
@@ -877,15 +918,17 @@ pub async fn update_agent_budget(
         }
     }
 
-    // Capture OLD per-agent caps BEFORE the in-memory mutation so the
-    // audit row can carry an old→new diff for forensics. `None` here
-    // means the agent vanished between the path-parse and the snapshot,
-    // which the `update_resources` call below will surface as 404.
-    let old_resources = state
+    let Some(old_resources) = state
         .kernel
         .agent_registry()
         .get(agent_id)
-        .map(|e| e.manifest.resources.clone());
+        .map(|entry| entry.manifest.resources.clone())
+    else {
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found("Agent not found"),
+        );
+    };
 
     let body = match state
         .kernel
@@ -893,16 +936,39 @@ pub async fn update_agent_budget(
         .update_resources(agent_id, hourly, daily, monthly, tokens)
     {
         Ok(()) => {
-            // Persist updated entry
-            let new_resources = state
-                .kernel
-                .agent_registry()
-                .get(agent_id)
-                .map(|e| e.manifest.resources.clone());
-            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-                if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
-                    tracing::warn!("Failed to persist agent state: {e}");
-                }
+            let Some(entry) = state.kernel.agent_registry().get(agent_id) else {
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::not_found("Agent not found"),
+                );
+            };
+            let new_resources = entry.manifest.resources.clone();
+            if let Err(error) = state.kernel.memory_substrate().save_agent(&entry) {
+                let rollback = state
+                    .kernel
+                    .agent_registry()
+                    .replace_resources(agent_id, old_resources.clone());
+                tracing::error!(
+                    %agent_id,
+                    %error,
+                    rollback_error = rollback.as_ref().err().map(ToString::to_string),
+                    "Failed to persist agent budget; restored prior live quota"
+                );
+                state.kernel.audit().record_with_context(
+                    agent_id.to_string(),
+                    librefang_kernel::audit::AuditAction::ConfigChange,
+                    format!(
+                        "agent_budget update failed for {agent_id}: attempted {}",
+                        fmt_agent_resources_diff(Some(&old_resources), Some(&new_resources))
+                    ),
+                    "error",
+                    api_user_ref.map(|u| u.user_id),
+                    Some("api".to_string()),
+                );
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    ApiErrorResponse::internal_scrub(error),
+                );
             }
             // Audit with old→new diff and caller attribution. agent_id
             // is the *target* of the change, not the actor — the actor
@@ -912,28 +978,13 @@ pub async fn update_agent_budget(
                 librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "agent_budget updated for {agent_id}: {}",
-                    fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
+                    fmt_agent_resources_diff(Some(&old_resources), Some(&new_resources))
                 ),
                 "ok",
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            // Return the post-mutation ResourceQuota so callers can
-            // setQueryData / hydrate caches without an extra GET.
-            // If the agent vanished between update and snapshot (race),
-            // fall back to a minimal ack so the call still appears to
-            // have succeeded — `update_resources` already returned Ok.
-            match new_resources {
-                Some(resources) => (StatusCode::OK, Json(resources)).into_response(),
-                None => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "ok",
-                        "message": "Agent budget updated"
-                    })),
-                )
-                    .into_response(),
-            }
+            (StatusCode::OK, Json(new_resources)).into_response()
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     };
@@ -1111,14 +1162,26 @@ pub async fn user_budget_detail(
         .users
         .iter()
         .find(|u| UserId::from_name(&u.name) == user_id);
-    let display_name = user_cfg.map(|u| u.name.clone());
-    let role = user_cfg.map(|u| u.role.clone());
-    let budget = user_cfg.and_then(|u| u.budget.clone());
+    let Some(user_cfg) = user_cfg else {
+        return ApiErrorResponse::not_found("user not found").into_response();
+    };
+    let display_name = user_cfg.name.clone();
+    let role = user_cfg.role.clone();
+    let budget = user_cfg.budget.clone();
 
     let usage_store = state.kernel.memory_substrate().usage();
-    let hourly = usage_store.query_user_hourly(user_id).unwrap_or(0.0);
-    let daily = usage_store.query_user_daily(user_id).unwrap_or(0.0);
-    let monthly = usage_store.query_user_monthly(user_id).unwrap_or(0.0);
+    let hourly = match usage_store.query_user_hourly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let daily = match usage_store.query_user_daily(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
+    let monthly = match usage_store.query_user_monthly(user_id) {
+        Ok(value) => value,
+        Err(error) => return usage_query_error(error),
+    };
 
     // Compute alert breach against the user's configured budget. When no
     // limit is set the percentage is 0 and `alert_breach` is false — the
@@ -1167,7 +1230,7 @@ pub async fn user_budget_detail(
         // global / per-agent / per-provider caps). When `alert_breach`
         // flips true, the next LLM call from this user is denied at the
         // BudgetExceeded gate.
-        "enforced": true,
+        "enforced": budget.is_some(),
     }))
     .into_response()
 }
@@ -1501,7 +1564,7 @@ fn exhaustion_reason_label(
         (status = 200, description = "Per-provider budget snapshot", body = crate::types::JsonObject)
     )
 )]
-pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> Response {
     let budget = state.kernel.budget_config();
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().pool());
@@ -1511,7 +1574,10 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
     // for free — caller relies on this for deterministic UI ordering.
     let mut providers: std::collections::BTreeSet<String> =
         budget.providers.keys().cloned().collect();
-    let observed = usage_store.query_distinct_providers().unwrap_or_default();
+    let observed = match usage_store.query_distinct_providers() {
+        Ok(providers) => providers,
+        Err(error) => return usage_query_error(error),
+    };
     for p in &observed {
         providers.insert(p.clone());
     }
@@ -1536,35 +1602,39 @@ pub async fn provider_budget_list(State(state): State<Arc<AppState>>) -> impl In
         })
         .unwrap_or_default();
 
-    let rows: Vec<serde_json::Value> = providers
+    let rows = providers
         .into_iter()
-        .map(|provider| {
-            let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
-            let unconfigured = !budget.providers.contains_key(&provider);
-            let spend_hourly = usage_store.query_provider_hourly(&provider).unwrap_or(0.0);
-            let spend_daily = usage_store.query_provider_daily(&provider).unwrap_or(0.0);
-            let spend_monthly = usage_store.query_provider_monthly(&provider).unwrap_or(0.0);
-            let tokens_hourly = usage_store
-                .query_provider_tokens_hourly(&provider)
-                .unwrap_or(0);
-            let ex = exhaustion_snapshot.get(&provider);
-            serde_json::json!({
-                "provider": provider,
-                "unconfigured": unconfigured,
-                "cap_hourly_usd": configured.max_cost_per_hour_usd,
-                "cap_daily_usd": configured.max_cost_per_day_usd,
-                "cap_monthly_usd": configured.max_cost_per_month_usd,
-                "cap_tokens_per_hour": configured.max_tokens_per_hour,
-                "spend_hourly_usd": spend_hourly,
-                "spend_daily_usd": spend_daily,
-                "spend_monthly_usd": spend_monthly,
-                "tokens_this_hour": tokens_hourly,
-                "is_exhausted": ex.is_some(),
-                "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
-                "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
-            })
-        })
-        .collect();
+        .map(
+            |provider| -> librefang_types::error::LibreFangResult<serde_json::Value> {
+                let configured = budget.providers.get(&provider).cloned().unwrap_or_default();
+                let unconfigured = !budget.providers.contains_key(&provider);
+                let spend_hourly = usage_store.query_provider_hourly(&provider)?;
+                let spend_daily = usage_store.query_provider_daily(&provider)?;
+                let spend_monthly = usage_store.query_provider_monthly(&provider)?;
+                let tokens_hourly = usage_store.query_provider_tokens_hourly(&provider)?;
+                let ex = exhaustion_snapshot.get(&provider);
+                Ok(serde_json::json!({
+                    "provider": provider,
+                    "unconfigured": unconfigured,
+                    "cap_hourly_usd": configured.max_cost_per_hour_usd,
+                    "cap_daily_usd": configured.max_cost_per_day_usd,
+                    "cap_monthly_usd": configured.max_cost_per_month_usd,
+                    "cap_tokens_per_hour": configured.max_tokens_per_hour,
+                    "spend_hourly_usd": spend_hourly,
+                    "spend_daily_usd": spend_daily,
+                    "spend_monthly_usd": spend_monthly,
+                    "tokens_this_hour": tokens_hourly,
+                    "is_exhausted": ex.is_some(),
+                    "exhaustion_reason": ex.map(|r| exhaustion_reason_label(r.reason)),
+                    "exhaustion_remaining_ms": ex.and_then(|r| r.remaining_ms),
+                }))
+            },
+        )
+        .collect::<librefang_types::error::LibreFangResult<Vec<_>>>();
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => return usage_query_error(error),
+    };
 
     let alert_threshold = budget.alert_threshold;
     (
@@ -1682,10 +1752,26 @@ pub async fn update_provider_budget(
         Ok(Some(n))
     };
 
-    // Capture the OLD entry for the audit diff BEFORE we mutate. `None`
-    // here means "this provider was not configured before" — the diff
-    // will render the old side as `none` and the new side as the values
-    // the operator just set.
+    // Parse the patch before taking the config write guard. The live snapshot
+    // and partial merge happen under that guard below.
+    let hourly_cap = match parse_cost_cap("max_cost_per_hour_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let daily_cap = match parse_cost_cap("max_cost_per_day_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let monthly_cap = match parse_cost_cap("max_cost_per_month_usd") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+    let token_cap = match parse_token_cap("max_tokens_per_hour") {
+        Ok(value) => value,
+        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    };
+
+    let config_guard = state.config_write_lock.lock().await;
     let old_budget_config = state.kernel.budget_config();
     let old_provider = old_budget_config.providers.get(&provider_id).cloned();
 
@@ -1693,25 +1779,17 @@ pub async fn update_provider_budget(
     // in the body keeps its prior value — matches the global PUT's
     // partial-update contract (`budget_put_with_empty_object_is_noop`).
     let mut next_provider = old_provider.clone().unwrap_or_default();
-    match parse_cost_cap("max_cost_per_hour_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_hour_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = hourly_cap {
+        next_provider.max_cost_per_hour_usd = value;
     }
-    match parse_cost_cap("max_cost_per_day_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_day_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = daily_cap {
+        next_provider.max_cost_per_day_usd = value;
     }
-    match parse_cost_cap("max_cost_per_month_usd") {
-        Ok(Some(v)) => next_provider.max_cost_per_month_usd = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = monthly_cap {
+        next_provider.max_cost_per_month_usd = value;
     }
-    match parse_token_cap("max_tokens_per_hour") {
-        Ok(Some(v)) => next_provider.max_tokens_per_hour = v,
-        Ok(None) => {}
-        Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
+    if let Some(value) = token_cap {
+        next_provider.max_tokens_per_hour = value;
     }
 
     // Compose the full BudgetConfig the persist layer expects, with the
@@ -1723,7 +1801,7 @@ pub async fn update_provider_budget(
         .providers
         .insert(provider_id.clone(), next_provider.clone());
 
-    if let Err(e) = persist_budget(&state, &new_budget).await {
+    if let Err(e) = persist_budget_locked(&state, &new_budget, &config_guard).await {
         state.kernel.audit().record_with_context(
             "system",
             librefang_kernel::audit::AuditAction::ConfigChange,
@@ -1744,12 +1822,19 @@ pub async fn update_provider_budget(
         };
     }
 
+    let live_budget = state.kernel.budget_config();
+    let live_provider = live_budget
+        .providers
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+    drop(config_guard);
     state.kernel.audit().record_with_context(
         "system",
         librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "provider_budget updated for {provider_id}: {}",
-            fmt_provider_budget_diff(old_provider.as_ref(), Some(&next_provider))
+            fmt_provider_budget_diff(old_provider.as_ref(), Some(&live_provider))
         ),
         "ok",
         api_user_ref.map(|u| u.user_id),
@@ -1760,10 +1845,10 @@ pub async fn update_provider_budget(
         StatusCode::OK,
         Json(serde_json::json!({
             "provider": provider_id,
-            "max_cost_per_hour_usd": next_provider.max_cost_per_hour_usd,
-            "max_cost_per_day_usd": next_provider.max_cost_per_day_usd,
-            "max_cost_per_month_usd": next_provider.max_cost_per_month_usd,
-            "max_tokens_per_hour": next_provider.max_tokens_per_hour,
+            "max_cost_per_hour_usd": live_provider.max_cost_per_hour_usd,
+            "max_cost_per_day_usd": live_provider.max_cost_per_day_usd,
+            "max_cost_per_month_usd": live_provider.max_cost_per_month_usd,
+            "max_tokens_per_hour": live_provider.max_tokens_per_hour,
         })),
     )
         .into_response()

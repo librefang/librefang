@@ -2,7 +2,7 @@
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
+use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState, ResourceQuota};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -818,6 +818,20 @@ impl AgentRegistry {
             if let Some(v) = tokens_per_hour {
                 entry.manifest.resources.max_llm_tokens_per_hour = Some(v);
             }
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Replace an agent's complete resource quota.
+    ///
+    /// Used to roll back a live budget mutation when durable persistence
+    /// fails. Replaying individual optional fields cannot restore
+    /// `max_llm_tokens_per_hour = None` after it was set to `Some(_)`.
+    pub fn replace_resources(&self, id: AgentId, resources: ResourceQuota) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.resources = resources;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();
