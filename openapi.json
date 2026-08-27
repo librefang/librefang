@@ -949,8 +949,8 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Clone an agent with its workspace files",
+          "201": {
+            "description": "Agent created; response reports any partial identity-copy failures",
             "content": {
               "application/json": {
                 "schema": {

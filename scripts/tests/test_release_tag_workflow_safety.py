@@ -136,6 +136,84 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    issue_pr_link = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "issue-pr-link.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    issue_link_triggers = issue_pr_link.get("on", issue_pr_link.get(True, {}))
+    if set(issue_link_triggers.get("pull_request", {}).get("paths", [])) != {
+        ".github/scripts/issue-pr-links.js",
+        ".github/scripts/tests/issue-pr-links.test.js",
+        ".github/workflows/issue-pr-link.yml",
+    }:
+        raise SystemExit("issue-link validation paths drifted")
+    if issue_link_triggers.get("pull_request_target", {}).get("types") != [
+        "opened",
+        "edited",
+        "closed",
+        "reopened",
+    ]:
+        raise SystemExit("issue-link reconciliation privileged events drifted")
+    if issue_pr_link.get("permissions") != {"contents": "read"}:
+        raise SystemExit("issue-link workflow has broader default permissions than read-only")
+    issue_link_jobs = issue_pr_link.get("jobs", {})
+    test_job = issue_link_jobs.get("test", {})
+    link_job = issue_link_jobs.get("link", {})
+    if (
+        test_job.get("if") != "github.event_name == 'pull_request'"
+        or test_job.get("timeout-minutes") != 2
+    ):
+        raise SystemExit("issue-link unprivileged test gate drifted")
+    if (
+        link_job.get("if") != "github.event_name == 'pull_request_target'"
+        or link_job.get("timeout-minutes") != 5
+        or link_job.get("permissions")
+        != {
+            "contents": "read",
+            "issues": "write",
+            "pull-requests": "read",
+        }
+    ):
+        raise SystemExit("issue-link privileged reconciliation gate drifted")
+    if link_job.get("concurrency") != {
+        "group": "issue-pr-link-${{ github.repository }}",
+        "cancel-in-progress": False,
+    }:
+        raise SystemExit("issue-link mutations are not globally serialized")
+    expected_checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    expected_github_script = (
+        "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
+    )
+    test_uses = [step.get("uses") for step in test_job.get("steps", []) if step.get("uses")]
+    link_uses = [step.get("uses") for step in link_job.get("steps", []) if step.get("uses")]
+    if test_uses != [expected_checkout] or link_uses != [
+        expected_checkout,
+        expected_github_script,
+    ]:
+        raise SystemExit("issue-link workflow action pins drifted")
+    for uses in test_uses + link_uses:
+        if FULL_SHA.fullmatch(uses.rsplit("@", 1)[1]) is None:
+            raise SystemExit("issue-link workflow has a non-SHA action pin")
+    privileged_checkout = link_job.get("steps", [])[0].get("with", {})
+    if (
+        privileged_checkout.get("ref")
+        != "${{ github.event.repository.default_branch }}"
+        or privileged_checkout.get("persist-credentials") is not False
+    ):
+        raise SystemExit("privileged issue-link job checks out untrusted code")
+    github_script = link_job.get("steps", [])[1].get("with", {}).get("script", "")
+    for contract_fragment in (
+        "collectReconciliationState",
+        "await github.rest.pulls.get",
+        "github.paginate(github.rest.pulls.list",
+        "github.paginate(github.rest.issues.listForRepo",
+    ):
+        if contract_fragment not in github_script:
+            raise SystemExit(
+                "issue-link reconciliation lost contract: " + contract_fragment
+            )
+
     contributors_workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "update-contributors.yml").read_text(
             encoding="utf-8"
