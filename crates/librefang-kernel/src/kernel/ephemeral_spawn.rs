@@ -428,13 +428,14 @@ impl LibreFangKernel {
             "Spawning ephemeral worker"
         );
 
+        let started_at = chrono::Utc::now();
         let start_time = std::time::Instant::now();
         // Every capability slot below is wired, and that is the point: the
         // worker executes the tools it advertises. `with_agent_call_depth`
         // makes this turn one level deeper for anything the worker itself
         // spawns, which is what gives the check at the top of this function
         // something to count.
-        let result = librefang_runtime::tool_runner::with_agent_call_depth(run_agent_loop(
+        let outcome = librefang_runtime::tool_runner::with_agent_call_depth(run_agent_loop(
             &manifest,
             &request.message,
             &mut session,
@@ -472,10 +473,41 @@ impl LibreFangKernel {
             None, // no mid-turn injection channel — the worker takes one task
             &loop_opts,
         ))
-        .await
-        .map_err(KernelError::LibreFang)?;
+        .await;
 
         let latency_ms = start_time.elapsed().as_millis() as u64;
+
+        // A run that failed is the run an operator most wants to see.
+        // The record is written before the error is propagated, so a worker that died on a driver error leaves the same reachable trace as one that answered — otherwise the only runs visible under a parent would be the ones that went fine, which inverts the point of the feature.
+        let result = match outcome {
+            Ok(r) => r,
+            Err(e) => {
+                self.record_ephemeral_run(librefang_memory::EphemeralRunRow {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    parent_agent_id: parent_id.0.to_string(),
+                    label: label.to_string(),
+                    worker_name: mission_name.clone(),
+                    agent_type: request.agent_type.clone(),
+                    task: librefang_memory::ephemeral_run_store::truncate_for_record(
+                        &request.message,
+                    ),
+                    response: String::new(),
+                    status: "failed".to_string(),
+                    error: Some(e.to_string()),
+                    provider: manifest.model.provider.clone(),
+                    model: manifest.model.model.clone(),
+                    iterations: 0,
+                    tool_calls: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                    latency_ms: latency_ms as i64,
+                    started_at: started_at.to_rfc3339(),
+                    finished_at: chrono::Utc::now().to_rfc3339(),
+                });
+                return Err(KernelError::LibreFang(e));
+            }
+        };
 
         // ── Metering, billed to the parent ──────────────────────────────────
         let cost = MeteringEngine::estimate_cost_with_catalog(
@@ -528,6 +560,35 @@ impl LibreFangKernel {
             let _ = self.metering.engine.record(&usage_record);
         }
 
+        // ── The run record, filed under the parent ──────────────────────────
+        // The counterpart to the usage row above: that one says what the run cost, this one says what the run *was*.
+        // Both name `parent_id`, so the ledger and the run list agree on the owner.
+        //
+        // Written here, by the kernel, rather than by clearing the loop's `incognito` flag — see `loop_opts` above.
+        // That flag gates the episodic-memory write, the context-engine advance and the proactive `auto_memorize` pass as well as the session write, and all four key on `session.agent_id`, which for a worker *is* the parent.
+        // Clearing it would teach the parent it said things it never said and file the worker's throwaway session among the parent's real conversations.
+        self.record_ephemeral_run(librefang_memory::EphemeralRunRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent_agent_id: parent_id.0.to_string(),
+            label: label.to_string(),
+            worker_name: mission_name.clone(),
+            agent_type: request.agent_type.clone(),
+            task: librefang_memory::ephemeral_run_store::truncate_for_record(&request.message),
+            response: librefang_memory::ephemeral_run_store::truncate_for_record(&result.response),
+            status: "completed".to_string(),
+            error: None,
+            provider: usage_record.provider.clone(),
+            model: usage_record.model.clone(),
+            iterations: i64::from(result.iterations),
+            tool_calls: result.decision_traces.len() as i64,
+            input_tokens: i64::try_from(result.total_usage.input_tokens).unwrap_or(i64::MAX),
+            output_tokens: i64::try_from(result.total_usage.output_tokens).unwrap_or(i64::MAX),
+            cost_usd: cost,
+            latency_ms: latency_ms as i64,
+            started_at: started_at.to_rfc3339(),
+            finished_at: chrono::Utc::now().to_rfc3339(),
+        });
+
         info!(
             parent_id = %parent_id,
             mission = %mission_name,
@@ -545,5 +606,47 @@ impl LibreFangKernel {
         })
         // `mission` drops here — on this path, on every `?` above it, and
         // while unwinding through a panic — taking the directory with it.
+    }
+
+    /// Persist one ephemeral run record, best-effort (refs #7752).
+    ///
+    /// Best-effort for the same reason the post-call usage record is: the work is already done and the tokens are already spent, so failing the call because bookkeeping failed would throw away an answer the caller has paid for.
+    /// A warning names the parent and the mission so the gap is traceable rather than silent.
+    ///
+    /// This records the *run*, not the workspace.
+    /// `MissionWorkspace` still deletes the worker's directory on every exit path (#7723) — a run record makes the delegation auditable, which is a different question from whether the worker's scratch files outlive it, and the answer to the second stays "no".
+    pub(crate) fn record_ephemeral_run(&self, row: librefang_memory::EphemeralRunRow) {
+        let store = librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool());
+        if let Err(e) = store.record_run(&row) {
+            warn!(
+                parent_id = %row.parent_agent_id,
+                mission = %row.worker_name,
+                error = %e,
+                "Failed to persist an ephemeral worker run record"
+            );
+        }
+    }
+
+    /// The ephemeral runs an agent most recently spawned, newest first.
+    ///
+    /// Bounded by the store's own per-parent retention cap, so this is the retained history rather than all time.
+    pub fn ephemeral_runs_for_agent(
+        &self,
+        parent_id: AgentId,
+        limit: usize,
+    ) -> KernelResult<Vec<librefang_memory::EphemeralRunRow>> {
+        librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool())
+            .list_for_parent(&parent_id.0.to_string(), limit)
+            .map_err(KernelError::LibreFang)
+    }
+
+    /// Aggregate spend and run count across an agent's retained ephemeral runs.
+    pub fn ephemeral_run_rollup_for_agent(
+        &self,
+        parent_id: AgentId,
+    ) -> KernelResult<librefang_memory::EphemeralRunRollup> {
+        librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool())
+            .rollup_for_parent(&parent_id.0.to_string())
+            .map_err(KernelError::LibreFang)
     }
 }

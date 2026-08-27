@@ -661,6 +661,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn list_agent_ephemeral_runs(&self, id: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "ephemeral-runs"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
     pub async fn list_agent_events(&self, id: &str, limit: Option<&str>) -> Result<Value> {
         do_req(
             &self.client,

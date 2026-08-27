@@ -243,13 +243,37 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // and so `memory.fts_only` finally has a memories index to fall back to.
     run_step!(50, migrate_v50);
 
-    // NOTE ON THE GAP 51-53: v51 (#7916), v52 (#7919) and v53 (#7904) are claimed by open PRs that were already in review when this migration was written.
-    // This migration deliberately takes v54 rather than reusing a contended number, so it must merge AFTER those three.
-    // `migration::tests::test_every_migration_records_audit_row` fails while the gap is open — that failure is the ladder telling the truth, not a defect in this migration.
+    // v51 (#7912): add `memories.embedding_model` so a stored vector records
+    // which model produced it. Before this, `memories.embedding` was a bare
+    // BLOB: swapping `[memory] embedding_model` between two models of the same
+    // dimensionality left every pre-existing vector in the table, and cosine
+    // similarity was computed across two unrelated spaces with no error
+    // anywhere. NULL means "written before this migration, model unknown" and
+    // is treated as comparable, so no existing deployment changes behaviour.
+    run_step!(51, migrate_v51);
+
+    // v52 (#7086): add `group_roster.source` so the observational roster and a
+    // platform's bulk member list can share one table without sharing one
+    // meaning. `channel_dm` authorizes against `source = 'observed'` only.
     //
+    // This took 52 rather than 51 because #7916 held 51 while both were in
+    // review. #7916 landed first, so the ladder is contiguous and no number is
+    // skipped: the audit backfill inserts a row per version in `1..=user_version`,
+    // and every one of those versions now has a migration behind it.
+    run_step!(52, migrate_v52);
+
+    // v53 (#7752): add the `ephemeral_runs` table so a disposable sub-agent run leaves a record attributable to the agent that spawned it.
+    // Before this an ephemeral worker vanished completely — its spend reached the parent's ledger through `usage_events.billed_agent_id` (v49) but the work that produced the spend was invisible, so an operator could not answer "what did this agent delegate, and what did each one cost".
+    // Purely additive: no existing table is touched and no existing row changes meaning.
+    //
+    // Written as v51, renumbered to 53 on merge: #7916 took 51 and #7086 took 52 while this was in review.
+    run_step!(53, migrate_v53);
+
     // v54 (#7930): persist agent lineage.
     // `AgentEntry.parent` had no column at all, so every reload from the store hydrated it as `None` and the API answered `parent_agent_id: null` for agents that demonstrably had a parent.
     // Adds `agents.parent_id` plus the index that makes "list this agent's children" a lookup instead of a full-table scan, and `agents.parent_recorded` so a row written before this migration is distinguishable from an agent that genuinely has no parent.
+    //
+    // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
 
     // Audit-trail consistency (#3538): user_version must match the count
@@ -945,6 +969,45 @@ fn migrate_v48(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// v51 (#7912): Record which embedding model produced each stored vector.
+///
+/// `memories.embedding` was a bare BLOB with no provenance, and the only guard
+/// against comparing vectors from different models was the length check inside
+/// `cosine_similarity`, which returns `None` on a dimension mismatch.
+/// Two models of the *same* dimensionality — the issue measured `bge-m3` against
+/// `multilingual-e5-large`, both 1024-d — slip straight past that guard, so an
+/// operator editing one config line turned every pre-existing row's similarity
+/// into a meaningless number with no error and no log line.
+///
+/// `NULL` means "written before this migration, provenance unknown". Those rows
+/// stay comparable: the overwhelmingly common case is that the operator never
+/// changed the model, and silently dropping every historical vector out of
+/// retrieval would be a far worse default than the risk it removes.
+/// The census in `SemanticStore::embedding_model_census` reports them as
+/// unstamped so an operator can see how much of their corpus predates the
+/// stamp.
+///
+/// The index exists for the census and for a future re-embedding sweep, both of
+/// which group by this column over the whole table.
+fn migrate_v51(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "memories", "embedding_model")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN embedding_model TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (51, datetime('now'), 'Add memories.embedding_model so a stored vector records which model produced it (#7912)')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// v49 (#7714): Record who owns a workflow run, and who a call's spend bills to.
 ///
 /// `workflow_runs.owner_agent_id` is the agent that asked for the run — the caller of `workflow_run` / `workflow_start`, the agent bound to the channel that issued the command, or the agent an API caller named.
@@ -1044,7 +1107,33 @@ fn migrate_v50(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (49, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+         VALUES (50, datetime('now'), 'Add memories_fts FTS5 index over memories.content so search without embeddings is a real index, not a LIKE scan (#7808)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v52 (#7086): `group_roster.source` — where a roster row came from.
+///
+/// The roster had exactly one meaning until now: a row existed because that person was observed speaking in that chat.
+/// `channel_dm` (#7874) leans on precisely that meaning — it authorizes a private message against the roster, so the set doubles as "people this agent has actually interacted with here".
+///
+/// The bulk enumeration this issue asked for (Slack's `conversations.members`) reports everyone the platform lists, most of whom have never addressed the agent.
+/// Writing those into the same undifferentiated rows would silently promote the whole channel into `channel_dm`'s authorization set — an agent could then DM a member who has never spoken to it, which is a privilege escalation dressed as a feature.
+///
+/// So the two sets share the table and the primary key but not the predicate.
+/// `source` is `'observed'` (someone spoke) or `'enumerated'` (a platform listed them), every pre-migration row is `'observed'` because the sender upsert was the only writer, and the authorization query filters on the column explicitly.
+/// A single column beats a second table here because the natural key is identical in both sets: a member who is enumerated and later speaks is one row that changes classification, not two rows needing a UNION with a priority rule at every read site.
+fn migrate_v52(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !try_column_exists(conn, "group_roster", "source")? {
+        conn.execute(
+            "ALTER TABLE group_roster ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (52, datetime('now'), 'Add group_roster.source so bulk-enumerated members stay out of the channel_dm authorization set (#7086)')",
         [],
     )?;
     Ok(())
@@ -1135,6 +1224,51 @@ fn rebuild_memories_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT INTO memories_fts (memory_id, agent_id, content) \
          SELECT id, agent_id, content FROM memories",
+        [],
+    )?;
+    Ok(())
+}
+
+/// v53 (#7752): ephemeral worker run records.
+///
+/// An ephemeral worker runs one turn under its parent's identity and then vanishes — no registry entry, no persisted session, and a mission workspace deleted on the way out.
+/// That left an operator with nothing to inspect: v49 gave the parent the *spend* through `usage_events.billed_agent_id`, but the work behind the spend had no record at all.
+///
+/// This table is that record, and it is deliberately not a session.
+/// The alternative — clearing the worker's `incognito` flag so the agent loop persists its session under the parent's `AgentId` — also un-gates the episodic-memory write, the context-engine advance and the proactive `auto_memorize` pass, all of which key on the same id, and would fold a delegated sub-run's text into the parent's own recall and conversation list.
+/// See `crate::ephemeral_run_store` for the full argument.
+///
+/// `parent_agent_id` is indexed because every read is scoped to one parent, and carries no foreign key for the same reason the other agent-scoped tables do not: the cascade is explicit, in `MemorySubstrate::remove_agent`, so all agent-scoped deletes stay in one reviewable list rather than split between SQL and Rust.
+fn migrate_v53(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ephemeral_runs (
+            id              TEXT PRIMARY KEY,
+            parent_agent_id TEXT NOT NULL,
+            label           TEXT NOT NULL,
+            worker_name     TEXT NOT NULL,
+            agent_type      TEXT,
+            task            TEXT NOT NULL DEFAULT '',
+            response        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL CHECK (status IN ('completed','failed')),
+            error           TEXT,
+            provider        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT '',
+            iterations      INTEGER NOT NULL DEFAULT 0,
+            tool_calls      INTEGER NOT NULL DEFAULT 0,
+            input_tokens    INTEGER NOT NULL DEFAULT 0,
+            output_tokens   INTEGER NOT NULL DEFAULT 0,
+            cost_usd        REAL NOT NULL DEFAULT 0.0,
+            latency_ms      INTEGER NOT NULL DEFAULT 0,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT NOT NULL,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ephemeral_runs_parent
+            ON ephemeral_runs(parent_agent_id, finished_at DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (53, datetime('now'), 'Add ephemeral_runs table so a disposable sub-agent run leaves a record under its parent (#7752)')",
         [],
     )?;
     Ok(())
@@ -2261,6 +2395,86 @@ mod tests {
                 "migration v{v} is applied (user_version={user_version}) but has no audit row"
             );
         }
+
+        // …and each one must have written that row *itself*.
+        // The two checks above run after the #3538 backfill at the end of `run_migrations`, which inserts a placeholder row for any version that failed to record itself — so they pass even when a migration writes its audit row under the wrong version number.
+        // `migrate_v50` did exactly that (it recorded itself as 49, where `INSERT OR IGNORE` silently dropped it against v49's existing row), and the only visible symptom was a "drift detected and self-healed" warning on every fresh boot.
+        // A clean ladder must need no backfill at all.
+        let placeholders: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM migrations WHERE description = 'audit-row backfill (#3538)'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            placeholders, 0,
+            "a fresh ladder must need no audit-row backfill; some migrate_vN is \
+             recording its audit row under a version other than its own"
+        );
+    }
+
+    /// Companion to `test_every_migration_records_audit_row`, and the guard that test could not be (#7924).
+    ///
+    /// That test asserts every applied version *has* an audit row, but the #3538 backfill at the end of `run_migrations` creates any missing row before the assertion runs — so a migration that stamps the wrong version number passes it, rescued by the repair path.
+    /// `migrate_v50` did exactly that: it recorded under version 49, where `INSERT OR IGNORE` silently dropped it against `migrate_v49`'s row, and every fresh database then warned about historical drift on its first boot.
+    ///
+    /// The invariant the backfill's own doc comment already claims is the stronger one and is what this pins: on a clean database the backfill inserts nothing, because every migration recorded itself.
+    /// A placeholder description surviving a fresh `run_migrations` means some migration is stamping a version that is not its own.
+    #[test]
+    fn no_migration_relies_on_the_audit_backfill() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT version, description FROM migrations ORDER BY version")
+            .unwrap();
+        let rescued: Vec<u32> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .filter(|(_, description)| description.contains("audit-row backfill"))
+            .map(|(version, _)| version)
+            .collect();
+
+        assert!(
+            rescued.is_empty(),
+            "these versions were rescued by the #3538 backfill on a clean database, which means the \
+             migration that applied their DDL stamped a version that is not its own: {rescued:?}"
+        );
+    }
+
+    /// The specific collision from #7924, pinned by description rather than by presence.
+    ///
+    /// Both rows existing is not enough — that was already true, because the backfill supplied the missing one.
+    /// What has to hold is that each version's description names the DDL that version actually applied.
+    #[test]
+    fn v49_and_v50_each_describe_their_own_ddl() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let description = |version: u32| -> String {
+            conn.query_row(
+                "SELECT description FROM migrations WHERE version = ?1",
+                [version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|e| panic!("no audit row for v{version}: {e}"))
+        };
+
+        assert!(
+            description(49).contains("owner_agent_id"),
+            "v49 must describe the run-ownership columns it adds (#7714), got: {}",
+            description(49)
+        );
+        assert!(
+            description(50).contains("memories_fts"),
+            "v50 must describe the FTS5 index it adds (#7808), not a backfill placeholder or v49's \
+             description, got: {}",
+            description(50)
+        );
     }
 
     /// Boot-time ladder invariant: a DB whose `migrations` audit table
@@ -2720,6 +2934,76 @@ mod tests {
     }
 
     #[test]
+    fn test_migrate_v51_adds_embedding_model_column_nullable_and_indexed() {
+        // #7912: `memories.embedding` carried no provenance, so swapping
+        // `[memory] embedding_model` between two models of the same
+        // dimensionality left every stored vector in place and cosine ran
+        // across two unrelated spaces with no error anywhere.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        assert!(column_exists(&conn, "memories", "embedding_model"));
+
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_memories_embedding_model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 1,
+            "the census and any future re-embedding sweep group by this column over the whole table"
+        );
+
+        // A legacy-shaped INSERT that omits embedding_model leaves it NULL,
+        // which the recall guard reads as "provenance unknown, still comparable".
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, embedding) \
+             VALUES ('legacy-vec', 'agent-1', 'c', 'conversation', 'episodic', 1.0, '{}', '2026-07-19T00:00:00+00:00', '2026-07-19T00:00:00+00:00', 0, 0, X'00000000')",
+            [],
+        )
+        .unwrap();
+        let stamp: Option<String> = conn
+            .query_row(
+                "SELECT embedding_model FROM memories WHERE id = 'legacy-vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stamp, None,
+            "a pre-v51 vector must read back NULL, not a synthetic model name"
+        );
+
+        // Re-running is a no-op on both the column and the index, and must not
+        // disturb the seeded row.
+        migrate_v51(&conn).unwrap();
+        migrate_v51(&conn).unwrap();
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_memories_embedding_model'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            index_count, 1,
+            "the index must exist exactly once after repeated boots"
+        );
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM memories WHERE id = 'legacy-vec'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "c", "re-running migrate_v51 must not touch data");
+    }
+
+    #[test]
     fn test_migrate_v48_adds_last_decayed_at_column() {
         // #7756: confidence decay needs to know when it last ran for a row.
         // The column is nullable with no default so every pre-migration memory
@@ -2837,6 +3121,48 @@ mod tests {
             "re-running migrate_v49 must not touch data"
         );
         assert_eq!(cost, 0.5, "re-running migrate_v49 must not touch data");
+    }
+
+    /// #7752: the `ephemeral_runs` table must exist after the ladder, accept a row, refuse an out-of-domain `status`, and survive a re-run untouched.
+    #[test]
+    fn test_migrate_v53_creates_ephemeral_runs_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO ephemeral_runs (
+                 id, parent_agent_id, label, worker_name, status,
+                 started_at, finished_at, cost_usd
+             ) VALUES ('r1', 'parent-1', 'researcher', 'researcher-00ff', 'completed',
+                       '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z', 0.25)",
+            [],
+        )
+        .unwrap();
+
+        // The CHECK constraint is the last line of defence behind the store's own status validation; an unknown value must never round-trip.
+        assert!(
+            conn.execute(
+                "INSERT INTO ephemeral_runs (
+                     id, parent_agent_id, label, worker_name, status,
+                     started_at, finished_at
+                 ) VALUES ('r2', 'parent-1', 'x', 'x-00ff', 'sideways',
+                           '2026-01-01T00:00:00Z', '2026-01-01T00:00:05Z')",
+                [],
+            )
+            .is_err(),
+            "status must be constrained to the run outcomes the store writes"
+        );
+
+        migrate_v53(&conn).unwrap();
+        let (n, cost): (i64, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), IFNULL(SUM(cost_usd), 0.0) FROM ephemeral_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "re-running migrate_v53 must not touch data");
+        assert_eq!(cost, 0.25, "re-running migrate_v53 must not touch data");
     }
 
     #[test]
@@ -3833,7 +4159,8 @@ mod tests {
         // If `parent_recorded` did not default to 0, every agent that predates v54 would start positively claiming to be a root agent — a more confident wrong answer than the `null` the bug already produced.
         //
         // Simulates a real pre-v54 database: build the v40-era `agents` table, insert a row, stamp `user_version = 50`, then let the ladder run.
-        // Only `run_step!(54, ..)` fires (50 < 54, and 51-53 do not exist yet).
+        // Steps 51-54 all fire from 50, so the fixture also needs the tables 51 and 52 alter — `memories` and `group_roster` — even though this test asserts nothing about them.
+        // Their absence is not a v54 bug; a real database at user_version 50 has both.
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -3847,6 +4174,15 @@ mod tests {
                 session_id TEXT DEFAULT '',
                 identity TEXT DEFAULT '{}',
                 source_toml_path TEXT DEFAULT NULL
+            );
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL
+            );
+            CREATE TABLE group_roster (
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
             );
             CREATE TABLE migrations (
                 version INTEGER PRIMARY KEY,
