@@ -180,12 +180,53 @@ async fn test_clone_agent_creates_independent_copy() {
     assert_eq!(status, StatusCode::CREATED, "body: {body}");
     let new_id = body["agent_id"].as_str().expect("agent_id in response");
     assert_eq!(body["name"], "clone-dest");
+    assert_eq!(body["partial"], false);
+    assert_eq!(body["warnings"], serde_json::json!([]));
     assert_ne!(new_id, src.to_string(), "clone must get a fresh id");
 
     // Read-back: the clone is independently addressable and carries the new name.
     let (status, got) = send(h.app.clone(), get(&format!("/api/agents/{}", new_id))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got["name"], "clone-dest");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_clone_identity_copy_failure_returns_partial_creation() {
+    let h = boot(TEST_TOKEN).await;
+    let src = spawn_named(&h.state, "partial-clone-source");
+    let source_workspace = h
+        .state
+        .kernel
+        .agent_registry()
+        .get(src)
+        .and_then(|entry| entry.manifest.workspace.clone())
+        .expect("source workspace");
+    let source_identity = source_workspace.join(".identity");
+    std::fs::remove_dir_all(&source_identity).expect("remove source identity directory");
+    std::fs::write(&source_identity, "not a directory")
+        .expect("replace identity directory with a file");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{}/clone", src),
+            serde_json::json!({"new_name": "partial-clone-dest"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "body: {body}");
+    assert_eq!(body["name"], "partial-clone-dest");
+    assert_eq!(body["partial"], true);
+    assert_eq!(
+        body["warnings"],
+        serde_json::json!(["identity_files_copy_failed"])
+    );
+
+    let new_id = body["agent_id"].as_str().expect("agent_id in response");
+    let (status, got) = send(h.app.clone(), get(&format!("/api/agents/{new_id}"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got["name"], "partial-clone-dest");
 }
 
 #[tokio::test(flavor = "multi_thread")]

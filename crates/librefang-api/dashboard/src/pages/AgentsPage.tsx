@@ -5,6 +5,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   type AgentDetail,
   type AgentItem,
+  type CloneAgentResult,
   type PromptVersion,
   type ToolDefinition,
 } from "../api";
@@ -132,6 +133,17 @@ function safeStringify(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+export function cloneResultNotice(result: CloneAgentResult): {
+  partial: boolean;
+  warnings: string;
+} {
+  const warnings = result.warnings.filter(Boolean);
+  return {
+    partial: result.partial || warnings.length > 0,
+    warnings: warnings.join(", ") || "unknown",
+  };
 }
 
 /** Two-column row used inside the detail modal's value cards. */
@@ -3421,7 +3433,7 @@ export function AgentsPage() {
             const newName = cloneNameDraft.trim();
             if (!newName) return;
             try {
-              await cloneMutation.mutateAsync({
+              const result = await cloneMutation.mutateAsync({
                 agentId: cloneDialog.agentId,
                 payload: {
                   new_name: newName,
@@ -3429,7 +3441,15 @@ export function AgentsPage() {
                   include_tools: cloneIncludeTools,
                 },
               });
-              addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              const notice = cloneResultNotice(result);
+              if (notice.partial) {
+                addToast(t("agents.clone_partial", {
+                  defaultValue: "Agent cloned with incomplete initialization: {{warnings}}",
+                  warnings: notice.warnings,
+                }), "info");
+              } else {
+                addToast(t("agents.clone_succeeded", { defaultValue: "Agent cloned" }), "success");
+              }
               setCloneDialog(null);
             } catch (err) {
               addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");

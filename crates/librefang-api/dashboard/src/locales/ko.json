@@ -692,6 +692,7 @@
       }
     },
     "clone_failed": "에이전트를 복제하지 못했습니다.",
+    "clone_partial": "에이전트가 복제되었지만 초기화가 완료되지 않았습니다: {{warnings}}",
     "clone_succeeded": "에이전트를 복제했습니다.",
     "clone_title": "에이전트 복제",
     "clone_desc": "{{name}}의 매니페스트를 새 에이전트로 복사합니다. 이름은 고유해야 합니다.",
