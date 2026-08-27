@@ -881,6 +881,11 @@ pub fn build_reload_plan_with_caps(
             old.max_history_messages != new.max_history_messages,
             "max_history_messages",
         );
+        // Read live per turn: the kernel copies it into `LoopOptions` from `self.config.load()` at every `send_message_full` / spawn site, so the ArcSwap swap is the whole reapply action.
+        noop_if_changed(
+            old.memory_fact_budget_percent != new.memory_fact_budget_percent,
+            "memory_fact_budget_percent",
+        );
         noop_if_changed(
             old.max_agent_call_depth != new.max_agent_call_depth,
             "max_agent_call_depth",
@@ -910,6 +915,10 @@ pub fn build_reload_plan_with_caps(
             old.registry.auto_sync != new.registry.auto_sync,
             "registry.auto_sync",
         );
+        // #7891 — the daily metering sweep reads `usage.retention_days` from
+        // `config_ref()` at the top of each tick, so a swapped value is in
+        // force on the next sweep with no reapply action.
+        noop_if_changed(field_changed(&old.usage, &new.usage), "usage");
         noop_if_changed(field_changed(&old.links, &new.links), "links");
         noop_if_changed(field_changed(&old.privacy, &new.privacy), "privacy");
         noop_if_changed(field_changed(&old.pairing, &new.pairing), "pairing");
@@ -1051,6 +1060,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "default_owner",
         "proactive_memory",
         "queue",
+        "usage",
         "budget",
         "sanitize",
         "provider_api_keys",
@@ -1118,6 +1128,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         // -- backfilled NOOP branches --
         "agent_max_iterations",
         "max_history_messages",
+        "memory_fact_budget_percent",
         "max_agent_call_depth",
         "tool_timeout_secs",
         "tool_timeouts",

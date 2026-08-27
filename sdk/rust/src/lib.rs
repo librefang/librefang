@@ -663,6 +663,18 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn list_agent_ephemeral_runs(&self, id: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "ephemeral-runs"],
+            None,
+            &[("limit", limit)],
+        )
+        .await
+    }
+
     pub async fn list_agent_events(&self, id: &str, limit: Option<&str>) -> Result<Value> {
         do_req(
             &self.client,
@@ -1840,62 +1852,108 @@ impl BudgetResource {
         .await
     }
 
-    pub async fn usage_stats(&self) -> Result<Value> {
+    pub async fn usage_stats(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_by_model(&self) -> Result<Value> {
+    pub async fn usage_by_model(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "by-model"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_by_model_performance(&self) -> Result<Value> {
+    pub async fn usage_by_model_performance(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "by-model", "performance"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }
 
-    pub async fn usage_daily(&self) -> Result<Value> {
+    pub async fn usage_daily(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        days: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "daily"],
             None,
-            &[],
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("days", days),
+            ],
         )
         .await
     }
 
-    pub async fn usage_summary(&self) -> Result<Value> {
+    pub async fn usage_export(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+        format: Option<&str>,
+    ) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "usage", "export"],
+            None,
+            &[
+                ("start_date", start_date),
+                ("end_date", end_date),
+                ("format", format),
+            ],
+        )
+        .await
+    }
+
+    pub async fn usage_summary(
+        &self,
+        start_date: Option<&str>,
+        end_date: Option<&str>,
+    ) -> Result<Value> {
         do_req(
             &self.client,
             &self.base_url,
             reqwest::Method::GET,
             &["api", "usage", "summary"],
             None,
-            &[],
+            &[("start_date", start_date), ("end_date", end_date)],
         )
         .await
     }

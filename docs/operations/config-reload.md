@@ -150,6 +150,7 @@ classified differently — the row note spells out which is which.
 | `context_engine` | R | Pluggable context-engine config. |
 | `tool_results` | N | Tool-result context budget + artifact spill config. |
 | `max_history_messages` | N | Global message-history trim cap (see arch doc). |
+| `memory_fact_budget_percent` | N | Share of the prompt memory section budget reserved for extracted facts (#7920). |
 | `agent_max_iterations` | N | Operator override for the agent-loop iteration cap. |
 | `max_agent_call_depth` | N | Maximum inter-agent call depth. |
 
@@ -238,6 +239,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `notification` | N | Notification-engine config for alerts and task state. |
 | `usage_footer` | H | Usage footer mode (what to show after each response). |
+| `usage` | N | Retention horizon for the `usage_events` table; the daily metering sweep reads it live, so a change is in force on the next sweep. |
 | `inbox` | R | File-based input inbox config. |
 | `audit` | R | Audit log config. |
 | `telemetry` | R | OpenTelemetry + Prometheus config. |

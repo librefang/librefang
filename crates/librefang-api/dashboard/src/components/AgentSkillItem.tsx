@@ -1,4 +1,3 @@
-import type { KeyboardEvent } from "react";
 import { Clock, Plus, Sparkles, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -23,6 +22,10 @@ import { useTranslation } from "react-i18next";
  *     hit area matches the old "click to open" affordance.
  * With no `action` (or `"none"`) the row is the read-only display used by
  * the "all" informational list.
+ *
+ * The row action and the remove action are two separate native buttons
+ * rather than one click-handling div with a nested control.
+ * A real `<button>` gets keyboard activation, focus and `disabled` semantics from the platform instead of a hand-rolled `role`/`tabIndex`/`onKeyDown` triple, and keeping the remove control outside the row button avoids nesting one interactive element inside another.
  *
  * Extracted into its own component so it can be unit-tested without
  * mounting the entire AgentsPage (which pulls in routing, multiple
@@ -70,31 +73,11 @@ export function AgentSkillItem({
     ? t("agents.detail.skill_pending_desc", {
         defaultValue: "not installed here — activates on the next skills reload",
       })
-    : trimmedDescription && trimmedDescription.length > 0
-      ? trimmedDescription
-      : t("agents.detail.skill_meta", { defaultValue: "installed" });
-  // The row is interactive when an onClick is provided. Mirror that to
-  // keyboard + assistive tech with role/tabIndex/Enter+Space handling so
-  // it isn't a mouse-only target.
-  const handleKeyDown = onClick
-    ? (event: KeyboardEvent<HTMLDivElement>) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onClick();
-        }
-      }
-    : undefined;
-  return (
-    <div
-      onClick={onClick}
-      onKeyDown={handleKeyDown}
-      role={onClick ? "button" : undefined}
-      tabIndex={onClick ? 0 : undefined}
-      className={`px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 transition-colors flex items-start justify-between gap-2 ${
-        onClick ? "cursor-pointer hover:border-brand/40" : ""
-      } ${busy ? "opacity-50 pointer-events-none" : ""}`}
-      data-testid="agent-skill-item"
-    >
+    : trimmedDescription || t("agents.detail.skill_meta", {
+        defaultValue: "installed",
+      });
+  const content = (
+    <>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 min-w-0">
           <div
@@ -121,7 +104,44 @@ export function AgentSkillItem({
           {subtitle}
         </div>
       </div>
-      {action === "remove" ? (
+      {action === "add" && (
+        <Plus
+          className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5"
+          data-testid="agent-skill-item-add"
+        />
+      )}
+      {action === "none" && (
+        <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+      )}
+    </>
+  );
+
+  return (
+    <div
+      className={`rounded-md border border-border-subtle bg-main/40 transition-colors flex items-stretch ${
+        onClick ? "cursor-pointer hover:border-brand/40" : ""
+      } ${busy ? "opacity-50" : ""}`}
+      aria-busy={busy || undefined}
+      data-testid="agent-skill-item"
+    >
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={busy}
+          className="flex min-w-0 flex-1 items-start justify-between gap-2 px-3 py-2.5 text-left disabled:cursor-not-allowed"
+          data-testid="agent-skill-item-action"
+        >
+          {content}
+        </button>
+      ) : (
+        <div
+          className="flex min-w-0 flex-1 items-start justify-between gap-2 px-3 py-2.5"
+        >
+          {content}
+        </div>
+      )}
+      {action === "remove" && (
         <button
           type="button"
           onClick={(e) => {
@@ -138,18 +158,11 @@ export function AgentSkillItem({
             defaultValue: "Remove {{name}}",
             name,
           })}
-          className="shrink-0 mt-0.5 rounded p-0.5 text-text-dim hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
+          className="mr-3 mt-3 shrink-0 self-start rounded p-0.5 text-text-dim hover:text-red-400 hover:bg-red-400/10 transition-colors disabled:opacity-50"
           data-testid="agent-skill-item-remove"
         >
           <X className="w-3.5 h-3.5" />
         </button>
-      ) : action === "add" ? (
-        <Plus
-          className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5"
-          data-testid="agent-skill-item-add"
-        />
-      ) : (
-        <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
       )}
     </div>
   );

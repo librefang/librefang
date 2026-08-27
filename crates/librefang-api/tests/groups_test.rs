@@ -203,9 +203,9 @@ async fn groups_create_rejects_empty_name() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"]
+    assert!(body["error"]["message"]
         .as_str()
-        .unwrap()
+        .unwrap_or_else(|| panic!("error envelope must carry a message: {body}"))
         .contains("must not be empty"));
 }
 

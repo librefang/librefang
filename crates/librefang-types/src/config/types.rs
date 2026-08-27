@@ -2999,6 +2999,53 @@ impl Default for QueueConfig {
     }
 }
 
+/// Usage/metering retention (#7891).
+///
+/// The daemon runs a daily sweep that hard-deletes `usage_events` rows older
+/// than `retention_days`. Before #7891 that horizon was a literal `90` in
+/// `background_lifecycle.rs`, so an operator who needed a longer window for
+/// quarterly or annual cost reporting had no way to ask for one, and one who
+/// wanted a shorter window for data-minimisation reasons had no way to shorten
+/// it either.
+///
+/// This is the retention of the underlying event table, so it bounds every
+/// `/api/usage*` endpoint at once — not just the daily breakdown. Raising it
+/// grows the table roughly linearly with call volume; the rows are small
+/// (a dozen scalar columns) but they are the highest-cardinality table in the
+/// substrate, so treat a multi-year horizon as a storage decision rather than a
+/// free one.
+///
+/// Configure in config.toml:
+///
+/// ```toml
+/// [usage]
+/// retention_days = 365
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// How many days of `usage_events` the daily retention sweep keeps.
+    ///
+    /// Default: 90, which is the horizon the sweep has always enforced.
+    /// Set to 0 to disable pruning entirely — the table then grows without
+    /// bound, which is the right call only when an external archival job
+    /// (for example a scheduled `GET /api/usage/export`) owns the lifecycle.
+    #[serde(default = "default_usage_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_usage_retention_days() -> u32 {
+    90
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_usage_retention_days(),
+        }
+    }
+}
+
 /// Per-lane concurrency limits for the command queue.
 ///
 /// Configure in config.toml:
@@ -3412,6 +3459,17 @@ pub struct KernelConfig {
     /// emitting a `warn!` log with `agent`, `requested`, and `applied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
+    /// Share of the prompt memory section's character budget reserved for extracted facts, as a percentage; the remainder goes to raw dialogue.
+    ///
+    /// The two classes differ by roughly nine to one in row size, so a single ranked list spends the section on dialogue by size alone and leaves a large fraction of turns with no extracted fact in the prompt at all (#7920).
+    /// Neither share is wasted: whatever one class does not use spills to the other, so a turn with only one class still fills the whole budget.
+    ///
+    /// `None` means "use the compiled-in default" (`prompt_builder::MEMORY_FACT_BUDGET_PERCENT`, 70 — the best arm of the measurement, which could not separate 30/50/70 from run-to-run noise).
+    /// Values above 100 are clamped down.
+    /// Lower it when raw dialogue carries narrative continuity your agents depend on; raise it when the store is dominated by per-turn dialogue rows.
+    /// The section's total character budget is unaffected either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_fact_budget_percent: Option<u8>,
     /// Kernel-wide Smart Model Router defaults applied to any agent whose
     /// `agent.toml` does not set its own `[routing]` block. The `init` wizard
     /// writes user-selected tier models here under `[default_routing]` so the
@@ -3964,6 +4022,9 @@ pub struct KernelConfig {
     /// Message queue configuration (depth limits, TTL, concurrency).
     #[serde(default)]
     pub queue: QueueConfig,
+    /// Usage/metering retention for the `usage_events` table (#7891).
+    #[serde(default)]
+    pub usage: UsageConfig,
     /// Task-board (shared task queue) safety knobs — see [`TaskBoardConfig`].
     #[serde(default)]
     pub task_board: TaskBoardConfig,
@@ -6686,6 +6747,7 @@ impl Default for KernelConfig {
             api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
             agent_max_iterations: None,
+            memory_fact_budget_percent: None,
             max_history_messages: None,
             default_routing: None,
             default_model: DefaultModelConfig::default(),
@@ -6772,6 +6834,7 @@ impl Default for KernelConfig {
             compaction: CompactionTomlConfig::default(),
             gateway_compression: GatewayCompressionConfig::default(),
             queue: QueueConfig::default(),
+            usage: UsageConfig::default(),
             task_board: TaskBoardConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
@@ -7304,10 +7367,21 @@ pub struct MemoryConfig {
     /// the `librefang_memory_pool_get_failed_total{store=...}` counter.
     #[serde(default = "default_memory_pool_size")]
     pub pool_size: u32,
+    /// Upper bound, in characters, on the text of a single episodic memory row written by the agent loop's per-turn writer (#7911).
+    /// Zero disables the cap.
+    ///
+    /// The per-turn writer composes `[Past exchange]\nThem: …\nYou: …` from the raw turn, so an inbound attachment that the channel adapter rendered into the user message — a transcribed PDF, a pasted log — was previously stored verbatim and embedded verbatim.
+    /// The cap is applied before the embedding call, so it bounds embedding cost as well as row size, and it is split across the two halves of the exchange so a large user message can never truncate the agent's reply away entirely.
+    #[serde(default = "default_max_episodic_chars")]
+    pub max_episodic_chars: usize,
 }
 
 fn default_soft_delete_retention_days() -> u64 {
     30
+}
+
+fn default_max_episodic_chars() -> usize {
+    8_000
 }
 
 fn default_memory_pool_size() -> u32 {
@@ -7358,6 +7432,7 @@ impl Default for MemoryConfig {
             vector_store_url: None,
             soft_delete_retention_days: default_soft_delete_retention_days(),
             pool_size: default_memory_pool_size(),
+            max_episodic_chars: default_max_episodic_chars(),
         }
     }
 }
@@ -7495,6 +7570,11 @@ pub struct MemoryDecayConfig {
     pub session_ttl_days: u32,
     /// AGENT-scope memories expire after this many days of no access. Zero disables expiry.
     pub agent_ttl_days: u32,
+    /// EPISODIC-scope memories expire after this many days of no access. Zero disables expiry.
+    ///
+    /// `episodic` is the default scope of the `memories` table and the scope the agent loop writes one row into on every non-fork, non-incognito turn, so before #7911 it was the only scope with no exit at all: never decayed, never distilled, never deleted.
+    /// The TTL is deliberately longer than the AGENT default because an episodic row is the only record that a conversation happened, and `accessed_at` is refreshed by recall — a row that keeps being retrieved keeps living.
+    pub episodic_ttl_days: u32,
     /// How often to run the decay sweep (hours).
     pub decay_interval_hours: u32,
 }
@@ -7505,6 +7585,7 @@ impl Default for MemoryDecayConfig {
             enabled: false,
             session_ttl_days: 7,
             agent_ttl_days: 30,
+            episodic_ttl_days: 90,
             decay_interval_hours: 1,
         }
     }
