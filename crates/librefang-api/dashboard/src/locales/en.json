@@ -692,6 +692,7 @@
       }
     },
     "clone_failed": "Failed to clone agent",
+    "clone_partial": "Agent cloned with incomplete initialization: {{warnings}}",
     "clone_succeeded": "Agent cloned",
     "clone_title": "Clone agent",
     "clone_desc": "Copies {{name}}'s manifest into a new agent. The name must be unique.",
