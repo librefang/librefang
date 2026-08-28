@@ -136,6 +136,39 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    pr_labels = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "pr-labels.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    pr_label_triggers = pr_labels.get("on", pr_labels.get(True, {}))
+    target_trigger = pr_label_triggers.get("pull_request_target", {})
+    if target_trigger.get("types") != ["opened", "reopened", "synchronize"]:
+        raise SystemExit("PR area labels schedule unsupported or no-op event types")
+    if pr_labels.get("concurrency") != {
+        "group": "pr-labels-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": True,
+    }:
+        raise SystemExit("PR area labels do not cancel superseded runs per PR")
+    if pr_labels.get("permissions") != {
+        "contents": "read",
+        "pull-requests": "write",
+    }:
+        raise SystemExit("PR area labels have incorrect token permissions")
+    area_job = pr_labels.get("jobs", {}).get("area", {})
+    if "if" in area_job:
+        raise SystemExit("PR area labels retain a redundant event condition")
+    if area_job.get("timeout-minutes") != 5:
+        raise SystemExit("PR area labels no longer have a five-minute bound")
+    area_steps = area_job.get("steps", [])
+    expected_labeler = (
+        "actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13"
+    )
+    if [step.get("uses") for step in area_steps] != [expected_labeler]:
+        raise SystemExit("PR area labels do not use the reviewed labeler action pin")
+    if FULL_SHA.fullmatch(expected_labeler.rsplit("@", 1)[1]) is None:
+        raise SystemExit("PR area labeler action is not pinned to a full SHA")
+
     issue_pr_link = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "issue-pr-link.yml").read_text(
             encoding="utf-8"
