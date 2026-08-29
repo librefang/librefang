@@ -92,6 +92,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# The wrapper mounts the workspace and sets CARGO_HOME to /usr/local/cargo
+# The wrapper mounts the workspace and sets CARGO_HOME to /cargo
 # via named volumes, so we don't pre-create anything here. `rustup` /
 # `cargo` are already on PATH from the base image.
