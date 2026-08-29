@@ -4,17 +4,20 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+permissions:
+  pull-requests: read
+
 # The title check is a pure function of the current PR title, so the newest run is the only one whose verdict matters.
 # `pull_request` events always carry a PR number, which is unique per PR and therefore cannot collide across PRs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: pr-title-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   check-title:
     name: Validate PR title
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Check conventional commit format
         uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6
@@ -37,7 +40,7 @@ jobs:
             release
           # Allow scope like feat(cli): or fix(kernel):
           requireScope: false
-          # Enforce lowercase after prefix
+          # Require a non-empty subject; case is intentionally unrestricted.
           subjectPattern: ^.+$
           subjectPatternError: |
             PR title "{title}" doesn't follow conventional commit format.

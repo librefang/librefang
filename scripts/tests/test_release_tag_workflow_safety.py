@@ -165,6 +165,62 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    pr_title = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "pr-title.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    pr_title_triggers = pr_title.get("on", pr_title.get(True, {}))
+    if pr_title_triggers.get("pull_request", {}).get("types") != [
+        "opened",
+        "edited",
+        "synchronize",
+        "reopened",
+    ]:
+        raise SystemExit("PR-title validation trigger contract drifted")
+    if pr_title.get("permissions") != {"pull-requests": "read"}:
+        raise SystemExit("PR-title validation has broader permissions than read-only")
+    if pr_title.get("concurrency") != {
+        "group": "pr-title-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": True,
+    }:
+        raise SystemExit("PR-title validation does not cancel superseded runs per PR")
+    title_job = pr_title.get("jobs", {}).get("check-title", {})
+    if title_job.get("timeout-minutes") != 5:
+        raise SystemExit("PR-title validation no longer has a five-minute bound")
+    title_steps = title_job.get("steps", [])
+    if len(title_steps) != 1:
+        raise SystemExit("PR-title validation has an unexpected step inventory")
+    title_step = title_steps[0]
+    expected_title_action = (
+        "amannn/action-semantic-pull-request@"
+        "48f256284bd46cdaab1048c3721360e808335d50"
+    )
+    if title_step.get("uses") != expected_title_action:
+        raise SystemExit("PR-title validation action pin drifted")
+    if FULL_SHA.fullmatch(expected_title_action.rsplit("@", 1)[1]) is None:
+        raise SystemExit("PR-title validation action is not pinned to a full SHA")
+    title_inputs = title_step.get("with", {})
+    if title_inputs.get("subjectPattern") != "^.+$":
+        raise SystemExit("PR-title validation no longer accepts case-neutral subjects")
+    expected_title_types = {
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "perf",
+        "test",
+        "build",
+        "ci",
+        "chore",
+        "revert",
+        "release",
+    }
+    actual_title_types = set(str(title_inputs.get("types", "")).split())
+    if actual_title_types != expected_title_types:
+        raise SystemExit("PR-title validation conventional types drifted")
+
     label_sync = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "label-sync.yml").read_text(
             encoding="utf-8"
