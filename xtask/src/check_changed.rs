@@ -100,6 +100,13 @@ struct LaneRegexes {
     xtask_src: regex::Regex,
 }
 
+/// The `ci` lane pattern, kept byte-identical to the `CI=false; has '…'` expression in
+/// `.github/workflows/ci.yml`.
+/// `ci_lane_pattern_matches_the_workflow` fails the build when the two drift, because a local
+/// `cargo xtask check-changed` that routes differently from CI is worse than no local command at
+/// all — it reports a lane as skipped that CI is about to run, or the reverse.
+const CI_LANE_PATTERN: &str = r"^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$)";
+
 fn lane_regexes() -> &'static LaneRegexes {
     // Same regexes as ci.yml's `Compute diff and route` step. Keep these
     // identical to the shell version — drift would silently make the local
@@ -109,10 +116,7 @@ fn lane_regexes() -> &'static LaneRegexes {
         rust: regex::Regex::new(r"^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)")
             .expect("static regex"),
         docs: regex::Regex::new(r"^(docs/|.*\.md$)").expect("static regex"),
-        ci: regex::Regex::new(
-            r"^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)",
-        )
-        .expect("static regex"),
+        ci: regex::Regex::new(CI_LANE_PATTERN).expect("static regex"),
         install: regex::Regex::new(
             r"^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$",
         )
@@ -457,11 +461,42 @@ mod tests {
     fn repository_automation_paths_flag_ci_lane() {
         for path in [
             ".devcontainer/devcontainer.json",
+            "scripts/check-no-empty-string-sentinels.sh",
+            "scripts/tests/check-no-empty-string-sentinels.sh",
+            "scripts/workers/install-redirect.js",
+            "scripts/tests/install-redirect-workers.mjs",
+            "scripts/run-xtask.sh",
+            "scripts/tests/run-xtask.sh",
             "scripts/tests/test_release_tag_workflow_safety.py",
+            "scripts/tests/test_issue_labels_workflow.py",
         ] {
             let lanes = lanes_from(&[path]);
             assert!(lanes.ci, "expected CI lane for {path}");
         }
+    }
+
+    /// `lane_regexes` only tells the truth about CI while it carries CI's own pattern.
+    /// The mirror had already drifted by four paths before this guard existed, so compare the
+    /// literal against the workflow instead of trusting the "keep these identical" comment.
+    #[test]
+    fn ci_lane_pattern_matches_the_workflow() {
+        let workflow = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows/ci.yml"),
+        )
+        .expect("read ci.yml");
+        let line = workflow
+            .lines()
+            .find(|line| line.trim_start().starts_with("CI=false;"))
+            .expect("ci.yml declares a CI lane routing line");
+        let pattern = line
+            .split_once('\'')
+            .and_then(|(_, rest)| rest.rsplit_once('\''))
+            .map(|(pattern, _)| pattern)
+            .expect("CI lane routing line quotes its pattern");
+        assert_eq!(
+            pattern, CI_LANE_PATTERN,
+            "xtask's CI lane pattern drifted from .github/workflows/ci.yml"
+        );
     }
 
     #[test]
