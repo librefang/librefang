@@ -180,6 +180,18 @@ fn restore_root<'a>(
     }
 }
 
+/// SQLite's shared-memory index sidecar.
+///
+/// `-shm` is the WAL index for the connections currently mapping the database, not state: SQLite
+/// recreates it on demand, a snapshot of one means nothing to any other process, and writing one
+/// over a live database is wrong on every platform.
+/// On Windows it is also impossible — SQLite memory-maps the file, and truncating a file with an
+/// active mapped section fails with `ERROR_USER_MAPPED_FILE` (os error 1224), which is what left
+/// two `data/` entries failing every restore on that platform.
+fn is_sqlite_shared_memory_index(name: &str) -> bool {
+    name.ends_with("-shm")
+}
+
 /// Normalise an archive entry path to the `/`-separated string the layout
 /// table is written in.
 ///
@@ -294,6 +306,13 @@ fn create_backup_blocking(
         {
             let path = entry.path();
             if !path.is_file() {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_sqlite_shared_memory_index)
+            {
                 continue;
             }
             let rel = path
@@ -924,6 +943,12 @@ fn restore_backup_blocking(
         // `create_backup_blocking` archives from, so a component can never
         // mean one set of entries on the way out and another on the way back.
         let entry_key = archive_entry_key(&entry_name);
+        // Archives written before the exclusion above still carry a `-shm`, and restoring one is
+        // what fails on Windows. Skipping it is not a partial restore: SQLite rebuilds the index
+        // from the database and its `-wal` on the next connection.
+        if is_sqlite_shared_memory_index(&entry_key) {
+            continue;
+        }
         if keep_config && entry_belongs_to(&entry_key, "config") {
             continue;
         }
@@ -1306,7 +1331,7 @@ mod tests {
             br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["data"]}"#,
         )
         .unwrap();
-        zip.start_file("data/a2a_tasks.db-shm", options).unwrap();
+        zip.start_file("data/a2a_tasks.db-wal", options).unwrap();
         zip.write_all(&vec![0_u8; 32 * 1024]).unwrap();
         zip.finish().unwrap();
 
@@ -1318,9 +1343,9 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(outcome.restored, vec!["data/a2a_tasks.db-shm"]);
+        assert_eq!(outcome.restored, vec!["data/a2a_tasks.db-wal"]);
         assert_eq!(
-            std::fs::metadata(restore_dir.join("data").join("a2a_tasks.db-shm"))
+            std::fs::metadata(restore_dir.join("data").join("a2a_tasks.db-wal"))
                 .unwrap()
                 .len(),
             32 * 1024
@@ -1536,6 +1561,67 @@ mod tests {
             ),
             "data/cron_jobs.json"
         );
+    }
+
+    /// A `-shm` in an archive written before the exclusion must be skipped, not written.
+    ///
+    /// On Windows SQLite memory-maps the file and truncating it fails with
+    /// `ERROR_USER_MAPPED_FILE`, which is what made every restore report a partial failure there.
+    /// Skipping loses nothing: SQLite rebuilds the index from the database and its `-wal`.
+    #[test]
+    fn restore_skips_the_sqlite_shared_memory_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("legacy.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["data"]}"#,
+        )
+        .unwrap();
+        zip.start_file("data/memory.sqlite", options).unwrap();
+        zip.write_all(b"db-bytes").unwrap();
+        zip.start_file("data/memory.sqlite-shm", options).unwrap();
+        zip.write_all(b"index-bytes").unwrap();
+        zip.start_file("data/memory.sqlite-wal", options).unwrap();
+        zip.write_all(b"wal-bytes").unwrap();
+        zip.finish().unwrap();
+
+        let outcome = restore_backup_blocking(
+            archive_path,
+            restore_dir.clone(),
+            restore_dir.join("workspaces").join("agents"),
+            false,
+            None,
+        )
+        .unwrap();
+
+        // Skipped, not failed: the `-shm` must never reach the errors list either.
+        assert_eq!(outcome.errors, Vec::<String>::new());
+        assert_eq!(
+            outcome.restored,
+            vec!["data/memory.sqlite", "data/memory.sqlite-wal"]
+        );
+        assert!(
+            !restore_dir.join("data").join("memory.sqlite-shm").exists(),
+            "the shared-memory index must not be written over a live database"
+        );
+    }
+
+    /// The exclusion has to hold on the create side too, or every archive keeps carrying an entry
+    /// the restore then has to skip.
+    #[test]
+    fn the_sqlite_shared_memory_index_is_never_archived() {
+        assert!(is_sqlite_shared_memory_index("data/memory.sqlite-shm"));
+        assert!(is_sqlite_shared_memory_index("a2a_tasks.db-shm"));
+        assert!(!is_sqlite_shared_memory_index("data/memory.sqlite"));
+        assert!(!is_sqlite_shared_memory_index("data/memory.sqlite-wal"));
+        assert!(!is_sqlite_shared_memory_index("data/shm"));
     }
 
     /// The reported list is a contract, not a debug string: callers match it against the `/`-separated archive keys.
