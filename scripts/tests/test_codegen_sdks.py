@@ -119,7 +119,11 @@ def main():
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
     assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
-    assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
+    # `.removesuffix("\r")`, not `.strip()`: an SSE `data:` value carries significant leading and
+    # trailing whitespace, and #7203 changed the generator to trim only the CR of a CRLF line
+    # ending. A `.strip()` here would silently corrupt multiline event payloads.
+    assert_in('line = raw_line.decode().removesuffix("\\r")', py, "python-decode-complete-line")
+    assert_not_in("line = line.decode().strip()", py, "python-no-whitespace-eating-decode")
     assert_not_in("buffer += chunk.decode()", py, "python-no-per-chunk-decode")
     assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
     assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
@@ -127,10 +131,10 @@ def main():
     expect(py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures")
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
     assert_in("if buffer:", py, "python-flush-trailing-sse-line")
-    assert_in("line = buffer.decode().strip()", py, "python-parse-trailing-sse-line")
+    assert_in('line = buffer.decode().removesuffix("\\r")', py, "python-parse-trailing-sse-line")
     expect(
-        py.count("line = line.decode().strip()")
-        + py.count("line = buffer.decode().strip()")
+        py.count('line = raw_line.decode().removesuffix("\\r")')
+        + py.count('line = buffer.decode().removesuffix("\\r")')
         == 2,
         "trailing SSE flush must decode strictly, matching per-line decode",
     )

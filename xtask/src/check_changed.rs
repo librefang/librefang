@@ -110,7 +110,7 @@ fn lane_regexes() -> &'static LaneRegexes {
             .expect("static regex"),
         docs: regex::Regex::new(r"^(docs/|.*\.md$)").expect("static regex"),
         ci: regex::Regex::new(
-            r"^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$)",
+            r"^(\.github/workflows/|\.devcontainer/|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/codegen-sdks\.py$|scripts/tests/test_codegen_sdks\.py$)",
         )
         .expect("static regex"),
         install: regex::Regex::new(
@@ -458,6 +458,8 @@ mod tests {
         for path in [
             ".devcontainer/devcontainer.json",
             "scripts/tests/test_release_tag_workflow_safety.py",
+            "scripts/codegen-sdks.py",
+            "scripts/tests/test_codegen_sdks.py",
         ] {
             let lanes = lanes_from(&[path]);
             assert!(lanes.ci, "expected CI lane for {path}");
