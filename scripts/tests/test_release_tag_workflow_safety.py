@@ -165,6 +165,52 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    todo_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "todo-to-issue.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if todo_workflow.get("permissions") != {
+        "contents": "read",
+        "issues": "write",
+    }:
+        raise SystemExit("TODO issue workflow permissions are not minimal and complete")
+    # Any concurrency group at all can drop an intermediate push scan, and nothing retriggers it.
+    # A group keyed on `github.run_id` does not count as an escape hatch: the id is unique per run,
+    # so the block reads as a policy while implementing none.
+    if "concurrency" in todo_workflow:
+        raise SystemExit("TODO issue workflow can discard an incremental push scan")
+    scan_job = todo_workflow.get("jobs", {}).get("scan", {})
+    if scan_job.get("timeout-minutes") != 10:
+        raise SystemExit("TODO issue workflow has no bounded runtime")
+    checkout = next(
+        (
+            step
+            for step in scan_job.get("steps", [])
+            if step.get("uses", "").startswith("actions/checkout@")
+        ),
+        {},
+    )
+    if checkout.get("with", {}).get("persist-credentials") is not False:
+        raise SystemExit("TODO issue checkout persists credentials")
+    todo_action = next(
+        (
+            step
+            for step in scan_job.get("steps", [])
+            if step.get("uses", "").startswith("alstr/todo-to-issue-action@")
+        ),
+        {},
+    )
+    identifiers = todo_action.get("with", {}).get("IDENTIFIERS")
+    try:
+        parsed_identifiers = json.loads(identifiers)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise SystemExit("TODO issue identifiers are not valid JSON") from error
+    if parsed_identifiers != [
+        {"name": "TODO", "labels": ["good first issue", "help wanted"]}
+    ]:
+        raise SystemExit("TODO issue labels do not match the supported action contract")
+
     welcome_workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "welcome.yml").read_text(encoding="utf-8")
     )

@@ -1,0 +1,22 @@
+# A deployment-provisioned agent (#6695).
+#
+# The resource identifier is `name` below, not this file's name.
+# Renaming the file changes nothing; changing `name` declares a different agent and releases the old one under the default prune policy.
+#
+# The daemon applies this at boot and then refuses every API route that would change the manifest — PATCH /api/agents/{id}, the model / tools / skills / mcp_servers / channels / config / identity writes, and DELETE — with 423 and code "resource_provisioned".
+# Operating the agent is untouched: suspend, resume, messages and sessions all still work.
+#
+# NO SECRET BELONGS IN THIS FILE.
+# It is a ConfigMap, unencrypted in etcd and in version control. Reference credentials by environment-variable name, exactly as config.toml does.
+
+name = "researcher"
+description = "Deployment-provisioned research agent"
+module = "builtin:chat"
+
+[model]
+# Inherits the kernel default from config.toml, so the model is configured in one place.
+provider = "default"
+model = "default"
+max_tokens = 8192
+temperature = 0.3
+system_prompt = "You research questions carefully and cite what you find."
