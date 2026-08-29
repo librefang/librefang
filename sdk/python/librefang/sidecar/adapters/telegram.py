@@ -11,14 +11,22 @@ in-process ``crates/librefang-channels/src/telegram.rs`` so that
 in-process adapter can be removed. Every subsystem below is a faithful
 port of the audited Rust (function-by-function, not re-derived):
 
-* DONE — Markdown → Telegram-HTML formatter subsystem: a byte-exact
+* DONE — outbound text prefers Telegram's native Rich Markdown
+  (``sendRichMessage`` / ``editMessageText(rich_message=...)``, Bot API
+  10.1+): Telegram parses the GFM itself, so tables, ``_italic_``,
+  ``~~strikethrough~~`` and nested emphasis work, and the limit is
+  32768 characters instead of 4096. Agent text goes through
+  ``sanitize_rich_markdown`` first — a port of
+  ``format::rich_sanitize`` — so quoted untrusted content cannot inject
+  ``<tg-button>`` and friends.
+* DONE — Markdown → Telegram-HTML formatter subsystem, now the
+  fallback for Bot API servers older than 10.1: a byte-exact
   port of ``formatter::markdown_to_telegram_html`` + the
   ``sanitize_telegram_html`` security pass (tag/scheme allowlist,
   attribute-injection escaping, unclosed-tag balancing) + the
   ``message_truncator`` UTF-16/HTML-entity-aware chunker
-  (``split_to_utf16_chunks``). Outbound text is now formatted and sent
-  with ``parse_mode=HTML`` (was ``Markdown``), with the same
-  plain-text retry on Telegram's "can't parse entities" 400.
+  (``split_to_utf16_chunks``), sent with ``parse_mode=HTML``, with the
+  same plain-text retry on Telegram's "can't parse entities" 400.
 * DONE — full inbound parsing: text/bot-command, photo, document,
   audio, voice, animation, video, video_note, location, sticker;
   ``from`` / ``sender_chat`` sender extraction; ``callback_query`` →
@@ -70,6 +78,10 @@ LONGPOLL_CLIENT_SECS = 35
 SEND_TIMEOUT_SECS = 10
 # Telegram's message limit is 4096 *UTF-16 code units* (not chars).
 TELEGRAM_MSG_LIMIT = 4096
+# Rich message limit: "Up to 32768 UTF-8 characters in the rich message
+# text" (Bot API, Rich Message Limits). Counted in characters, unlike the
+# legacy sendMessage path which counts UTF-16 code units.
+RICH_MSG_LIMIT = 32768
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
@@ -645,6 +657,346 @@ def _format_and_sanitize(text: str) -> str:
 
 
 # ====================================================================
+# Rich Markdown sanitiser
+# (port of format::rich_sanitize::sanitize_rich_markdown)
+# ====================================================================
+
+# Passive formatting tags safe to let Telegram's rich parser handle.
+# Everything else is escaped to literal text. An allowlist (rather than a
+# denylist of known-active tags) means any tag a future Bot API version
+# adds is inert here until someone deliberately allows it.
+_ALLOWED_RICH_TAGS = frozenset({
+    # inline emphasis
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "mark",
+    "sub", "sup", "tg-spoiler", "tg-emoji",
+    # code
+    "code", "pre",
+    # links (href scheme is checked separately, see _anchor_href_allowed)
+    "a",
+    # block structure
+    "p", "br", "hr", "blockquote",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "td", "th",
+})
+
+_TAG_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+)
+
+
+def _fence_at(s: str, i: int):
+    """Marker char, run length and whether an info string follows, for a code
+    fence line at `i`; None when the line is not a fence. CommonMark allows an
+    info string only on the *opening* fence, so callers matching a closing
+    fence must reject ``has_info``. Up to three leading spaces still open a
+    fence."""
+    j = i
+    spaces = 0
+    while j < len(s) and s[j] == " " and spaces < 3:
+        j += 1
+        spaces += 1
+    if j >= len(s):
+        return None
+    marker = s[j]
+    if marker not in ("`", "~"):
+        return None
+    run = 0
+    while j + run < len(s) and s[j + run] == marker:
+        run += 1
+    if run < 3:
+        return None
+    rest = s[j + run:_line_end(s, i)]
+    return (marker, run, rest.strip(" \t\r\n") != "")
+
+
+# Schemes a link destination may carry. Mirrors the Rust
+# `rich_sanitize::ALLOWED_HREF_SCHEMES` and `sanitize_telegram_html`'s own
+# allowlist, whose guarantee (javascript: / data: never reach a live tag) the
+# legacy path enforces and this path must not weaken.
+_ALLOWED_RICH_HREF_SCHEMES = ("https:", "http:", "mailto:", "tg:")
+_SCHEME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
+)
+
+
+def _scheme_is_allowed(dest: str) -> bool:
+    """True when `dest` carries no scheme at all (a relative target or
+    ``#anchor``) or carries one on the allowlist."""
+    dest = dest.strip()
+    if not dest or not dest[0].isascii() or not dest[0].isalpha():
+        return True  # no scheme possible
+    j = 0
+    while j < len(dest) and dest[j] in _SCHEME_CHARS:
+        j += 1
+    if j >= len(dest) or dest[j] != ":":
+        return True  # not a scheme, just text before a slash or space
+    scheme = dest[:j + 1].lower()
+    return scheme in _ALLOWED_RICH_HREF_SCHEMES
+
+
+def _link_destination_at(s: str, i: int):
+    """Destination of a ``[label](destination)`` starting at `i` (which must be
+    ``[``), or None when this is not an inline link."""
+    j = i + 1
+    while j < len(s) and s[j] not in "]\n":
+        j += 1
+    if j >= len(s) or s[j] != "]" or j + 1 >= len(s) or s[j + 1] != "(":
+        return None
+    start = j + 2
+    k = start
+    while k < len(s) and s[k] not in ")\n":
+        k += 1
+    if k >= len(s) or s[k] != ")":
+        return None
+    return s[start:k]
+
+
+def _anchor_href_allowed(s: str, i: int) -> bool:
+    """True when the ``<a ...>`` opening at `i` has no href, or one whose
+    scheme is allowed. A closing ``</a>`` carries no href and always passes."""
+    if i + 1 < len(s) and s[i + 1] == "/":
+        return True
+    tag_end = i + 1
+    while tag_end < len(s) and s[tag_end] not in ">\n":
+        tag_end += 1
+    j = i + 1
+    while j < tag_end:
+        if s.startswith("href", j):
+            k = j + 4
+            while k < tag_end and s[k].isspace():
+                k += 1
+            if k >= tag_end or s[k] != "=":
+                j += 1
+                continue
+            k += 1
+            while k < tag_end and s[k].isspace():
+                k += 1
+            if k < tag_end and s[k] in "\"'":
+                quote = s[k]
+                start = k + 1
+                end = start
+                while end < tag_end and s[end] != quote:
+                    end += 1
+            else:
+                start = k
+                end = start
+                while end < tag_end and not s[end].isspace():
+                    end += 1
+            return _scheme_is_allowed(s[start:end])
+        j += 1
+    return True  # no href attribute at all
+
+
+def _starts_new_block(s: str, i: int) -> bool:
+    """True when the line starting at `i` ends the current paragraph — either
+    it is blank (spaces and tabs only, tolerating CRLF) or its first non-space
+    character opens a new block. Bounds an inline code-span scan to a single
+    paragraph."""
+    if i >= len(s):
+        return True
+    j = i
+    while j < len(s) and s[j] in " \t":
+        j += 1
+    if j >= len(s) or s[j] in "\n\r":
+        return True  # blank line; \r covers CRLF from quoted email/web content
+    ch = s[j]
+    if ch in "># |":
+        return ch in ">#|"
+    if ch in "`~":
+        return _fence_at(s, i) is not None
+    if ch in "-*+":
+        return j + 1 < len(s) and s[j + 1] in " \t"
+    if ch.isdigit():
+        k = j
+        while k < len(s) and s[k].isdigit():
+            k += 1
+        return (k < len(s) and s[k] in ".)"
+                and k + 1 < len(s) and s[k + 1] in " \t")
+    return False
+
+
+def _line_end(s: str, i: int) -> int:
+    """Index just past the end of the line starting at `i` (including \\n)."""
+    nl = s.find("\n", i)
+    return len(s) if nl == -1 else nl + 1
+
+
+def _tag_name_at(s: str, i: int):
+    """Lower-cased tag name of the HTML tag opening at `i` (which must be
+    `<`), for both ``<foo ...>`` and ``</foo>``. None when not tag-shaped."""
+    j = i + 1
+    if j < len(s) and s[j] == "/":
+        j += 1
+    start = j
+    while j < len(s) and s[j] in _TAG_NAME_CHARS:
+        j += 1
+    if j == start:
+        return None
+    # Must actually terminate like a tag, not be prose such as `5 <3 apples`.
+    if j >= len(s) or not (s[j] in (">", "/") or s[j].isspace()):
+        return None
+    return s[start:j].lower()
+
+
+def sanitize_rich_markdown(text: str) -> str:
+    """Neutralise "active" constructs in agent-authored Rich Markdown
+    before it is handed to ``sendRichMessage``.
+
+    Rich Markdown "can contain arbitrary HTML" (Bot API 10.1+). The text
+    we send is model output, and model output routinely *quotes*
+    untrusted content — a fetched web page, an email body, a file the
+    agent read. Without this pass, quoted content could render itself
+    inline buttons::
+
+        <tg-button type="callback_data" data="anything">Click me</tg-button>
+
+    A tap then arrives back at the adapter as a ButtonCallback event with
+    an attacker-chosen payload. Interactive buttons must stay an explicit
+    ``ChannelContent::Interactive`` feature, never a side effect of
+    formatting text.
+
+    Code spans and fenced blocks are copied verbatim: Markdown does not
+    interpret HTML there, so it is already inert, and escaping it would
+    surface a literal ``&lt;`` inside the user's code sample."""
+    out = []
+    i = 0
+    at_line_start = True
+    n = len(text)
+
+    while i < n:
+        # Fenced code block: copy verbatim, including the fence lines.
+        if at_line_start:
+            fence = _fence_at(text, i)
+            if fence is not None:
+                marker, run, _ = fence
+                pos = _line_end(text, i)
+                out.append(text[i:pos])
+                while pos < n:
+                    end = _line_end(text, pos)
+                    out.append(text[pos:end])
+                    # A closing fence carries no info string — ```js inside a
+                    # block is content, not a close.
+                    closing = _fence_at(text, pos)
+                    if (closing is not None and closing[0] == marker
+                            and closing[1] >= run and not closing[2]):
+                        pos = end
+                        break
+                    pos = end
+                i = pos
+                at_line_start = True
+                continue
+
+        ch = text[i]
+
+        # Inline code span: copy verbatim so `<tg-button>` in a code
+        # sample stays readable. A run of N backticks closes on the next
+        # run of exactly N; an unclosed run is not a code span at all.
+        #
+        # The scan stops at any line that starts a new block. Markdown
+        # resolves block structure *before* inline structure, so a
+        # backtick in one block can never pair with one in another —
+        # and pairing them here would copy everything between the two
+        # verbatim, handing an attacker a way to smuggle a live
+        # <tg-button> past this pass by planting a stray backtick on
+        # either side of it. Stopping early is the safe direction.
+        if ch == "`":
+            run = 0
+            while i + run < n and text[i + run] == "`":
+                run += 1
+            j = i + run
+            closed = -1
+            while j < n:
+                if text[j] == "`":
+                    close = 0
+                    while j + close < n and text[j + close] == "`":
+                        close += 1
+                    if close == run:
+                        closed = j + close
+                        break
+                    j += close
+                    continue
+                if text[j] == "\n" and _starts_new_block(text, j + 1):
+                    break
+                j += 1
+            if closed != -1:
+                out.append(text[i:closed])
+                i = closed
+            else:
+                out.append(text[i:i + run])
+                i += run
+            at_line_start = False
+            continue
+
+        # `![...](...)` is a real media block in Rich Markdown, fetched
+        # from the URL — today it is inert text. Escape the `!` so the
+        # link (if any) renders the way the HTML pipeline renders it,
+        # without attaching media.
+        if ch == "!" and i + 1 < n and text[i + 1] == "[":
+            out.append("\\!")
+            at_line_start = False
+            i += 1
+            continue
+
+        # A Markdown link whose destination carries a scheme we do not
+        # allow is escaped whole, so `[x](javascript:...)` stays literal
+        # text. `sanitize_telegram_html` drops such links on the legacy
+        # path; without this the rich path would be the weaker of the two.
+        if ch == "[":
+            dest = _link_destination_at(text, i)
+            if dest is not None and not _scheme_is_allowed(dest):
+                out.append("\\[")
+                at_line_start = False
+                i += 1
+                continue
+
+        if ch == "<":
+            name = _tag_name_at(text, i)
+            if name == "a":
+                # <a> is allowed only when its href scheme is: Telegram does
+                # not filter schemes for us.
+                allowed = _anchor_href_allowed(text, i)
+            else:
+                allowed = name in _ALLOWED_RICH_TAGS
+            out.append("<" if allowed else "&lt;")
+            at_line_start = False
+            i += 1
+            continue
+
+        out.append(ch)
+        at_line_start = ch == "\n"
+        i += 1
+
+    return "".join(out)
+
+
+def _is_api_rejection(resp: dict) -> bool:
+    """True when Telegram answered with a definitive refusal, i.e. a 4xx.
+
+    Everything else leaves the outcome unknown and must not be retried with
+    different content: a 5xx can be returned after the message was already
+    created, and re-sending then delivers the same answer twice. (Transport
+    failures raise out of ``_api_post`` rather than reaching here, which has
+    the same effect — no second send.) Mirrors the Rust
+    ``dispatcher::is_api_rejection``."""
+    code = resp.get("_http")
+    if not isinstance(code, int):
+        # Telegram also reports failures with HTTP 200 and ``ok: false``;
+        # ``_api_post`` returns that body verbatim, so the verdict is in
+        # ``error_code``. Rust's ``call_json`` builds ``Error::Api`` from the
+        # same field.
+        code = resp.get("error_code")
+    return isinstance(code, int) and 400 <= code < 500
+
+
+def _prepare_rich_markdown(text: str):
+    """Sanitised text for ``sendRichMessage``, or None when it exceeds the
+    rich limit and the caller should fall back to the chunking pipeline."""
+    sanitized = sanitize_rich_markdown(text)
+    return sanitized if len(sanitized) <= RICH_MSG_LIMIT else None
+
+
+# ====================================================================
 # Reaction emoji map  (port of telegram.rs map_reaction_emoji)
 # ====================================================================
 
@@ -898,11 +1250,66 @@ class TelegramAdapter(SidecarAdapter):
             return None
         return f"{self.api_root}/file/bot{self.token}/{fp}"
 
-    # ---- outbound text (formatter + sanitize + chunk + HTML) ---------
+    # ---- outbound text (rich Markdown, HTML pipeline as fallback) ----
 
     def _send_text(self, chat_id, text: str, thread_id=None) -> dict:
+        """Send outbound text.
+
+        Prefers ``sendRichMessage`` (Bot API 10.1+), which hands the text
+        to Telegram's own GFM-compatible parser. That gets us tables,
+        ``_italic_``, ``~~strikethrough~~`` and nested emphasis — none of
+        which ``markdown_to_telegram_html`` can express — and raises the
+        size limit from 4096 to 32768, so ordinary replies stop being
+        split mid-sentence. The text is sanitised first so quoted
+        untrusted content cannot inject interactive elements.
+
+        A definitive refusal by Telegram (4xx — e.g. ``sendRichMessage``
+        missing on a self-hosted Bot API server older than 10.1) falls
+        back to the legacy HTML pipeline. A 5xx or a transport failure
+        does *not*: Telegram may have created the message already, and
+        re-sending the same answer would deliver it twice."""
+        resp = self._send_rich(chat_id, text, thread_id)
+        if resp is not None:
+            if resp.get("ok") is True:
+                return resp
+            if not _is_api_rejection(resp):
+                # Outcome unknown — do not re-send the same answer.
+                return resp
         responses = self._send_text_chunks(chat_id, text, thread_id)
         return responses[0] if responses else {}
+
+    def _send_rich(self, chat_id, text: str, thread_id=None):
+        """Raw ``sendRichMessage`` response for `text`, or None when the
+        text is over the rich limit and the rich path cannot be used at
+        all. Callers decide what a non-``ok`` response means — see
+        ``_is_api_rejection``."""
+        markdown = _prepare_rich_markdown(text)
+        if markdown is None:
+            return None
+        payload = {"chat_id": chat_id, "rich_message": {"markdown": markdown}}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        return self._call_retrying("sendRichMessage", payload)
+
+    def _edit_rich(self, chat_id, message_id, text: str) -> bool:
+        """``editMessageText(rich_message=...)`` for `text`. True when the
+        caller must NOT fall back to the legacy HTML edit — either the
+        message now shows `text` (``message is not modified`` counts), or
+        the outcome is unknown (5xx / transport), where a second edit with
+        different content could overwrite one that did land."""
+        markdown = _prepare_rich_markdown(text)
+        if markdown is None:
+            return False
+        resp = self._call("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {"markdown": markdown},
+        })
+        if resp.get("ok") is True:
+            return True
+        if "message is not modified" in str(resp.get("description", "")):
+            return True
+        return not _is_api_rejection(resp)
 
     def _send_text_chunks(self, chat_id, text: str, thread_id=None) -> list:
         sanitized = _format_and_sanitize(text)
@@ -929,10 +1336,6 @@ class TelegramAdapter(SidecarAdapter):
                 plain["message_thread_id"] = thread_id
             resp = self._call("sendMessage", plain)
         return resp
-
-    def _edit_text(self, chat_id, message_id, text: str) -> None:
-        sanitized = _format_and_sanitize(text)
-        self._edit_formatted_chunk(chat_id, message_id, sanitized, text)
 
     def _edit_formatted_chunk(
         self, chat_id, message_id, sanitized: str, plain_fallback: str,
@@ -1670,6 +2073,31 @@ class TelegramAdapter(SidecarAdapter):
             st["last_edit"] = time.monotonic()
 
     def _sync_stream_messages(self, st: dict) -> None:
+        # Rich path: while the answer still fits one rich message (32768
+        # chars vs 4096), stream it as a single message rather than a
+        # chunked HTML one, so tables and nested emphasis render during
+        # streaming exactly as they will in the finished reply. Once the
+        # answer has already spilled into several messages, stay on the
+        # legacy chunked path rather than restructuring mid-stream.
+        if len(st["message_ids"]) <= 1:
+            if st["message_ids"]:
+                if self._edit_rich(st["chat_id"], st["message_ids"][0],
+                                   st["text"]):
+                    return
+            else:
+                resp = self._send_rich(st["chat_id"], st["text"],
+                                       st["thread_id"])
+                if resp is not None:
+                    message_id = (resp.get("result") or {}).get("message_id")
+                    if message_id is not None:
+                        st["message_ids"].append(message_id)
+                    if not _is_api_rejection(resp):
+                        # Either it worked, or the outcome is unknown (5xx)
+                        # and Telegram may have created the message anyway.
+                        # Sending the chunked HTML version now would deliver
+                        # the answer twice; the next throttled tick retries.
+                        return
+
         sanitized = _format_and_sanitize(st["text"])
         chunks = _split_to_utf16_chunks(sanitized, TELEGRAM_MSG_LIMIT)
         for index, formatted_chunk in enumerate(chunks):

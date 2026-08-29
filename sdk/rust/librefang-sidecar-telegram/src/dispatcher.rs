@@ -1,7 +1,7 @@
 //! Outbound dispatch: SDK `Content` value → Telegram Bot API call.
 //!
 //! Mirrors the Python adapter's `_dispatch_content` / `_send_*` family.
-//! All text routes go through `format_sanitize_and_chunk` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
+//! Plain text prefers `sendRichMessage` (Bot API 10.1+, server-side GFM parsing); everything else — and the pre-10.1 fallback — routes through `format_sanitize_and_chunk` → `sendMessage` (HTML parse mode), with a "can't parse entities" automatic fallback to plain text. The same fallback is applied to single-item captioned media (Image / Voice / Video / Audio / Animation) so a malformed sanitiser output never silently drops the media send. MediaGroup does NOT have a per-item fallback — it's an atomic Bot API call and a parse error on ANY item caption fails the whole group; callers that need fallback-per-item should send items individually.
 
 use crate::api::types::{InlineKeyboardAction as TgAction, InlineKeyboardButton as TgButton};
 use crate::api::{BotClient, Error, Result};
@@ -144,33 +144,107 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
     Some(crate::format::truncate_to_utf16_limit(raw, CAPTION_LIMIT_UTF16).to_string())
 }
 
-/// Send a text message (formatted + sanitised + chunked).
+/// Send a text message.
 ///
-/// Delivery is not atomic when formatting produces multiple Telegram messages: chunks are sent sequentially, and an error on a later chunk is returned after earlier chunks have already been delivered.
-/// Telegram provides no rollback for those preceding messages, so callers must treat an error as possible partial delivery rather than as proof that the recipient saw nothing.
+/// Prefers `sendRichMessage` (Bot API 10.1+), which hands the text to Telegram's own
+/// GFM-compatible parser. That gets us tables, `_italic_`, `~~strikethrough~~` and
+/// nested emphasis — none of which `format::markdown` can express — and raises the
+/// size limit from 4096 to 32768, so ordinary replies stop being split mid-sentence.
+/// The text is passed through [`crate::format::prepare_rich_markdown`] first so quoted
+/// untrusted content cannot inject interactive elements.
+///
+/// Any failure falls back to [`send_text_legacy_counting`], keeping pre-10.1 (typically
+/// self-hosted) Bot API servers working exactly as before.
 pub async fn send_text(
     client: &BotClient,
     chat_id: i64,
     text: &str,
     thread_id: Option<i64>,
 ) -> Result<()> {
+    let (_, error) = send_text_counting(client, chat_id, text, thread_id).await;
+    match error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// `send_text`, additionally reporting how many messages actually reached the chat
+/// before any error.
+///
+/// Streaming's finalize needs the distinction: the legacy path sends chunks
+/// sequentially and, as [`send_text_legacy_counting`] warns, an error there means *possible
+/// partial delivery*. A caller that retries or re-renders the whole answer after a
+/// partial delivery shows the user the first chunk twice.
+pub async fn send_text_counting(
+    client: &BotClient,
+    chat_id: i64,
+    text: &str,
+    thread_id: Option<i64>,
+) -> (usize, Option<Error>) {
+    if let Some(markdown) = crate::format::prepare_rich_markdown(text) {
+        match client
+            .send_rich_message(chat_id, &markdown, thread_id)
+            .await
+        {
+            Ok(_) => return (1, None),
+            // Only a rejection *by Telegram* means the rich path is unavailable for this
+            // text. A transport failure (timeout, connection reset) leaves the outcome
+            // unknown — Telegram may well have created the message — so re-sending the
+            // same answer through the legacy path would deliver it twice.
+            Err(e) if !is_api_rejection(&e) => return (0, Some(e)),
+            Err(e) => {
+                eprintln!("[telegram] sendRichMessage rejected, using HTML fallback: {e}");
+            }
+        }
+    }
+    send_text_legacy_counting(client, chat_id, text, thread_id).await
+}
+
+/// True when Telegram itself answered with a definitive refusal, i.e. a 4xx.
+///
+/// Everything else leaves the outcome unknown and must not be retried with different
+/// content: `Error::Http` / `Io` / `Decode` mean we never got a verdict, and a 5xx can be
+/// returned after the message was already created. Re-sending in those cases delivers the
+/// same answer twice, which the user sees and we cannot undo.
+pub(crate) fn is_api_rejection(e: &Error) -> bool {
+    matches!(e, Error::Api { code, .. } if (400..500).contains(code))
+}
+
+/// Legacy path: our own Markdown → sanitised Telegram HTML pipeline, chunked to the
+/// 4096 UTF-16 limit, with a plain-text retry on `can't parse entities`.
+///
+/// Delivery is not atomic when formatting produces multiple Telegram messages: chunks are sent sequentially, and an error on a later chunk is returned after earlier chunks have already been delivered.
+/// Telegram provides no rollback for those preceding messages, so callers must treat an error as possible partial delivery rather than as proof that the recipient saw nothing.
+/// Reports how many chunks were delivered before any error — see
+/// [`send_text_counting`] for why callers need that rather than a bare `Result`.
+async fn send_text_legacy_counting(
+    client: &BotClient,
+    chat_id: i64,
+    text: &str,
+    thread_id: Option<i64>,
+) -> (usize, Option<Error>) {
+    let mut delivered = 0;
     for chunk in format_sanitize_and_chunk(text) {
         match client
             .send_message(chat_id, &chunk, Some(PARSE_MODE_HTML), thread_id, None)
             .await
         {
-            Ok(_) => {}
+            Ok(_) => delivered += 1,
             Err(e) if is_parse_entities_error(&e) => {
                 // Plain-text fallback: strip the HTML markup we added so the user sees readable prose rather than literal `<b>foo</b>` tags. Without the strip, the fallback "succeeds" at delivery but leaks our markup.
                 let plain = html_to_plain(&chunk);
-                client
+                match client
                     .send_message(chat_id, &plain, None, thread_id, None)
-                    .await?;
+                    .await
+                {
+                    Ok(_) => delivered += 1,
+                    Err(e) => return (delivered, Some(e)),
+                }
             }
-            Err(e) => return Err(e),
+            Err(e) => return (delivered, Some(e)),
         }
     }
-    Ok(())
+    (delivered, None)
 }
 
 static RE_HTML_TAG: once_cell::sync::Lazy<regex::Regex> =
@@ -768,6 +842,208 @@ fn looks_like_ogg_opus(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// Minimal Bot API stand-in: serves `expected` responses in order and records the
+    /// request line + body of each call, so a test can assert *which* method was used.
+    fn mock_bot_api(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<(String, String)>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let address = listener.local_addr().expect("mock address");
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept mock request");
+                let mut buf = [0_u8; 8192];
+                let read = stream.read(&mut buf).expect("read mock request");
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let line = request.lines().next().unwrap_or_default().to_string();
+                let payload = request
+                    .split_once("\r\n\r\n")
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_default();
+                seen.push((line, payload));
+                let reason = if status == 200 { "OK" } else { "Bad Request" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("write mock response");
+            }
+            seen
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    const OK_MESSAGE: &str = r#"{"ok":true,"result":{"message_id":1}}"#;
+    const ERR_NO_METHOD: &str =
+        r#"{"ok":false,"error_code":404,"description":"Not Found: method not found"}"#;
+
+    #[test]
+    fn send_text_prefers_rich_message_and_skips_the_html_pipeline() {
+        let (root, server) = mock_bot_api(vec![(200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(send_text(
+                &client,
+                42,
+                "| a | b |\n|--|--|\n| _x_ | y |",
+                None,
+            ))
+            .expect("send succeeds");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 1, "legacy pipeline must not be touched");
+        assert!(seen[0].0.contains("/sendRichMessage"), "{}", seen[0].0);
+        // The table reaches Telegram as Markdown, not as pre-rendered HTML.
+        assert!(seen[0].1.contains("rich_message"));
+        assert!(seen[0].1.contains("| a | b |"));
+    }
+
+    #[test]
+    fn send_text_falls_back_to_html_when_rich_is_unavailable() {
+        // Pre-10.1 Bot API server: sendRichMessage is unknown, sendMessage works.
+        let (root, server) = mock_bot_api(vec![(200, ERR_NO_METHOD), (200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(send_text(&client, 42, "**bold**", None))
+            .expect("send succeeds via fallback");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].0.contains("/sendRichMessage"));
+        assert!(seen[1].0.contains("/sendMessage"));
+        assert!(seen[1].1.contains("HTML"));
+        assert!(seen[1].1.contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn send_text_sanitizes_injected_buttons_before_they_reach_telegram() {
+        let (root, server) = mock_bot_api(vec![(200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let quoted =
+            r#"The page said: <tg-button type="callback_data" data="wipe">Confirm</tg-button>"#;
+        runtime
+            .block_on(send_text(&client, 42, quoted, None))
+            .expect("send succeeds");
+
+        let seen = server.join().expect("mock thread");
+        assert!(seen[0].0.contains("/sendRichMessage"));
+        assert!(
+            !seen[0].1.contains("<tg-button"),
+            "an injected button reached Telegram: {}",
+            seen[0].1
+        );
+        assert!(seen[0].1.contains("&lt;tg-button"));
+    }
+
+    #[test]
+    fn oversize_text_bypasses_rich_and_uses_the_chunking_pipeline() {
+        // Beyond the 32768-character rich limit, so the rich path is skipped entirely
+        // and the legacy chunker splits into 4096-unit sendMessage calls.
+        let huge = "x".repeat(crate::format::RICH_MSG_LIMIT + 1);
+        let (root, server) = mock_bot_api(vec![(200, OK_MESSAGE); 9]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(send_text(&client, 42, &huge, None))
+            .expect("send succeeds");
+
+        let seen = server.join().expect("mock thread");
+        assert!(
+            seen.iter().all(|(line, _)| line.contains("/sendMessage")),
+            "rich path must not be attempted above the rich limit"
+        );
+    }
+
+    /// A transport failure is not a verdict from Telegram: the message may well have
+    /// been created. Re-sending the same answer through the legacy path would deliver it
+    /// twice, so the rich path must surface the error instead of falling back.
+    #[test]
+    fn transport_failure_on_rich_does_not_resend_through_the_legacy_path() {
+        // One accept, then the connection is closed without a response.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut methods = Vec::new();
+            let mut record = |stream: &mut std::net::TcpStream| {
+                let mut buf = [0_u8; 4096];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                methods.push(request.lines().next().unwrap_or_default().to_string());
+                // Close with no response at all → the client sees a transport error.
+            };
+            if let Ok((mut stream, _)) = listener.accept() {
+                record(&mut stream);
+            }
+            // Poll briefly for a second connection: a legacy retry would make one. Must
+            // be non-blocking, or a correctly-behaving client leaves this thread parked
+            // on accept() forever and the test hangs instead of passing.
+            listener.set_nonblocking(true).expect("nonblocking");
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .ok();
+                        record(&mut stream);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+            methods
+        });
+
+        let root = format!("http://{address}");
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let (delivered, error) = runtime.block_on(send_text_counting(&client, 42, "hello", None));
+
+        assert_eq!(delivered, 0);
+        assert!(error.is_some(), "transport failure must surface");
+        assert!(
+            !is_api_rejection(error.as_ref().expect("error")),
+            "a dropped connection is not an API rejection"
+        );
+        drop(client);
+        let methods = server.join().expect("server thread");
+        assert_eq!(
+            methods.len(),
+            1,
+            "legacy path must not run after a transport failure, saw: {methods:?}"
+        );
+        assert!(methods[0].contains("/sendRichMessage"));
+    }
+
+    /// A mid-sequence chunk failure leaves earlier chunks in the chat. The caller has to
+    /// be able to see that, or streaming's finalize re-renders the whole answer into the
+    /// placeholder and the user reads the first chunk twice.
+    #[test]
+    fn partial_chunk_delivery_is_reported_to_the_caller() {
+        let huge = "x".repeat(crate::format::RICH_MSG_LIMIT + 1);
+        let (root, server) = mock_bot_api(vec![
+            (200, OK_MESSAGE),                         // chunk 1 lands
+            (200, r#"{"ok":false,"error_code":403}"#), // chunk 2 refused
+        ]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let (delivered, error) = runtime.block_on(send_text_counting(&client, 42, &huge, None));
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2, "rich must be skipped above the rich limit");
+        assert!(seen.iter().all(|(line, _)| line.contains("/sendMessage")));
+        assert_eq!(delivered, 1, "one chunk reached the chat");
+        assert!(error.is_some());
+    }
 
     fn ogg_page(segment_table: &[u8], body: &[u8]) -> Vec<u8> {
         let mut page = vec![0_u8; 27];

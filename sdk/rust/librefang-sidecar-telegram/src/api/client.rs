@@ -224,6 +224,46 @@ impl BotClient {
         self.call_json("editMessageText", &payload).await
     }
 
+    /// `sendRichMessage` (Bot API 10.1+). Hands raw Rich Markdown to Telegram's own
+    /// GFM-compatible parser instead of pre-rendering it ourselves — tables, nested
+    /// emphasis and `_italic_` are all things `format::markdown` structurally cannot do.
+    /// Any failure (method missing on a pre-10.1 self-hosted Bot API server, a parse
+    /// error, ...) surfaces as `Error::Api` so callers can fall back to the legacy
+    /// `sendMessage` + hand-rolled HTML pipeline.
+    pub async fn send_rich_message(
+        &self,
+        chat_id: i64,
+        markdown: &str,
+        thread_id: Option<i64>,
+    ) -> Result<SendMessageResult> {
+        let mut payload = json!({
+            "chat_id": chat_id,
+            "rich_message": { "markdown": markdown },
+        });
+        if let Some(t) = thread_id {
+            payload["message_thread_id"] = json!(t);
+        }
+        self.call_typed("sendRichMessage", &payload).await
+    }
+
+    /// `editMessageText` carrying `rich_message` instead of `text` (Bot API 10.1+).
+    /// Used by the streaming path, which keeps the existing edit-in-place lifecycle —
+    /// `sendRichMessageDraft` is an ephemeral 30-second preview and needs a different
+    /// lifecycle altogether, so it is deliberately not used here.
+    pub async fn edit_rich_message_text(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        markdown: &str,
+    ) -> Result<Value> {
+        let payload = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": { "markdown": markdown },
+        });
+        self.call_json("editMessageText", &payload).await
+    }
+
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<Value> {
         let payload = json!({ "chat_id": chat_id, "message_id": message_id });
         self.call_json("deleteMessage", &payload).await
