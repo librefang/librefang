@@ -38,6 +38,7 @@ pub mod passkey;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub mod provisioning;
 pub mod registry;
 pub mod secrets_env;
 pub mod sidecar_describe;
@@ -380,6 +381,34 @@ pub fn guard_config_write(
             "error": "configuration is managed by the deployment",
             "code": "config_managed",
             "source": source.display().to_string(),
+        })),
+    ))
+}
+
+/// Refuse a write to a resource the deployment's provisioning tree owns (#6695).
+///
+/// The resource-level counterpart of [`guard_config_write`], and deliberately the same status code and envelope shape so a client can handle both with one branch: `423 Locked` carrying `{ok:false, error, code, kind, name, source}`.
+/// The `code` differs — `resource_provisioned` rather than `config_managed` — because the remedy differs: one is fixed by editing `config.toml`, the other by editing a file in the provisioning tree and rolling the daemon.
+///
+/// Returns `None` for every runtime-created resource, which is the whole point of provisioning being per-resource rather than a global switch: an operator keeps full control of everything the deployment did not declare.
+///
+/// This is a lock on the resource's *definition*, not on operating it. Suspending, resuming, messaging, resetting a session, or reading anything about a provisioned agent all stay available — the RFC's "operational actions and mutable runtime state remain usable" criterion.
+pub fn guard_provisioned_write(
+    resource: Option<&librefang_kernel::provisioning::ResourceProvenance>,
+) -> Option<(
+    axum::http::StatusCode,
+    axum::response::Json<serde_json::Value>,
+)> {
+    let provenance = resource?;
+    Some((
+        axum::http::StatusCode::LOCKED,
+        axum::response::Json(serde_json::json!({
+            "ok": false,
+            "error": "this resource is provisioned by the deployment",
+            "code": "resource_provisioned",
+            "kind": provenance.kind.as_str(),
+            "name": provenance.name,
+            "source": provenance.source,
         })),
     ))
 }

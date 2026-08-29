@@ -1289,6 +1289,9 @@ class _SystemResource(_Resource):
     def get_profile(self, name: str):
         return self._c._request("GET", f"/api/profiles/{name}")
 
+    def provisioning_status(self):
+        return self._c._request("GET", "/api/provisioning/status")
+
     def queue_status(self):
         return self._c._request("GET", "/api/queue/status")
 

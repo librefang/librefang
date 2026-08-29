@@ -5,18 +5,27 @@ on:
     branches: [main]
 
 permissions:
+  contents: read
   issues: write
+
+# No `concurrency:` block, deliberately. Each push to main carries a distinct incremental diff, and
+# GitHub keeps only one pending run per group — any shared group would discard an intermediate
+# commit's scan, and nothing retriggers it. Keying the group on `github.run_id` would express that
+# intent but not implement it: the id is unique per run, so every run lands in its own group and
+# the block does nothing at all. Omitting it is the honest way to say "never coalesce these runs".
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: alstr/todo-to-issue-action@37bb7b56e58569ef273b60678048030a7f0c261a # v5
         with:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LABEL: "good first issue,help wanted"
+          IDENTIFIERS: '[{"name":"TODO","labels":["good first issue","help wanted"]}]'
           AUTO_ASSIGN: false
           # Skip files that contain TODO markers inside string-literal code templates
           # (e.g. plugin / skill scaffolding) — those are placeholders for end users,

@@ -40,6 +40,11 @@ pub async fn set_model(
             )
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
     let model = match body["model"].as_str() {
         Some(m) if !m.is_empty() => m,
         _ => {
@@ -255,6 +260,11 @@ pub async fn set_agent_tools(
         }
     };
 
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
+
     if body.capabilities_tools.is_none()
         && body.tool_allowlist.is_none()
         && body.tool_blocklist.is_none()
@@ -427,6 +437,11 @@ pub async fn set_agent_skills(
             )
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
     let skills: Vec<String> = body["skills"]
         .as_array()
         .map(|arr| {
@@ -575,6 +590,11 @@ pub async fn set_agent_mcp_servers(
             )
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
     let servers = body.mcp_servers;
     match state
         .kernel
@@ -710,6 +730,11 @@ pub async fn set_agent_channels(
             )
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
     let channels = body.channels;
     match state.kernel.set_agent_channels(agent_id, channels.clone()) {
         Ok(()) => (
@@ -785,6 +810,11 @@ pub async fn patch_agent_config(
             );
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
 
     // Input length limits
     const MAX_NAME_LEN: usize = 256;
