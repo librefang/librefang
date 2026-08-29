@@ -136,6 +136,61 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    dashboard_build = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "dashboard-build.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if dashboard_build.get("permissions") != {"contents": "read"}:
+        raise SystemExit("dashboard workflow does not default to read-only contents")
+    dashboard_jobs = dashboard_build.get("jobs", {})
+    build_job = dashboard_jobs.get("build", {})
+    upload_job = dashboard_jobs.get("upload", {})
+    if "permissions" in build_job:
+        raise SystemExit("dashboard build job overrides its read-only token")
+    if (
+        upload_job.get("if") != "github.event_name != 'pull_request'"
+        or upload_job.get("needs") != "build"
+        or upload_job.get("permissions") != {"contents": "write"}
+        or upload_job.get("timeout-minutes") != 10
+    ):
+        raise SystemExit("dashboard release writes are not isolated behind build")
+    expected_transfer_actions = {
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    }
+    actual_transfer_actions = {
+        step.get("uses")
+        for job in (build_job, upload_job)
+        for step in job.get("steps", [])
+        if str(step.get("uses", "")).startswith(
+            ("actions/upload-artifact@", "actions/download-artifact@")
+        )
+    }
+    if actual_transfer_actions != expected_transfer_actions:
+        raise SystemExit("dashboard release artifact action pins drifted")
+    upload_checkout = upload_job.get("steps", [])[0].get("with", {})
+    if (
+        upload_checkout.get("ref")
+        != "${{ github.event.repository.default_branch }}"
+        or upload_checkout.get("persist-credentials") is not False
+    ):
+        raise SystemExit("dashboard release upload executes an untrusted helper")
+    upload_step = next(
+        (
+            step
+            for step in upload_job.get("steps", [])
+            if step.get("name") == "Upload to release"
+        ),
+        {},
+    )
+    upload_script = upload_step.get("run", "")
+    if (
+        'gh release upload --repo "$REPOSITORY" --clobber --' not in upload_script
+        or '"$TAG" /tmp/dashboard-dist.tar.gz' not in upload_script
+    ):
+        raise SystemExit("dashboard release tag is not separated from gh options")
+
     auto_update = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "auto-update-branches.yml").read_text(
             encoding="utf-8"
