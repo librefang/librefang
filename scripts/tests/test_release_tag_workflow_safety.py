@@ -165,6 +165,57 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    welcome_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "welcome.yml").read_text(encoding="utf-8")
+    )
+    if welcome_workflow.get("permissions") != {
+        "issues": "write",
+        "pull-requests": "read",
+    }:
+        raise SystemExit("welcome workflow permissions are not minimal")
+    welcome_job = welcome_workflow.get("jobs", {}).get("welcome", {})
+    if welcome_job.get("timeout-minutes") != 5:
+        raise SystemExit("welcome workflow has no bounded runtime")
+    welcome_step = next(
+        (
+            step
+            for step in welcome_job.get("steps", [])
+            if step.get("name") == "Welcome first-time contributors"
+        ),
+        {},
+    )
+    welcome_script = welcome_step.get("run", "")
+    if not isinstance(welcome_script, str) or "${{" in welcome_script:
+        raise SystemExit("welcome shell source interpolates GitHub event expressions")
+    if (
+        welcome_script.count('select(.number != $current)') != 2
+        or welcome_script.count('--argjson current "$NUMBER"') != 2
+    ):
+        raise SystemExit("welcome workflow does not exclude the event item from history")
+    if "cargo test --workspace" in welcome_script or (
+        "cargo test -p <affected-crate>" not in welcome_script
+    ):
+        raise SystemExit("welcome workflow recommends a forbidden workspace-wide test")
+    expected_event_env = {
+        "REPO": "${{ github.repository }}",
+        "AUTHOR": "${{ github.event.sender.login }}",
+        "EVENT_NAME": "${{ github.event_name }}",
+        "ISSUE_NUMBER": "${{ github.event.issue.number || '' }}",
+        "PR_NUMBER": "${{ github.event.pull_request.number || '' }}",
+    }
+    welcome_env = welcome_step.get("env", {})
+    if any(welcome_env.get(name) != value for name, value in expected_event_env.items()):
+        raise SystemExit("welcome workflow does not pass event metadata through env")
+    shell_check = subprocess.run(
+        ["bash", "-n"],
+        input=welcome_script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shell_check.returncode != 0:
+        raise SystemExit("welcome workflow shell is invalid: " + shell_check.stderr)
+
     dashboard_build = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "dashboard-build.yml").read_text(
             encoding="utf-8"
