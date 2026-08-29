@@ -55,15 +55,16 @@ pub trait PasskeyStore: Send + Sync {
     /// Fetch a single credential by its base64url id, or `None` if unknown.
     fn get(&self, credential_id: &str) -> Result<Option<PasskeyRecord>, PasskeyStoreError>;
 
-    /// Persist the re-serialized credential (updated sign-count) and stamp
-    /// `last_used_at` after a successful assertion. No-op if the id is
-    /// unknown.
-    fn update_cred(
+    /// Persist an updated credential only when the opaque JSON still matches
+    /// the value the caller read. Returns false for a missing row or a
+    /// concurrent update so sign-count changes can never overwrite each other.
+    fn compare_and_update_cred(
         &self,
         credential_id: &str,
+        expected_cred: &str,
         cred: &str,
         last_used_at: i64,
-    ) -> Result<(), PasskeyStoreError>;
+    ) -> Result<bool, PasskeyStoreError>;
 
     /// Revoke a credential. Scoped to `user_name` so one principal can never
     /// delete another's credential. Returns `true` if a row was removed.
@@ -209,22 +210,23 @@ impl PasskeyStore for SqlitePasskeyStore {
         Ok(row)
     }
 
-    fn update_cred(
+    fn compare_and_update_cred(
         &self,
         credential_id: &str,
+        expected_cred: &str,
         cred: &str,
         last_used_at: i64,
-    ) -> Result<(), PasskeyStoreError> {
+    ) -> Result<bool, PasskeyStoreError> {
         let conn = self
             .pool
             .get()
-            .inspect_err(|_| record_pool_failure("update_cred"))?;
-        conn.execute(
+            .inspect_err(|_| record_pool_failure("compare_and_update_cred"))?;
+        let affected = conn.execute(
             "UPDATE webauthn_credentials SET cred = ?2, last_used_at = ?3 \
-             WHERE credential_id = ?1",
-            rusqlite::params![credential_id, cred, last_used_at],
+             WHERE credential_id = ?1 AND cred = ?4",
+            rusqlite::params![credential_id, cred, last_used_at, expected_cred],
         )?;
-        Ok(())
+        Ok(affected == 1)
     }
 
     fn delete(&self, credential_id: &str, user_name: &str) -> Result<bool, PasskeyStoreError> {
@@ -327,15 +329,21 @@ mod tests {
     }
 
     #[test]
-    fn update_cred_persists_sign_count_and_last_used() {
+    fn compare_and_update_cred_rejects_stale_writes() {
         let s = make_store();
         s.insert(&rec("cred-a", "admin")).unwrap();
-        s.update_cred("cred-a", "{\"sign_count\":5}", 1234).unwrap();
+        assert!(s
+            .compare_and_update_cred("cred-a", "{}", "{\"sign_count\":5}", 1234)
+            .unwrap());
+        assert!(!s
+            .compare_and_update_cred("cred-a", "{}", "{\"sign_count\":4}", 1235)
+            .unwrap());
         let got = s.get("cred-a").unwrap().unwrap();
         assert_eq!(got.cred, "{\"sign_count\":5}");
         assert_eq!(got.last_used_at, Some(1234));
-        // Updating an unknown id is a silent no-op.
-        s.update_cred("missing", "{}", 1).unwrap();
+        assert!(!s
+            .compare_and_update_cred("missing", "{}", "new", 1)
+            .unwrap());
     }
 
     #[test]
