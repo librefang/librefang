@@ -105,7 +105,7 @@ struct LaneRegexes {
 /// `ci_lane_pattern_matches_the_workflow` fails the build when the two drift, because a local
 /// `cargo xtask check-changed` that routes differently from CI is worse than no local command at
 /// all — it reports a lane as skipped that CI is about to run, or the reverse.
-const CI_LANE_PATTERN: &str = r"^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$)";
+const CI_LANE_PATTERN: &str = r"^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/check-error-shape\.sh$|scripts/tests/check-error-shape\.sh$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$)";
 
 fn lane_regexes() -> &'static LaneRegexes {
     // Same regexes as ci.yml's `Compute diff and route` step. Keep these
@@ -469,6 +469,8 @@ mod tests {
             "scripts/tests/run-xtask.sh",
             "scripts/tests/test_release_tag_workflow_safety.py",
             "scripts/tests/test_issue_labels_workflow.py",
+            "scripts/check-error-shape.sh",
+            "scripts/tests/check-error-shape.sh",
         ] {
             let lanes = lanes_from(&[path]);
             assert!(lanes.ci, "expected CI lane for {path}");
