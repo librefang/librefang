@@ -278,6 +278,61 @@ def check_repository_automation() -> None:
     ):
         raise SystemExit("OpenRouter auto-merge does not use the bounded trusted PR number")
 
+    devto_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "devto-publish.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    devto_triggers = devto_workflow.get("on", devto_workflow.get(True, {}))
+    expected_devto_pr_paths = {
+        "articles/*.md",
+        ".github/scripts/publish-devto.rb",
+        ".github/scripts/test-publish-devto.rb",
+        ".github/workflows/devto-publish.yml",
+    }
+    if set(devto_triggers.get("pull_request", {}).get("paths", [])) != (
+        expected_devto_pr_paths
+    ):
+        raise SystemExit("Dev.to publisher validation paths drifted")
+    if devto_workflow.get("permissions") != {"contents": "read"}:
+        raise SystemExit("Dev.to publisher has broader repository permissions than read-only")
+    if devto_workflow.get("concurrency") != {
+        "group": (
+            "devto-publish-${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.number || 'production' }}"
+        ),
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }:
+        raise SystemExit("Dev.to publisher does not isolate PR validation from production")
+    devto_jobs = devto_workflow.get("jobs", {})
+    validate_job = devto_jobs.get("validate", {})
+    publish_job = devto_jobs.get("publish", {})
+    if validate_job.get("timeout-minutes") != 5:
+        raise SystemExit("Dev.to publisher validation is not bounded to five minutes")
+    if (
+        publish_job.get("timeout-minutes") != 10
+        or publish_job.get("needs") != "validate"
+        or publish_job.get("if") != "github.event_name != 'pull_request'"
+    ):
+        raise SystemExit("Dev.to production publication bypasses its bounded validation gate")
+    validate_steps = validate_job.get("steps", [])
+    publish_steps = publish_job.get("steps", [])
+    expected_checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    for job_name, steps in (("validate", validate_steps), ("publish", publish_steps)):
+        checkouts = [step.get("uses") for step in steps if step.get("uses")]
+        if checkouts != [expected_checkout]:
+            raise SystemExit(f"Dev.to {job_name} checkout action pin drifted")
+        if FULL_SHA.fullmatch(expected_checkout.rsplit("@", 1)[1]) is None:
+            raise SystemExit(f"Dev.to {job_name} checkout is not pinned to a full SHA")
+    if [step.get("run") for step in validate_steps if step.get("run")] != [
+        "ruby .github/scripts/test-publish-devto.rb"
+    ]:
+        raise SystemExit("Dev.to validation does not run the publisher test suite")
+    if [step.get("run") for step in publish_steps if step.get("run")] != [
+        "ruby .github/scripts/publish-devto.rb articles/*.md"
+    ]:
+        raise SystemExit("Dev.to production job does not run the reviewed publisher")
+
     contributor_role = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "contributor-role.yml").read_text(
             encoding="utf-8"
