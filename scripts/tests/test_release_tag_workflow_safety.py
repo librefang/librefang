@@ -165,6 +165,44 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    auto_close = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "auto-close-resolved-issues.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    reconcile = auto_close.get("jobs", {}).get("reconcile", {})
+    if (
+        auto_close.get("permissions") != {"contents": "read"}
+        or reconcile.get("needs") != "test-helper"
+        or reconcile.get("if") != "github.event_name != 'pull_request'"
+        or reconcile.get("permissions")
+        != {"contents": "read", "issues": "write"}
+    ):
+        raise SystemExit("resolved-issue mutations are not isolated behind tests")
+    reconcile_steps = reconcile.get("steps", [])
+    checkout = reconcile_steps[0].get("with", {}) if reconcile_steps else {}
+    if (
+        checkout.get("ref") != "${{ github.event.repository.default_branch }}"
+        or checkout.get("persist-credentials") is not False
+        or checkout.get("fetch-depth") != 0
+    ):
+        raise SystemExit("resolved-issue reconciliation checks out untrusted history")
+    reconcile_script = next(
+        (
+            step.get("with", {}).get("script", "")
+            for step in reconcile_steps
+            if str(step.get("uses", "")).startswith("actions/github-script@")
+        ),
+        "",
+    )
+    for contract in (
+        "execFileSync",
+        "--format=%H%x00%s%x00%B",
+        "sanitizeInlineCode",
+    ):
+        if contract not in reconcile_script:
+            raise SystemExit("resolved-issue reconciliation lost contract: " + contract)
+
     pr_labels = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "pr-labels.yml").read_text(
             encoding="utf-8"
@@ -609,6 +647,124 @@ def main() -> None:
         )
     ):
         raise SystemExit("release-cli workflow does not verify the exact release tag")
+
+    sign_job = release_cli_jobs.get("sign_release_artifacts", {})
+    sign_steps = sign_job.get("steps", [])
+    manifest_step = next(
+        (
+            step
+            for step in sign_steps
+            if step.get("name") == "Build SHA256SUMS manifest from release assets"
+        ),
+        None,
+    )
+    manifest_script = (
+        manifest_step.get("run") if isinstance(manifest_step, dict) else None
+    )
+    sign_env = sign_job.get("env", {})
+    expected_platforms = sign_env.get("EXPECTED_CHECKSUM_ASSETS")
+    allowed_symbols = sign_env.get("ALLOWED_SYMBOL_CHECKSUM_ASSETS")
+    if not all(
+        isinstance(value, str)
+        for value in (manifest_script, expected_platforms, allowed_symbols)
+    ):
+        raise SystemExit("release-cli manifest builder is missing its asset contract")
+
+    def run_manifest_builder(assets: list[str]) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_bin = temp_root / "bin"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1 $2\" = \"release view\" ]; then\n"
+                "  printf '%s\\n' \"$FAKE_ASSETS\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1 $2\" = \"release download\" ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --pattern ]; then shift; name=$1; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  printf 'deadbeef  %s\\n' \"${name%.sha256}\" > \"$name\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "FAKE_ASSETS": "\n".join(assets),
+                    "RELEASE_TAG": "v2026.8.19",
+                    "EXPECTED_CHECKSUM_ASSETS": expected_platforms,
+                    "ALLOWED_SYMBOL_CHECKSUM_ASSETS": allowed_symbols,
+                }
+            )
+            return subprocess.run(
+                ["bash", "-eu", "-o", "pipefail", "-c", manifest_script],
+                cwd=temp_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    platform_assets = expected_platforms.splitlines()
+    symbol_assets = allowed_symbols.splitlines()
+
+    # release.yml gates the same set by count and release-cli.yml by exact name, so the two drift
+    # apart the moment a matrix target is added on one side only. Tie them together here: a new
+    # target that reaches release.yml's constant without reaching this list, or the reverse, stops
+    # the build instead of shipping a manifest that is missing a platform's hash.
+    release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    expected_platform_count = re.search(r"^\s*EXPECTED_PLATFORMS=(\d+)$", release_text, re.M)
+    if expected_platform_count is None:
+        raise SystemExit("release.yml no longer declares EXPECTED_PLATFORMS")
+    if len(platform_assets) != int(expected_platform_count.group(1)):
+        raise SystemExit(
+            "release-cli EXPECTED_CHECKSUM_ASSETS "
+            f"({len(platform_assets)}) does not match release.yml EXPECTED_PLATFORMS "
+            f"({expected_platform_count.group(1)})"
+        )
+    required_symbols = [
+        asset for asset in symbol_assets if "apple-darwin" in asset
+    ]
+    if run_manifest_builder(platform_assets + required_symbols).returncode != 0:
+        raise SystemExit("release-cli rejected the required platform and macOS symbol assets")
+    if run_manifest_builder(platform_assets + symbol_assets).returncode != 0:
+        raise SystemExit("release-cli rejected the complete known symbol asset set")
+    if run_manifest_builder(platform_assets + required_symbols[:1]).returncode == 0:
+        raise SystemExit("release-cli accepted a missing required macOS symbol asset")
+    unexpected_symbol = "librefang-unknown-debug-symbols.tar.gz.sha256"
+    if (
+        run_manifest_builder(platform_assets + required_symbols + [unexpected_symbol]).returncode
+        == 0
+    ):
+        raise SystemExit("release-cli accepted an unknown debug-symbol asset")
+
+    verify_signature_step = next(
+        (
+            step
+            for step in sign_steps
+            if step.get("name") == "Verify signature locally before upload"
+        ),
+        None,
+    )
+    verify_signature_script = (
+        verify_signature_step.get("run")
+        if isinstance(verify_signature_step, dict)
+        else None
+    )
+    if (
+        not isinstance(verify_signature_script, str)
+        or '--certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}"'
+        not in verify_signature_script
+    ):
+        raise SystemExit("release-cli does not verify the exact signing workflow identity")
 
     for workflow_name in ("mobile-smoke.yml", "release.yml"):
         mobile_document = yaml.safe_load(
