@@ -165,6 +165,148 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    openrouter_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "update-openrouter-models.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if openrouter_workflow.get("permissions") != {"contents": "read"}:
+        raise SystemExit("OpenRouter updater has broader default permissions than read-only")
+    if openrouter_workflow.get("concurrency", {}).get("cancel-in-progress") is not False:
+        raise SystemExit("OpenRouter updater can cancel a run after it mutates PR state")
+    openrouter_job = openrouter_workflow.get("jobs", {}).get("update", {})
+    if openrouter_job.get("timeout-minutes") != 10:
+        raise SystemExit("OpenRouter updater does not retain its bounded runtime")
+    openrouter_steps = openrouter_job.get("steps", [])
+    for step in openrouter_steps:
+        uses = step.get("uses")
+        if isinstance(uses, str) and (
+            "@" not in uses
+            or FULL_SHA.fullmatch(uses.rsplit("@", 1)[1]) is None
+        ):
+            raise SystemExit(f"OpenRouter updater has a non-SHA action pin: {uses}")
+
+    download_step = next(
+        (
+            step
+            for step in openrouter_steps
+            if step.get("name") == "Download deterministic snapshot"
+        ),
+        None,
+    )
+    download_script = download_step.get("run") if isinstance(download_step, dict) else None
+    if not isinstance(download_script, str) or not all(
+        fragment in download_script
+        for fragment in (
+            'set -euo pipefail',
+            'mktemp "${snapshot_path}.XXXXXX"',
+            'mv -- "$snapshot" "$snapshot_path"',
+        )
+    ):
+        raise SystemExit("OpenRouter download does not use fail-fast same-directory replacement")
+
+    valid_model = {
+        "data": [
+            {
+                "id": "acme/model",
+                "name": "Acme Model",
+                "context_length": 32768,
+                "architecture": {"input_modalities": ["text"]},
+                "supported_parameters": ["tools"],
+                "top_provider": {"max_completion_tokens": 4096},
+                "pricing": {"prompt": "0.1", "completion": "0.2"},
+                "ignored": "not projected",
+            }
+        ]
+    }
+    invalid_catalogs = (
+        {"data": []},
+        {
+            "data": [
+                {"id": "duplicate", "name": "First", "context_length": 4096},
+                {"id": "duplicate", "name": "Second", "context_length": 8192},
+            ]
+        },
+        {"data": [{"id": " padded", "name": "Padded", "context_length": 4096}]},
+        {"data": [{"id": "zero", "name": "Zero", "context_length": 0}]},
+        {"data": [{"id": "float", "name": "Float", "context_length": 1.5}]},
+    )
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_root = Path(temp_dir)
+        fake_bin = temp_root / "bin"
+        fake_bin.mkdir()
+        fake_curl = fake_bin / "curl"
+        fake_curl.write_text(
+            "#!/bin/sh\n"
+            "if [ \"${FAKE_CURL_FAIL:-0}\" = 1 ]; then exit 22; fi\n"
+            "printf '%s' \"$FAKE_OPENROUTER_BODY\"\n"
+        )
+        fake_curl.chmod(0o755)
+        snapshot = (
+            temp_root
+            / "crates"
+            / "librefang-runtime"
+            / "openrouter-models.snapshot.json"
+        )
+        snapshot.parent.mkdir(parents=True)
+        original_snapshot = b'{"data":[{"id":"preserve-me"}]}\n'
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+        def run_download(body: dict, *, curl_fails: bool = False) -> subprocess.CompletedProcess:
+            snapshot.write_bytes(original_snapshot)
+            environment["FAKE_OPENROUTER_BODY"] = json.dumps(body)
+            environment["FAKE_CURL_FAIL"] = "1" if curl_fails else "0"
+            return subprocess.run(
+                ["bash", "-c", download_script],
+                cwd=temp_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        valid_result = run_download(valid_model)
+        if valid_result.returncode != 0:
+            raise SystemExit(
+                "OpenRouter updater rejected a valid catalog: " + valid_result.stderr
+            )
+        projected = json.loads(snapshot.read_text(encoding="utf-8"))
+        if projected["data"][0].get("ignored") is not None:
+            raise SystemExit("OpenRouter updater retained an unreviewed API field")
+
+        for invalid_catalog in invalid_catalogs:
+            invalid_result = run_download(invalid_catalog)
+            if invalid_result.returncode == 0 or snapshot.read_bytes() != original_snapshot:
+                raise SystemExit(
+                    "OpenRouter updater replaced the snapshot with an invalid catalog"
+                )
+        curl_result = run_download(valid_model, curl_fails=True)
+        if curl_result.returncode == 0 or snapshot.read_bytes() != original_snapshot:
+            raise SystemExit("OpenRouter updater replaced the snapshot after curl failed")
+        if list(snapshot.parent.glob("openrouter-models.snapshot.json.*")):
+            raise SystemExit("OpenRouter updater leaked a temporary snapshot")
+
+    auto_merge_step = next(
+        (step for step in openrouter_steps if step.get("name") == "Enable auto-merge"),
+        None,
+    )
+    auto_merge_script = (
+        auto_merge_step.get("run") if isinstance(auto_merge_step, dict) else None
+    )
+    auto_merge_env = (
+        auto_merge_step.get("env", {}) if isinstance(auto_merge_step, dict) else {}
+    )
+    if (
+        not isinstance(auto_merge_script, str)
+        or "${{" in auto_merge_script
+        or 'gh pr merge "$PR_NUMBER"' not in auto_merge_script
+        or "for attempt in 1 2 3" not in auto_merge_script
+        or auto_merge_env.get("PR_NUMBER")
+        != "${{ steps.cpr.outputs.pull-request-number }}"
+    ):
+        raise SystemExit("OpenRouter auto-merge does not use the bounded trusted PR number")
+
     pr_title = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "pr-title.yml").read_text(
             encoding="utf-8"
