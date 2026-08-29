@@ -10,48 +10,66 @@ historically regressed:
 Run: python3 scripts/tests/test_codegen_sdks.py
 """
 import importlib.util
-import sys
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "codegen-sdks.py"
 
-spec = importlib.util.spec_from_file_location("codegen_sdks", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
+def load_codegen_module():
+    """Load the generator only when the standalone smoke test runs."""
+    spec = importlib.util.spec_from_file_location("codegen_sdks", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load generator module from {SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def assert_in(needle, haystack, label):
     if needle not in haystack:
-        print(f"FAIL [{label}]: substring not found:\n  {needle!r}", file=sys.stderr)
-        sys.exit(1)
+        raise AssertionError(f"FAIL [{label}]: substring not found:\n  {needle!r}")
 
 
 def assert_not_in(needle, haystack, label):
     if needle in haystack:
-        print(f"FAIL [{label}]: forbidden substring present:\n  {needle!r}", file=sys.stderr)
-        sys.exit(1)
+        raise AssertionError(f"FAIL [{label}]: forbidden substring present:\n  {needle!r}")
+
+
+def assert_matches(pattern, haystack, label):
+    if re.search(pattern, haystack) is None:
+        raise AssertionError(f"FAIL [{label}]: pattern not found:\n  {pattern!r}")
+
+
+def expect(condition, label):
+    if not condition:
+        raise AssertionError(f"FAIL [{label}]")
 
 
 def main():
+    mod = load_codegen_module()
     tag_ops = mod.load_ops()
 
-    tools = None
-    for ops in tag_ops.values():
-        for o in ops:
-            if o["op_id"] == "invoke_tool":
-                tools = o
-                break
-    assert tools is not None, "invoke_tool missing from loaded ops"
-    assert "agent_id" in tools["query_params"], f"expected agent_id query param, got {tools['query_params']}"
-    assert tools["has_body"], "invoke_tool should have body"
+    tool_matches = [
+        operation
+        for operations in tag_ops.values()
+        for operation in operations
+        if operation["op_id"] == "invoke_tool"
+    ]
+    expect(len(tool_matches) == 1, f"expected one invoke_tool operation, got {len(tool_matches)}")
+    tools = tool_matches[0]
+    expect("agent_id" in tools["query_params"], f"expected agent_id query param, got {tools['query_params']}")
+    expect(tools["has_body"], "invoke_tool should have body")
 
     agents_list = next((o for o in tag_ops.get("agents", []) if o["op_id"] == "list_agents"), None)
-    assert agents_list is not None
-    assert set(agents_list["query_params"]) == {"q", "status", "limit", "offset", "sort", "order"}
+    expect(agents_list is not None, "list_agents missing from agents operations")
+    expect(
+        set(agents_list["query_params"]) == {"q", "status", "limit", "offset", "sort", "order"},
+        f"unexpected list_agents query params: {agents_list['query_params']}",
+    )
 
     stream_op = next((o for o in tag_ops.get("agents", []) if o["op_id"] == "send_message_stream"), None)
-    assert stream_op and stream_op["is_stream"], "send_message_stream not detected as stream"
+    expect(bool(stream_op and stream_op["is_stream"]), "send_message_stream not detected as stream")
 
     py = mod.gen_python(tag_ops)
     js = mod.gen_js(tag_ops)
@@ -59,10 +77,10 @@ def main():
     rs = mod.gen_rust(tag_ops)
 
     # invoke_tool signatures across SDKs
-    assert_in("def invoke_tool(self, name: str, agent_id:", py, "python-invoke_tool-sig")
-    assert_in("async invokeTool(name, data, query)", js, "js-invoke_tool-sig")
-    assert_in("InvokeTool(name string, data map[string]interface{}, query map[string]string)", go, "go-invoke_tool-sig")
-    assert_in("pub async fn invoke_tool(&self, name: &str, data: Value, agent_id: Option<&str>)", rs, "rust-invoke_tool-sig")
+    assert_matches(r"def\s+invoke_tool\(\s*self,\s*name:\s*str,\s*agent_id:", py, "python-invoke_tool-sig")
+    assert_matches(r"async\s+invokeTool\(\s*name,\s*data,\s*query\s*\)", js, "js-invoke_tool-sig")
+    assert_matches(r"InvokeTool\(\s*name\s+string,\s*data\s+map\[string\]interface\{\},\s*query\s+map\[string\]string\s*\)", go, "go-invoke_tool-sig")
+    assert_matches(r"pub\s+async\s+fn\s+invoke_tool\(\s*&self,\s*name:\s*&str,\s*data:\s*Value,\s*agent_id:\s*Option<&str>\s*\)", rs, "rust-invoke_tool-sig")
     assert_in('#[tokio::main(flavor = "current_thread")]', rs, "rust-doc-current-thread-runtime")
     assert_in("Self::with_client(base_url, client)", rs, "rust-default-client-delegation")
     assert_in(".connect_timeout(DEFAULT_CONNECT_TIMEOUT)", rs, "rust-default-client-connect-timeout")
@@ -77,7 +95,7 @@ def main():
     assert_in(".timeout(DEFAULT_REQUEST_TIMEOUT)", rs, "rust-request-timeout")
     assert_in("mpsc::channel(STREAM_CHANNEL_CAPACITY)", rs, "rust-bounded-stream-channel")
     assert_not_in("mpsc::unbounded_channel()", rs, "rust-no-unbounded-stream-channel")
-    assert rs.count("_ = tx.closed() => return") == 3, "all stream network waits must cancel on receiver drop"
+    expect(rs.count("_ = tx.closed() => return") == 3, "all stream network waits must cancel on receiver drop")
     assert_in("Some(Err(e)) => {", rs, "rust-stream-result-loop")
     assert_in(".path_segments_mut()", rs, "rust-url-segment-builder")
     assert_in('&["api", "agents", id]', rs, "rust-borrowed-path-segments")
@@ -94,25 +112,32 @@ def main():
         "rust-trailing-sse-flush-reports-invalid-utf8",
     )
     assert_in("DEFAULT_TIMEOUT = 30.0", py, "python-default-timeout")
-    assert py.count("urlopen(req, timeout=self.timeout)") == 2
+    expect(py.count("urlopen(req, timeout=self.timeout)") == 2, "both Python request paths must use configured timeout")
     # A stalled body read (timeout mid-stream, after urlopen() already succeeded) must be wrapped the same as a timeout during connection setup — not just the initial urlopen() call inside _stream.
-    assert py.count('raise LibreFangError(f"Request timed out after {self.timeout}s") from e') == 3
+    expect(py.count('raise LibreFangError(f"Request timed out after {self.timeout}s") from e') == 3, "all Python timeout paths must wrap consistently")
     assert_in('"error": fmt.Sprintf("new request: %v", err)', go, "go-stream-request-error")
     assert_not_in("req, _ := http.NewRequest", go, "go-no-discarded-stream-request-error")
     assert_in('buffer = b""', py, "python-byte-buffer")
     assert_in('lines = buffer.split(b"\\n")', py, "python-byte-line-split")
-    assert_in("line = line.decode().strip()", py, "python-decode-complete-line")
+    # `.removesuffix("\r")`, not `.strip()`: an SSE `data:` value carries significant leading and
+    # trailing whitespace, and #7203 changed the generator to trim only the CR of a CRLF line
+    # ending. A `.strip()` here would silently corrupt multiline event payloads.
+    assert_in('line = raw_line.decode().removesuffix("\\r")', py, "python-decode-complete-line")
+    assert_not_in("line = line.decode().strip()", py, "python-no-whitespace-eating-decode")
     assert_not_in("buffer += chunk.decode()", py, "python-no-per-chunk-decode")
     assert_in('"error": fmt.Sprintf("marshal: %v", err)', go, "go-stream-marshal-error")
     assert_not_in("b, _ := json.Marshal(body)", go, "go-no-discarded-stream-marshal-error")
     assert_in("from urllib.error import HTTPError, URLError", py, "python-urlerror-import")
-    assert py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures"
+    expect(py.count("except URLError as e:") == 2, "both Python request paths must wrap connection failures")
     assert_in("active_error = sys.exc_info()[0] is not None", py, "python-stream-close-finally")
     assert_in("if buffer:", py, "python-flush-trailing-sse-line")
-    assert_in("line = buffer.decode().strip()", py, "python-parse-trailing-sse-line")
-    assert py.count("line = line.decode().strip()") + py.count(
-        "line = buffer.decode().strip()"
-    ) == 2, "trailing SSE flush must decode strictly, matching the per-line decode above it"
+    assert_in('line = buffer.decode().removesuffix("\\r")', py, "python-parse-trailing-sse-line")
+    expect(
+        py.count('line = raw_line.decode().removesuffix("\\r")')
+        + py.count('line = buffer.decode().removesuffix("\\r")')
+        == 2,
+        "trailing SSE flush must decode strictly, matching per-line decode",
+    )
     assert_in("const trailing = buffer.trim();", js, "js-flush-trailing-sse-line")
     assert_in('if (trailing.startsWith("data: ")) {', js, "js-parse-trailing-sse-line")
 
@@ -121,11 +146,17 @@ def main():
     assert_in("maxSSELine", go, "go-max-sse")
 
     # Reserved-word escape works
-    assert mod._py_safe("class") == "class_"
-    assert mod._rust_safe("type") == "type_"
-    assert mod._rust_path_segments("/api/agents/{id}", owned=False) == '&["api", "agents", id]'
-    assert mod._rust_path_segments("/api/agents/{id}", owned=True) == (
-        'vec!["api".to_string(), "agents".to_string(), id.to_string()]'
+    expect(mod._py_safe("class") == "class_", "Python reserved-word escape")
+    expect(mod._rust_safe("type") == "type_", "Rust reserved-word escape")
+    expect(
+        mod._rust_path_segments("/api/agents/{id}", owned=False)
+        == '&["api", "agents", id]',
+        "borrowed Rust path segments",
+    )
+    expect(
+        mod._rust_path_segments("/api/agents/{id}", owned=True)
+        == 'vec!["api".to_string(), "agents".to_string(), id.to_string()]',
+        "owned Rust path segments",
     )
 
     print(f"OK — {sum(len(v) for v in tag_ops.values())} ops across {len(tag_ops)} tags")
