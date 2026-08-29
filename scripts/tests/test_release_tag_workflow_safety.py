@@ -136,6 +136,52 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    dependabot = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "auto-merge-dependabot.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if dependabot.get("permissions") != {"contents": "read"}:
+        raise SystemExit("Dependabot auto-merge does not default to read-only")
+    dependabot_jobs = dependabot.get("jobs", {})
+    merge_job = dependabot_jobs.get("auto-merge", {})
+    if merge_job.get("needs") != "test-selector":
+        raise SystemExit("Dependabot auto-merge does not require its helper tests")
+    if merge_job.get("permissions") != {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+    }:
+        raise SystemExit("Dependabot auto-merge permissions drifted")
+    merge_steps = merge_job.get("steps", [])
+    privileged_checkout = merge_steps[0].get("with", {}) if merge_steps else {}
+    if (
+        privileged_checkout.get("ref")
+        != "${{ github.event.repository.default_branch }}"
+        or privileged_checkout.get("persist-credentials") is not False
+    ):
+        raise SystemExit("Dependabot auto-merge executes an untrusted helper")
+    classify_step = next(
+        (
+            step
+            for step in merge_steps
+            if step.get("name") == "Classify update-type from PR title"
+        ),
+        {},
+    )
+    if "classify-dependabot-title.sh" not in classify_step.get("run", ""):
+        raise SystemExit("Dependabot auto-merge bypasses its tested classifier")
+    merge_step = next(
+        (
+            step
+            for step in merge_steps
+            if step.get("name") == "Enable auto-merge for safe Dependabot bumps"
+        ),
+        {},
+    )
+    if "--match-head-commit \"$expected_head\"" not in merge_step.get("run", ""):
+        raise SystemExit("Dependabot auto-merge has no final head guard")
+
     auto_close = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "auto-close-resolved-issues.yml").read_text(
             encoding="utf-8"
