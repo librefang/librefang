@@ -9,8 +9,8 @@ name: release-cli
 # release pipeline".
 #
 # Inputs:
-#   tag      — existing release tag to (re)build for, e.g. v2026.5.4
-#   targets  — comma-separated subset of jobs to run; default 'all'
+#   tag          — existing release tag to (re)build for, e.g. v2026.5.4
+#   include_pypi — also re-publish the CLI PyPI wheels (off by default)
 #
 # Maintainer must configure the `release-cli` GitHub environment (with
 # required reviewers) before this stub becomes useful for redirecting
@@ -33,7 +33,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-cli-${{ inputs.tag }}
+  # Match release.yml's `release-${{ github.ref }}` value for a tag push so a
+  # manual repair cannot clobber assets while the canonical release is active.
+  group: release-refs/tags/${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
@@ -44,7 +46,7 @@ jobs:
   validate_release_tag:
     name: Validate release tag
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -581,6 +583,28 @@ jobs:
     permissions:
       contents: write
       id-token: write
+    env:
+      # One entry per target across the cli_* jobs, matching release.yml's EXPECTED_PLATFORMS count.
+      # `test_release_tag_workflow_safety.py` fails when the two disagree, so a new matrix target
+      # cannot reach one workflow without the other.
+      EXPECTED_CHECKSUM_ASSETS: |
+        librefang-aarch64-apple-darwin.tar.gz.sha256
+        librefang-aarch64-linux-android.tar.gz.sha256
+        librefang-aarch64-pc-windows-msvc.zip.sha256
+        librefang-aarch64-unknown-linux-gnu.tar.gz.sha256
+        librefang-aarch64-unknown-linux-musl.tar.gz.sha256
+        librefang-x86_64-apple-darwin-mini.tar.gz.sha256
+        librefang-x86_64-apple-darwin.tar.gz.sha256
+        librefang-x86_64-pc-windows-msvc-mini.zip.sha256
+        librefang-x86_64-pc-windows-msvc.zip.sha256
+        librefang-x86_64-unknown-linux-gnu-mini.tar.gz.sha256
+        librefang-x86_64-unknown-linux-gnu.tar.gz.sha256
+        librefang-x86_64-unknown-linux-musl.tar.gz.sha256
+      ALLOWED_SYMBOL_CHECKSUM_ASSETS: |
+        librefang-aarch64-apple-darwin-debug-symbols.tar.gz.sha256
+        librefang-aarch64-unknown-linux-gnu-debug-symbols.tar.gz.sha256
+        librefang-x86_64-apple-darwin-debug-symbols.tar.gz.sha256
+        librefang-x86_64-unknown-linux-gnu-debug-symbols.tar.gz.sha256
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -601,13 +625,34 @@ jobs:
             echo "::error::no *.sha256 sibling files attached to release $RELEASE_TAG"
             exit 1
           fi
-          # Same EXPECTED_PLATFORMS gate as release.yml — change in lockstep.
-          EXPECTED_PLATFORMS=12
-          ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
-          if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
-            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings, got $ACTUAL"
-            cat asset-list.txt
+          grep -v -- '-debug-symbols\.tar\.gz\.sha256$' asset-list.txt | sort -u > platform-assets.txt || true
+          grep -- '-debug-symbols\.tar\.gz\.sha256$' asset-list.txt | sort -u > symbol-assets.txt || true
+          printf '%s\n' "$EXPECTED_CHECKSUM_ASSETS" | sed '/^$/d' | sort > expected-platform-assets.txt
+          if ! diff -u expected-platform-assets.txt platform-assets.txt; then
+            echo "::error::platform checksum assets do not match the CLI build matrix"
             exit 1
+          fi
+          printf '%s\n' "$ALLOWED_SYMBOL_CHECKSUM_ASSETS" | sed '/^$/d' | sort > allowed-symbol-assets.txt
+          if [ -n "$(comm -13 allowed-symbol-assets.txt symbol-assets.txt)" ]; then
+            echo "::error::release contains an unexpected debug-symbol checksum asset"
+            comm -13 allowed-symbol-assets.txt symbol-assets.txt
+            exit 1
+          fi
+          for required in \
+            librefang-aarch64-apple-darwin-debug-symbols.tar.gz.sha256 \
+            librefang-x86_64-apple-darwin-debug-symbols.tar.gz.sha256; do
+            if ! grep -Fxq "$required" symbol-assets.txt; then
+              echo "::error::required macOS debug-symbol checksum is missing: $required"
+              exit 1
+            fi
+          done
+          SYMBOLS=$(wc -l < symbol-assets.txt | tr -d ' ')
+          if [ "$SYMBOLS" -lt 2 ] || [ "$SYMBOLS" -gt 4 ]; then
+            echo "::error::expected 2-4 known debug-symbol checksum assets, got $SYMBOLS"
+            exit 1
+          fi
+          if [ "$SYMBOLS" -lt 4 ]; then
+            echo "::warning::only $SYMBOLS/4 debug-symbol checksum assets are present; Linux split debuginfo is best-effort"
           fi
           while IFS= read -r name; do
             echo "Fetching $name"
@@ -632,7 +677,7 @@ jobs:
           cosign verify-blob \
             --certificate SHA256SUMS.pem \
             --signature SHA256SUMS.sig \
-            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             SHA256SUMS
       - name: Upload signed manifest to GitHub Release
