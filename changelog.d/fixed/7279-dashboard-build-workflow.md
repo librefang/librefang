@@ -1,0 +1,1 @@
+Pass dashboard release metadata through environment variables, upload main builds only to stable releases, isolate write permission in a trusted post-build job, and bound every workflow job. (#7279) (@xiaomo)
