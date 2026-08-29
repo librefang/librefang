@@ -75,30 +75,14 @@ pub async fn remove_binding(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.kernel.remove_binding(index as usize) {
-        Some(_) => binding_removed_response(),
+        // A bodyless 204: a generated client decoding a no-content response trips over both a
+        // serialized JSON `null` and the `content-type` that shipping one implies.
+        // `bindings_routes_test.rs` drives the mounted router and asserts both.
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
         )
             .into_response(),
-    }
-}
-
-fn binding_removed_response() -> axum::response::Response {
-    StatusCode::NO_CONTENT.into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn no_content_response_has_no_json_body() {
-        let response = binding_removed_response();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-
-        assert!(body.is_empty());
     }
 }
