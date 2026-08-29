@@ -8,7 +8,7 @@ on:
 
 permissions:
   issues: write
-  pull-requests: write
+  pull-requests: read
 
 # A greeting is a one-shot side effect, so this group never cancels: killing a run that has already posted, or dropping one that has not yet, is not something a later run repairs.
 # The group is per PR / issue rather than workflow-wide on purpose — GitHub keeps only one pending run per concurrency group and cancels any earlier pending one, so a single shared group would silently drop the greeting for every contributor who opened a PR while another greeting was still in flight.
@@ -20,21 +20,28 @@ concurrency:
 jobs:
   welcome:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Welcome first-time contributors
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.sender.login }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || '' }}
         run: |
-          REPO="${{ github.repository }}"
-          AUTHOR="${{ github.event.sender.login }}"
+          set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            NUMBER="${{ github.event.issue.number }}"
-            # Check if this is the author's first issue (use listing API, not search — search has secondary rate limits and indexing delays)
-            COUNT=$(gh issue list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
-            if [ "$COUNT" -lt 2 ]; then
-              gh issue comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+          if [ "$EVENT_NAME" = "issues" ]; then
+            NUMBER="$ISSUE_NUMBER"
+            # Exclude the event issue explicitly so delayed indexing cannot make a returning author look new.
+            PRIOR_COUNT=$(gh issue list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number | jq --argjson current "$NUMBER" '[.[] | select(.number != $current)] | length')
+            if [ "$PRIOR_COUNT" -eq 0 ]; then
+              BODY_FILE=$(mktemp)
+              trap 'rm -f "$BODY_FILE"' EXIT
+              cat > "$BODY_FILE" <<'MSG'
           Thanks for opening your first issue! 🎉
 
           A maintainer will take a look soon. In the meantime:
@@ -43,24 +50,30 @@ jobs:
 
           We aim to respond within 7 days.
           MSG
-              )"
+              gh issue comment "$NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+              rm -f "$BODY_FILE"
+              trap - EXIT
             fi
 
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            NUMBER="${{ github.event.pull_request.number }}"
-            # Check if this is the author's first PR (use listing API, not search — search has secondary rate limits and indexing delays)
-            COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
-            if [ "$COUNT" -lt 2 ]; then
-              gh pr comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            NUMBER="$PR_NUMBER"
+            # Exclude the event PR explicitly so delayed indexing cannot make a returning author look new.
+            PRIOR_COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number | jq --argjson current "$NUMBER" '[.[] | select(.number != $current)] | length')
+            if [ "$PRIOR_COUNT" -eq 0 ]; then
+              BODY_FILE=$(mktemp)
+              trap 'rm -f "$BODY_FILE"' EXIT
+              cat > "$BODY_FILE" <<'MSG'
           Thanks for your first pull request! 🎉
 
           A maintainer will review it soon. While you wait, please make sure:
           - [ ] PR title follows conventional format (`feat:`, `fix:`, `docs:`, etc.)
-          - [ ] `cargo test --workspace` passes
+          - [ ] `cargo test -p <affected-crate>` passes
           - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
 
           We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
           MSG
-              )"
+              gh pr comment "$NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+              rm -f "$BODY_FILE"
+              trap - EXIT
             fi
           fi
