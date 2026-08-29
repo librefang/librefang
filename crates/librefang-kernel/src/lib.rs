@@ -35,6 +35,7 @@ pub mod oauth_cache_invalidator;
 pub use librefang_kernel_metering as metering;
 pub mod orchestration;
 pub mod pairing;
+pub mod provisioning;
 pub mod registry;
 pub mod rl_export;
 pub use librefang_kernel_router as router;

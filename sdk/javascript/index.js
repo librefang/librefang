@@ -1594,6 +1594,10 @@ class SystemResource {
     return this._c._request("GET", `/api/profiles/${name}`);
   }
 
+  async provisioningStatus() {
+    return this._c._request("GET", "/api/provisioning/status");
+  }
+
   async queueStatus() {
     return this._c._request("GET", "/api/queue/status");
   }

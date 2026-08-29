@@ -98,6 +98,16 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     fn home_dir(&self) -> &Path;
     /// Path of the `config.toml` this daemon loaded — see [`LibreFangKernel::config_path`].
     fn config_path(&self) -> &Path;
+    /// What the deployment's provisioning tree owns right now, with per-resource drift (#6695).
+    fn provisioning_status(&self) -> crate::provisioning::ProvisioningStatus;
+    /// Provenance for one provisioned resource, or `None` when it is runtime-owned.
+    ///
+    /// The lookup every resource write guard performs, so it reads an in-memory snapshot and never touches the filesystem.
+    fn provisioned_resource(
+        &self,
+        kind: crate::provisioning::ResourceKind,
+        name: &str,
+    ) -> Option<crate::provisioning::ResourceProvenance>;
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine;
     fn media_drivers(&self) -> &librefang_runtime::media::MediaDriverCache;
     fn memory_substrate(&self) -> &Arc<MemorySubstrate>;
@@ -884,6 +894,16 @@ impl KernelApi for LibreFangKernel {
     }
     fn config_path(&self) -> &Path {
         Self::config_path(self)
+    }
+    fn provisioning_status(&self) -> crate::provisioning::ProvisioningStatus {
+        Self::provisioning_status(self)
+    }
+    fn provisioned_resource(
+        &self,
+        kind: crate::provisioning::ResourceKind,
+        name: &str,
+    ) -> Option<crate::provisioning::ResourceProvenance> {
+        Self::provisioned_resource(self, kind, name)
     }
     fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
         <Self as crate::MediaSubsystemApi>::media_engine(self)

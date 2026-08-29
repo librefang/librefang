@@ -26,6 +26,7 @@ import hashlib
 import posixpath
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -89,9 +90,21 @@ SECRET_ASSIGNMENT = re.compile(
 # `vault:` and `env:` values are indirections, which is the pattern this check exists to steer people towards rather than away from.
 SECRET_INDIRECTIONS = ("vault:", "env:")
 
-# `include = [...]` pulls further TOML files into the effective configuration, but the checksum on `GET /api/config/status` is computed over the primary file's raw bytes alone.
-# Editing an included file would therefore leave the checksum unchanged, and an operator using it to confirm a rollout landed gets a false negative — so the annotation this overlay is built around would stop meaning what it says.
-INCLUDE_DIRECTIVE = re.compile(r"^\s*include\s*=", re.MULTILINE)
+# `include = [...]` pulls further TOML files into the effective configuration.
+# Since #6695 the checksum on `GET /api/config/status` covers the whole include closure rather than the primary file alone, so an included file can be part of a managed deployment — but only when the manifest actually renders it, which is what `check_include_targets` below verifies.
+INCLUDE_ARRAY = re.compile(r"^[ \t]*include[ \t]*=[ \t]*\[(.*?)\]", re.MULTILINE | re.DOTALL)
+INCLUDE_ITEM = re.compile(r"""["']([^"']+)["']""")
+
+# Mirrors `MAX_INCLUDE_DEPTH` in crates/librefang-kernel/src/config.rs.
+MAX_INCLUDE_DEPTH = 10
+
+# Declarative resource provisioning (#6695).
+# `LIBREFANG_PROVISIONING_PATH` switches the feature on; unset means off, so the checks below stay silent for every manifest that has not opted in.
+# A ConfigMap mounts its keys flat in one directory, so the mount has to supply `<root>/agents` rather than the root itself.
+PROVISIONING_PATH_ENV = "LIBREFANG_PROVISIONING_PATH"
+PROVISIONING_PRUNE_ENV = "LIBREFANG_PROVISIONING_PRUNE"
+PROVISIONING_AGENTS_SUBDIR = "agents"
+PROVISIONING_CHECKSUM_ANNOTATION = "checksum/provisioning"
 
 
 class Failures:
@@ -505,9 +518,14 @@ def check_managed_config(
         )
         return
 
+    data = config_map.get("data", {})
     check_no_secret_values(cm_name, config_key, contents, failures)
-    check_no_include(cm_name, config_key, contents, failures)
-    check_checksum_annotation(template, contents, failures)
+    chain = check_include_targets(
+        cm_name, config_key, data, bool(mount.get("subPath")), failures
+    )
+    if chain is None:
+        return
+    check_checksum_annotation(template, data, chain, failures)
 
 
 def _find_config_mount(
@@ -544,37 +562,97 @@ def check_no_secret_values(
         )
 
 
-def check_no_include(
-    cm_name: str, key: str, contents: str, failures: Failures
-) -> None:
-    """A managed config must be one file, because its checksum only covers one.
+def check_include_targets(
+    cm_name: str,
+    config_key: str,
+    data: dict[str, str],
+    mount_is_subpath: bool,
+    failures: Failures,
+) -> list[str] | None:
+    """Resolve `include = [...]` against the ConfigMap's own keys and return the source chain.
 
-    Of the three ways to reconcile `include` with the checksum — hash the transitive closure, refuse `include`, or document primary-file-only and tell operators not to key rollouts on it — this overlay takes the second, and only within its own scope.
-    It is the option that keeps the annotation honest without changing what the daemon computes, and a managed deployment loses nothing by it: the file is generated from a manifest, so composing it is the manifest's job rather than the config loader's.
+    The daemon resolves an include relative to the primary file's directory, and a directory-mounted ConfigMap puts every data key in that one directory — so `include = ["extra.toml"]` works exactly when `extra.toml` is another key of the same ConfigMap.
+    Anything else the daemon would silently skip or fail to read, which is worth catching in CI rather than at boot.
+
+    Returns the ordered, deduplicated list of contributing keys (primary first), or `None` when the chain is unusable and the caller should stop.
     """
-    if INCLUDE_DIRECTIVE.search(contents):
+    if mount_is_subpath and INCLUDE_ARRAY.search(data.get(config_key, "")):
         failures.fail(
-            f"ConfigMap {cm_name!r} key {key!r} uses `include = [...]`. The "
-            "checksum on GET /api/config/status covers this file's bytes only, "
-            "so an edit to an included file would leave it unchanged and the "
-            "checksum annotation would report a rollout that never happened. "
-            "Compose the configuration in the manifest — a kustomize patch, or "
-            "one ConfigMap key — so the file the daemon hashes is the whole of "
-            "what it reads."
+            f"ConfigMap {cm_name!r} key {config_key!r} uses `include = [...]` "
+            "but is mounted with a subPath, which exposes this one file and "
+            "nothing else. The included files would not exist in the "
+            "container. Mount the whole directory instead."
         )
+        return None
+
+    chain: list[str] = []
+    seen: set[str] = set()
+
+    def walk(key: str, depth: int) -> bool:
+        if key in seen:
+            return True
+        seen.add(key)
+        chain.append(key)
+        if depth >= MAX_INCLUDE_DEPTH:
+            failures.fail(
+                f"ConfigMap {cm_name!r} `include` nesting exceeds the daemon's "
+                f"maximum depth of {MAX_INCLUDE_DEPTH}."
+            )
+            return False
+        match = INCLUDE_ARRAY.search(data.get(key, ""))
+        if match is None:
+            return True
+        for target in INCLUDE_ITEM.findall(match.group(1)):
+            if target.startswith("/") or ".." in target.split("/"):
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}. "
+                    "The daemon rejects absolute paths and `..` components, so "
+                    "this include is silently skipped and the file it names "
+                    "never reaches the effective configuration."
+                )
+                return False
+            if "/" in target:
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}, "
+                    "but a ConfigMap key cannot contain '/' and every key is "
+                    "mounted flat in one directory. A subdirectory include can "
+                    "never resolve here."
+                )
+                return False
+            if target not in data:
+                failures.fail(
+                    f"ConfigMap {cm_name!r} key {key!r} includes {target!r}, "
+                    f"which this kustomization does not render — it has "
+                    f"{sorted(data)!r}. Add it to the configMapGenerator, or "
+                    "fold its contents into the primary file."
+                )
+                return False
+            if not walk(target, depth + 1):
+                return False
+        return True
+
+    if not walk(config_key, 0):
+        return None
+    return chain
 
 
 def check_checksum_annotation(
-    template: dict[str, Any], contents: str, failures: Failures
+    template: dict[str, Any],
+    data: dict[str, str],
+    chain: list[str],
+    failures: Failures,
 ) -> None:
     """The rollout trigger and the rollout *proof* must be the same string.
 
-    `GET /api/config/status` reports `sha256:<hex>` over the config file's raw bytes, and the ConfigMap's data value is those bytes.
+    `GET /api/config/status` reports `sha256:<hex>` over everything that contributes to the effective configuration, and the ConfigMap's data values are those bytes.
     Pinning the annotation to the same digest means one comparison answers both "will editing the config roll the pod?" and "is the running daemon on the file I edited?" — and a stale annotation, which would silently skip the rollout, fails here instead of in production.
+
+    With no `include` the digest is over the primary file's raw bytes, unchanged from before the include closure was folded in, so an existing annotation keeps matching.
+    With includes it is the digest of `sha256sum` output over the chain, matching `config_provenance` in crates/librefang-kernel/src/config.rs.
     """
     annotations = template.get("metadata", {}).get("annotations", {})
     actual = annotations.get(CHECKSUM_ANNOTATION)
-    expected = f"sha256:{hashlib.sha256(contents.encode()).hexdigest()}"
+    expected = f"sha256:{expected_config_digest(data, chain)}"
 
     if actual is None:
         failures.fail(
@@ -591,6 +669,217 @@ def check_checksum_annotation(
         f"to {expected!r}. The config changed and the annotation did not, so "
         "applying this would not roll the StatefulSet and the annotation would "
         "no longer match the checksum GET /api/config/status reports.",
+    )
+
+
+def expected_config_digest(data: dict[str, str], chain: list[str]) -> str:
+    """The hex digest `GET /api/config/status` will report for this ConfigMap."""
+    if len(chain) <= 1:
+        return hashlib.sha256(data[chain[0]].encode()).hexdigest()
+    manifest = "".join(
+        f"{hashlib.sha256(data[key].encode()).hexdigest()}  {key}\n" for key in chain
+    )
+    return hashlib.sha256(manifest.encode()).hexdigest()
+
+
+def check_provisioning(
+    docs: list[dict[str, Any]], sts: dict[str, Any], failures: Failures
+) -> None:
+    """The declarative provisioning tree, when the manifest opts into one (#6695).
+
+    Silent unless the container sets `LIBREFANG_PROVISIONING_PATH`, so the base kustomization and every existing deployment pass unchanged.
+
+    The daemon reconciles this tree at boot and then locks each declared agent individually, which makes the manifest the only place those agents can be changed — so the same two things have to hold as for the managed config: the files have to actually reach the container, and editing them has to roll the pod.
+    """
+    template = sts.get("spec", {}).get("template", {})
+    pod_spec = template.get("spec", {})
+    containers = pod_spec.get("containers", [])
+    if len(containers) != 1:
+        return
+    container = containers[0]
+    env = {e.get("name"): e for e in container.get("env", []) if isinstance(e, dict)}
+
+    if PROVISIONING_PATH_ENV not in env:
+        return
+
+    entry = env[PROVISIONING_PATH_ENV]
+    if "value" not in entry:
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} must be set as a literal `value`, not "
+            "valueFrom. Which resources the deployment owns has to be readable "
+            "from the manifest rather than from another object."
+        )
+        return
+
+    root = entry["value"].strip()
+    if not root:
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} is empty, which the daemon reads as "
+            "provisioning being switched off. Remove the variable or give it a "
+            "path."
+        )
+        return
+    if not posixpath.isabs(root):
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} must be an absolute path, got {root!r}."
+        )
+        return
+    if root == DATA_DIR or root.startswith(DATA_DIR + "/"):
+        failures.fail(
+            f"{PROVISIONING_PATH_ENV} is {root!r}, inside {DATA_DIR}. The "
+            "provisioning tree is deployment-owned and the PVC is runtime "
+            "state; putting one inside the other gives the same file two "
+            "owners."
+        )
+        return
+
+    prune = env.get(PROVISIONING_PRUNE_ENV, {}).get("value")
+    if prune is not None and prune.strip() and prune.strip().lower() != "delete":
+        failures.fail(
+            f"{PROVISIONING_PRUNE_ENV} is {prune!r}, which the daemon reads as "
+            "`keep` — only the exact word `delete` prunes. Set it to `delete` "
+            "or remove it, rather than leaving a value that reads as intent it "
+            "does not carry."
+        )
+
+    agents_dir = posixpath.join(root, PROVISIONING_AGENTS_SUBDIR)
+    mount = next(
+        (
+            m
+            for m in container.get("volumeMounts", [])
+            if not m.get("subPath") and m.get("mountPath") == agents_dir
+        ),
+        None,
+    )
+    if mount is None:
+        failures.fail(
+            f"no volumeMount supplies {agents_dir!r}. A ConfigMap mounts its "
+            "keys flat in one directory, so the agent declarations have to be "
+            f"mounted at the `{PROVISIONING_AGENTS_SUBDIR}` subdirectory of the "
+            "provisioning root, not at the root."
+        )
+        return
+
+    failures.check(
+        mount.get("readOnly") is True,
+        f"the volumeMount supplying {agents_dir!r} must set readOnly: true. "
+        "The daemon never writes into the provisioning tree — a provisioned "
+        "agent's manifest is materialised into its own workspace instead — so "
+        "a writable mount states an intention the daemon does not have.",
+    )
+
+    volume = next(
+        (v for v in pod_spec.get("volumes", []) if v.get("name") == mount.get("name")),
+        None,
+    )
+    if volume is None or "configMap" not in volume:
+        failures.fail(
+            f"volume {mount.get('name')!r} must be a configMap volume — "
+            "provisioned resources come from the manifest, and this checker "
+            "verifies the checksum annotation against its rendered contents."
+        )
+        return
+
+    cm_name = volume["configMap"].get("name")
+    config_map = next(
+        (
+            d
+            for d in docs
+            if d.get("kind") == "ConfigMap" and d.get("metadata", {}).get("name") == cm_name
+        ),
+        None,
+    )
+    if config_map is None:
+        failures.fail(
+            f"ConfigMap {cm_name!r} is referenced but not rendered by this "
+            "kustomization. An out-of-band ConfigMap cannot be checked here, "
+            "and the checksum annotation could not be verified against it."
+        )
+        return
+
+    data = config_map.get("data", {})
+    if not data:
+        failures.fail(
+            f"ConfigMap {cm_name!r} renders no data, so the provisioning tree "
+            "is empty and the feature does nothing. Remove "
+            f"{PROVISIONING_PATH_ENV} or declare a resource."
+        )
+        return
+
+    for key in sorted(data):
+        check_provisioned_agent(cm_name, key, data[key], failures)
+        check_no_secret_values(cm_name, key, data[key], failures)
+
+    check_provisioning_checksum(template, data, failures)
+
+
+def check_provisioned_agent(
+    cm_name: str, key: str, contents: str, failures: Failures
+) -> None:
+    """One declaration the daemon has to be able to use.
+
+    The reconcile records a bad file as a failure and carries on rather than refusing to boot, which is the right behaviour at runtime and the wrong place to discover a typo — the agent is simply missing, and only `GET /api/provisioning/status` says why.
+    Catching it here means the manifest does not merge in the first place.
+    """
+    if not key.endswith(".toml"):
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} is not a `.toml` file. The "
+            "reconcile only reads `*.toml` from the agents directory, so this "
+            "key is mounted and ignored."
+        )
+        return
+
+    try:
+        parsed = tomllib.loads(contents)
+    except tomllib.TOMLDecodeError as exc:
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} is not valid TOML: {exc}. The "
+            "daemon would record this as a provisioning failure and start "
+            "without the agent."
+        )
+        return
+
+    name = parsed.get("name")
+    if not isinstance(name, str) or not name.strip():
+        failures.fail(
+            f"ConfigMap {cm_name!r} key {key!r} declares no `name`. The "
+            "resource identifier is the manifest's `name`, not the file name, "
+            "and the reconcile refuses a manifest without one rather than "
+            "provisioning an agent called `unnamed`."
+        )
+
+
+def check_provisioning_checksum(
+    template: dict[str, Any], data: dict[str, str], failures: Failures
+) -> None:
+    """Editing a declaration has to roll the pod, exactly as editing the config does.
+
+    The reconcile runs at boot and nowhere else, so a ConfigMap edit that does not roll the StatefulSet changes nothing at all — and `GET /api/provisioning/status` would report the resource as `drifted` indefinitely with no indication that a rollout was ever expected.
+    """
+    annotations = template.get("metadata", {}).get("annotations", {})
+    actual = annotations.get(PROVISIONING_CHECKSUM_ANNOTATION)
+    manifest = "".join(
+        f"{hashlib.sha256(data[key].encode()).hexdigest()}  {key}\n"
+        for key in sorted(data)
+    )
+    expected = f"sha256:{hashlib.sha256(manifest.encode()).hexdigest()}"
+
+    if actual is None:
+        failures.fail(
+            f"the pod template has no {PROVISIONING_CHECKSUM_ANNOTATION!r} "
+            "annotation. The provisioning tree is reconciled at boot only, so "
+            "without it an edited declaration leaves the pod template "
+            "identical and never reaches a running daemon. Expected "
+            f"{expected!r}."
+        )
+        return
+
+    failures.check(
+        actual == expected,
+        f"{PROVISIONING_CHECKSUM_ANNOTATION} is {actual!r} but the rendered "
+        f"declarations hash to {expected!r}. A declaration changed and the "
+        "annotation did not, so applying this would not roll the StatefulSet "
+        "and the daemon would keep provisioning the old manifest.",
     )
 
 
@@ -693,6 +982,7 @@ def main(argv: list[str]) -> int:
         else:
             check_statefulset(sts, failures)
             check_managed_config(docs, sts, failures)
+            check_provisioning(docs, sts, failures)
 
         check_services(docs, sts, failures)
         check_no_inline_secrets(docs, failures)
