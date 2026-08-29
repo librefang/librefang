@@ -165,6 +165,41 @@ def check_repository_automation() -> None:
         if required not in desktop_source:
             raise SystemExit(f"desktop release hardening is missing: {required}")
 
+    label_sync = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "label-sync.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if label_sync.get("concurrency") != {
+        "group": "label-sync",
+        "cancel-in-progress": False,
+    }:
+        raise SystemExit("label reconciliation does not serialize complete runs")
+    label_sync_job = label_sync.get("jobs", {}).get("sync", {})
+    if label_sync_job.get("timeout-minutes") != 5:
+        raise SystemExit("label reconciliation no longer has a five-minute bound")
+    if label_sync_job.get("permissions") != {
+        "contents": "read",
+        "issues": "write",
+    }:
+        raise SystemExit("label reconciliation lacks minimal checkout/write permissions")
+    expected_label_sync_actions = {
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a",
+    }
+    actual_label_sync_actions = {
+        step.get("uses")
+        for step in label_sync_job.get("steps", [])
+        if isinstance(step.get("uses"), str)
+    }
+    if actual_label_sync_actions != expected_label_sync_actions:
+        raise SystemExit("label reconciliation action pins drifted")
+    if any(
+        FULL_SHA.fullmatch(uses.rsplit("@", 1)[1]) is None
+        for uses in actual_label_sync_actions
+    ):
+        raise SystemExit("label reconciliation has a non-SHA action pin")
+
     devto_workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "devto-publish.yml").read_text(
             encoding="utf-8"
