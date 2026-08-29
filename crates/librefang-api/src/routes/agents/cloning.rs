@@ -184,8 +184,25 @@ fn copy_clone_identity_files(
     let src_identity = src_can.join(".identity");
     let dst_identity = dst_can.join(".identity");
     std::fs::create_dir_all(&dst_identity)?;
+    // A `.identity` that exists but is not a directory has to be detected here, not through the per-file `try_exists()` below.
+    // Unix surfaces the bad path component as ENOTDIR, but Windows reports ERROR_PATH_NOT_FOUND, which std maps to `NotFound` and `try_exists()` reduces to `Ok(false)` — the clone would then silently fall back to the legacy workspace-root copy and report success (#7547).
+    let migrated_identity_is_not_a_directory = std::fs::metadata(&src_identity)
+        .map(|metadata| !metadata.is_dir())
+        .unwrap_or(false);
     let mut first_error = None;
     for &filename in KNOWN_IDENTITY_FILES {
+        if migrated_identity_is_not_a_directory {
+            first_error.get_or_insert_with(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!(
+                        "failed to inspect migrated identity file {filename}: {} is not a directory",
+                        src_identity.display()
+                    ),
+                )
+            });
+            continue;
+        }
         // Source: prefer .identity/ (post-migration), fall back to workspace root.
         let migrated_source = src_identity.join(filename);
         let source = match migrated_source.try_exists() {
@@ -289,6 +306,11 @@ mod tests {
         let error = copy_clone_identity_files(&source, &destination)
             .expect_err("malformed migrated identity path must be reported");
         assert!(error.to_string().contains("migrated identity file SOUL.md"));
+        // The legacy root copy must not stand in for an unreadable `.identity`: a clone that quietly resurrects a pre-migration file is worse than one that reports the failure.
+        assert!(
+            !destination.join(".identity/SOUL.md").exists(),
+            "unreadable .identity must not fall back to the legacy workspace-root file"
+        );
     }
 
     #[test]
