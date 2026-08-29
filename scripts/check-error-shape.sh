@@ -7,7 +7,7 @@
 # four are being unified onto `ApiErrorResponse` (`{"error": "<string>"}`,
 # defined in `crates/librefang-api/src/types.rs`).
 #
-# This script grep-rejects new occurrences of the two ad-hoc shapes from
+# This script rejects new occurrences of the two ad-hoc shapes from
 # coming back into route handlers. It enforces the rule on already-clean
 # files. Files that still carry legacy shapes are listed in
 # LEGACY_FILES below with their cleanup tracking issue, and are exempt
@@ -64,35 +64,65 @@ LEGACY_FILES=(
   "crates/librefang-api/src/routes/config/system.rs"
 )
 
-# Build an extended-regex alternation of legacy paths for grep filtering.
-LEGACY_RE=""
-for f in "${LEGACY_FILES[@]}"; do
-  if [ -z "$LEGACY_RE" ]; then
-    LEGACY_RE="^${f}:"
-  else
-    LEGACY_RE="${LEGACY_RE}|^${f}:"
+# Scan complete Rust source files so rustfmt line wrapping cannot hide a
+# forbidden first JSON key. Python is already required by the repository's CI
+# and gives every platform the same multiline-regex semantics.
+search_routes() {
+  local shape=$1
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "::error::python3 is required for multiline error-shape scanning." >&2
+    return 2
   fi
-done
+  python3 - "$ROUTES_DIR" "$shape" <<'PY'
+import os
+import re
+import sys
 
-# Prefer ripgrep (fast). Fall back to grep -RHn so the script still
-# works in stripped-down CI containers that don't bundle ripgrep.
-if command -v rg >/dev/null 2>&1; then
-  search_multi() { rg --no-heading --line-number -U "$@"; }
-  search_line()  { rg --no-heading --line-number "$@"; }
-else
-  search_multi() { grep -RHnP "$@"; }
-  search_line()  { grep -RHnE "$@"; }
-fi
+root, shape = sys.argv[1:]
+patterns = {
+    "detail": re.compile(r'json\s*!\s*\(\s*\{\s*"detail"\s*:', re.DOTALL),
+    "status_error": re.compile(
+        r'json\s*!\s*\(\s*\{\s*"status"\s*:\s*"error"', re.DOTALL
+    ),
+}
+try:
+    pattern = patterns[shape]
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        directories.sort()
+        for filename in sorted(filenames):
+            if not filename.endswith(".rs"):
+                continue
+            path = os.path.join(directory, filename)
+            if os.path.islink(path):
+                continue
+            with open(path, encoding="utf-8", errors="replace") as source:
+                text = source.read()
+            lines = text.splitlines()
+            for match in pattern.finditer(text):
+                line_number = text.count("\n", 0, match.start()) + 1
+                excerpt = lines[line_number - 1].strip() if lines else ""
+                print(f"{path}:{line_number}:{excerpt}")
+except (OSError, KeyError) as error:
+    print(f"::error::error-shape search failed: {error}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
 
-# Filter out hits in the legacy allowlist. Using `grep -Ev` keeps the
-# script readable; the alternation regex is anchored on `^path:` so a
-# substring match in a comment cannot mask hits in other files.
+# Filter out hits in the legacy allowlist by exact path, never by regex.
 filter_legacy() {
-  if [ -z "$LEGACY_RE" ]; then
-    cat
-  else
-    grep -Ev "$LEGACY_RE" || true
-  fi
+  local line path legacy skip
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    path=${line%%:*}
+    skip=0
+    for legacy in "${LEGACY_FILES[@]}"; do
+      if [ "$path" = "$legacy" ]; then
+        skip=1
+        break
+      fi
+    done
+    [ "$skip" = 1 ] || printf '%s\n' "$line"
+  done
 }
 
 violations=0
@@ -104,8 +134,15 @@ violations=0
 # with `"detail"` as the first key. The cheapest reliable heuristic:
 # require the literal `json!({"detail":` so the AuditEntry row case
 # (`json!({ "seq": …, "detail": …, … })`) is naturally excluded.
-detail_hits=$(search_multi 'json!\(\{\s*"detail"\s*:' "$ROUTES_DIR" 2>/dev/null || true)
-detail_hits_filtered=$(printf '%s\n' "$detail_hits" | filter_legacy | grep -Ev ':[[:space:]]*///' | sed '/^$/d' || true)
+if ! detail_hits=$(search_routes detail); then
+  exit 2
+fi
+detail_hits_filtered=""
+if [ -n "$detail_hits" ]; then
+  detail_hits_filtered=$(printf '%s\n' "$detail_hits" \
+    | filter_legacy \
+    | grep -Ev ':[0-9]+:[[:space:]]*///' || true)
+fi
 if [ -n "$detail_hits_filtered" ]; then
   echo "::error::Found forbidden '{\"detail\": …}' error shape (issue #3505):"
   echo "$detail_hits_filtered"
@@ -119,8 +156,15 @@ fi
 # Pattern 2: `{"status": "error", …}` shape. Strip out `///` doc-comment
 # lines so a doc string explaining why the shape is gone doesn't trip
 # the lint.
-status_hits=$(search_line '"status"[[:space:]]*:[[:space:]]*"error"' "$ROUTES_DIR" 2>/dev/null || true)
-status_hits_filtered=$(printf '%s\n' "$status_hits" | filter_legacy | grep -Ev ':[[:space:]]*///' | sed '/^$/d' || true)
+if ! status_hits=$(search_routes status_error); then
+  exit 2
+fi
+status_hits_filtered=""
+if [ -n "$status_hits" ]; then
+  status_hits_filtered=$(printf '%s\n' "$status_hits" \
+    | filter_legacy \
+    | grep -Ev ':[0-9]+:[[:space:]]*///' || true)
+fi
 if [ -n "$status_hits_filtered" ]; then
   echo "::error::Found forbidden '{\"status\": \"error\", …}' shape (issue #3505):"
   echo "$status_hits_filtered"
