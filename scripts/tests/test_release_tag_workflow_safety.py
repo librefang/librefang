@@ -136,6 +136,45 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    auto_update = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "auto-update-branches.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    if auto_update.get("permissions") != {"contents": "read"}:
+        raise SystemExit("branch reconciliation does not default to read-only")
+    update_job = auto_update.get("jobs", {}).get("update-branches", {})
+    if "permissions" in update_job:
+        raise SystemExit("branch reconciliation grants the default token write access")
+    if (
+        update_job.get("if") != "github.event_name != 'pull_request'"
+        or update_job.get("needs") != "test-helper"
+    ):
+        raise SystemExit("branch reconciliation mutations are not gated behind tests")
+    update_steps = update_job.get("steps", [])
+    privileged_checkout = update_steps[0].get("with", {}) if update_steps else {}
+    if (
+        privileged_checkout.get("ref")
+        != "${{ github.event.repository.default_branch }}"
+        or privileged_checkout.get("persist-credentials") is not False
+    ):
+        raise SystemExit("branch reconciliation executes an untrusted helper")
+    github_script = next(
+        (
+            step
+            for step in update_steps
+            if str(step.get("uses", "")).startswith("actions/github-script@")
+        ),
+        {},
+    )
+    if github_script.get("with", {}).get("github-token") != (
+        "${{ secrets.WEBSITE_REPO_TOKEN }}"
+    ):
+        raise SystemExit("branch reconciliation does not use its explicit PAT")
+    reconciliation_script = github_script.get("with", {}).get("script", "")
+    if "expected_head_sha: ref" not in reconciliation_script:
+        raise SystemExit("branch reconciliation has no head-movement guard")
+
     dependabot = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "auto-merge-dependabot.yml").read_text(
             encoding="utf-8"
