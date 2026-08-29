@@ -84,6 +84,19 @@ fn json_err(status: StatusCode, error: &str, message: impl AsRef<str>) -> Respon
         .into_response()
 }
 
+fn internal_error_response(
+    error_code: &'static str,
+    operation: &'static str,
+    error: &impl std::fmt::Display,
+) -> Response {
+    tracing::error!(%error, operation, "passkey request failed");
+    json_err(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error_code,
+        "Internal server error.",
+    )
+}
+
 /// 503 when passkey login is not enabled / misconfigured.
 fn engine_unavailable() -> Response {
     json_err(
@@ -107,10 +120,10 @@ fn engine_error_response(e: PasskeyError) -> Response {
             "webauthn_failed",
             inner.to_string(),
         ),
-        PasskeyError::CorruptCredential(inner) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
+        PasskeyError::CorruptCredential(inner) => internal_error_response(
             "corrupt_credential",
-            inner.to_string(),
+            "deserialize stored credential",
+            &inner,
         ),
     }
 }
@@ -168,13 +181,7 @@ pub(crate) async fn registration_options(
 
     let existing = match state.passkey_store.list_for_user(&user.name) {
         Ok(rows) => parse_stored_passkeys(&rows),
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("store_error", "list credentials", &e),
     };
 
     match engine.start_registration(&user.name, &existing) {
@@ -225,13 +232,7 @@ pub(crate) async fn registration_verify(
     let credential_id = encode_credential_id(passkey.cred_id());
     let cred_json = match serde_json::to_string(&passkey) {
         Ok(s) => s,
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "serialize_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("serialize_error", "serialize credential", &e),
     };
     let label = body
         .label
@@ -245,11 +246,7 @@ pub(crate) async fn registration_verify(
         label,
     );
     if let Err(e) = state.passkey_store.insert(&record) {
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        );
+        return internal_error_response("store_error", "insert credential", &e);
     }
 
     tracing::info!(user = %user.name, %credential_id, "passkey registered");
@@ -283,13 +280,7 @@ pub(crate) async fn authentication_options(
 
     let passkeys = match state.passkey_store.list_for_user(&principal) {
         Ok(rows) => parse_stored_passkeys(&rows),
-        Err(e) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_error",
-                e.to_string(),
-            )
-        }
+        Err(e) => return internal_error_response("store_error", "list credentials", &e),
     };
     if passkeys.is_empty() {
         return json_err(
@@ -319,6 +310,8 @@ pub(crate) async fn authentication_options(
     responses(
         (status = 200, description = "Session token (same shape as dashboard-login)", body = crate::types::JsonObject),
         (status = 400, description = "Assertion verification failed"),
+        (status = 409, description = "Credential changed during authentication"),
+        (status = 500, description = "Credential persistence failed"),
         (status = 503, description = "Passkey login not enabled")
     )
 )]
@@ -340,32 +333,83 @@ pub(crate) async fn authentication_verify(
     let credential_id = encode_credential_id(auth_result.cred_id());
     // Look up the asserted credential to (a) persist any sign-count bump and
     // (b) learn which principal it authenticates as.
-    let Some(record) = state.passkey_store.get(&credential_id).ok().flatten() else {
-        // The assertion verified against in-flight state but the row vanished
-        // (revoked mid-ceremony). Treat as a failed login.
-        return json_err(
-            StatusCode::BAD_REQUEST,
-            "unknown_credential",
-            "The asserted passkey is no longer registered.",
-        );
+    let mut record = match state.passkey_store.get(&credential_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            // The assertion verified against in-flight state but the row vanished
+            // (revoked mid-ceremony). Treat as a failed login.
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "unknown_credential",
+                "The asserted passkey is no longer registered.",
+            );
+        }
+        Err(e) => return internal_error_response("store_error", "load credential", &e),
     };
 
-    // Update the stored credential's sign-count / last-used. We re-serialize
-    // unconditionally so `last_used_at` is always fresh; the counter bump is
-    // applied via `update_credential`.
-    if let Ok(mut passkey) = serde_json::from_str::<Passkey>(&record.cred) {
-        passkey.update_credential(&auth_result);
-        if let Ok(cred_json) = serde_json::to_string(&passkey) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if let Err(e) = state
-                .passkey_store
-                .update_cred(&credential_id, &cred_json, now)
-            {
-                tracing::warn!(error = %e, %credential_id, "failed to persist passkey sign-count update");
+    // Apply sign-count and backup-state changes with optimistic concurrency.
+    // A concurrent assertion may advance the same row after our read; reload
+    // that value and reapply this monotonic authentication result instead of
+    // overwriting the newer counter.
+    const MAX_CAS_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_CAS_ATTEMPTS {
+        let mut passkey = match serde_json::from_str::<Passkey>(&record.cred) {
+            Ok(passkey) => passkey,
+            Err(e) => {
+                return internal_error_response(
+                    "corrupt_credential",
+                    "deserialize asserted credential",
+                    &e,
+                )
             }
+        };
+        if passkey.update_credential(&auth_result).is_none() {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "credential_mismatch",
+                "The asserted passkey does not match the stored credential.",
+            );
+        }
+        let cred_json = match serde_json::to_string(&passkey) {
+            Ok(json) => json,
+            Err(e) => {
+                return internal_error_response("serialize_error", "serialize credential", &e)
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        match state.passkey_store.compare_and_update_cred(
+            &credential_id,
+            &record.cred,
+            &cred_json,
+            now,
+        ) {
+            Ok(true) => break,
+            Ok(false) if attempt < MAX_CAS_ATTEMPTS => {
+                record = match state.passkey_store.get(&credential_id) {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        return json_err(
+                            StatusCode::BAD_REQUEST,
+                            "unknown_credential",
+                            "The asserted passkey is no longer registered.",
+                        )
+                    }
+                    Err(e) => {
+                        return internal_error_response("store_error", "reload credential", &e)
+                    }
+                };
+            }
+            Ok(false) => {
+                return json_err(
+                    StatusCode::CONFLICT,
+                    "concurrent_authentication",
+                    "The passkey changed during authentication; retry login.",
+                )
+            }
+            Err(e) => return internal_error_response("store_error", "update credential", &e),
         }
     }
 
@@ -421,11 +465,7 @@ pub(crate) async fn list_credentials(
                 .collect();
             Json(serde_json::json!({ "credentials": items })).into_response()
         }
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        ),
+        Err(e) => internal_error_response("store_error", "list credentials", &e),
     }
 }
 
@@ -465,11 +505,27 @@ pub(crate) async fn revoke_credential(
             "not_found",
             "No such passkey credential for this account.",
         ),
-        Err(e) => json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store_error",
-            e.to_string(),
-        ),
+        Err(e) => internal_error_response("store_error", "delete credential", &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn internal_passkey_errors_are_scrubbed_from_http_body() {
+        let sensitive_error = "database /srv/librefang/passkeys.db is not writable";
+        let response = internal_error_response("store_error", "list credentials", &sensitive_error);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("store_error"));
+        assert!(body.contains("Internal server error."));
+        assert!(!body.contains("/srv/librefang/passkeys.db"));
+        assert!(!body.contains("not writable"));
     }
 }
 
