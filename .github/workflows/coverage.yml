@@ -66,13 +66,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The instrumented workspace build does not fit the runner's default free space.
-      # `cargo llvm-cov nextest --workspace` writes a debug + coverage-instrumented target tree
-      # for ~12k tests, and this job has failed intermittently on `main` at the very last step —
-      # every test passing, then `failed to write to file lcov.info: No space left on device
-      # (os error 28)`. Alternating success and failure on neighbouring commits is the signature
-      # of a capacity race, not a regression, so the fix belongs here rather than in the report.
-      # None of the preinstalled SDKs removed below are used by this job; together they are the
-      # bulk of the image, with the Android SDK alone around 9 GB.
+      # `cargo llvm-cov nextest --workspace` writes a debug + coverage-instrumented target tree for ~12k tests, and this job has failed intermittently on `main` at the very last step — every test passing, then `failed to write to file lcov.info: No space left on device (os error 28)`.
+      # Alternating success and failure on neighbouring commits is the signature of a capacity race, not a regression, so the fix belongs here rather than in the report.
+      # None of the preinstalled SDKs removed below are used by this job; together they are the bulk of the image, with the Android SDK alone around 9 GB.
       - name: Free runner disk space
         run: |
           echo "before: $(df -h --output=avail / | tail -1 | tr -d ' ') available"
