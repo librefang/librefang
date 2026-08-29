@@ -306,8 +306,7 @@ mod tests {
         let error = copy_clone_identity_files(&source, &destination)
             .expect_err("malformed migrated identity path must be reported");
         assert!(error.to_string().contains("migrated identity file SOUL.md"));
-        // The legacy root copy must not stand in for an unreadable `.identity`: a clone that
-        // quietly resurrects a pre-migration file is worse than one that reports the failure.
+        // The legacy root copy must not stand in for an unreadable `.identity`: a clone that quietly resurrects a pre-migration file is worse than one that reports the failure.
         assert!(
             !destination.join(".identity/SOUL.md").exists(),
             "unreadable .identity must not fall back to the legacy workspace-root file"
