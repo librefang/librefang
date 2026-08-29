@@ -5,13 +5,13 @@
 # Why bash, not /bin/sh: we build argv as arrays so that workspace paths containing spaces (e.g. `~/My Workspace/librefang`) survive being passed to `docker run -v`. POSIX sh has no arrays; string concat + unquoted word-splitting would break on the first space. Bash 3.2 is present on macOS by default and on every supported Linux distro.
 #
 # Mounts (read-only, into the container):
-#   ~/.gitconfig                → /home/dev/.gitconfig — so `git commit` inside the container uses your identity.
-#   ~/.ssh                      → /home/dev/.ssh       — so `git push` over SSH works.
-#   ~/.config/gh                → /home/dev/.config/gh — so `gh` finds its hosts.yml (the token may live in the macOS keychain — see GH_TOKEN passthrough below).
+#   ~/.gitconfig                → /tmp/host.gitconfig — included by a synthesized config in the private guest home.
+#   ~/.ssh                      → /tmp/librefang-host-ssh — linked into the private guest home so `git push` over SSH works.
+#   ~/.config/gh                → /tmp/librefang-host-gh  — linked into the private guest home so `gh` finds its hosts.yml (the token may live in the macOS keychain — see GH_TOKEN passthrough below).
 #   <main-repo>                 — when the caller is in a linked worktree, the main repo's checkout is also mounted at its host absolute path.
 #                                 Linked worktrees keep their `.git` as a text file pointing at `<main-repo>/.git/worktrees/<name>` — without this extra mount that absolute path doesn't exist inside the container and every `git` call fails.
 #
-# In-container HOME is fixed at `/home/dev` (set via `-e HOME=/home/dev`) so the same mount layout works whether the container runs as root (macOS Docker Desktop) or as the host uid (Linux, see below). Docker auto-creates the bind-mount targets.
+# In-container HOME is created under `/tmp` by the runtime uid. This keeps it writable when Linux runs the container as an arbitrary host uid and avoids depending on a pre-created image user.
 #
 # Env-var passthrough:
 #   GH_TOKEN                    — if unset on the host, this script tries `gh auth token` (covers macOS where `gh` keeps the token in Keychain instead of `~/.config/gh/hosts.yml`) and forwards the value via `-e GH_TOKEN`.
@@ -49,11 +49,16 @@ EOF
     exit 127
 fi
 
+if ! command -v git >/dev/null 2>&1; then
+    printf '%s\n' 'error: `git` is required to locate the LibreFang workspace.' >&2
+    exit 127
+fi
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 GIT_COMMON_DIR_ABS="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
 MAIN_REPO="$(dirname "$GIT_COMMON_DIR_ABS")"
 IMAGE="${LIBREFANG_RUST_IMAGE:-librefang-rust-dev:latest}"
-GUEST_HOME=/home/dev
+GUEST_HOME=/tmp/librefang-home
 
 if [[ "${LIBREFANG_RUST_IMAGE_REBUILD:-}" == "1" ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "info: building $IMAGE from Dockerfile.rust-dev (one-time, ~10 min)" >&2
@@ -65,27 +70,34 @@ user_args=()
 if [[ "$(uname -s)" == "Linux" ]]; then
     host_uid=$(id -u)
     host_gid=$(id -g)
-    marker="/cargo/.owned-by-${host_uid}"
+    cargo_marker="/cargo/.owned-by-${host_uid}-${host_gid}"
+    target_marker="/target/.owned-by-${host_uid}-${host_gid}"
     if ! docker run --rm \
             -v librefang-cargo:/cargo \
+            -v librefang-target:/target \
             "$IMAGE" \
-            test -f "$marker" >/dev/null 2>&1; then
+            sh -c 'test -f "$1" && test -f "$2"' \
+            sh "$cargo_marker" "$target_marker" >/dev/null 2>&1; then
         echo "info: chowning librefang-cargo + librefang-target volumes to ${host_uid}:${host_gid} (one-time)" >&2
         docker run --rm \
             --user 0:0 \
             -v librefang-cargo:/cargo \
             -v librefang-target:/target \
             "$IMAGE" \
-            sh -c "chown -R ${host_uid}:${host_gid} /cargo /target && touch '$marker'"
+            sh -c 'chown -R "$1:$2" /cargo /target && touch "$3" "$4"' \
+            sh "$host_uid" "$host_gid" "$cargo_marker" "$target_marker"
     fi
     user_args=(--user "${host_uid}:${host_gid}")
 fi
 
 # Build the inner command with POSIX-safe single-quote escaping so args containing spaces or quotes survive the `sh -c` wrapper inside the container.
 # Synthesize a container-side gitconfig that `[include]`s the host's gitconfig (mounted at /tmp/host.gitconfig — see mounts below) for user.*/alias.* AND then overrides any `credential.helper` that hard-codes a host-only absolute path. The double `helper =` form first clears (resets) the included value, then installs a relative `!gh auth git-credential` that resolves in both /usr/bin/gh (container) and /opt/homebrew/bin/gh (macOS host PATH). This subsumes the previous `gh auth setup-git` call from #5827 — setup-git tried to write /home/dev/.gitconfig, but that path was mounted :ro from the host, so the write silently failed and the host helper kept winning. Direct synthesis at a writeable path is the only reliable fix.
-inner_cmd='export PATH=/usr/local/cargo/bin:$PATH'
+inner_cmd='export PATH="$CARGO_HOME/bin:$PATH"'
+inner_cmd+=' && mkdir -p "$HOME" "$HOME/.config"'
+inner_cmd+=' && if [ -d /tmp/librefang-host-ssh ]; then ln -s /tmp/librefang-host-ssh "$HOME/.ssh"; fi'
+inner_cmd+=' && if [ -d /tmp/librefang-host-gh ]; then ln -s /tmp/librefang-host-gh "$HOME/.config/gh"; fi'
 inner_cmd+=' && if [ -f /tmp/host.gitconfig ]; then'
-inner_cmd+=' printf "[include]\n\tpath = /tmp/host.gitconfig\n[credential]\n\thelper =\n\thelper = !gh auth git-credential\n" > /home/dev/.gitconfig;'
+inner_cmd+=' printf "[include]\n\tpath = /tmp/host.gitconfig\n[credential]\n\thelper =\n\thelper = !gh auth git-credential\n" > "$HOME/.gitconfig";'
 inner_cmd+=' fi'
 inner_cmd+=' && exec cargo xtask'
 for arg in "$@"; do
@@ -94,19 +106,20 @@ for arg in "$@"; do
 done
 
 mounts=(-v "$REPO_ROOT:/work")
+HOST_HOME="${HOME:-}"
 # Mount the main repo at its host path so the `.git` text-file pointer inside a linked worktree resolves; skip when the worktree IS the main repo (would collide on the same target).
 if [[ "$MAIN_REPO" != "$REPO_ROOT" ]]; then
     mounts+=(-v "$MAIN_REPO:$MAIN_REPO")
 fi
 # Mount the host gitconfig at a side path (NOT directly at $GUEST_HOME/.gitconfig). The inner_cmd above writes a real gitconfig at $GUEST_HOME/.gitconfig that includes this one for user/alias settings but overrides any host-absolute-path credential helper. Mounting directly at $GUEST_HOME/.gitconfig:ro would block both the override and any in-container `git config` from working.
-if [[ -f "$HOME/.gitconfig" ]]; then
-    mounts+=(-v "$HOME/.gitconfig:/tmp/host.gitconfig:ro")
+if [[ -n "$HOST_HOME" && -f "$HOST_HOME/.gitconfig" ]]; then
+    mounts+=(-v "$HOST_HOME/.gitconfig:/tmp/host.gitconfig:ro")
 fi
-if [[ -d "$HOME/.ssh" ]]; then
-    mounts+=(-v "$HOME/.ssh:$GUEST_HOME/.ssh:ro")
+if [[ -n "$HOST_HOME" && -d "$HOST_HOME/.ssh" ]]; then
+    mounts+=(-v "$HOST_HOME/.ssh:/tmp/librefang-host-ssh:ro")
 fi
-if [[ -d "$HOME/.config/gh" ]]; then
-    mounts+=(-v "$HOME/.config/gh:$GUEST_HOME/.config/gh:ro")
+if [[ -n "$HOST_HOME" && -d "$HOST_HOME/.config/gh" ]]; then
+    mounts+=(-v "$HOST_HOME/.config/gh:/tmp/librefang-host-gh:ro")
 fi
 
 # Pull the gh token out of the host's keychain (macOS) or wherever `gh auth token` finds it, so the container authenticates even when `~/.config/gh/hosts.yml` carries no token.
