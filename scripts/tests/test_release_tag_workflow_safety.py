@@ -192,6 +192,68 @@ def check_repository_automation() -> None:
     if actual_title_types != expected_title_types:
         raise SystemExit("PR-title validation conventional types drifted")
 
+    contributor_role = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "contributor-role.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    contributor_triggers = contributor_role.get("on", contributor_role.get(True, {}))
+    if set(contributor_triggers.get("pull_request", {}).get("paths", [])) != {
+        ".github/scripts/contributor-announcement.sh",
+        ".github/scripts/tests/contributor-announcement.test.sh",
+        ".github/workflows/contributor-role.yml",
+    }:
+        raise SystemExit("contributor announcement validation paths drifted")
+    if contributor_triggers.get("pull_request_target", {}).get("types") != ["closed"]:
+        raise SystemExit("contributor announcements run on unsupported privileged events")
+    if contributor_role.get("permissions") != {
+        "contents": "read",
+        "pull-requests": "read",
+    }:
+        raise SystemExit("contributor announcements have broader than read-only permissions")
+    contributor_jobs = contributor_role.get("jobs", {})
+    validate_job = contributor_jobs.get("validate", {})
+    announce_job = contributor_jobs.get("assign-role", {})
+    if (
+        validate_job.get("if") != "github.event_name == 'pull_request'"
+        or validate_job.get("timeout-minutes") != 5
+    ):
+        raise SystemExit("contributor announcement PR validation gate drifted")
+    if announce_job.get("if") != (
+        "github.event_name == 'pull_request_target' && "
+        "github.event.pull_request.merged == true"
+    ) or announce_job.get("timeout-minutes") != 5:
+        raise SystemExit("contributor announcement privileged gate drifted")
+    expected_checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    for job_name, job in (("validate", validate_job), ("announce", announce_job)):
+        uses = [step.get("uses") for step in job.get("steps", []) if step.get("uses")]
+        if uses != [expected_checkout]:
+            raise SystemExit(f"contributor {job_name} checkout pin drifted")
+        if FULL_SHA.fullmatch(expected_checkout.rsplit("@", 1)[1]) is None:
+            raise SystemExit(f"contributor {job_name} checkout is not a full SHA")
+    announce_checkout = announce_job.get("steps", [])[0].get("with", {})
+    if (
+        announce_checkout.get("ref") != "${{ github.event.repository.default_branch }}"
+        or announce_checkout.get("persist-credentials") is not False
+    ):
+        raise SystemExit("privileged contributor announcement checks out untrusted code")
+    announce_step = next(
+        (
+            step
+            for step in announce_job.get("steps", [])
+            if step.get("name") == "Announce in Discord"
+        ),
+        None,
+    )
+    announce_script = announce_step.get("run") if isinstance(announce_step, dict) else None
+    if (
+        not isinstance(announce_script, str)
+        or announce_script.strip() != "bash .github/scripts/contributor-announcement.sh"
+    ):
+        raise SystemExit("privileged contributor announcement bypasses its trusted helper")
+    if "${{" in announce_script:
+        raise SystemExit("contributor announcement interpolates event data into shell code")
+
     todo_workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "todo-to-issue.yml").read_text(
             encoding="utf-8"
