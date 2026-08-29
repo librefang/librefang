@@ -1790,11 +1790,18 @@ export interface CloneAgentPayload {
   include_tools?: boolean;
 }
 
+export interface CloneAgentResult {
+  agent_id: string;
+  name: string;
+  partial: boolean;
+  warnings: string[];
+}
+
 export async function cloneAgent(
   agentId: string,
   payload: CloneAgentPayload
-): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
+): Promise<CloneAgentResult> {
+  return post<CloneAgentResult>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
 }
 
 export async function stopAgent(agentId: string): Promise<ApiActionResponse> {
