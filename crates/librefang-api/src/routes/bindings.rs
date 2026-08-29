@@ -67,18 +67,22 @@ pub async fn add_binding(
 }
 
 /// DELETE /api/bindings/:index — Remove a binding by index.
-#[utoipa::path(delete, path = "/api/bindings/{index}", tag = "system", params(("index" = u32, Path, description = "Binding index")), responses((status = 200, description = "Binding removed")))]
+#[utoipa::path(delete, path = "/api/bindings/{index}", tag = "system", params(("index" = u32, Path, description = "Binding index")), responses((status = 204, description = "Binding removed")))]
 pub async fn remove_binding(
     State(state): State<Arc<AppState>>,
-    Path(index): Path<usize>,
+    Path(index): Path<u32>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    match state.kernel.remove_binding(index) {
-        Some(_) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+    match state.kernel.remove_binding(index as usize) {
+        // A bodyless 204: a generated client decoding a no-content response trips over both a
+        // serialized JSON `null` and the `content-type` that shipping one implies.
+        // `bindings_routes_test.rs` drives the mounted router and asserts both.
+        Some(_) => StatusCode::NO_CONTENT.into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
-        ),
+        )
+            .into_response(),
     }
 }
