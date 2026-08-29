@@ -4152,6 +4152,12 @@
           "400": {
             "description": "Assertion verification failed"
           },
+          "409": {
+            "description": "Credential changed during authentication"
+          },
+          "500": {
+            "description": "Credential persistence failed"
+          },
           "503": {
             "description": "Passkey login not enabled"
           }
