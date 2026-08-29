@@ -136,6 +136,44 @@ def check_repository_automation() -> None:
         ):
             raise SystemExit(f"supply-chain-audit {job_name} has a non-SHA action pin")
 
+    auto_close = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "auto-close-resolved-issues.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    reconcile = auto_close.get("jobs", {}).get("reconcile", {})
+    if (
+        auto_close.get("permissions") != {"contents": "read"}
+        or reconcile.get("needs") != "test-helper"
+        or reconcile.get("if") != "github.event_name != 'pull_request'"
+        or reconcile.get("permissions")
+        != {"contents": "read", "issues": "write"}
+    ):
+        raise SystemExit("resolved-issue mutations are not isolated behind tests")
+    reconcile_steps = reconcile.get("steps", [])
+    checkout = reconcile_steps[0].get("with", {}) if reconcile_steps else {}
+    if (
+        checkout.get("ref") != "${{ github.event.repository.default_branch }}"
+        or checkout.get("persist-credentials") is not False
+        or checkout.get("fetch-depth") != 0
+    ):
+        raise SystemExit("resolved-issue reconciliation checks out untrusted history")
+    reconcile_script = next(
+        (
+            step.get("with", {}).get("script", "")
+            for step in reconcile_steps
+            if str(step.get("uses", "")).startswith("actions/github-script@")
+        ),
+        "",
+    )
+    for contract in (
+        "execFileSync",
+        "--format=%H%x00%s%x00%B",
+        "sanitizeInlineCode",
+    ):
+        if contract not in reconcile_script:
+            raise SystemExit("resolved-issue reconciliation lost contract: " + contract)
+
     pr_labels = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "pr-labels.yml").read_text(
             encoding="utf-8"
