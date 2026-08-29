@@ -8,11 +8,11 @@ permissions:
   contents: read
   issues: write
 
-concurrency:
-  # Each push carries a distinct incremental diff. Shared concurrency groups
-  # retain only one pending run and can discard an intermediate commit scan.
-  group: todo-to-issue-${{ github.run_id }}
-  cancel-in-progress: false
+# No `concurrency:` block, deliberately. Each push to main carries a distinct incremental diff, and
+# GitHub keeps only one pending run per group — any shared group would discard an intermediate
+# commit's scan, and nothing retriggers it. Keying the group on `github.run_id` would express that
+# intent but not implement it: the id is unique per run, so every run lands in its own group and
+# the block does nothing at all. Omitting it is the honest way to say "never coalesce these runs".
 
 jobs:
   scan:

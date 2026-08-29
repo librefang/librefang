@@ -146,11 +146,10 @@ def check_repository_automation() -> None:
         "issues": "write",
     }:
         raise SystemExit("TODO issue workflow permissions are not minimal and complete")
-    todo_concurrency = todo_workflow.get("concurrency", {})
-    if todo_concurrency != {
-        "group": "todo-to-issue-${{ github.run_id }}",
-        "cancel-in-progress": False,
-    }:
+    # Any concurrency group at all can drop an intermediate push scan, and nothing retriggers it.
+    # A group keyed on `github.run_id` does not count as an escape hatch: the id is unique per run,
+    # so the block reads as a policy while implementing none.
+    if "concurrency" in todo_workflow:
         raise SystemExit("TODO issue workflow can discard an incremental push scan")
     scan_job = todo_workflow.get("jobs", {}).get("scan", {})
     if scan_job.get("timeout-minutes") != 10:
