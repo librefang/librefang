@@ -43,10 +43,8 @@ fn default_model_cfg() -> librefang_types::config::DefaultModelConfig {
 
 /// Surface the restore handler's own diagnostics in the test output.
 ///
-/// A partial restore answers `500` with nothing but `restored_files` and `error_count` — the
-/// per-entry reasons go to `tracing::error!`, and with no subscriber installed a failure here
-/// says only that two entries failed, never which two or why. That is exactly the shape of the
-/// Windows-only failure this harness could not diagnose from CI logs.
+/// A partial restore answers `500` with nothing but `restored_files` and `error_count` — the per-entry reasons go to `tracing::error!`, and with no subscriber installed a failure here says only that two entries failed, never which two or why.
+/// That is exactly the shape of the Windows-only failure this harness could not diagnose from CI logs.
 fn capture_restore_diagnostics() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

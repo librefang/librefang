@@ -980,11 +980,9 @@ fn restore_backup_blocking(
                 "archive exceeded the total decompression limit".to_string(),
             ));
         }
-        // `entry_name` is a `Path`, so rendering it hands back `\` separators on Windows and the
-        // restored list stops matching the `/`-separated archive keys every caller compares
-        // against. `archive_entry_key` is the normalisation the classification filters above
-        // already go through.
-        restored.push(archive_entry_key(&entry_name));
+        // `entry_name` is a `Path`, so rendering it directly would hand back `\` separators on Windows and the restored list would stop matching the `/`-separated archive keys every caller compares against.
+        // `entry_key`, computed above for the classification filters, is already normalised to `/`.
+        restored.push(entry_key);
     }
 
     Ok(RestoreOutcome {
@@ -1540,9 +1538,8 @@ mod tests {
         );
     }
 
-    /// The reported list is a contract, not a debug string: callers match it against the
-    /// `/`-separated archive keys. Building the expectation with `Path::join` makes the assertion
-    /// itself platform-agnostic, so a host that renders `\` cannot quietly agree with itself.
+    /// The reported list is a contract, not a debug string: callers match it against the `/`-separated archive keys.
+    /// Building the expectation with `Path::join` makes the assertion itself platform-agnostic, so a host that renders `\` cannot quietly agree with itself.
     #[test]
     fn restored_entries_are_reported_with_archive_separators() {
         let temp = tempfile::tempdir().unwrap();
