@@ -9,7 +9,8 @@ name: release-cli
 # release pipeline".
 #
 # Inputs:
-#   tag      — existing release tag to (re)build for, e.g. v2026.5.4
+#   tag          — existing release tag to (re)build for, e.g. v2026.5.4
+#   include_pypi — also re-publish the CLI PyPI wheels (off by default)
 #
 # Maintainer must configure the `release-cli` GitHub environment (with
 # required reviewers) before this stub becomes useful for redirecting
@@ -583,6 +584,9 @@ jobs:
       contents: write
       id-token: write
     env:
+      # One entry per target across the cli_* jobs, matching release.yml's EXPECTED_PLATFORMS count.
+      # `test_release_tag_workflow_safety.py` fails when the two disagree, so a new matrix target
+      # cannot reach one workflow without the other.
       EXPECTED_CHECKSUM_ASSETS: |
         librefang-aarch64-apple-darwin.tar.gz.sha256
         librefang-aarch64-linux-android.tar.gz.sha256

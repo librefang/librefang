@@ -648,6 +648,21 @@ def main() -> None:
 
     platform_assets = expected_platforms.splitlines()
     symbol_assets = allowed_symbols.splitlines()
+
+    # release.yml gates the same set by count and release-cli.yml by exact name, so the two drift
+    # apart the moment a matrix target is added on one side only. Tie them together here: a new
+    # target that reaches release.yml's constant without reaching this list, or the reverse, stops
+    # the build instead of shipping a manifest that is missing a platform's hash.
+    release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    expected_platform_count = re.search(r"^\s*EXPECTED_PLATFORMS=(\d+)$", release_text, re.M)
+    if expected_platform_count is None:
+        raise SystemExit("release.yml no longer declares EXPECTED_PLATFORMS")
+    if len(platform_assets) != int(expected_platform_count.group(1)):
+        raise SystemExit(
+            "release-cli EXPECTED_CHECKSUM_ASSETS "
+            f"({len(platform_assets)}) does not match release.yml EXPECTED_PLATFORMS "
+            f"({expected_platform_count.group(1)})"
+        )
     required_symbols = [
         asset for asset in symbol_assets if "apple-darwin" in asset
     ]
