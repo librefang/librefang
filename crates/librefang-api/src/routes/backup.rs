@@ -980,7 +980,11 @@ fn restore_backup_blocking(
                 "archive exceeded the total decompression limit".to_string(),
             ));
         }
-        restored.push(entry_name.to_string_lossy().to_string());
+        // `entry_name` is a `Path`, so rendering it hands back `\` separators on Windows and the
+        // restored list stops matching the `/`-separated archive keys every caller compares
+        // against. `archive_entry_key` is the normalisation the classification filters above
+        // already go through.
+        restored.push(archive_entry_key(&entry_name));
     }
 
     Ok(RestoreOutcome {
@@ -1533,6 +1537,47 @@ mod tests {
                     .as_path()
             ),
             "data/cron_jobs.json"
+        );
+    }
+
+    /// The reported list is a contract, not a debug string: callers match it against the
+    /// `/`-separated archive keys. Building the expectation with `Path::join` makes the assertion
+    /// itself platform-agnostic, so a host that renders `\` cannot quietly agree with itself.
+    #[test]
+    fn restored_entries_are_reported_with_archive_separators() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("nested.zip");
+        let restore_dir = temp.path().join("restore");
+        std::fs::create_dir(&restore_dir).unwrap();
+
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("manifest.json", options).unwrap();
+        zip.write_all(
+            br#"{"version":1,"created_at":"now","hostname":"host","librefang_version":"test","components":["data"]}"#,
+        )
+        .unwrap();
+        zip.start_file("data/cron_jobs.json", options).unwrap();
+        zip.write_all(b"{}").unwrap();
+        zip.finish().unwrap();
+
+        let outcome = restore_backup_blocking(
+            archive_path,
+            restore_dir.clone(),
+            restore_dir.join("workspaces").join("agents"),
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.errors, Vec::<String>::new());
+        assert_eq!(outcome.restored, vec!["data/cron_jobs.json"]);
+        assert!(
+            !outcome.restored.iter().any(|entry| entry.contains('\\')),
+            "restored entries must never carry a host separator: {:?}",
+            outcome.restored
         );
     }
 }

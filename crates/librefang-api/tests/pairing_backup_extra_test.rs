@@ -41,7 +41,24 @@ fn default_model_cfg() -> librefang_types::config::DefaultModelConfig {
     }
 }
 
+/// Surface the restore handler's own diagnostics in the test output.
+///
+/// A partial restore answers `500` with nothing but `restored_files` and `error_count` — the
+/// per-entry reasons go to `tracing::error!`, and with no subscriber installed a failure here
+/// says only that two entries failed, never which two or why. That is exactly the shape of the
+/// Windows-only failure this harness could not diagnose from CI logs.
+fn capture_restore_diagnostics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 async fn boot(pairing_enabled: bool) -> Harness {
+    capture_restore_diagnostics();
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.pairing = librefang_types::config::PairingConfig {
             enabled: pairing_enabled,
