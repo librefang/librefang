@@ -53,7 +53,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Compute and apply labels
@@ -80,26 +80,37 @@ jobs:
   response-state:
     # Only pure issues — skip PR comments (handled by pr-labels.yml)
     if: >-
-      (github.event_name == 'issues' && github.event.action == 'closed') ||
+      (github.event_name == 'issues' &&
+       (github.event.action == 'closed' || github.event.action == 'reopened')) ||
       (github.event_name == 'issue_comment' && !github.event.issue.pull_request)
     runs-on: ubuntu-latest
     permissions:
       issues: write
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Update response state labels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_ASSOC: ${{ github.event.comment.author_association }}
         run: |
           set -euo pipefail
 
           LABEL_WAITING="awaiting-response"
           LABEL_ATTENTION="needs-attention"
-          ISSUE="${{ github.event.issue.number }}"
+          ISSUE="$ISSUE_NUMBER"
 
-          add_label() { gh issue edit "$ISSUE" --repo "$REPO" --add-label "$1" 2>/dev/null || true; }
-          remove_label() { gh issue edit "$ISSUE" --repo "$REPO" --remove-label "$1" 2>/dev/null || true; }
+          add_label() {
+            gh issue edit "$ISSUE" --repo "$REPO" --add-label "$1"
+          }
+          remove_label() {
+            labels_json=$(gh issue view "$ISSUE" --repo "$REPO" --json labels)
+            if jq -e --arg label "$1" '.labels | any(.name == $label)' <<<"$labels_json" >/dev/null; then
+              gh issue edit "$ISSUE" --repo "$REPO" --remove-label "$1"
+            fi
+          }
 
           is_maintainer() {
             case "$1" in
@@ -108,13 +119,12 @@ jobs:
             esac
           }
 
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            # Issue closed — clean up state labels
+          if [ "$EVENT_NAME" = "issues" ]; then
+            # Closed/reopened issues start without a stale response state.
             remove_label "$LABEL_WAITING"
             remove_label "$LABEL_ATTENTION"
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            ASSOC="${{ github.event.comment.author_association }}"
-            if is_maintainer "$ASSOC"; then
+          elif [ "$EVENT_NAME" = "issue_comment" ]; then
+            if is_maintainer "$COMMENT_ASSOC"; then
               remove_label "$LABEL_ATTENTION"
               add_label "$LABEL_WAITING"
             else
@@ -130,7 +140,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Re-label every unlabeled open issue
@@ -139,9 +149,12 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh issue list --repo "$REPO" --state open --limit 1000 \
-            --json number,title,body,labels \
-            --jq '.[] | select(.labels | length == 0) | @base64' \
+          gh api --paginate --slurp \
+            "repos/$REPO/issues?state=open&per_page=100" --jq '
+            [flatten[] | select(.pull_request == null) |
+             select(.labels | length == 0) | {number, title, body, labels}] |
+            .[] | @base64
+          ' \
             | while IFS= read -r row; do
                 decoded=$(printf '%s' "$row" | base64 -d)
                 num=$(printf '%s' "$decoded" | jq -r '.number')
