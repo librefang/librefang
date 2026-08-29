@@ -1690,6 +1690,10 @@ func (r *SystemResource) GetProfile(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/profiles/%s", name), nil, nil)
 }
 
+func (r *SystemResource) ProvisioningStatus() (interface{}, error) {
+	return r.client.request("GET", "/api/provisioning/status", nil, nil)
+}
+
 func (r *SystemResource) QueueStatus() (interface{}, error) {
 	return r.client.request("GET", "/api/queue/status", nil, nil)
 }

@@ -135,6 +135,7 @@ pub mod mission_workspace;
 mod pooled_driver;
 mod prompt_context;
 mod provider_probe;
+mod provisioning_ops;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
@@ -822,6 +823,11 @@ pub struct LibreFangKernel {
     config_path_boot: PathBuf,
     /// Boot-time data directory (immutable — cannot hot-reload).
     data_dir_boot: PathBuf,
+    /// What the deployment's provisioning tree currently owns (#6695).
+    ///
+    /// Swapped wholesale by [`Self::apply_provisioning`] so a reader never observes a half-applied plan, and read on every resource write guard — which is why it is an `ArcSwap` rather than a lock.
+    /// Empty and disabled unless `LIBREFANG_PROVISIONING_PATH` is set, which is every installation that has not opted in.
+    pub(crate) provisioning: ArcSwap<crate::provisioning::ProvisioningRuntime>,
     /// Kernel configuration (atomically swappable for hot-reload).
     pub(crate) config: ArcSwap<KernelConfig>,
     /// Cached raw `config.toml` value used for skill config-var injection.

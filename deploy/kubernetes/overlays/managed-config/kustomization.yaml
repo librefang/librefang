@@ -3,10 +3,11 @@ kind: Kustomization
 
 # Deployment-managed configuration (#6695).
 #
-# Layers three things onto ../../base:
+# Layers four things onto ../../base:
 #   1. config.toml rendered into a ConfigMap and mounted read-only at /etc/librefang/, outside the PVC.
 #   2. LIBREFANG_CONFIG_PATH pointing the daemon at that mount, and LIBREFANG_CONFIG_MODE=managed locking every API route that would persist into it (they answer 423 with code "config_managed").
-#   3. A checksum annotation on the pod template, so editing the config rolls the StatefulSet instead of drifting a running pod.
+#   3. agents/*.toml rendered into a second ConfigMap and mounted read-only under LIBREFANG_PROVISIONING_PATH, so the deployment declares its agents the same way it declares its configuration. Each declared agent is locked individually (423, code "resource_provisioned") while anything created at runtime stays editable.
+#   4. Two checksum annotations on the pod template, so editing either ConfigMap rolls the StatefulSet instead of drifting a running pod.
 #
 # Secrets are still created out of band and referenced by the base StatefulSet — see ../../README.md.
 # Nothing secret belongs in the ConfigMap.
@@ -27,6 +28,14 @@ configMapGenerator:
       #
       # And a hashed name leaves an orphaned ConfigMap behind on every edit; kustomize does not prune them, and `kubectl apply -k` will not either.
       # A stable name has exactly one live object to reason about.
+      disableNameSuffixHash: true
+  # Provisioned resources. Kustomize keys ConfigMap data by basename, and a ConfigMap volume mounts
+  # its keys flat in one directory, which is why the mount below points at `<root>/agents` rather
+  # than at the provisioning root.
+  - name: librefang-agents
+    files:
+      - agents/researcher.toml
+    options:
       disableNameSuffixHash: true
 
 patches:

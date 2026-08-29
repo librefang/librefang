@@ -10993,6 +10993,28 @@
         }
       }
     },
+    "/api/provisioning/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/provisioning/status — what the deployment's provisioning tree owns, and whether it has drifted.",
+        "description": "`resources[].drifted` is true when the declaring file on disk no longer hashes to what was applied, which is the resource-level equivalent of comparing a ConfigMap's `checksum/config` annotation against `GET /api/config/status`.\nA drifted resource means the tree moved and the daemon has not been rolled; it does **not** mean the running resource is broken.\n\n`failures[]` carries one entry per file the last reconcile refused, with the reason already formatted for an operator.\nA malformed manifest never fails the boot, so this endpoint is the only place that record survives after the boot log has scrolled.\n\nAuthenticated like every other `/api/*` route. It exposes paths and checksums, never manifest contents.",
+        "operationId": "provisioning_status",
+        "responses": {
+          "200": {
+            "description": "Provisioned resources, their provenance, and reconcile failures",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/queue/status": {
       "get": {
         "tags": [
