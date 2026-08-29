@@ -149,7 +149,7 @@ jobs:
           # `openapi-drift` job still gates direct edits.
           RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
-          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$)' && CI=true
+          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/check-error-shape\.sh$|scripts/tests/check-error-shape\.sh$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$)' && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
           # The WASM-skill guest SDK and its example are independent
           # workspaces (own `[workspace]` roots), so the main RUST lane —
@@ -356,6 +356,8 @@ jobs:
         run: python3 scripts/tests/test_issue_labels_workflow.py
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Test API error response scanner
+        run: bash scripts/tests/check-error-shape.sh
       - name: Check API error response shape (issue #3505)
         # Pure text scan, ~milliseconds. Rejects new `{"detail": …}` or
         # `{"status": "error", …}` constructions in `routes/`. Files
