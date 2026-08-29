@@ -350,6 +350,21 @@ pub async fn bulk_delete_agents(
                 continue;
             }
         };
+        // #6695: a provisioned agent is refused per item rather than failing the batch —
+        // one deployment-owned agent in a list must not take the operator's other deletes
+        // down with it.
+        if super::guard_provisioned_agent(&state, agent_id).is_some() {
+            results.push(BulkActionResult {
+                agent_id: id_str.clone(),
+                success: false,
+                message: None,
+                error: Some(
+                    "This agent is provisioned by the deployment; remove its declaration from the provisioning tree instead."
+                        .to_string(),
+                ),
+            });
+            continue;
+        }
         // Same guard as the single-agent kill path: hand-spawned agents
         // must be removed by deactivating their owning hand, not directly.
         if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
@@ -787,6 +802,12 @@ pub async fn kill_agent(
         }
     };
 
+    // #6695: a provisioned agent's lifecycle belongs to the deployment. Placed before the
+    // idempotent-absent short-circuit below so the refusal is about ownership, not existence.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal.into_response();
+    }
+
     // Idempotent-no-op short-circuit: a DELETE for an already-absent agent is
     // a no-op per RFC 9110 §9.2.2, so we don't gate it on `?confirm=true` —
     // there's nothing to confirm destroying. Hand-owned and confirmation
@@ -1206,6 +1227,11 @@ pub async fn patch_agent(
             );
         }
     };
+
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
 
     if state.kernel.agent_registry().get(agent_id).is_none() {
         return (

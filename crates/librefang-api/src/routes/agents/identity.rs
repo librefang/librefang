@@ -53,6 +53,11 @@ pub async fn update_agent_identity(
         }
     };
 
+    // #6695: refuse to change the manifest of an agent the deployment provisioned.
+    if let Some(refusal) = super::guard_provisioned_agent(&state, agent_id) {
+        return refusal;
+    }
+
     // Validate color format if provided
     if let Some(ref color) = req.color {
         if !color.is_empty() && !color.starts_with('#') {
