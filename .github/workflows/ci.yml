@@ -431,6 +431,10 @@ jobs:
         with:
           components: clippy, rustfmt
           targets: wasm32-unknown-unknown
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           workspaces: |
@@ -466,6 +470,10 @@ jobs:
         with:
           components: clippy, rustfmt
           targets: aarch64-unknown-linux-musl
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           # Both workspaces — the adapter and the sibling SDK it depends on.
