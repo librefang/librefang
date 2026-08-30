@@ -1109,6 +1109,13 @@ def test_rich_sanitizer_no_raw_html_survives_any_context():
                     "a \\` %s \\` b" % _BTN,
                     "\\" + _BTN,
                     "\\\\\\" + _BTN,
+                    # Two `<` in a row after an author backslash: the first
+                    # consumes the run, so the second must be judged on its
+                    # own. Dropping the counter reset in the `<` branch leaves
+                    # this one bare — a live tag — and every other test still
+                    # passes.
+                    "\\<" + _BTN,
+                    "\\\\<" + _BTN,
                     "<b %s" % _BTN,
                     "    ```\n%s\n" % _BTN,
                     "```a`b\n%s\n" % _BTN,
@@ -1129,7 +1136,11 @@ def test_rich_sanitizer_author_written_escapes_are_preserved():
                 "[a\\](https://example.com)",
                 "a \\< b",
                 "\\`not code\\`",
-                "\\!\\[not an image](x)"):
+                "\\!\\[not an image](x)",
+                # The `!` arm's parity guard: here `!` really is followed by
+                # `[`, so the arm is reached and the guard is what stops it
+                # from escaping again. The line above never reaches it.
+                "\\![alt](https://example.com/x.jpg)"):
         assert tg.sanitize_rich_markdown(src) == src
     # An even run is still not an escape, so the `<` gains one.
     assert tg.sanitize_rich_markdown("\\\\<b>") == "\\\\\\<b>"

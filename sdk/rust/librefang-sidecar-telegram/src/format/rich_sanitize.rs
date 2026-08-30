@@ -174,6 +174,12 @@ mod tests {
             format!("a `hello\r> {BUTTON}\r> ` b"),
             format!("a \\` {BUTTON} \\` b"),
             format!("\\{BUTTON}"),
+            // Two `<` in a row after an author backslash: the first consumes the run,
+            // so the second must be judged on its own. Dropping the counter reset in
+            // the `<` arm leaves this one bare — a live tag — and every other test
+            // still passes.
+            format!("\\<{BUTTON}"),
+            format!("\\\\<{BUTTON}"),
             format!("\\\\\\{BUTTON}"),
             format!("<b {BUTTON}"),
             format!("    ```\n{BUTTON}\n"),
@@ -201,6 +207,10 @@ mod tests {
             "a \\< b",
             "\\`not code\\`",
             "\\!\\[not an image](x)",
+            // The `!` arm's parity guard: here `!` really is followed by `[`, so the
+            // arm is reached and the guard is what stops it from escaping again. The
+            // line above never reaches it — `!` is followed by `\\`.
+            "\\![alt](https://example.com/x.jpg)",
         ] {
             assert_eq!(sanitize_rich_markdown(source), source);
         }

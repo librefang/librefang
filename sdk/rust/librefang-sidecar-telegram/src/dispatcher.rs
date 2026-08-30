@@ -896,6 +896,11 @@ mod tests {
     const OK_MESSAGE: &str = r#"{"ok":true,"result":{"message_id":1}}"#;
     const ERR_NO_METHOD: &str =
         r#"{"ok":false,"error_code":404,"description":"Not Found: method not found"}"#;
+    /// A rate limit carries no verdict about whether the *method* exists.
+    const ERR_RATE_LIMITED: &str = r#"{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":0}}"#;
+    /// Some self-hosted Bot API servers answer HTTP 200 with a bare `ok:false` and no
+    /// `error_code`, which the client surfaces as code 0.
+    const ERR_BARE_FALSE: &str = r#"{"ok":false,"description":"Bad Request"}"#;
 
     #[test]
     fn send_text_prefers_rich_message_and_skips_the_html_pipeline() {
@@ -917,6 +922,51 @@ mod tests {
         // The table reaches Telegram as Markdown, not as pre-rendered HTML.
         assert!(seen[0].1.contains("rich_message"));
         assert!(seen[0].1.contains("| a | b |"));
+    }
+
+    /// 429 is excluded from the fallback on purpose: it says the request was throttled,
+    /// not that `sendRichMessage` is missing. Falling back would re-send the whole answer
+    /// through the legacy path, chunk by chunk, into a chat Telegram just asked us to back
+    /// off from — turning one throttled call into several.
+    ///
+    /// `_call` retries a 429 once, so it takes two to reach `is_api_rejection`. The
+    /// assertion is on the *kind* of error rather than the request count: `mock_bot_api`
+    /// serves exactly as many connections as it was given responses for, so a third
+    /// request cannot be observed — it just fails on a dead listener, and a count-based
+    /// test would read the same 2 either way. The 429 has to come back out intact.
+    #[test]
+    fn a_rate_limit_is_not_treated_as_rich_being_unavailable() {
+        let (root, server) = mock_bot_api(vec![(200, ERR_RATE_LIMITED), (200, ERR_RATE_LIMITED)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let error = runtime
+            .block_on(send_text(&client, 42, "**bold**", None))
+            .expect_err("a 429 must surface, not silently fall back");
+
+        assert!(
+            matches!(error, Error::Api { code: 429, .. }),
+            "expected the 429 to surface as-is, got {error:?}"
+        );
+        let seen = server.join().expect("mock thread");
+        assert!(seen.iter().all(|(path, _)| path.contains("/sendRichMessage")));
+    }
+
+    /// A bare `ok:false` with no `error_code` reaches us as code 0. It is still a
+    /// definitive refusal, so it must fall back — otherwise the answer is never delivered
+    /// at all, on exactly the self-hosted setups the fallback exists for.
+    #[test]
+    fn a_bare_ok_false_still_falls_back() {
+        let (root, server) = mock_bot_api(vec![(200, ERR_BARE_FALSE), (200, OK_MESSAGE)]);
+        let client = BotClient::with_roots("t", &root, &root).expect("client");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(send_text(&client, 42, "**bold**", None))
+            .expect("send succeeds via fallback");
+
+        let seen = server.join().expect("mock thread");
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].0.contains("/sendRichMessage"));
+        assert!(seen[1].0.contains("/sendMessage"));
     }
 
     #[test]
