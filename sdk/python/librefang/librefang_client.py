@@ -54,6 +54,7 @@ class LibreFang:
         self.channels = _ChannelsResource(self)
         self.extensions = _ExtensionsResource(self)
         self.goals = _GoalsResource(self)
+        self.groups = _GroupsResource(self)
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
@@ -607,6 +608,35 @@ class _GoalsResource(_Resource):
 
     def list_goal_templates(self):
         return self._c._request("GET", "/api/goals/templates")
+
+
+# ── Groups Resource ────────────────────────────────────────────
+
+class _GroupsResource(_Resource):
+
+    def list_groups(self):
+        return self._c._request("GET", "/api/groups")
+
+    def create_group(self, **data):
+        return self._c._request("POST", "/api/groups", data)
+
+    def get_group(self, name: str):
+        return self._c._request("GET", f"/api/groups/{name}")
+
+    def update_group(self, name: str, **data):
+        return self._c._request("PUT", f"/api/groups/{name}", data)
+
+    def delete_group(self, name: str):
+        return self._c._request("DELETE", f"/api/groups/{name}")
+
+    def add_group_member(self, name: str, user: str):
+        return self._c._request("PUT", f"/api/groups/{name}/members/{user}")
+
+    def remove_group_member(self, name: str, user: str):
+        return self._c._request("DELETE", f"/api/groups/{name}/members/{user}")
+
+    def user_groups(self, name: str):
+        return self._c._request("GET", f"/api/users/{name}/groups")
 
 
 # ── Hands Resource ─────────────────────────────────────────────
@@ -1184,6 +1214,9 @@ class _SystemResource(_Resource):
     def effective_permissions(self, user_id: str):
         return self._c._request("GET", f"/api/authz/effective/{user_id}")
 
+    def whoami(self):
+        return self._c._request("GET", "/api/authz/whoami")
+
     def create_backup(self):
         return self._c._request("POST", "/api/backup")
 
@@ -1255,6 +1288,9 @@ class _SystemResource(_Resource):
 
     def get_profile(self, name: str):
         return self._c._request("GET", f"/api/profiles/{name}")
+
+    def provisioning_status(self):
+        return self._c._request("GET", "/api/provisioning/status")
 
     def queue_status(self):
         return self._c._request("GET", "/api/queue/status")

@@ -4837,7 +4837,7 @@ async fn test_cron_create_preserves_peer_id() {
     });
 
     kernel
-        .cron_create(&agent_id, job_json)
+        .cron_create(&agent_id, job_json, None)
         .await
         .expect("cron_create should succeed");
 
@@ -4864,7 +4864,7 @@ async fn test_cron_create_preserves_peer_id() {
         "action": { "kind": "agent_turn", "message": "ping" },
     });
     kernel
-        .cron_create(&agent_id, job_no_peer)
+        .cron_create(&agent_id, job_no_peer, None)
         .await
         .expect("cron_create without peer_id should succeed");
     let jobs2 = kernel
@@ -7873,6 +7873,7 @@ fn depth_probe_workflow() -> crate::workflow::Workflow {
         layout: None,
         total_timeout_secs: Some(5),
         input_schema: None,
+        owner: None,
     }
 }
 

@@ -1,1 +1,0 @@
-Treat macOS TCP resets as a valid closed-stream result in the Rust SDK backpressure test, whose strict FIN-only assertion intermittently failed even though dropping the receiver closed the connection (#7790) (@houko)

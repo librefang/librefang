@@ -16,7 +16,7 @@ use librefang_kernel::SkillsSubsystemApi;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::{AgentId, ResetScope};
 use screens::{
-    agents, audit, chat, comms, dashboard, extensions, hands, logs, memory, models, peers,
+    agents, audit, chat, comms, dashboard, extensions, groups, hands, logs, memory, models, peers,
     security, sessions, settings, skills, templates, triggers, usage, welcome, wizard, workflows,
 };
 use std::path::PathBuf;
@@ -57,6 +57,7 @@ enum Tab {
     Extensions,
     Templates,
     Peers,
+    Groups,
     Comms,
     Security,
     Audit,
@@ -79,6 +80,7 @@ const TABS: &[Tab] = &[
     Tab::Extensions,
     Tab::Templates,
     Tab::Peers,
+    Tab::Groups,
     Tab::Comms,
     Tab::Security,
     Tab::Audit,
@@ -103,6 +105,7 @@ impl Tab {
             Tab::Extensions => format!("{} {}", "\u{29c9}", crate::i18n::t("tui-tab-extensions")),
             Tab::Templates => format!("{} {}", "\u{25a2}", crate::i18n::t("tui-tab-templates")),
             Tab::Peers => format!("{} {}", "\u{25cc}", crate::i18n::t("tui-tab-peers")),
+            Tab::Groups => format!("{} {}", "\u{2687}", crate::i18n::t("tui-tab-groups")),
             Tab::Comms => format!("{} {}", "\u{25ef}", crate::i18n::t("tui-tab-comms")),
             Tab::Security => format!("{} {}", "\u{25c6}", crate::i18n::t("tui-tab-security")),
             Tab::Audit => format!("{} {}", "\u{25c8}", crate::i18n::t("tui-tab-audit")),
@@ -188,6 +191,7 @@ struct App {
     usage: usage::UsageState,
     settings: settings::SettingsState,
     peers: peers::PeersState,
+    groups: groups::GroupsState,
     comms: comms::CommsState,
     logs: logs::LogsState,
 
@@ -228,6 +232,7 @@ impl App {
             usage: usage::UsageState::new(),
             settings: settings::SettingsState::new(),
             peers: peers::PeersState::new(),
+            groups: groups::GroupsState::new(),
             comms: comms::CommsState::new(),
             logs: logs::LogsState::new(),
             kernel_booting: false,
@@ -630,6 +635,13 @@ impl App {
                 self.models.status_msg =
                     crate::i18n::t_args("tui-models-status-reset", &[("model", &key)]);
                 self.refresh_models();
+            }
+            AppEvent::GroupsLoaded(list) => {
+                self.groups.groups = list;
+                if !self.groups.groups.is_empty() && self.groups.list_state.selected().is_none() {
+                    self.groups.list_state.select(Some(0));
+                }
+                self.groups.loading = false;
             }
             AppEvent::BackupsLoaded(backups) => {
                 self.settings.backups = backups;
@@ -1101,6 +1113,10 @@ impl App {
                     let action = self.settings.handle_key(key);
                     self.handle_settings_action(action);
                 }
+                Tab::Groups => {
+                    let action = self.groups.handle_key(key);
+                    self.handle_groups_action(action);
+                }
                 Tab::Peers => {
                     let action = self.peers.handle_key(key);
                     self.handle_peers_action(action);
@@ -1140,6 +1156,7 @@ impl App {
         self.usage.tick();
         self.settings.tick();
         self.peers.tick();
+        self.groups.tick();
         self.comms.tick();
         self.logs.tick();
 
@@ -1148,6 +1165,7 @@ impl App {
             match self.active_tab {
                 Tab::Logs if self.logs.should_poll() => self.refresh_logs(),
                 Tab::Peers if self.peers.should_poll() => self.refresh_peers(),
+                Tab::Groups if self.groups.should_poll() => self.refresh_groups(),
                 Tab::Comms if self.comms.should_poll() => self.refresh_comms(),
                 _ => {}
             }
@@ -1206,6 +1224,7 @@ impl App {
                 self.refresh_settings_providers();
             }
             Tab::Peers => self.refresh_peers(),
+            Tab::Groups => self.refresh_groups(),
             Tab::Comms => self.refresh_comms(),
             Tab::Logs => self.refresh_logs(),
             Tab::Chat => {} // Chat doesn't need refresh on enter
@@ -1359,6 +1378,13 @@ impl App {
         if let Some(backend) = self.backend.to_ref() {
             self.settings.loading = true;
             event::spawn_fetch_backups(backend, self.event_tx.clone());
+        }
+    }
+
+    fn refresh_groups(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.groups.loading = true;
+            event::spawn_fetch_groups(backend, self.event_tx.clone());
         }
     }
 
@@ -2004,6 +2030,13 @@ impl App {
                     event::spawn_reset_model_limits(backend, key, self.event_tx.clone());
                 }
             }
+        }
+    }
+
+    fn handle_groups_action(&mut self, action: groups::GroupsAction) {
+        match action {
+            groups::GroupsAction::Continue => {}
+            groups::GroupsAction::Refresh => self.refresh_groups(),
         }
     }
 
@@ -2675,6 +2708,7 @@ impl App {
                     Tab::Usage => usage::draw(frame, chunks[1], &mut self.usage),
                     Tab::Settings => settings::draw(frame, chunks[1], &mut self.settings),
                     Tab::Peers => peers::draw(frame, chunks[1], &mut self.peers),
+                    Tab::Groups => groups::draw(frame, chunks[1], &mut self.groups),
                     Tab::Comms => comms::draw(frame, chunks[1], &mut self.comms),
                     Tab::Logs => logs::draw(frame, chunks[1], &mut self.logs),
                 }

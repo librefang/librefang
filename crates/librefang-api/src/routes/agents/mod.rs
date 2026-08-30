@@ -249,6 +249,25 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 
+/// Refuse a write that would change the *definition* of an agent the deployment provisioned (#6695).
+///
+/// Returns `None` — proceed — for an agent that does not exist (the handler's own 404 is the better answer) and for every agent the provisioning tree does not declare, which is all of them unless `LIBREFANG_PROVISIONING_PATH` is set.
+///
+/// The guard is on the manifest, not on the agent: suspend, resume, stop, message, session and file routes stay open on a provisioned agent, because those change runtime state the deployment never declared.
+/// The dividing line is "would the next reconcile overwrite this" — if yes, the write is a lie and is refused; if no, it is the operator's to make.
+pub(crate) fn guard_provisioned_agent(
+    state: &AppState,
+    agent_id: AgentId,
+) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let name = state.kernel.agent_registry().get(agent_id)?.name;
+    super::guard_provisioned_write(
+        state
+            .kernel
+            .provisioned_resource(librefang_kernel::provisioning::ResourceKind::Agent, &name)
+            .as_ref(),
+    )
+}
+
 /// Shape an `ApiErrorResponse`-compatible JSON envelope into the
 /// `(status, bytes)` tuple the idempotency middleware caches.
 /// Mirrors `ApiErrorResponse::into_response` so callers see the same

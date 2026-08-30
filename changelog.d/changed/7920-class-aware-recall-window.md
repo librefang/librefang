@@ -1,5 +1,0 @@
-Recall now carries both memory classes into the prompt, taking the top candidates of each rather than the top candidates overall.
-A class-blind cap decided the section's class mix before the budget above could have a say: on a store that is four parts raw dialogue to one part extracted fact, the top five rows are raw dialogue, and no per-class budget can render a fact that recall never handed it.
-The supplemental substrate fetch that widens the context engine's own small, class-blind window now runs on every turn rather than only on turns carrying a chat or session scope — the engine is built unconditionally at boot, so a dashboard, REST or cron turn previously handed the section that window and nothing else.
-This is the one part of #7920 that is not free: the candidate window grows from 5 to 30 and the fetch behind it from 5 (50 when scoped) to 120, and turns that skipped the supplemental recall now run it.
-Both are local SQLite/vector queries, and on the two ranked paths the candidate scan is unchanged — it was already bounded by `MAX_FTS_CANDIDATES` and `MAX_BRUTEFORCE_CANDIDATES` rather than by the caller's limit (#7922) (@houko)

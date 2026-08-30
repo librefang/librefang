@@ -1118,6 +1118,15 @@ impl LibreFangKernel {
                  LibreFang role and grant nothing — see WARN lines above"
             );
         }
+        // And for `[external_auth.group_map]` (#7746): a target that names no `[[groups]]` entry — a rename that missed the map, or a typo — confers no membership, with the same silent symptom.
+        let oidc_group_dangling =
+            crate::auth::validate_oidc_group_map(&config.external_auth.group_map, &config.groups);
+        if oidc_group_dangling > 0 {
+            warn!(
+                "external_auth.group_map: {oidc_group_dangling} entr(ies) point at a group that \
+                 does not exist in [[groups]] and confer no membership — see WARN lines above"
+            );
+        }
 
         // Initialize git repo for config version control (first boot)
         init_git_if_missing(&config.home_dir);
@@ -1962,6 +1971,9 @@ impl LibreFangKernel {
             home_dir_boot: config.home_dir.clone(),
             config_path_boot,
             data_dir_boot: config.data_dir.clone(),
+            provisioning: ArcSwap::new(std::sync::Arc::new(
+                crate::provisioning::ProvisioningRuntime::default(),
+            )),
             config: ArcSwap::new(std::sync::Arc::new(config)),
             raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
             agents: crate::kernel::subsystems::AgentSubsystem::new(agent_identities, supervisor),
@@ -2992,6 +3004,14 @@ impl LibreFangKernel {
                 );
             }
         }
+
+        // Reconcile the deployment-owned provisioning tree (#6695).
+        //
+        // Ordered after the registry restore so the plan can tell "this agent exists" from
+        // "this agent must be created", and before the default-assistant fallback below so a
+        // deployment that declares its own agents does not also get an `assistant` it never
+        // asked for.
+        kernel.apply_provisioning();
 
         // If no agents exist (fresh install), spawn a default assistant.
         if kernel.agents.registry.list().is_empty() {

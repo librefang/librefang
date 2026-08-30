@@ -207,7 +207,9 @@ async fn test_cron_defaults_return_errors() {
     // can match on the variant directly instead of substring-grepping on
     // the formatted message (#3541). Display still includes
     // "Cron scheduler not available" for log-output continuity.
-    let result = handle.cron_create("agent", serde_json::json!({})).await;
+    let result = handle
+        .cron_create("agent", serde_json::json!({}), None)
+        .await;
     match result {
         Err(KernelOpError::Unavailable(c)) if c == "Cron scheduler" => {}
         other => panic!("cron_create: expected Unavailable, got {other:?}"),

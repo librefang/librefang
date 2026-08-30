@@ -762,6 +762,11 @@ impl LibreFangKernel {
                 canvas_config: Some(self.config.load().canvas.clone()),
                 // Ephemeral /btw is a user-initiated turn, not a system fork.
                 system_call: false,
+                // #7744: `/btw` runs on an empty ephemeral session and the
+                // path carries no authenticated owner (its callers pass
+                // `None`). Anything it creates is recorded unowned rather
+                // than attributed to the agent that ran it.
+                acting_principal: None,
             },
         )
         .await
@@ -1762,6 +1767,10 @@ impl LibreFangKernel {
             canvas_config: Some(self.config.load().canvas.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
+            // #7744: resolved in `send_message_streaming_with_sender_and_opts`,
+            // the first point where this agent's manifest is in hand — the
+            // same place `compaction_config` above is filled in.
+            acting_principal: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             effective_id,
@@ -1955,6 +1964,12 @@ impl LibreFangKernel {
             // cron / autonomous channel carve-out for a path that has no
             // synthetic channel to match on.
             system_call: true,
+            // #7744: a fork must not inherit the parent turn's human. Left
+            // `None` here and re-resolved fork-aware in
+            // `send_message_streaming_with_sender_and_opts`, so what a fork
+            // creates is recorded against the agent's configured owner or
+            // nothing — never against the person whose turn spawned it.
+            acting_principal: None,
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -2039,6 +2054,10 @@ impl LibreFangKernel {
             canvas_config: Some(self.config.load().canvas.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
+            // #7744: resolved in `send_message_streaming_with_sender_and_opts`,
+            // the first point where this agent's manifest is in hand — the
+            // same place `compaction_config` above is filled in.
+            acting_principal: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -2094,6 +2113,25 @@ impl LibreFangKernel {
                 _ => cfg.compaction.clone(),
             };
             loop_opts.compaction_config = Some(merged);
+        }
+
+        // #7744: resolve the principal this turn acts for, here rather than at
+        // the five call sites that build `LoopOptions`, for the same reason
+        // `compaction_config` is resolved here — this is the first point where
+        // the manifest is in hand. A caller that already populated the field
+        // wins.
+        //
+        // The fork clause mirrors `effective_owner` below: a fork must not
+        // inherit the parent turn's human, so what a fork creates is recorded
+        // against the agent's configured owner or nothing, never against the
+        // person whose turn spawned it.
+        if loop_opts.acting_principal.is_none() {
+            let turn_owner = if loop_opts.is_fork { None } else { owner };
+            loop_opts.acting_principal = librefang_types::principal::resolve_acting_principal(
+                turn_owner,
+                entry.manifest.owner.as_deref(),
+                cfg.default_owner_principal(),
+            );
         }
 
         // #4807: the pre-dispatch provider-budget gate was removed

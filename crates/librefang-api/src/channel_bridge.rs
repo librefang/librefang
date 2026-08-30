@@ -1528,6 +1528,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     delivery_targets: Vec::new(),
                     peer_id: None,
                     session_mode: None,
+                    // #7744: `/schedule add` arrives over a chat channel and
+                    // carries no LibreFang-authenticated principal — the
+                    // platform sender is a routing key, not a credential —
+                    // so the job is recorded unowned rather than attributed
+                    // to whoever the bridge guessed.
+                    owner: None,
                     created_at: chrono::Utc::now(),
                     last_run: None,
                     next_run: None,

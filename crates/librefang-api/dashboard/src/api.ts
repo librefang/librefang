@@ -1790,11 +1790,18 @@ export interface CloneAgentPayload {
   include_tools?: boolean;
 }
 
+export interface CloneAgentResult {
+  agent_id: string;
+  name: string;
+  partial: boolean;
+  warnings: string[];
+}
+
 export async function cloneAgent(
   agentId: string,
   payload: CloneAgentPayload
-): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
+): Promise<CloneAgentResult> {
+  return post<CloneAgentResult>(`/api/agents/${encodeURIComponent(agentId)}/clone`, payload);
 }
 
 export async function stopAgent(agentId: string): Promise<ApiActionResponse> {
@@ -4186,6 +4193,28 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
   return get<HandInstanceStatus>(`/api/hands/instances/${encodeURIComponent(instanceId)}/status`);
 }
 
+/** One entry of the server-owned chat slash-command catalog.
+ *
+ *  Mirrors `librefang_channels::commands::CommandDef` projected through
+ *  `GET /api/commands`. `exec` is absent for commands the catalog lists but
+ *  the chat cannot run — those stay out of the slash menu. */
+export interface ChatCommand {
+  cmd: string;
+  desc: string;
+  /** i18n key under `chat.`; falls back to `desc` when the locale lacks it. */
+  desc_key?: string;
+  args_hint?: string;
+  no_args?: boolean;
+  exec?: "client" | "backend";
+  /** Present only on skill-derived entries. */
+  source?: string;
+}
+
+export async function listChatCommands(): Promise<ChatCommand[]> {
+  const data = await get<{ commands: ChatCommand[] }>("/api/commands");
+  return data.commands ?? [];
+}
+
 export async function listGoals(): Promise<GoalItem[]> {
   const data = await get<PaginatedResponse<GoalItem>>("/api/goals");
   return data.items ?? [];
@@ -5280,6 +5309,88 @@ export async function importUsers(
     rows,
     dry_run: options.dryRun ?? false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// User groups (#7745)
+//
+// Shape mirrors `routes/groups.rs::GroupView` / `GroupUpsert`. Membership is
+// FLAT — a group has members and no parent or child; see the doc-comment on
+// `GroupConfig` in `librefang-types` for why.
+// ---------------------------------------------------------------------------
+
+export interface GroupItem {
+  name: string;
+  description: string;
+  members: string[];
+  roles: string[];
+  member_count: number;
+  // Members with no matching `[[users]]` entry. Not an error: membership can
+  // be synced from an external identity provider before the person has ever
+  // authenticated here. Surfaced so the UI can badge the row.
+  unknown_members: string[];
+}
+
+export interface GroupUpsertPayload {
+  name: string;
+  description?: string;
+  members?: string[];
+  roles?: string[];
+}
+
+export interface UserGroupsResult {
+  name: string;
+  groups: string[];
+  roles: string[];
+}
+
+export async function listGroups(): Promise<GroupItem[]> {
+  return get<GroupItem[]>("/api/groups");
+}
+
+export async function getGroup(name: string): Promise<GroupItem> {
+  return get<GroupItem>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function createGroup(payload: GroupUpsertPayload): Promise<GroupItem> {
+  return post<GroupItem>("/api/groups", payload);
+}
+
+export async function updateGroup(
+  originalName: string,
+  payload: GroupUpsertPayload,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(originalName)}`,
+    payload,
+  );
+}
+
+export async function deleteGroup(name: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/groups/${encodeURIComponent(name)}`);
+}
+
+export async function addGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return put<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+    {},
+  );
+}
+
+export async function removeGroupMember(
+  group: string,
+  user: string,
+): Promise<GroupItem> {
+  return del<GroupItem>(
+    `/api/groups/${encodeURIComponent(group)}/members/${encodeURIComponent(user)}`,
+  );
+}
+
+export async function getUserGroups(name: string): Promise<UserGroupsResult> {
+  return get<UserGroupsResult>(`/api/users/${encodeURIComponent(name)}/groups`);
 }
 
 // ---------------------------------------------------------------------------

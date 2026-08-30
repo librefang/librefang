@@ -135,6 +135,7 @@ pub mod mission_workspace;
 mod pooled_driver;
 mod prompt_context;
 mod provider_probe;
+mod provisioning_ops;
 mod reviewer_sanitize;
 mod session_ops;
 mod spawn;
@@ -822,6 +823,11 @@ pub struct LibreFangKernel {
     config_path_boot: PathBuf,
     /// Boot-time data directory (immutable — cannot hot-reload).
     data_dir_boot: PathBuf,
+    /// What the deployment's provisioning tree currently owns (#6695).
+    ///
+    /// Swapped wholesale by [`Self::apply_provisioning`] so a reader never observes a half-applied plan, and read on every resource write guard — which is why it is an `ArcSwap` rather than a lock.
+    /// Empty and disabled unless `LIBREFANG_PROVISIONING_PATH` is set, which is every installation that has not opted in.
+    pub(crate) provisioning: ArcSwap<crate::provisioning::ProvisioningRuntime>,
     /// Kernel configuration (atomically swappable for hot-reload).
     pub(crate) config: ArcSwap<KernelConfig>,
     /// Cached raw `config.toml` value used for skill config-var injection.
@@ -1972,6 +1978,32 @@ impl LibreFangKernel {
             // originating session's checker is no longer live — skip the
             // session-scoped dangerous-command check here.
             dangerous_command_checker: None,
+            // #7744: deliberately `None`, and this is the one decision the
+            // issue thread left genuinely open, so it is recorded here rather
+            // than in a commit message.
+            //
+            // `DeferredToolExecution` is persisted. A principal written into
+            // it would be resolved at *defer* time and consumed at *resume*
+            // time — possibly after a restart, a config reload, or the
+            // deletion of the user it names — so it would be an assertion
+            // about the past presented as a live one. That is the same failure
+            // mode as stamping an unauthenticated sender: it looks
+            // authoritative and is not.
+            //
+            // The three candidate answers are (a) stamp it and accept the
+            // staleness, (b) re-resolve at resume and fail closed if the
+            // principal is gone, (c) refuse to defer a tool call that needs an
+            // owner. Choosing between them needs the enforcement semantics
+            // that this increment deliberately does not have yet — with
+            // nothing reading the owner, all three are indistinguishable — so
+            // the conservative one is taken and the choice is left to the PR
+            // that makes ownership restrict something.
+            //
+            // Concretely: a `workflow_create` or `cron_create` that goes
+            // through the approval gate is recorded unowned. That is a real
+            // gap, and it is narrower than the alternative of recording an
+            // owner nobody re-verified.
+            acting_principal: None,
         }
     }
 

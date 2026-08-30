@@ -1,4 +1,0 @@
-Migration v50 — the FTS5 index over `memories.content` — recorded its audit row under version 49, which version 49 already held, so `INSERT OR IGNORE` dropped it and the audit-consistency backfill supplied a placeholder in its place.
-The DDL always applied correctly; what was lost was the record of it, and the side effect was that every brand-new database logged "Migration audit drift detected and self-healed" on its first boot — a warning meant to tell an operator that an old database was being repaired, fired for everyone, which is how a real drift warning stops being read.
-The existing guard could not catch this because it asserted that every applied version has an audit row, and the backfill created the missing row before the assertion ran; the new one pins the invariant the backfill's own comment claims, that a clean database needs no backfill at all.
-(#7925) (@houko)

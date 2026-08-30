@@ -1,4 +1,0 @@
-Agents can now author an agent type mid-conversation with the new `agent_type_create` tool, instead of an operator having to leave the conversation and hand-write a manifest for a role the agent just worked out it needs.
-  The tool writes through the same `AgentTypeSpec` validation and the same store as `POST /api/templates`, so a type an agent creates is byte-for-byte the kind of document the dashboard editor opens, and the name rule, the refusal to shadow a live agent and the race-free claim against a concurrent create cannot hold on one writing path while quietly missing from the other.
-  The agent-facing surface now settles the naming question that had been open since the store landed: "agent type" is the word the tool, the dashboard and the TUI screen all use, and `/api/templates` stays the single API path rather than gaining a permanent second name for one resource.
-  (#7877) (@houko)

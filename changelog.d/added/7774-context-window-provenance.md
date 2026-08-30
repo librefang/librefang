@@ -1,3 +1,0 @@
-`GET /api/agents/{id}/session/context` now reports where its `max_context_tokens` came from, as `max_context_tokens_source` plus a `max_context_tokens_assumed` flag, and the chat view labels an assumed window instead of presenting it as measured.
-The number alone could not be read: a window an operator configured, one the registry declared and one the runtime invented when nothing knew are the same integer, and only the last is a reason to distrust the pressure percentage computed against it.
-That last case is the one that started the report — a gateway-served model that publishes no limits, a conservative 8192 assumed in its place, and a conversation well inside the model's real window refused for an overflow that existed only in the assumption (#7881) (@houko)

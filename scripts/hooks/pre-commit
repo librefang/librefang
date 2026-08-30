@@ -18,6 +18,12 @@
 
 set -eu
 
+HOOK_TMP=$(mktemp -d "${TMPDIR:-/tmp}/librefang-pre-commit.XXXXXX")
+trap 'rm -rf "$HOOK_TMP"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # Portable sha256 shim. `shasum -a 256` ships on macOS by default
 # (perl-provided) but is absent on many Linux dev boxes (Debian /
 # Ubuntu / Alpine slim images) that only carry GNU coreutils'
@@ -42,15 +48,39 @@ sha256() {
 # directly so the path scope actually sticks. Edition is hardcoded to
 # match `workspace.package.edition` in the root Cargo.toml.
 #
-# NUL-delimited pipeline so paths containing spaces, quotes, or shell
-# metacharacters (`with space.rs`, `weird $name.rs`) are passed as
-# single argv entries to rustfmt instead of being word-split by the
-# shell. (#5664 sub-finding 1.)
-if git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-    | grep -zq .; then
+# NUL-delimited input so paths containing spaces, quotes, or shell
+# metacharacters (`with space.rs`, `weird $name.rs`) are not word-split.
+# Each exact index blob is materialized under the private temporary tree;
+# rustfmt never reads a newer unstaged working-tree post-image.
+STAGED_RUST="$HOOK_TMP/staged-rust"
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' >"$STAGED_RUST"
+if [ -s "$STAGED_RUST" ]; then
     if command -v rustfmt >/dev/null 2>&1; then
-        if ! git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \
-            | xargs -0 -r rustfmt --check --edition 2021 >/dev/null 2>&1; then
+        STAGED_RUST_TREE="$HOOK_TMP/staged-rust-tree"
+        STAGED_RUSTFMT_CONFIG="$HOOK_TMP/rustfmt.toml"
+        mkdir -p "$STAGED_RUST_TREE"
+        if ! git show :rustfmt.toml >"$STAGED_RUSTFMT_CONFIG"; then
+            echo "Error: unable to read staged rustfmt.toml from the index." >&2
+            exit 1
+        fi
+        if ! xargs -0 -n 1 sh -c '
+            set -e
+            staged_root=$1
+            rustfmt_config=$2
+            file=$3
+            metadata=$(git ls-files -s -- "$file")
+            tab=$(printf "\t")
+            case "$metadata" in
+                100644\ *\ 0"$tab"*|100755\ *\ 0"$tab"*) ;;
+                *) exit 0 ;;
+            esac
+            staged_file=$staged_root/$file
+            mkdir -p "$(dirname "$staged_file")"
+            git show ":$file" >"$staged_file"
+            rustfmt --check --edition 2021 --config-path "$rustfmt_config" \
+                --config skip_children=true "$staged_file"
+        ' sh "$STAGED_RUST_TREE" "$STAGED_RUSTFMT_CONFIG" \
+            <"$STAGED_RUST" >/dev/null 2>&1; then
             echo "Error: staged Rust files are not rustfmt-clean."
             echo "Run: git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' \\"
             echo "       | xargs -0 rustfmt --edition 2021"
@@ -72,7 +102,12 @@ fi
 # subsequent blocks. See #3395.
 STAGED_NAMES=$(git diff --cached --name-only)
 if printf '%s\n' "$STAGED_NAMES" | grep -qx "CHANGELOG.md"; then
-    UNRELEASED_COUNT=$(grep -c '^## \[Unreleased\]' CHANGELOG.md || true)
+    STAGED_CHANGELOG="$HOOK_TMP/CHANGELOG.md"
+    if ! git show :CHANGELOG.md >"$STAGED_CHANGELOG"; then
+        echo "Error: unable to read staged CHANGELOG.md from the index." >&2
+        exit 1
+    fi
+    UNRELEASED_COUNT=$(grep -c '^## \[Unreleased\]' "$STAGED_CHANGELOG" || true)
     if [ "$UNRELEASED_COUNT" -gt 1 ]; then
         echo "Error: CHANGELOG.md has $UNRELEASED_COUNT '## [Unreleased]' sections; expected exactly 1."
         echo "Release tooling will silently drop entries from all but the first. Merge them into one block."
@@ -140,19 +175,32 @@ fi
 # `shasum`) are handled the same as macOS. (#5664 sub-finding 2.)
 if git diff --cached --name-only | grep -qx "openapi.json"; then
     BASELINE_FILE="xtask/baselines/openapi.sha256"
-    if [ -f openapi.json ] && [ -f "$BASELINE_FILE" ]; then
-        if EXPECTED_LINE=$(sha256 openapi.json 2>/dev/null); then
-            EXPECTED=$(printf '%s' "$EXPECTED_LINE" | awk '{print $1}')
-            RECORDED=$(awk '{print $1}' "$BASELINE_FILE")
-            if [ "$EXPECTED" != "$RECORDED" ]; then
-                printf '%s  openapi.json\n' "$EXPECTED" > "$BASELINE_FILE"
-                git add "$BASELINE_FILE"
-                echo "info: auto-staged refreshed openapi.sha256 baseline (#4690)" >&2
+    STAGED_OPENAPI="$HOOK_TMP/openapi.json"
+    STAGED_BASELINE="$HOOK_TMP/openapi.sha256"
+    if ! git show :openapi.json >"$STAGED_OPENAPI"; then
+        echo "Error: unable to read staged openapi.json from the index." >&2
+        exit 1
+    fi
+    if ! git show ":$BASELINE_FILE" >"$STAGED_BASELINE"; then
+        echo "Error: unable to read staged $BASELINE_FILE from the index." >&2
+        exit 1
+    fi
+    if EXPECTED_LINE=$(sha256 "$STAGED_OPENAPI" 2>/dev/null); then
+        EXPECTED=$(printf '%s' "$EXPECTED_LINE" | awk '{print $1}')
+        RECORDED=$(awk '{print $1}' "$STAGED_BASELINE")
+        if [ "$EXPECTED" != "$RECORDED" ]; then
+            if ! git diff --quiet -- "$BASELINE_FILE"; then
+                echo "Error: $BASELINE_FILE has unstaged changes; refusing to overwrite them." >&2
+                echo "Stage or discard those changes, then retry the commit." >&2
+                exit 1
             fi
-        else
-            echo "warning: neither sha256sum nor shasum available; skipping openapi baseline sync." >&2
-            echo "  CI openapi-drift gate may reject this commit." >&2
+            printf '%s  openapi.json\n' "$EXPECTED" >"$BASELINE_FILE"
+            git add "$BASELINE_FILE"
+            echo "info: auto-staged refreshed openapi.sha256 baseline (#4690)" >&2
         fi
+    else
+        echo "warning: neither sha256sum nor shasum available; skipping openapi baseline sync." >&2
+        echo "  CI openapi-drift gate may reject this commit." >&2
     fi
 fi
 
@@ -168,28 +216,37 @@ fi
 # already-allowlisted file, is not detected — this is a policy
 # ratchet, not a security boundary.
 ALLOWLIST="crates/librefang-channels/src/channels-allowlist.txt"
-if [ -f "$ALLOWLIST" ]; then
-    STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- \
-        'crates/librefang-channels/src/*.rs' \
-        'crates/librefang-channels/src/*/*.rs' 2>/dev/null || true)
-    VIOLATIONS=""
-    for f in $STAGED_FILES; do
+STAGED_ALLOWLIST="$HOOK_TMP/channels-allowlist.txt"
+if ! git show ":$ALLOWLIST" >"$STAGED_ALLOWLIST" 2>/dev/null; then
+    : >"$STAGED_ALLOWLIST"
+fi
+check_staged_channels() {
+    STAGED_CHANNELS="$HOOK_TMP/staged-channels"
+    VIOLATIONS="$HOOK_TMP/channel-violations"
+    git diff --cached --name-only --diff-filter=ACMR -- \
+        crates/librefang-channels/src >"$STAGED_CHANNELS" 2>/dev/null || true
+    : >"$VIOLATIONS"
+    while IFS= read -r f; do
         case "$f" in
-            crates/librefang-channels/src/*/*.rs)
-                base=$(basename "$(dirname "$f")") ;;
             crates/librefang-channels/src/*.rs)
-                base=$(basename "$f" .rs) ;;
+                relative=${f#crates/librefang-channels/src/}
+                case "$relative" in
+                    */*) base=${relative%%/*} ;;
+                    *) base=${relative%.rs} ;;
+                esac
+                ;;
             *) continue ;;
         esac
-        if git show ":$f" 2>/dev/null | grep -q 'ChannelAdapter for'; then
-            if ! grep -qx "$base" "$ALLOWLIST"; then
-                VIOLATIONS="$VIOLATIONS $f"
+        if git show ":$f" 2>/dev/null \
+            | grep -Eq '^[[:space:]]*(unsafe[[:space:]]+)?impl([^[:alnum:]_]|$)(.*[^[:alnum:]_])?ChannelAdapter[[:space:]]+for[[:space:]]+'; then
+            if ! grep -qx "$base" "$STAGED_ALLOWLIST"; then
+                printf '%s\n' "$f" >>"$VIOLATIONS"
             fi
         fi
-    done
-    if [ -n "$VIOLATIONS" ]; then
+    done <"$STAGED_CHANNELS"
+    if [ -s "$VIOLATIONS" ]; then
         echo "Error: in-process channel adapter(s) not allowed:" >&2
-        for v in $VIOLATIONS; do echo "  - $v" >&2; done
+        while IFS= read -r v; do echo "  - $v" >&2; done <"$VIOLATIONS"
         echo "" >&2
         echo "LibreFang is sidecar-first. Ship a new channel as an" >&2
         echo "out-of-process sidecar adapter (Python or any language):" >&2
@@ -215,4 +272,5 @@ if [ -f "$ALLOWLIST" ]; then
             echo "  instead be a sidecar adapter (see the policy above)." >&2
         fi
     fi
-fi
+}
+check_staged_channels

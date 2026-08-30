@@ -1,1 +1,0 @@
-Keep audit SSE backfills bounded after empty polls, stop quiet stream tasks when clients disconnect, surface serialization and task-termination failures, and avoid redundant per-entry filter allocations. (#7158) (@houko)

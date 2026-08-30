@@ -46,10 +46,17 @@ jobs:
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
+    # 345, not a tighter proportional value: this cap is per matrix leg, and a
+    # cold Tauri leg was measured at only a 1.45x margin under 300 (#7836).
+    # `max-parallel: 1` serialises the legs but does not extend the per-leg cap,
+    # so trimming this kills a release build rather than catching a hang.
     timeout-minutes: 345
     environment: release-desktop
     strategy:
       fail-fast: false
+      # tauri-action merges each platform into one latest.json release asset.
+      # Serialize the read/modify/write cycle so no matrix leg loses another.
+      max-parallel: 1
       matrix:
         platform:
           - name: Linux x86_64
@@ -104,6 +111,7 @@ jobs:
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
+        shell: bash
         run: |
           pnpm install --frozen-lockfile --config.strict-dep-builds=false
           pnpm run build
@@ -121,12 +129,13 @@ jobs:
           echo "$MAC_CERT_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security list-keychains -d user > "$RUNNER_TEMP/prior-signing-keychains.txt"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          PRIOR=$(tr -d '"' < "$RUNNER_TEMP/prior-signing-keychains.txt" | tr '\n' ' ')
           security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -166,20 +175,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           ASSETS=""
+          LISTED=false
           for attempt in $(seq 1 5); do
             if ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null); then
+              LISTED=true
               break
             fi
             echo "Failed to fetch release assets (attempt $attempt/5), retrying in 10s..."
             sleep 10
           done
+          if [ "$LISTED" != true ]; then
+            echo "::error::Failed to list release assets for $TAG after 5 attempts"
+            exit 1
+          fi
           echo "$ASSETS" | while read -r name; do
             [ -z "$name" ] && continue
             case "$name" in
-              *${{ matrix.platform.rust_target }}*|*latest.json)
+              *${{ matrix.platform.rust_target }}*)
                 echo "Deleting existing asset: $name"
-                gh release delete-asset "$TAG" "$name" --yes 2>/dev/null || true
+                gh release delete-asset "$TAG" "$name" --yes
                 ;;
             esac
           done
@@ -212,6 +228,7 @@ jobs:
           # id, not tag — see the `release_id` step above.
           releaseId: ${{ steps.release_id.outputs.id }}
           uploadUpdaterJson: true
+          retryAttempts: 3
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
@@ -230,8 +247,31 @@ jobs:
           # id, not tag — see the `release_id` step above.
           releaseId: ${{ steps.release_id.outputs.id }}
           uploadUpdaterJson: true
+          retryAttempts: 3
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
+
+      - name: Clean up macOS signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          PRIOR_KEYCHAINS="$RUNNER_TEMP/prior-signing-keychains.txt"
+          STATUS=0
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          if [ -f "$PRIOR_KEYCHAINS" ]; then
+            if ! xargs security list-keychains -d user -s < "$PRIOR_KEYCHAINS"; then
+              echo "::error::Failed to restore the prior keychain search list"
+              STATUS=1
+            fi
+          fi
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            if ! security delete-keychain "$KEYCHAIN_PATH"; then
+              echo "::error::Failed to delete the temporary signing keychain"
+              STATUS=1
+            fi
+          fi
+          exit "$STATUS"
 
   sync_homebrew_cask:
     name: Sync Homebrew Cask
@@ -255,7 +295,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 10); do
-            curl -fsSL \
+            curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
@@ -283,12 +323,18 @@ jobs:
 
           ARM_DMG=$(jq -r '[.assets[].name | select(endswith("_aarch64.dmg"))][0] // empty' release.json)
           X86_DMG=$(jq -r '[.assets[].name | select(endswith("_x64.dmg"))][0] // empty' release.json)
-          TAURI_VERSION=$(echo "$ARM_DMG" | sed 's/^LibreFang_//; s/_aarch64\.dmg$//')
-
           if [ -z "$ARM_DMG" ] || [ -z "$X86_DMG" ]; then
             echo "::error::DMG assets not found in release.json"
             exit 1
           fi
+          TAURI_VERSION=$(echo "$ARM_DMG" | sed -n 's/^LibreFang_\(.\+\)_aarch64\.dmg$/\1/p')
+          X86_TAURI_VERSION=$(echo "$X86_DMG" | sed -n 's/^LibreFang_\(.\+\)_x64\.dmg$/\1/p')
+          if [ -z "$TAURI_VERSION" ] || [ "$TAURI_VERSION" != "$X86_TAURI_VERSION" ]; then
+            echo "::error::DMG names have missing or inconsistent Tauri versions: $ARM_DMG, $X86_DMG"
+            exit 1
+          fi
+          # The tag version names the pinned cask. The Tauri bundle version
+          # names the actual DMG and therefore remains the cask's version.
           echo "DMG version (Tauri): $TAURI_VERSION"
 
           asset_sha() {
@@ -297,9 +343,9 @@ jobs:
             if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
               local asset_url
               asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
-              curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
+              curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 "$asset_url" | sha256sum | awk '{print $1}'
             else
-              curl -fsSL "$sha_url" | awk '{print $1}'
+              curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 "$sha_url" | awk '{print $1}'
             fi
           }
 
@@ -436,10 +482,30 @@ jobs:
 
       - name: Commit and push
         working-directory: tap
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           mkdir -p Casks
           git add .
-          git commit -m "chore: update cask channels to ${{ inputs.tag }}" || echo "No changes"
-          git push
+          if git diff --cached --quiet; then
+            echo "No cask changes"
+            exit 0
+          fi
+          git commit -m "chore: update cask channels to $TAG"
+          BRANCH=$(git branch --show-current)
+          for attempt in $(seq 1 5); do
+            if git push origin "$BRANCH"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Failed to push cask update after 5 attempts"
+              exit 1
+            fi
+            echo "Cask branch advanced; rebasing before retry ($attempt/5)"
+            sleep 5
+            git fetch origin "$BRANCH"
+            git rebase "origin/$BRANCH"
+          done

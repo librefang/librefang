@@ -35,6 +35,17 @@ for entry in "mise.toml:$mise_rust" "rust-toolchain.toml:$toolchain_rust" "mise.
   }
 done
 
+# flake.nix is the fourth consumer of this pin and the one that used to escape it: it built with `rust-bin.stable.latest`, resolved out of the pinned rust-overlay input, so a lock older than the MSRV handed every `nix build` a toolchain Cargo then rejected — main was red for days with "rustc 1.94.0 is not supported ... requires rustc 1.94.1" and nothing here noticed.
+# It now reads rust-toolchain.toml, and this keeps it that way.
+if ! grep -q 'builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)' flake.nix; then
+  echo 'flake.nix does not derive its Rust channel from rust-toolchain.toml' >&2
+  exit 1
+fi
+if grep -q 'rust-bin.stable.latest' flake.nix; then
+  echo 'flake.nix builds with rust-bin.stable.latest, which can drift below the MSRV' >&2
+  exit 1
+fi
+
 if [[ "${1:-}" == --print ]]; then
   printf '%s\n' "$cargo_msrv"
 else

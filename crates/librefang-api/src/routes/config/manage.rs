@@ -699,6 +699,17 @@ fn redacted_config_json(
             "role_map".into(),
             serde_json::json!(config.external_auth.role_map),
         );
+        // #7746: read-only and readable for exactly the same pair of reasons.
+        // `group_map` decides which local `[[groups]]` an IdP claim confers, and a group confers ownership and the role strings channel binding matches on, so a caller who could write it could join themselves to any team; `claim_paths` decides *where* the claim values both maps are matched against come from, and pointing it at an attacker-controlled claim would be the same escalation one level up.
+        // Both are group and claim names an operator chose, never secrets, and reading them back is how an operator confirms which IdP groups currently confer membership and which part of the token is being trusted.
+        ea.insert(
+            "group_map".into(),
+            serde_json::json!(config.external_auth.group_map),
+        );
+        ea.insert(
+            "claim_paths".into(),
+            serde_json::json!(config.external_auth.claim_paths),
+        );
     }
 
     // ── Newly surfaced sections (#4678) ──

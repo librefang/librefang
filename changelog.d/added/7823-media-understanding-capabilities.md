@@ -1,3 +1,0 @@
-`MediaCapability` gains `SpeechToText` and `ImageUnderstanding`, so a provider can declare that it transcribes audio or describes images the same way it already declares that it generates them.
-Understanding was the only half of media with no capability value, which is why its provider selection lives in two hand-written env-var ladders in `media_understanding.rs` instead of resolving through the driver registry like generation does — with no fallback when the first provider holding a key is the broken one.
-This is the type-level prerequisite; drivers declaring the new capabilities, and routing a capability the agent's own model lacks to a provider that has it, follow separately (#7824) (@DaBlitzStein)

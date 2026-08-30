@@ -1,1 +1,0 @@
-Harden OpenAI-compatible request handling by reading local images asynchronously, deduplicating concurrent Moonshot uploads, rejecting empty SSE successes, ordering out-of-order streamed tool metadata, and preserving completed Groq tool calls before truncated output. (#7639) (@houko)

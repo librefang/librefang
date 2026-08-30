@@ -1100,6 +1100,16 @@ pub struct AgentManifest {
     pub description: String,
     /// Author identifier.
     pub author: String,
+    /// The principal this agent acts for when no authenticated human is behind the turn (#7744).
+    ///
+    /// Written as an operator spec string — `user:alice`, `group:oncall`, or a bare `alice` meaning `user:alice` — and parsed by [`crate::principal::Principal::from_spec`].
+    /// It is deliberately **not** a required field: making it required would invalidate every existing `agent.toml`, and an ownership model that cannot be adopted incrementally is not adopted at all.
+    ///
+    /// This is a *fallback*, not an override.
+    /// A turn started by an authenticated caller is acting for that caller, and what it creates belongs to them; this value answers the other case — cron fires, triggers, workflow steps and autonomous ticks, where there is no human on the turn and the alternative is stamping nothing.
+    /// A malformed spec is reported as a `WARN` once at resolution and treated as absent rather than failing the turn, because an unparseable owner must not take an agent down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// Path to the agent module (WASM or Python file).
     pub module: String,
     /// Scheduling mode.
@@ -1658,6 +1668,7 @@ impl Default for AgentManifest {
             version: crate::VERSION.to_string(),
             description: String::new(),
             author: String::new(),
+            owner: None,
             module: "builtin:chat".to_string(),
             schedule: ScheduleMode::default(),
             session_mode: SessionMode::default(),

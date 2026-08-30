@@ -48,6 +48,8 @@ export {
   getConfigStatus,
   fetchRegistrySchema,
   getRawConfigToml,
+  // chat command catalog
+  listChatCommands,
   // goals
   listGoals,
   listGoalTemplates,
@@ -162,6 +164,10 @@ export {
   // users (RBAC M6)
   listUsers,
   getUser,
+  // groups (#7745)
+  listGroups,
+  getGroup,
+  getUserGroups,
   // per-user budget (M5) / policy (M3 #3205 — wired)
   getUserBudget,
   getUserPolicy,
@@ -355,6 +361,12 @@ export {
   createUser,
   updateUser,
   deleteUser,
+  // groups (#7745)
+  createGroup,
+  updateGroup,
+  deleteGroup,
+  addGroupMember,
+  removeGroupMember,
   importUsers,
   rotateUserKey,
   // per-user policy (M3 #3205)
@@ -377,6 +389,7 @@ export type {
   AutoDreamStatusName,
   AutoDreamTriggerOutcome,
   AutoDreamTurn,
+  ChatCommand,
   CronActionSpec,
   CronDeliverySpec,
   CronDeliveryTarget,
@@ -408,6 +421,10 @@ export type {
   // users / RBAC
   UserItem,
   UserUpsertPayload,
+  // groups (#7745)
+  GroupItem,
+  GroupUpsertPayload,
+  UserGroupsResult,
   UserRoleName,
   BulkImportRow,
   BulkImportResult,

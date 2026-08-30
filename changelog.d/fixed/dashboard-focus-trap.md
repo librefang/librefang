@@ -1,1 +1,0 @@
-- Keep dashboard modal focus contained when focus escapes, lands on a non-tabbable child, or has no visible target. (@xiaomo)

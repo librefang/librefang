@@ -16,6 +16,16 @@ spec:
         #
         # `checksum/config` rather than a librefang-specific key: it is the convention Helm charts use for exactly this, so an operator reading the pod template already knows what it is for.
         checksum/config: "sha256:c7607f7151246fb65efc1183680a450cfc3174dbfb9f32e78bb85c1ee6b19336"
+        # The same contract for the provisioning tree: sha256 of `sha256sum` output over the agent
+        # declarations in sorted key order, which is the digest scripts/check-k8s-manifests.py
+        # recomputes from the rendered ConfigMap.
+        #
+        # Regenerate with:
+        #   printf 'sha256:%s\n' "$( (cd agents && sha256sum *.toml) | sha256sum | awk '{print $1}')"
+        #
+        # `GET /api/provisioning/status` reports the per-resource checksums this is built from, so a
+        # rollout that did not land shows up there as `drifted: true` rather than as silence.
+        checksum/provisioning: "sha256:36a29c567703dcfe5a417c6e71c55f555ec49c73bdf5a0a329b968bea6ddf8a0"
     spec:
       containers:
         - name: librefang
@@ -31,15 +41,32 @@ spec:
             # Verify with `GET /api/config/status` rather than assuming.
             - name: LIBREFANG_CONFIG_MODE
               value: managed
+            # Declarative resource provisioning.
+            # Unset means off, so this variable alone switches the feature on; the base StatefulSet
+            # deliberately does not set it.
+            #
+            # LIBREFANG_PROVISIONING_PRUNE is left unset, which means `keep`: removing a declaration
+            # releases the agent back to runtime ownership instead of deleting it. Set it to exactly
+            # `delete` — nothing else is destructive — if the tree should be the only source of
+            # agents.
+            - name: LIBREFANG_PROVISIONING_PATH
+              value: /etc/librefang/provisioning
           volumeMounts:
             - name: config
               mountPath: /etc/librefang
               # ConfigMap volumes are read-only regardless; stating it keeps the manifest honest about the intent.
               # It is defence in depth and not the enforcement mechanism — enforcement is the 423, because an EACCES surfaces as a 500 with an errno that tells an operator nothing about why the write was refused.
               readOnly: true
+            - name: provisioning
+              mountPath: /etc/librefang/provisioning/agents
+              readOnly: true
       volumes:
         - name: config
           configMap:
             name: librefang-config
             # 0444: the file is readable by uid 1001 without granting the group or others anything the mount does not already imply.
+            defaultMode: 0444
+        - name: provisioning
+          configMap:
+            name: librefang-agents
             defaultMode: 0444

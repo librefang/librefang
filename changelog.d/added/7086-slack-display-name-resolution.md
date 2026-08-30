@@ -1,3 +1,0 @@
-The Slack sidecar can now resolve a sender's real display name and `@handle` through `users.info` instead of surfacing the raw `U09…` id, behind the new opt-in `SLACK_RESOLVE_DISPLAY_NAMES` knob.
-Lookups are cached per user id for `SLACK_DISPLAY_NAME_TTL` (six hours by default) because `users.info` sits in a per-method rate limit that a per-message lookup would exhaust on a busy channel; absences and transient failures are cached too, so an unresolvable user costs one request rather than one per message.
-It is off by default deliberately: the group roster persists whatever name the adapter reports, so turning it on changes what LibreFang stores about real people and not just what it displays (#7874) (@houko)

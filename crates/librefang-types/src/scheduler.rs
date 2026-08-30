@@ -470,6 +470,13 @@ pub struct CronJob {
     ///   history from previous fires cannot influence the current run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_mode: Option<SessionMode>,
+    /// The principal this job belongs to — the identity the turn that created it was acting for (#7744).
+    ///
+    /// Recorded, not enforced. Nothing in this increment consults it to decide who may read, run, edit or delete; it exists so the question "who is accountable for this, and who should be throttled or notified when it misbehaves" has an answer that outlives the log line that used to be the only trace.
+    ///
+    /// `None` means **unowned, visible to all** — the stated meaning, not an accident of `#[serde(default)]`. Every job that pre-dates this field deserializes to it, and so does one created by a turn with no authenticated caller, no manifest `owner` and no `default_owner`. Because ownership restricts nothing yet, an unowned job behaves exactly as it did before, which is what makes the field safe to add without a migration or a backfill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::principal::Principal>,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job last fired (if ever).
@@ -989,10 +996,51 @@ mod tests {
             delivery_targets: Vec::new(),
             peer_id: None,
             session_mode: None,
+            owner: None,
             created_at: Utc::now(),
             last_run: None,
             next_run: None,
         }
+    }
+
+    #[test]
+    fn a_job_written_before_ownership_deserializes_as_unowned() {
+        // `None` means "unowned, visible to all", and it is what every entry
+        // in an existing `cron_jobs.json` parses to — which is why the field
+        // needs no migration and no backfill (#7744).
+        let json = serde_json::json!({
+            "id": CronJobId::new(),
+            "agent_id": AgentId::new(),
+            "name": "legacy",
+            "enabled": true,
+            "schedule": { "kind": "every", "every_secs": 3600 },
+            "action": { "kind": "system_event", "text": "ping" },
+            "delivery": { "kind": "none" },
+            "created_at": "2020-01-01T00:00:00Z",
+            "last_run": null,
+            "next_run": null,
+        });
+        let job: CronJob = serde_json::from_value(json).expect("a pre-#7744 job still parses");
+        assert_eq!(job.owner, None);
+    }
+
+    #[test]
+    fn an_unowned_job_omits_the_key_entirely_when_serialized() {
+        // `skip_serializing_if` keeps the on-disk shape byte-identical for the
+        // unowned case, so adding the field does not rewrite every job in
+        // `cron_jobs.json` on the next persist.
+        let v = serde_json::to_value(valid_job()).expect("serializable");
+        assert!(v.get("owner").is_none());
+    }
+
+    #[test]
+    fn a_stamped_owner_round_trips_through_the_persisted_json() {
+        let owner = crate::principal::Principal::group_named("compliance");
+        let mut job = valid_job();
+        job.owner = Some(owner);
+        let text = serde_json::to_string(&job).expect("serializable");
+        let back: CronJob = serde_json::from_str(&text).expect("round-trips through the disk form");
+        assert_eq!(back.owner, Some(owner));
     }
 
     // -- CronJobId --

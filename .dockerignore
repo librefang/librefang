@@ -118,6 +118,9 @@ sdk/*
 sdk/python/*
 !sdk/python/librefang/
 !sdk/python/librefang/**
+# `pyproject.toml` is read with include_str! next to that include_dir!: the extracted tree cannot report its own version, so the version is baked in at compile time instead.
+# Excluding it fails the build with "couldn't read sdk/python/pyproject.toml".
+!sdk/python/pyproject.toml
 LICENSE-*
 CLAUDE.md
 AGENTS.md

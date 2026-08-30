@@ -356,6 +356,10 @@ pub fn ui_sections_overlay() -> serde_json::Value {
                 "max_cron_jobs", "agent_max_iterations", "workspaces_dir",
                 // Newly surfaced root-level scalars (#4678).
                 "update_channel", "max_history_messages", "max_upload_size_bytes",
+                // Fleet-wide fallback owner for artifacts created without an
+                // authenticated caller (#7744). Root-level scalar, so it renders here
+                // rather than as its own section.
+                "default_owner",
                 "max_concurrent_bg_llm", "max_agent_call_depth", "max_request_body_bytes",
                 "workflow_stale_timeout_minutes", "workflow_default_total_timeout_secs",
                 "tool_timeout_secs",
@@ -1519,6 +1523,12 @@ url = "https://search.example.com"
         ));
         // #7744: `role_map` is what turns a signed ID token into an API credential, so a caller who could write it could grant themselves Owner by naming an IdP group they already hold.
         assert!(!super::is_writable_config_path("external_auth.role_map"));
+        // #7746: same reasoning for the group side. Writing `group_map` would
+        // let a caller join themselves to any team — and a team owns artifacts
+        // and confers binding-rule role strings — while writing `claim_paths`
+        // would let them redirect both maps at a claim they control.
+        assert!(!super::is_writable_config_path("external_auth.group_map"));
+        assert!(!super::is_writable_config_path("external_auth.claim_paths"));
         assert!(!super::is_writable_config_path("oauth.google_client_id"));
         assert!(!super::is_writable_config_path("audit.anchor_path"));
         assert!(!super::is_writable_config_path("audit.retention_days"));

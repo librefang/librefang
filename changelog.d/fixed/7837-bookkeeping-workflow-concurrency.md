@@ -1,3 +1,0 @@
-Give the per-PR bookkeeping workflows cancelling concurrency groups, so a push no longer queues a full extra set of metadata runs that nothing supersedes.
-A sample of 100 queued runs found 64 were metadata bots rather than real CI, against a repository executing only three to four runs at a time — the labelers were directly starving the Rust build and test lanes of runner slots.
-Cancellation is decided per workflow rather than blanket-applied: the label and title reconcilers cancel because each run recomputes the full desired state, while the first-time-contributor greeting and the stale-PR sweep only serialise, because a half-posted comment or a half-finished sweep is worse than a redundant run (#7837) (@houko)

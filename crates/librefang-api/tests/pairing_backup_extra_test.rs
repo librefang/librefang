@@ -41,7 +41,22 @@ fn default_model_cfg() -> librefang_types::config::DefaultModelConfig {
     }
 }
 
+/// Surface the restore handler's own diagnostics in the test output.
+///
+/// A partial restore answers `500` with nothing but `restored_files` and `error_count` — the per-entry reasons go to `tracing::error!`, and with no subscriber installed a failure here says only that two entries failed, never which two or why.
+/// That is exactly the shape of the Windows-only failure this harness could not diagnose from CI logs.
+fn capture_restore_diagnostics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_test_writer()
+            .try_init();
+    });
+}
+
 async fn boot(pairing_enabled: bool) -> Harness {
+    capture_restore_diagnostics();
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.pairing = librefang_types::config::PairingConfig {
             enabled: pairing_enabled,
@@ -375,6 +390,20 @@ async fn delete_backup_removes_existing_archive() {
     assert_eq!(body["total"].as_u64(), Some(0));
     let on_disk = h.state.kernel.home_dir().join("backups").join(&filename);
     assert!(!on_disk.exists(), "file should be gone: {on_disk:?}");
+
+    let audit_entry = h
+        .state
+        .kernel
+        .audit()
+        .recent(50)
+        .into_iter()
+        .find(|entry| entry.detail == format!("Backup deleted: {filename}"))
+        .expect("successful backup deletion must be audited");
+    assert!(matches!(
+        audit_entry.action,
+        librefang_kernel::audit::AuditAction::ConfigChange
+    ));
+    assert_eq!(audit_entry.outcome, "completed");
 }
 
 // ---------------------------------------------------------------------------

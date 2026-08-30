@@ -21,7 +21,11 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+        # `stable.latest` resolves out of the pinned rust-overlay input, so a lock older than the workspace's MSRV silently hands the build a toolchain Cargo then rejects: every `nix build` on main failed with "rustc 1.94.0 is not supported by the following packages ... requires rustc 1.94.1" while the overlay lock sat five months behind.
+        # Read the channel the repo already declares instead, so the flake is bound by the same pin `scripts/check-toolchain-versions.sh` enforces across Cargo.toml, mise and rustup.
+        rustChannel =
+          (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
+        rustToolchain = pkgs.rust-bin.stable.${rustChannel}.default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" ];
         };
 

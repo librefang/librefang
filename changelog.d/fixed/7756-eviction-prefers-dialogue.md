@@ -1,3 +1,0 @@
-Evict raw dialogue before extracted facts when an agent hits `max_memories_per_agent`, instead of evicting whichever row happened to score lowest on confidence.
-The two classes have different exit paths: an extracted fact is the distilled artefact of many turns and arrives a few rows a day, while raw dialogue is written unconditionally once per turn, is never distilled into anything, and has no expiry — so the cap is the only exit it has, and spending that exit on a fact was not a decision anybody made.
-Within a class the previous lowest-confidence-first ordering is unchanged, and facts remain evictable once raw dialogue is exhausted (#7872) (@houko)

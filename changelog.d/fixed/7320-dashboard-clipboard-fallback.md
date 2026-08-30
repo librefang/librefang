@@ -1,1 +1,0 @@
-- Clean up the dashboard clipboard fallback after failures and allow mobile browsers to select its temporary text area. (@xiaomo)

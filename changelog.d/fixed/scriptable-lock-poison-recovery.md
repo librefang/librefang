@@ -1,1 +1,0 @@
-Log and clear poisoned scriptable context-engine locks after recovery so hook overrides, rate limiting, circuit breakers, metrics, and traces do not silently remain in a permanently poisoned state. (@xiaomo)

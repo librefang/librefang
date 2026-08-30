@@ -1,1 +1,0 @@
-Move identity-file path resolution and reads for `GET /api/agents/{id}/files/{filename}` onto the blocking pool, while preserving current-layout preference, legacy fallback, and canonical containment checks. Concurrent production-router coverage now also verifies that same-file writes publish one complete payload. (#7173) (@houko)

@@ -688,9 +688,70 @@ pub fn config_path_for(config: &KernelConfig) -> PathBuf {
     config_path_override().unwrap_or_else(|| config.home_dir.join("config.toml"))
 }
 
+/// Every file that contributes to the effective configuration, the primary file first (#6695).
+///
+/// Deliberately tolerant where [`resolve_config_includes`] is strict: this feeds a status endpoint, not a loader, so a broken `include` chain yields a shorter list rather than an error.
+/// The traversal applies the same two security rules — absolute paths and `..` components are skipped, never followed — and dedupes across the whole walk so a diamond graph lists a shared file once and a cycle terminates instead of hanging.
+///
+/// Paths are canonicalised where possible, so the primary file appears exactly once even when the caller passed a path through a symlink.
+pub fn config_source_files(path: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    collect_config_sources(path, 0, &mut seen, &mut out);
+    out
+}
+
+fn collect_config_sources(
+    path: &Path,
+    depth: u32,
+    seen: &mut std::collections::BTreeSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(canonical.clone()) {
+        return;
+    }
+    if !canonical.is_file() {
+        return;
+    }
+    out.push(canonical.clone());
+    if depth >= MAX_INCLUDE_DEPTH {
+        return;
+    }
+
+    let Ok(text) = std::fs::read_to_string(&canonical) else {
+        return;
+    };
+    let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(&text) else {
+        return;
+    };
+    let Some(toml::Value::Array(includes)) = table.get("include") else {
+        return;
+    };
+    let dir = canonical
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    for value in includes {
+        let Some(relative) = value.as_str() else {
+            continue;
+        };
+        let relative = Path::new(relative);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            continue;
+        }
+        collect_config_sources(&dir.join(relative), depth + 1, seen, out);
+    }
+}
+
 /// Provenance of the effective configuration, for the authenticated status endpoint.
 ///
-/// Deliberately carries no secret material: the checksum is over the raw file bytes, which the caller already has to be authenticated to influence, and the path is a deployment fact an operator needs in order to know where to make a change.
+/// Deliberately carries no secret material: the checksum is over file bytes, which the caller already has to be authenticated to influence, and the paths are deployment facts an operator needs in order to know where to make a change.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConfigProvenance {
     /// `"mutable"` or `"managed"`.
@@ -700,27 +761,81 @@ pub struct ConfigProvenance {
     /// Whether the API will accept a write.
     /// Equivalent to `mode == "mutable"`, surfaced separately so the dashboard branches on a boolean rather than string-matching a mode name.
     pub writable: bool,
-    /// `sha256:<hex>` over the config file's bytes, or `None` when the file does not exist.
+    /// `sha256:<hex>` covering every file that contributes to the effective configuration, or `None` when the primary file does not exist.
+    ///
+    /// With no `include`, this is the digest of the primary file's raw bytes, unchanged from before #6695 so an existing `checksum/config` rollout annotation keeps matching.
+    ///
+    /// With includes, hashing the primary file alone would report a rollout that never happened — an edit to an included file changes the effective configuration and leaves the primary byte-identical.
+    /// The composite is therefore the digest of `sha256sum` output over the source files in include order, relative to the primary file's directory, which an operator can reproduce with
+    /// `(cd /etc/librefang && sha256sum config.toml extra.toml) | sha256sum`.
     pub checksum: Option<String>,
-    /// RFC 3339 timestamp of the file's last modification, or `None` when unavailable.
+    /// Paths of the included files that contribute, relative to the primary file's directory, in include order.
+    ///
+    /// Empty for the ordinary single-file deployment. Non-empty means `checksum` is the composite form described above.
+    pub includes: Vec<String>,
+    /// RFC 3339 timestamp of the most recent modification across every source file, or `None` when unavailable.
+    ///
+    /// Across every source rather than the primary alone for the same reason as the checksum: an operator watching this field to confirm an edit landed must not be told nothing happened.
     pub modified_at: Option<String>,
 }
 
 /// Build the provenance record for the config file currently in effect.
 pub fn config_provenance(path: Option<&Path>) -> ConfigProvenance {
+    use sha2::{Digest, Sha256};
+
     let config_path = path
         .map(|p| p.to_path_buf())
         .unwrap_or_else(default_config_path);
     let mode = config_mode();
 
-    let checksum = std::fs::read(&config_path).ok().map(|bytes| {
-        use sha2::{Digest, Sha256};
-        format!("sha256:{:x}", Sha256::digest(&bytes))
-    });
+    let sources = config_source_files(&config_path);
+    let base_dir = sources
+        .first()
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
 
-    let modified_at = std::fs::metadata(&config_path)
-        .and_then(|m| m.modified())
-        .ok()
+    let checksum = match sources.len() {
+        // No includes: the historical digest, byte for byte.
+        0 | 1 => std::fs::read(&config_path)
+            .ok()
+            .map(|bytes| format!("sha256:{:x}", Sha256::digest(&bytes))),
+        _ => {
+            let mut manifest = String::new();
+            for source in &sources {
+                let Ok(bytes) = std::fs::read(source) else {
+                    continue;
+                };
+                let name = source
+                    .strip_prefix(&base_dir)
+                    .unwrap_or(source.as_path())
+                    .display();
+                manifest.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
+            }
+            Some(format!("sha256:{:x}", Sha256::digest(manifest.as_bytes())))
+        }
+    };
+
+    let includes = sources
+        .iter()
+        .skip(1)
+        .map(|p| {
+            p.strip_prefix(&base_dir)
+                .unwrap_or(p.as_path())
+                .display()
+                .to_string()
+        })
+        .collect();
+
+    let modified_at = sources
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+        .or_else(|| {
+            std::fs::metadata(&config_path)
+                .and_then(|m| m.modified())
+                .ok()
+        })
         .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
 
     ConfigProvenance {
@@ -728,6 +843,7 @@ pub fn config_provenance(path: Option<&Path>) -> ConfigProvenance {
         source: config_path.display().to_string(),
         writable: mode.is_writable(),
         checksum,
+        includes,
         modified_at,
     }
 }
@@ -884,6 +1000,118 @@ mod tests {
         let mem = base["memory"].as_table().unwrap();
         assert_eq!(mem["decay_rate"].as_float(), Some(0.5));
         assert_eq!(mem["consolidation_threshold"].as_integer(), Some(10000));
+    }
+
+    /// A deployment with no `include` must keep the exact digest the `checksum/config` rollout
+    /// annotation was generated from, or #7902's overlay and its kind e2e assertion both break.
+    #[test]
+    fn provenance_checksum_of_a_single_file_is_the_raw_byte_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"log_level = \"info\"\n").unwrap();
+
+        let provenance = config_provenance(Some(&path));
+
+        use sha2::{Digest, Sha256};
+        let expected = format!("sha256:{:x}", Sha256::digest(std::fs::read(&path).unwrap()));
+        assert_eq!(provenance.checksum.as_deref(), Some(expected.as_str()));
+        assert!(provenance.includes.is_empty(), "{:?}", provenance.includes);
+    }
+
+    /// The defect this fixes: an edit to an included file changes the effective configuration,
+    /// so a checksum that ignores it tells an operator a rollout landed when it did not.
+    #[test]
+    fn provenance_checksum_covers_included_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+        let extra = dir.path().join("extra.toml");
+        std::fs::write(&root, b"include = [\"extra.toml\"]\nlog_level = \"info\"\n").unwrap();
+        std::fs::write(&extra, b"api_listen = \"0.0.0.0:4545\"\n").unwrap();
+
+        let before = config_provenance(Some(&root));
+        assert_eq!(before.includes, vec!["extra.toml".to_string()]);
+
+        let root_bytes_digest = {
+            use sha2::{Digest, Sha256};
+            format!("sha256:{:x}", Sha256::digest(std::fs::read(&root).unwrap()))
+        };
+        assert_ne!(
+            before.checksum.as_deref(),
+            Some(root_bytes_digest.as_str()),
+            "with includes the checksum must be the composite, not the primary file alone"
+        );
+
+        std::fs::write(&extra, b"api_listen = \"0.0.0.0:9999\"\n").unwrap();
+        let after = config_provenance(Some(&root));
+
+        assert_eq!(
+            std::fs::read(&root).unwrap(),
+            b"include = [\"extra.toml\"]\nlog_level = \"info\"\n",
+            "the primary file is deliberately untouched — that is the whole point of the case"
+        );
+        assert_ne!(
+            before.checksum, after.checksum,
+            "editing an included file must move the checksum"
+        );
+    }
+
+    /// The published reproduction command has to actually reproduce it, or an operator
+    /// comparing a ConfigMap annotation against the API gets a mismatch with no explanation.
+    #[test]
+    fn composite_checksum_matches_the_documented_sha256sum_pipeline() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+        let extra = dir.path().join("extra.toml");
+        std::fs::write(&root, b"include = [\"extra.toml\"]\n").unwrap();
+        std::fs::write(&extra, b"log_level = \"debug\"\n").unwrap();
+
+        // `sha256sum config.toml extra.toml | sha256sum`, spelled out.
+        let mut manifest = String::new();
+        for name in ["config.toml", "extra.toml"] {
+            let bytes = std::fs::read(dir.path().join(name)).unwrap();
+            manifest.push_str(&format!("{:x}  {name}\n", Sha256::digest(&bytes)));
+        }
+        let expected = format!("sha256:{:x}", Sha256::digest(manifest.as_bytes()));
+
+        assert_eq!(
+            config_provenance(Some(&root)).checksum.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    /// Provenance feeds a status endpoint, so a broken chain must degrade rather than error.
+    #[test]
+    fn source_walk_skips_unsafe_and_missing_includes_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+        std::fs::write(
+            &root,
+            b"include = [\"/etc/passwd\", \"../escape.toml\", \"missing.toml\"]\n",
+        )
+        .unwrap();
+
+        let sources = config_source_files(&root);
+        assert_eq!(
+            sources.len(),
+            1,
+            "only the primary file contributes; got {sources:?}"
+        );
+        assert!(config_provenance(Some(&root)).includes.is_empty());
+    }
+
+    /// A cycle makes the loader error; the provenance walk must terminate and list each file once.
+    #[test]
+    fn source_walk_terminates_on_a_circular_include() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("config.toml");
+        let b = dir.path().join("b.toml");
+        std::fs::write(&a, b"include = [\"b.toml\"]\n").unwrap();
+        std::fs::write(&b, b"include = [\"config.toml\"]\n").unwrap();
+
+        let sources = config_source_files(&a);
+        assert_eq!(sources.len(), 2, "{sources:?}");
     }
 
     #[test]

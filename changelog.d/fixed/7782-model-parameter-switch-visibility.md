@@ -1,3 +1,0 @@
-Move the "inheriting the catalog default" dimming in the model parameter form off the row container and onto the label, the number input, the slider and the tick row, so the toggle that overrides the default is no longer faded along with the values it governs.
-Every parameter starts out inheriting, so a model with no overrides opened with all seven rows — and all seven switches — at 40% opacity, which read as a screen that had failed to load rather than as an opt-in-per-field form.
-The off state of the switch also moves from the divider hairline token to the muted-text token, clearing the 3:1 contrast floor WCAG 2.2 sets for interactive controls, and the switch now draws a focus ring when reached from the keyboard (#7444) (@houko)

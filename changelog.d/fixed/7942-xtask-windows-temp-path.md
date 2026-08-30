@@ -1,4 +1,0 @@
-Restore the Windows CI lane, which had been the only red lane on `main` once the template-fixture failures were fixed.
-Two `xtask` release tests built a scratch directory out of `std::thread::current().name()`, which under the test harness is the test's full path — `release::tests::git_diff_change_detection_distinguishes_changes_from_errors`.
-`:` is an ordinary character in a POSIX filename but is reserved on Windows, where it separates a drive letter or an NTFS alternate data stream, so the directory creation succeeded on Linux and macOS and failed on Windows with `InvalidFilename` (OS error 123) — two failures out of 5888 tests, on one lane, which is why the breakage read as a platform quirk rather than a path bug.
-The thread name now goes through a slug that keeps only characters every filesystem accepts. (#7942) (@houko)

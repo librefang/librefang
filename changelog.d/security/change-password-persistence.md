@@ -1,1 +1,0 @@
-Move dashboard credential verification, hashing, and config I/O off async workers; serialize and atomically persist config updates; and scrub internal persistence errors from HTTP responses. (@xiaomo)

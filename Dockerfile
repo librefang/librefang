@@ -57,6 +57,9 @@ COPY packages ./packages
 # panics with "sdk/python/librefang is not a directory". Only this one
 # subtree is needed — .dockerignore keeps the rest of sdk/ out.
 COPY sdk/python/librefang ./sdk/python/librefang
+# The same module reads the SDK version out of `sdk/python/pyproject.toml` with include_str!, because the extracted tree has neither a sibling pyproject.toml nor installed package metadata and would answer `0+unknown`.
+# Without this COPY the build fails with "couldn't read crates/librefang-channels/src/../../../sdk/python/pyproject.toml".
+COPY sdk/python/pyproject.toml ./sdk/python/pyproject.toml
 # librefang-api uses include_str!("../../../deploy/...") to embed the
 # observability stack (prometheus / tempo / otel-collector / grafana
 # configs) at compile time — added in #3062. Without this COPY the

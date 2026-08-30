@@ -1,4 +1,0 @@
-The memory page's plugin section now documents the seam that exists.
-It previously walked readers through `MemoryProvider`, a `set_external_provider` call that was never a method on anything, and a `prefetch_all` described as "called internally by the agent loop before each LLM request" when it had no caller at all — so anyone implementing against those pages got silence and no error.
-That section is replaced, in English and Chinese, by the `VectorStore` seam: the `[memory] vector_backend` / `vector_store_url` settings, the four-endpoint HTTP contract with its size and timeout bounds, what the backend is not allowed to decide (IDs hydrate from SQLite, the caller's filter is re-applied afterwards, and the chat/session isolation guards run regardless), and how a malformed ID or a dead backend degrades.
-(#7883) (@houko)
