@@ -1,1 +1,0 @@
-Restrict pairing URLs derived from X-Forwarded-Proto to normalized HTTP or HTTPS schemes, validate device metadata, keep persisted and live bearer state synchronized, classify completion failures, and report actual push delivery outcomes. (#7164) (@xiaomo)

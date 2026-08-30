@@ -1,6 +1,0 @@
-A model's context window is now an operator-editable property of the model, corrected at any time instead of only at registration.
-A gateway that proxies a self-hosted runtime reports nothing useful about its own capacity, so the window was unknown, the agent loop fell back to a conservative 8192, and conversations hit an overflow that did not exist — at a prompt size the provider was answering happily.
-The only reachable knob was the agent's `max_tokens`, which is the output cap rather than the window, and had to be repeated for every agent on the model.
-`ModelOverrides` now carries `context_window` and `max_output_tokens`, persisted in `model_overrides.json` and therefore surviving a registry sync, editable through `PUT /api/models/overrides/{id}` and from the provider drawer in the dashboard, and inherited by every agent that uses the model.
-Precedence is explicit: an `agent.toml` window still wins as the most specific layer, then the operator's per-model correction, then whatever the registry declared or a discovery probe assumed, then the conservative fallback.
-The dashboard also says when no window is known for a model, so the assumption the runtime has been logging is visible next to the model it applies to (#7818) (@houko)

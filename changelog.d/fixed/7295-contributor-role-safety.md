@@ -1,1 +1,0 @@
-Make contributor announcements distinguish prior merges without relying on immediate search indexing, reject malformed searches, escape event-derived Markdown, preserve multiline Discord formatting, disable mentions, and fail visibly on API or webhook errors. (#7295) (@xiaomo)

@@ -1,1 +1,0 @@
-Provider-only `PATCH /api/agents/{id}/config` requests now preserve the current model while applying and persisting the new provider instead of returning 200 without changing the agent (#7796) (@houko)

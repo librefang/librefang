@@ -1,4 +1,0 @@
-`librefang message` accepts `--session-id <UUID>` (also spelled `--session`), so a scripted caller can address one conversation among the many a single agent serves.
-Without it every caller collapsed onto the agent's one canonical session: for a public agent serving unrelated visitors, each visitor's text sat in the model context of the next visitor's turn, and the shared transcript was re-sent and billed on every turn until it hit the context limit.
-The HTTP surface has accepted `session_id` on `POST /api/agents/{id}/message` all along — the CLI simply never sent one, and `--incognito` was no substitute because it suppresses session writes entirely and so destroys continuity inside a conversation too.
-An explicit id overrides the agent's `session_mode` in both directions: a `persistent` agent stops funnelling the turn into its canonical session, and a `new` agent stops minting a throwaway one (#7815) (@houko)

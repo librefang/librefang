@@ -1,1 +1,0 @@
-Send URL-backed and inline file attachments through Slack's supported external upload flow, preserving thread placement and rejecting unsafe or oversized downloads instead of posting an unsupported-content placeholder (#6897) (@houko)

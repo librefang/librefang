@@ -1,2 +1,0 @@
-Files and images uploaded into Slack now reach the agent instead of being dropped, so a member can hand over a campaign image or a clip in the channel where the work is happening and ask for something to be done with it.
-The bot token is pinned to Slack's own file hosts, and downloads are gated by a size cap, an extension allow-list and per-channel switches so a busy channel can opt out without disabling uploads everywhere (#7812, #7087) (@houko)

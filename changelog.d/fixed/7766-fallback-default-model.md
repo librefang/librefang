@@ -1,1 +1,0 @@
-Resolve empty and `default` fallback sentinels by inheriting the configured default provider/model pair while retaining provider inference for explicit fallback models, preventing failover from sending the literal model name `default` or bypassing an EveryAPI/OpenRouter aggregate through either the per-turn or boot-time driver chain (#7798) (@houko)

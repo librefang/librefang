@@ -1,4 +1,0 @@
-Restore the `/api/templates` integration tests, which had been failing on `main` across every OS since #7648 introduced the `TemplateFixture` RAII guard.
-Eight call sites discarded the guard `write_template` returns, so its `Drop` deleted the template directory at the end of the very statement that wrote it and every later read of that template answered 404 — the assertion surfaced as `left: 404, right: 200` in tests that never mention cleanup.
-`write_template` is now `#[must_use]`, so discarding the guard is a compile error under `-D warnings` rather than a failure that lands in an unrelated assertion.
-Note that the compiler's suggested `let _ = ...` does not fix it: `_` drops immediately too, and only a named binding such as `let _fixture = ...` keeps the fixture alive for the test body. (#7938) (@e-hu)

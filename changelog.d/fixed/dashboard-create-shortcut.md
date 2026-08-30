@@ -1,1 +1,0 @@
-- Keep the dashboard create-shortcut listener stable across renders while invoking the latest page handler. (@xiaomo)

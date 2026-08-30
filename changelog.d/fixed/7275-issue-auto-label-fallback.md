@@ -1,1 +1,0 @@
-Preserve `needs-info` during triage fallback, recognize breaking conventional titles and inflected bug words, keep meta-only prefixes as successful empty output, and make thin-report detection language-neutral. (#7275) (@xiaomo)

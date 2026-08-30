@@ -1,1 +1,0 @@
-Return a bodyless HTTP 204 from binding deletion instead of a serialized JSON `null`, declare that 204 in the OpenAPI document that previously advertised 200, and take the path index as the `u32` the same document already promised, so generated clients decoding a no-content response no longer trip over an unexpected body or a mismatched parameter type (#7157) (@houko)

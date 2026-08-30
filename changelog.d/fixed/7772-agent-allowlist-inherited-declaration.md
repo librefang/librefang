@@ -1,7 +1,0 @@
-Editing an agent that inherited an MCP server this instance never installed no longer loses the edit.
-Saving the allowlist returned `[400] Internal error: Unknown MCP server: fetch`, naming a server the operator never asked for, because the check built its set of acceptable names from the MCP tools connected at that instant — a strict subset of what is configured, never mind what is installed — and the dashboard sends the whole array, so one inherited name took every unrelated change down with it.
-A declaration this instance has not installed is a legitimate state rather than a mistake: agent types are shared artefacts that say what the agent wants, `spawn` accepts such a manifest without any equivalent check, and the read side already surfaces the gap as pending, so the edit path was stricter than the path that created the agent.
-An MCP name is now accepted when it is configured in `config.toml`, connected or not, or present in the locally cached MCP catalog, and a skill when it is loaded or is the `[skill].name` of a directory sitting unloaded under the skills directory.
-Accepting one persists the name and nothing else — installing and connecting stay the operator's explicit action.
-Both rejections became `InvalidInput`, so a typo stops being reported as an internal fault; `mcp_servers = ["*"]` is storable again after the old check rejected the documented wildcard as an unknown server name; and a poisoned MCP tool lock no longer skips validation altogether.
-Reported and diagnosed by @DaBlitzStein. (#7898) (@houko)

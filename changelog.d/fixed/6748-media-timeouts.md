@@ -1,1 +1,0 @@
-Make audio transcription and ffmpeg subprocess timeouts independently configurable through `[media] transcription_timeout_secs` and `ffmpeg_timeout_secs`, preserving the former 60-second and 30-second limits as defaults and reporting media config reloads as restart-required because the live `MediaEngine` captures its config at boot (#6748, #7803) (@houko)

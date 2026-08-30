@@ -1,1 +1,0 @@
-Pin the GCP template's default LibreFang release, validate project IDs early, and ignore local Terraform overrides, variable files, and common GCP credential files without excluding the provider lock file. (@xiaomo)

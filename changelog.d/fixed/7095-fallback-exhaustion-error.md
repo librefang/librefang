@@ -1,1 +1,0 @@
-Return structured provider exhaustion details from fallback wrappers when every configured slot is temporarily unavailable, instead of reporting that no drivers are configured, while preserving attempted exhaustion causes and prioritizing real non-exhaustion failures regardless of slot order (#7799) (@houko)

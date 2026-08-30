@@ -1,2 +1,0 @@
-Bound backup restore entry counts, decompression ratios, and extracted sizes while rejecting symlink escapes, reporting partial restores as failures, and auditing backup deletion (#7174) (@houko)
-  The ratio bound applies only above 8 MiB, because SQLite's `-shm` and `-wal` sidecars are mostly zero pages and legitimately deflate several hundred to one; entries below that are still held to the absolute per-entry and whole-archive size caps.

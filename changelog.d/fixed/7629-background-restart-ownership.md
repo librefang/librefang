@@ -1,1 +1,0 @@
-Keep background-agent restart ownership consistent by stopping replaced loops and owned watcher tasks while preventing registration races or stale self-cleanup from losing the current task (#7629) (@houko)

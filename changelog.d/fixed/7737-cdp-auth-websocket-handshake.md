@@ -1,1 +1,0 @@
-Build authenticated CDP WebSocket requests through tungstenite's handshake generator before adding the bearer token, so token-protected browser endpoints receive the required upgrade headers (#7802) (@houko)

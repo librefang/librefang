@@ -1,1 +1,0 @@
-API vault tests and `MockKernelBuilder` now share one process-wide vault-key initializer, preventing parallel `cargo test -p librefang-api --lib` runs from switching keys between vault initialization and unlock (#7783) (@houko)

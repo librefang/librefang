@@ -1,1 +1,0 @@
-- Reject malformed numeric agent-model drafts, normalize persisted comparisons, and emit only API-required provider/model fields. (@xiaomo)

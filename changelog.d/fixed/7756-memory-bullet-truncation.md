@@ -1,3 +1,0 @@
-Cut recalled memory bullets at a sentence or word boundary and mark the cut, instead of severing them at the 500th character.
-On a production corpus 57% of raw-dialogue rows exceed that cap, so more than half of the memory section reached the model as an unmarked half-sentence — which invites the model to supply an ending that was never stored.
-The section's total also has an owner now: the per-bullet cap, the ten-bullet limit and the section budget are named constants rather than literals buried in the formatter, and the budget is enforced across all three producers that feed the section, with any omitted memories reported in the prompt rather than dropped silently (#7872) (@houko)

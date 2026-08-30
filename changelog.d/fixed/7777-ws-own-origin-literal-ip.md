@@ -1,6 +1,0 @@
-A daemon that is not on loopback now accepts the WebSocket from the dashboard it serves itself.
-`validate_ws_origin` auto-allowed only `localhost` / `127.0.0.1` / `::1` on the listen port, so a daemon bound to `0.0.0.0:4545` and opened at `http://192.168.1.161:4545` answered every agent-chat upgrade with a 403 and silently dropped every agent reply — the product's primary flow, broken out of the box on any non-loopback deployment.
-The implicit allow now also covers an origin naming the same **literal IP address and port** the request was itself addressed to.
-It is restricted to IP literals deliberately: the `Host` header is derived from whatever URL the page dialled rather than from anything the daemon asserted, so matching `Host` and `Origin` on a *hostname* proves only that the page came from a name that currently resolves here, which is exactly what DNS rebinding arranges — and treating that as same-origin would hand any rebound attacker page a socket and defeat the cross-site hijacking guard from #3731.
-An IP literal has no name in the middle to rebind, so for the two sides to match the page must have been served by whatever answers on that address and port.
-Deployments reached through a hostname, including anything behind a TLS-terminating proxy, continue to list their public origin in the top-level `cors_origin` (#7850) (@houko)

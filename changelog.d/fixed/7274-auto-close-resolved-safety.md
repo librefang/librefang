@@ -1,1 +1,0 @@
-Parse trusted NUL-delimited commit data, neutralize commit metadata in comments, reject negated or invalid references, validate lookback, serialize runs, and preserve idempotent live retries. (#7274) (@xiaomo)

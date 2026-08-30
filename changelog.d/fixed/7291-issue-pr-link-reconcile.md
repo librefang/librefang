@@ -1,1 +1,0 @@
-Reconcile issue `has-pr` labels from every open PR and currently labeled issue on merge, close, reopen, and body edits, refreshing the event PR before globally serialized writes and using one boundary-safe link parser. (#7291) (@houko)

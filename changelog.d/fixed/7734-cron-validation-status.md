@@ -1,1 +1,0 @@
-Preserve scheduler validation errors when creating cron jobs through `POST /api/cron/jobs`, so rejected names and other caller-correctable fields return `400 invalid_input` with an actionable message while capacity and other internal failures remain scrubbed 500 responses (#7734) (@houko)

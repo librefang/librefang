@@ -1,1 +1,0 @@
-Clean up closed provider cooldown entries without racing refreshed state, preserve half-open backoff history, and keep profile priority when every authentication profile is cooling down. (#7577) (@houko)

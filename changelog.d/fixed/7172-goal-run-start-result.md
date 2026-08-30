@@ -1,1 +1,0 @@
-Reject invalid goal IDs, link fields, progress values, and iteration limits; preserve orphan children when a missing parent is deleted; and serialize autonomous run startup with goal deletion so a deleted goal cannot leave an orphaned loop (#7172) (@houko)

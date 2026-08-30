@@ -1,1 +1,0 @@
-- Refresh all dashboard Hand-derived views after secret and message mutations, and preserve cached fields when partial lifecycle responses contain undefined values. (@xiaomo)

@@ -1,4 +1,0 @@
-`[memory.decay] episodic_ttl_days` (default 90) and `[memory] max_episodic_chars` (default 8000) give the episodic memory layer an exit.
-The agent loop writes one episodic row per turn, but the decay sweep only ever named the SESSION and AGENT scopes, so the highest-volume scope in any real store was the one scope nothing expired — and the per-turn writer inlines whatever the turn produced, so an attachment a channel adapter rendered into the user message became one memory row and one embedding request of the same size.
-The TTL is measured from last access, so a row that keeps being retrieved keeps living and the sweep retires the tail rather than the working set; the character budget is applied before the embedding call and split across the two halves of the exchange, so a large user message can never truncate the agent's reply away.
-(#7915) (@houko)
