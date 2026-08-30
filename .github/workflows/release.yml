@@ -3088,10 +3088,11 @@ jobs:
         # Keep that exception out of fly.toml so user deployments remain secure by default and must explicitly provision authentication.
         # The image is pinned to the tag being released for the same reason the auth exception lives here: fly.toml is a file users copy, and a release-specific tag baked into it goes stale the moment the next release lands.
         # `docker-manifest`, which this job needs, has just pushed both `:$VERSION` and `:latest`, so the tag is guaranteed to exist.
+        # `${RELEASE_TAG#v}` strips the `v` prefix to match `$VERSION` as pushed by `docker-manifest` — `RELEASE_TAG` itself (e.g. `v2026.7.31`) was never a tag pushed to the registry.
         # `--image` means there is nothing to build, which is why `--remote-only` is gone rather than merely unused.
         run: >-
           flyctl deploy --config deploy/fly/fly.toml
-          --image "ghcr.io/librefang/librefang:${RELEASE_TAG}"
+          --image "ghcr.io/librefang/librefang:${RELEASE_TAG#v}"
           --env LIBREFANG_ALLOW_NO_AUTH=1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
