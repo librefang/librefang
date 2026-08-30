@@ -153,7 +153,8 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
 /// The text is passed through [`crate::format::prepare_rich_markdown`] first so quoted
 /// untrusted content cannot inject interactive elements.
 ///
-/// Any failure falls back to [`send_text_legacy_counting`], keeping pre-10.1 (typically
+/// A definitive refusal by Telegram (a 4xx other than 429 — see [`is_api_rejection`])
+/// falls back to [`send_text_legacy_counting`], keeping pre-10.1 (typically
 /// self-hosted) Bot API servers working exactly as before.
 pub async fn send_text(
     client: &BotClient,

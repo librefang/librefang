@@ -1224,3 +1224,92 @@ def test_rich_sanitizer_escapes_active_constructs():
     assert "таблица — да" in out
     assert "🎉" in out
     assert "&lt;tg-button" in out
+
+
+# ---- rich sanitizer: parser-level bypasses found in review round 3 --
+
+_BTN = ('<tg-button type="callback_data" data="wipe">Tap'
+        '</tg-button>')
+
+
+def test_rich_sanitizer_handles_lone_cr_line_endings():
+    """A lone \\r is a line ending in Markdown, and lone-CR text arrives
+    verbatim from quoted mail. Matching only \\n meant the block-boundary
+    check never ran at all on such input."""
+    for sep in ("\r> q\r> ", "\r\r", "\r# h\r", "\r---\r", "\r<div>\r"):
+        out = tg.sanitize_rich_markdown(
+            "He said `hello%s%s%s`" % (sep, _BTN, sep))
+        assert "<tg-button" not in out, "%r leaked: %s" % (sep, out)
+
+
+def test_rich_sanitizer_escaped_and_attribute_backticks():
+    """A backslash-escaped backtick is literal, and a backtick inside an
+    attribute value is not Markdown at all; both used to open a span that
+    copied everything up to the next backtick verbatim."""
+    assert "<tg-button" not in tg.sanitize_rich_markdown(
+        "a \\` %s \\` b" % _BTN)
+    assert "<tg-button" not in tg.sanitize_rich_markdown(
+        '<a title="`" href="https://ok">t</a> %s `x`' % _BTN)
+
+
+def test_rich_sanitizer_entities_cannot_hide_a_scheme():
+    """An entity decoding to whitespace, and an entity we cannot decode,
+    both used to hide the scheme behind them."""
+    for bad in ("&#32;javascript:alert(1)", "&#9;javascript:alert(1)",
+                "java&#10;script:alert(1)", "&Tab;javascript:alert(1)",
+                "java&NewLine;script:alert(1)"):
+        assert not tg._scheme_is_allowed(bad), "slipped through: %s" % bad
+    assert tg._scheme_is_allowed("https://example.com/s?a=1&b=2&c=3")
+
+
+def test_rich_sanitizer_tag_spanning_lines_is_still_checked():
+    """HTML allows a line break inside a tag; stopping the attribute scan
+    there left the href uninspected."""
+    out = tg.sanitize_rich_markdown('<a\nhref="javascript:alert(1)">t</a>')
+    assert out.startswith("&lt;a"), "not escaped: %s" % out
+    ok = '<a\nhref="https://example.com">t</a>'
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
+def test_rich_sanitizer_destination_across_whitespace_and_titles():
+    """Whitespace — including one line break — may sit between a
+    destination and its closing paren, with an optional title in between."""
+    for bad in ("[x](javascript:alert(1)\n)",
+                "[x](javascript:alert(1) )",
+                '[x](javascript:alert(1) "title")'):
+        out = tg.sanitize_rich_markdown(bad)
+        assert out.startswith("\\["), "not escaped: %s" % out
+    for good in ('[x](https://example.com "title")',
+                 "[x](https://example.com)"):
+        assert tg.sanitize_rich_markdown(good) == good
+
+
+def test_rich_sanitizer_reference_definitions_are_checked():
+    """A reference definition carries the destination for `[x][ref]`
+    elsewhere in the message, and was not inspected at all."""
+    out = tg.sanitize_rich_markdown(
+        "[x][ref]\n\n[ref]: javascript:alert(1)")
+    assert "\\[ref]:" in out, "definition not escaped: %s" % out
+    ok = "[x][ref]\n\n[ref]: https://example.com"
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
+def test_rich_sanitizer_block_starter_boundaries_are_pinned():
+    """Boundaries no test pinned before: mutating any of these left the
+    whole suite green."""
+    assert tg._starts_new_block("1. item\n", 0) is True
+    assert tg._starts_new_block("1.item\n", 0) is False
+    assert tg._thematic_break_at("***\n", 0) is True
+    assert tg._thematic_break_at("**\n", 0) is False
+    assert not tg._scheme_is_allowed("javascript:alert(1)")
+
+
+def test_rich_sanitizer_uses_ascii_whitespace_like_rust():
+    """HTML5 tag whitespace is ASCII. Python's str.isspace() is
+    Unicode-aware and diverged from the Rust port on U+00A0 / U+2028."""
+    assert tg._is_ascii_space(" ")
+    assert tg._is_ascii_space("\t")
+    assert not tg._is_ascii_space("\u00a0")
+    assert not tg._is_ascii_space("\u2028")
+    out = tg.sanitize_rich_markdown('<a  href="javascript:x">t</a>')
+    assert out.startswith("&lt;a"), "not escaped: %s" % out

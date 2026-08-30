@@ -99,6 +99,17 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
 
         let b = bytes[i];
 
+        // A backslash escape makes the next punctuation character literal, so `` \` ``
+        // does not open a code span. Copying both bytes here keeps the escaped backtick
+        // out of `copy_code_span`, which would otherwise pair it with a later one and
+        // copy everything between them verbatim.
+        if b == b'\\' && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
+            out.push_str(&input[i..i + 2]);
+            at_line_start = false;
+            i += 2;
+            continue;
+        }
+
         // Inline code span: copy verbatim so `<tg-button>` in a code sample stays readable.
         if b == b'`' {
             let end = copy_code_span(input, bytes, i, &mut out);
@@ -122,7 +133,16 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
         // drops such links on the legacy path; without this the rich path would
         // be the weaker of the two.
         if b == b'[' {
-            if let Some(dest) = link_destination_at(bytes, i) {
+            // Inline form `[label](destination)`, and — at the start of a line — the
+            // reference definition `[label]: destination`, which resolves `[x][label]`
+            // elsewhere in the message. Escaping the `[` breaks the definition, so the
+            // reference no longer resolves to anything.
+            let dest = link_destination_at(bytes, i).or_else(|| {
+                at_line_start
+                    .then(|| reference_definition_at(bytes, i))
+                    .flatten()
+            });
+            if let Some(dest) = dest {
                 if !scheme_is_allowed(&input[dest]) {
                     out.push_str("\\[");
                     at_line_start = false;
@@ -142,15 +162,25 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
                 // Not a tag at all, e.g. a bare `a < b`.
                 None => false,
             };
-            out.push_str(if allowed { "<" } else { "&lt;" });
-            at_line_start = false;
-            i += 1;
+            if allowed {
+                // Copy the whole tag, not just the `<`. Attribute values are not
+                // Markdown: a backtick inside one (`<a title="`" …>`) would otherwise be
+                // read as opening a code span and copy the rest of the line verbatim.
+                let end = tag_end(bytes, i);
+                out.push_str(&input[i..end]);
+                at_line_start = false;
+                i = end;
+            } else {
+                out.push_str("&lt;");
+                at_line_start = false;
+                i += 1;
+            }
             continue;
         }
 
         let ch_len = utf8_char_len(b);
         out.push_str(&input[i..i + ch_len]);
-        at_line_start = b == b'\n';
+        at_line_start = is_line_break(b);
         i += ch_len;
     }
 
@@ -258,10 +288,17 @@ fn normalise_destination(dest: &str) -> String {
                     chars.next();
                 }
                 match decode_entity(&entity) {
+                    // A decoded character goes through the same filter as a literal one.
+                    // Pushing it unconditionally let `&#32;javascript:` start with a
+                    // space, which reads as "no scheme here" while the HTML and URL
+                    // parsers both discard that space and resolve the scheme.
+                    Some(decoded) if decoded.is_whitespace() || decoded.is_control() => {}
                     Some(decoded) => out.push(decoded),
-                    // An entity we do not decode cannot be part of a scheme; whatever
-                    // follows is no longer a scheme prefix.
-                    None => break,
+                    // An entity we cannot decode is skipped rather than ending the scan:
+                    // `&Tab;` and `&NewLine;` are real HTML5 entities we do not know, and
+                    // stopping here truncated the destination so the scheme behind it was
+                    // never examined.
+                    None => {}
                 }
             }
             c if c.is_whitespace() || c.is_control() => {}
@@ -324,25 +361,74 @@ fn link_destination_at(bytes: &[u8], i: usize) -> Option<std::ops::Range<usize>>
         }
         return (bytes.get(k) == Some(&b'>')).then_some(start..k + 1);
     }
+    // A bare destination ends at the first whitespace or at the closing `)`. Whitespace
+    // (including one line break) may then separate it from an optional title and the
+    // `)` — treating a break as "not a link" left `[x](javascript:…\n)` unescaped even
+    // though Markdown resolves it.
     let mut k = start;
     let mut parens = 0_i32;
     while let Some(&c) = bytes.get(k) {
         match c {
             b'\\' => k += 1,
             b'(' => parens += 1,
-            b')' => {
-                if parens == 0 {
-                    return Some(start..k);
-                }
-                parens -= 1;
-            }
-            // CommonMark forbids a newline in a bare destination.
-            b'\n' => return None,
+            b')' if parens == 0 => return Some(start..k),
+            b')' => parens -= 1,
+            c if c.is_ascii_whitespace() => break,
             _ => {}
         }
         k += 1;
     }
-    None
+    let dest = start..k;
+    // Skip whitespace, an optional quoted or parenthesised title, then whitespace again.
+    let mut k = skip_ascii_whitespace(bytes, k);
+    if let Some(&quote @ (b'"' | b'\'' | b'(')) = bytes.get(k) {
+        let closer = if quote == b'(' { b')' } else { quote };
+        k += 1;
+        while bytes.get(k).is_some_and(|&c| c != closer) {
+            k += 1;
+        }
+        k = skip_ascii_whitespace(bytes, k + 1);
+    }
+    (bytes.get(k) == Some(&b')')).then_some(dest)
+}
+
+/// Byte range of the destination in a link reference definition `[label]: destination`
+/// starting at `i`. `None` when the line is not a definition.
+///
+/// Without this the rich path is weaker than the legacy one it replaces: a `[x][ref]`
+/// reference plus a `[ref]: javascript:…` definition renders a live link here, while the
+/// legacy pipeline leaves the whole thing as inert text.
+fn reference_definition_at(bytes: &[u8], i: usize) -> Option<std::ops::Range<usize>> {
+    let mut j = i + 1;
+    while bytes
+        .get(j)
+        .is_some_and(|&c| c != b']' && !is_line_break(c))
+    {
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b']') || bytes.get(j + 1) != Some(&b':') {
+        return None;
+    }
+    let start = skip_ascii_whitespace(bytes, j + 2);
+    let mut end = start;
+    while bytes
+        .get(end)
+        .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'>')
+    {
+        end += 1;
+    }
+    // `<…>` wrapping is allowed here too; `normalise_destination` strips it.
+    if bytes.get(end) == Some(&b'>') {
+        end += 1;
+    }
+    (end > start).then_some(start..end)
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut k: usize) -> usize {
+    while bytes.get(k).is_some_and(u8::is_ascii_whitespace) {
+        k += 1;
+    }
+    k
 }
 
 /// True when the `<a …>` tag opening at `i` has no href, or one whose scheme is allowed.
@@ -356,13 +442,8 @@ fn anchor_href_allowed(input: &str, bytes: &[u8], i: usize) -> bool {
     if bytes.get(i + 1) == Some(&b'/') {
         return true;
     }
-    let tag_end = {
-        let mut k = i + 1;
-        while bytes.get(k).is_some_and(|&c| c != b'>' && c != b'\n') {
-            k += 1;
-        }
-        k
-    };
+    // Exclusive of the `>`; a tag may span lines, so this must not stop at a break.
+    let tag_end = tag_end(bytes, i).saturating_sub(1);
     // Skip the tag name.
     let mut j = i + 1;
     while j < tag_end && !bytes[j].is_ascii_whitespace() {
@@ -453,17 +534,42 @@ fn copy_fenced_block(
     pos
 }
 
-/// Index just past the end of the line starting at `i` (including its `\n`).
+/// True for either line-break byte. Markdown treats a lone `\r` as a line ending, and
+/// lone-CR text reaches us verbatim from quoted mail and older transports — handling only
+/// `\n` would mean the block-boundary checks never run on such input at all.
+fn is_line_break(c: u8) -> bool {
+    c == b'\n' || c == b'\r'
+}
+
+/// Index just past the end of the line starting at `i`, including its terminator
+/// (`\n`, `\r`, or the `\r\n` pair).
 fn line_end(bytes: &[u8], i: usize) -> usize {
     let mut j = i;
-    while j < bytes.len() && bytes[j] != b'\n' {
+    while j < bytes.len() && !is_line_break(bytes[j]) {
         j += 1;
     }
-    if j < bytes.len() {
-        j + 1
-    } else {
-        j
+    next_line_start(bytes, j)
+}
+
+/// Index just past the line terminator at `j`, treating `\r\n` as one terminator.
+/// Returns `j` unchanged when it is not a terminator.
+fn next_line_start(bytes: &[u8], j: usize) -> usize {
+    match bytes.get(j) {
+        Some(b'\r') if bytes.get(j + 1) == Some(&b'\n') => j + 2,
+        Some(c) if is_line_break(*c) => j + 1,
+        _ => j,
     }
+}
+
+/// Index of the `>` closing the tag opening at `i`, exclusive of it, or end of input.
+/// A tag may span lines, so this deliberately does not stop at a line break: doing so
+/// left `<a\nhref="javascript:…">` with no attributes to inspect.
+fn tag_end(bytes: &[u8], i: usize) -> usize {
+    let mut k = i + 1;
+    while bytes.get(k).is_some_and(|&c| c != b'>') {
+        k += 1;
+    }
+    (k + 1).min(bytes.len())
 }
 
 /// Copy an inline code span verbatim. A run of N backticks closes on the next run of
@@ -496,7 +602,7 @@ fn copy_code_span(input: &str, bytes: &[u8], i: usize, out: &mut String) -> usiz
             j += close;
             continue;
         }
-        if bytes[j] == b'\n' && starts_new_block(bytes, j + 1) {
+        if is_line_break(bytes[j]) && starts_new_block(bytes, next_line_start(bytes, j)) {
             break;
         }
         j += 1;
@@ -777,6 +883,109 @@ mod tests {
             let input = format!("a `code\n{continuation}\nmore` b");
             assert_eq!(sanitize_rich_markdown(&input), input);
         }
+    }
+
+    /// A lone `\r` is a line ending in Markdown, and lone-CR text arrives verbatim from
+    /// quoted mail. Matching only `\n` meant the block-boundary check never ran at all on
+    /// such input, so every separator below let a raw button through.
+    #[test]
+    fn code_span_respects_block_boundaries_with_lone_cr_line_endings() {
+        let button = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
+        for separator in ["\r> q\r> ", "\r\r", "\r# h\r", "\r---\r", "\r<div>\r"] {
+            let input = format!("He said `hello{separator}{button}{separator}`");
+            let out = sanitize_rich_markdown(&input);
+            assert!(
+                !out.contains("<tg-button"),
+                "lone-CR separator {separator:?} leaked: {out}"
+            );
+        }
+    }
+
+    /// `` \` `` is a literal backtick, not the start of a code span, and a backtick inside
+    /// an attribute value is not Markdown at all. Both used to open a span that then
+    /// copied everything up to the next backtick verbatim.
+    #[test]
+    fn escaped_and_attribute_backticks_do_not_open_a_code_span() {
+        let button = r#"<tg-button type="callback_data" data="x">Tap</tg-button>"#;
+        let escaped = format!("a \\` {button} \\` b");
+        assert!(!sanitize_rich_markdown(&escaped).contains("<tg-button"));
+
+        let in_attribute = format!(r#"<a title="`" href="https://ok">t</a> {button} `x`"#);
+        assert!(!sanitize_rich_markdown(&in_attribute).contains("<tg-button"));
+    }
+
+    /// An entity decoding to whitespace, and an entity we cannot decode at all, both used
+    /// to hide the scheme behind them — one by making the destination "start with a
+    /// space", the other by truncating the scan.
+    #[test]
+    fn entities_cannot_hide_a_scheme() {
+        for bad in [
+            "&#32;javascript:alert(1)",
+            "&#9;javascript:alert(1)",
+            "java&#10;script:alert(1)",
+            "&Tab;javascript:alert(1)",
+            "java&NewLine;script:alert(1)",
+        ] {
+            assert!(!scheme_is_allowed(bad), "scheme slipped through: {bad}");
+        }
+        // Ordinary destinations still pass, including a query string full of `&`.
+        assert!(scheme_is_allowed("https://example.com/s?a=1&b=2&c=3"));
+    }
+
+    /// HTML allows a line break inside a tag; stopping the attribute scan at one left the
+    /// href uninspected and the tag emitted live.
+    #[test]
+    fn tag_spanning_lines_still_has_its_href_checked() {
+        let out = sanitize_rich_markdown("<a\nhref=\"javascript:alert(1)\">t</a>");
+        assert!(out.starts_with("&lt;a"), "not escaped: {out}");
+        let ok = "<a\nhref=\"https://example.com\">t</a>";
+        assert_eq!(sanitize_rich_markdown(ok), ok);
+    }
+
+    /// Whitespace — including one line break — may sit between a destination and its
+    /// closing `)`, and a title may sit in between. Treating that as "not a link" left
+    /// the destination unchecked.
+    #[test]
+    fn destination_is_checked_across_whitespace_and_titles() {
+        for bad in [
+            "[x](javascript:alert(1)\n)",
+            "[x](javascript:alert(1) )",
+            "[x](javascript:alert(1) \"title\")",
+        ] {
+            let out = sanitize_rich_markdown(bad);
+            assert!(out.starts_with("\\["), "not escaped: {out}");
+        }
+        for good in [
+            "[x](https://example.com \"title\")",
+            "[x](https://example.com)",
+        ] {
+            assert_eq!(sanitize_rich_markdown(good), good);
+        }
+    }
+
+    /// A reference definition carries the destination for `[x][ref]` elsewhere in the
+    /// message. It was not inspected at all, making the rich path weaker than the legacy
+    /// pipeline it replaces — which leaves the same input inert.
+    #[test]
+    fn reference_definitions_are_scheme_checked() {
+        let out = sanitize_rich_markdown("[x][ref]\n\n[ref]: javascript:alert(1)");
+        assert!(out.contains("\\[ref]:"), "definition not escaped: {out}");
+        let ok = "[x][ref]\n\n[ref]: https://example.com";
+        assert_eq!(sanitize_rich_markdown(ok), ok);
+    }
+
+    /// Boundaries of the block-starter helpers, which no test pinned before: mutating any
+    /// of these left all 130 tests green.
+    #[test]
+    fn block_starter_boundaries_are_pinned() {
+        // An ordered-list marker needs a following space.
+        assert!(starts_new_block(b"1. item\n", 0));
+        assert!(!starts_new_block(b"1.item\n", 0));
+        // A thematic break needs three markers, not two.
+        assert!(thematic_break_at(b"***\n", 0));
+        assert!(!thematic_break_at(b"**\n", 0));
+        // A control character inside a destination is dropped, not kept.
+        assert!(!scheme_is_allowed("java\u{1}script:alert(1)"));
     }
 
     #[test]

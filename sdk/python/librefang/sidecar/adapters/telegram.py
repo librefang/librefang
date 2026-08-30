@@ -760,11 +760,18 @@ def _normalise_destination(dest: str) -> str:
             if j < n and trimmed[j] == ";":
                 j += 1
             decoded = _decode_entity(entity)
-            if decoded is None:
-                # An entity we do not decode cannot be part of a scheme;
-                # whatever follows is no longer a scheme prefix.
-                break
-            out.append(decoded)
+            # A decoded character goes through the same filter as a literal
+            # one. Appending it unconditionally let `&#32;javascript:` start
+            # with a space, which reads as "no scheme here" while the HTML and
+            # URL parsers both discard that space and resolve the scheme.
+            # An entity we cannot decode is skipped rather than ending the
+            # scan: `&Tab;` and `&NewLine;` are real HTML5 entities we do not
+            # know, and stopping truncated the destination so the scheme
+            # behind it was never examined.
+            if decoded is not None and not (decoded.isspace()
+                                            or ord(decoded) < 32
+                                            or ord(decoded) == 127):
+                out.append(decoded)
             i = j
             continue
         if not (ch.isspace() or ord(ch) < 32 or ord(ch) == 127):
@@ -828,6 +835,10 @@ def _link_destination_at(s: str, i: int):
         while k < n and s[k] not in ">\n":
             k += 1
         return s[start:k + 1] if k < n and s[k] == ">" else None
+    # A bare destination ends at the first whitespace or at the closing `)`.
+    # Whitespace (including one line break) may then separate it from an
+    # optional title and the `)` — treating a break as "not a link" left
+    # `[x](javascript:...\n)` unescaped even though Markdown resolves it.
     k = start
     parens = 0
     while k < n:
@@ -841,11 +852,47 @@ def _link_destination_at(s: str, i: int):
             if parens == 0:
                 return s[start:k]
             parens -= 1
-        elif ch == "\n":
-            # CommonMark forbids a newline in a bare destination.
-            return None
+        elif _is_ascii_space(ch):
+            break
         k += 1
-    return None
+    dest = s[start:k]
+    k = _skip_ascii_space(s, k)
+    if k < n and s[k] in "\"'(":
+        closer = ")" if s[k] == "(" else s[k]
+        k += 1
+        while k < n and s[k] != closer:
+            k += 1
+        k = _skip_ascii_space(s, k + 1)
+    return dest if k < n and s[k] == ")" else None
+
+
+def _skip_ascii_space(s: str, k: int) -> int:
+    while k < len(s) and _is_ascii_space(s[k]):
+        k += 1
+    return k
+
+
+def _reference_definition_at(s: str, i: int):
+    """Destination of a link reference definition ``[label]: destination``
+    starting at `i`, or None when the line is not a definition.
+
+    Without this the rich path is weaker than the legacy one it replaces: a
+    ``[x][ref]`` reference plus a ``[ref]: javascript:...`` definition renders
+    a live link here, while the legacy pipeline leaves it as inert text."""
+    n = len(s)
+    j = i + 1
+    while j < n and s[j] != "]" and not _is_line_break(s[j]):
+        j += 1
+    if j >= n or s[j] != "]" or j + 1 >= n or s[j + 1] != ":":
+        return None
+    start = _skip_ascii_space(s, j + 2)
+    end = start
+    while end < n and not _is_ascii_space(s[end]) and s[end] != ">":
+        end += 1
+    # `<...>` wrapping is allowed here too; _normalise_destination strips it.
+    if end < n and s[end] == ">":
+        end += 1
+    return s[start:end] if end > start else None
 
 
 def _anchor_href_allowed(s: str, i: int) -> bool:
@@ -859,26 +906,26 @@ def _anchor_href_allowed(s: str, i: int) -> bool:
     the real destination never inspected."""
     if i + 1 < len(s) and s[i + 1] == "/":
         return True
-    tag_end = i + 1
-    while tag_end < len(s) and s[tag_end] not in ">\n":
-        tag_end += 1
+    # Exclusive of the `>`; a tag may span lines, so this must not
+    # stop at a break.
+    tag_end = max(_tag_end(s, i) - 1, i + 1)
 
     # Skip the tag name.
     j = i + 1
-    while j < tag_end and not s[j].isspace():
+    while j < tag_end and not _is_ascii_space(s[j]):
         j += 1
 
     while j < tag_end:
-        while j < tag_end and s[j].isspace():
+        while j < tag_end and _is_ascii_space(s[j]):
             j += 1
         if j >= tag_end:
             break
         name_start = j
-        while j < tag_end and not s[j].isspace() and s[j] != "=":
+        while j < tag_end and not _is_ascii_space(s[j]) and s[j] != "=":
             j += 1
         name = s[name_start:j]
         k = j
-        while k < tag_end and s[k].isspace():
+        while k < tag_end and _is_ascii_space(s[k]):
             k += 1
         if k >= tag_end or s[k] != "=":
             # Valueless attribute; nudge past an empty name to guarantee
@@ -887,7 +934,7 @@ def _anchor_href_allowed(s: str, i: int) -> bool:
                 j += 1
             continue
         k += 1
-        while k < tag_end and s[k].isspace():
+        while k < tag_end and _is_ascii_space(s[k]):
             k += 1
         if k < tag_end and s[k] in "\"'":
             quote = s[k]
@@ -899,13 +946,21 @@ def _anchor_href_allowed(s: str, i: int) -> bool:
         else:
             start = k
             end = start
-            while end < tag_end and not s[end].isspace():
+            while end < tag_end and not _is_ascii_space(s[end]):
                 end += 1
             nxt = end
         if name.lower() == "href":
             return _scheme_is_allowed(s[start:end])
         j = nxt if nxt > j else j + 1
     return True  # no href attribute at all
+
+
+def _is_ascii_space(ch: str) -> bool:
+    """ASCII whitespace only. HTML5 defines tag whitespace as ASCII and Rust's
+    ``is_ascii_whitespace`` matches; Python's ``str.isspace`` is
+    Unicode-aware and would treat U+00A0 / U+2028 as separators,
+    diverging from the Rust port."""
+    return ch in " \t\n\r\x0c"
 
 
 def _is_bullet(s: str, j: int) -> bool:
@@ -996,10 +1051,41 @@ def _starts_new_block(s: str, i: int) -> bool:
     return False
 
 
+def _is_line_break(ch: str) -> bool:
+    """True for either line-break character. Markdown treats a lone ``\\r`` as a
+    line ending, and lone-CR text reaches us verbatim from quoted mail and older
+    transports — handling only ``\\n`` means the block-boundary checks never run
+    on such input at all."""
+    return ch in "\n\r"
+
+
+def _next_line_start(s: str, j: int) -> int:
+    """Index just past the line terminator at `j`, treating ``\\r\\n`` as one.
+    Returns `j` unchanged when it is not a terminator."""
+    if j >= len(s):
+        return j
+    if s[j] == "\r" and j + 1 < len(s) and s[j + 1] == "\n":
+        return j + 2
+    return j + 1 if _is_line_break(s[j]) else j
+
+
 def _line_end(s: str, i: int) -> int:
-    """Index just past the end of the line starting at `i` (including \\n)."""
-    nl = s.find("\n", i)
-    return len(s) if nl == -1 else nl + 1
+    """Index just past the end of the line starting at `i`, including its
+    terminator (``\\n``, ``\\r``, or the ``\\r\\n`` pair)."""
+    j = i
+    while j < len(s) and not _is_line_break(s[j]):
+        j += 1
+    return _next_line_start(s, j)
+
+
+def _tag_end(s: str, i: int) -> int:
+    """Index just past the ``>`` closing the tag opening at `i`, or end of input.
+    A tag may span lines, so this deliberately does not stop at a line break:
+    doing so left ``<a\\nhref="javascript:...">`` with no attributes to inspect."""
+    k = i + 1
+    while k < len(s) and s[k] != ">":
+        k += 1
+    return min(k + 1, len(s))
 
 
 def _tag_name_at(s: str, i: int):
@@ -1069,6 +1155,18 @@ def sanitize_rich_markdown(text: str) -> str:
 
         ch = text[i]
 
+        # A backslash escape makes the next punctuation character literal,
+        # so `` \` `` does not open a code span. Copying both characters
+        # here keeps the escaped backtick out of the span scan below, which
+        # would otherwise pair it with a later one and copy everything
+        # between them verbatim.
+        if (ch == "\\" and i + 1 < n
+                and text[i + 1] in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"):
+            out.append(text[i:i + 2])
+            at_line_start = False
+            i += 2
+            continue
+
         # Inline code span: copy verbatim so `<tg-button>` in a code
         # sample stays readable. A run of N backticks closes on the next
         # run of exactly N; an unclosed run is not a code span at all.
@@ -1096,7 +1194,8 @@ def sanitize_rich_markdown(text: str) -> str:
                         break
                     j += close
                     continue
-                if text[j] == "\n" and _starts_new_block(text, j + 1):
+                if (_is_line_break(text[j])
+                        and _starts_new_block(text, _next_line_start(text, j))):
                     break
                 j += 1
             if closed != -1:
@@ -1123,7 +1222,13 @@ def sanitize_rich_markdown(text: str) -> str:
         # text. `sanitize_telegram_html` drops such links on the legacy
         # path; without this the rich path would be the weaker of the two.
         if ch == "[":
+            # Inline form `[label](destination)`, and — at the start of a
+            # line — the reference definition `[label]: destination`, which
+            # resolves `[x][label]` elsewhere in the message. Escaping the
+            # `[` breaks the definition, so the reference no longer resolves.
             dest = _link_destination_at(text, i)
+            if dest is None and at_line_start:
+                dest = _reference_definition_at(text, i)
             if dest is not None and not _scheme_is_allowed(dest):
                 out.append("\\[")
                 at_line_start = False
@@ -1138,13 +1243,22 @@ def sanitize_rich_markdown(text: str) -> str:
                 allowed = _anchor_href_allowed(text, i)
             else:
                 allowed = name in _ALLOWED_RICH_TAGS
-            out.append("<" if allowed else "&lt;")
+            if allowed:
+                # Copy the whole tag, not just the `<`. Attribute values are
+                # not Markdown: a backtick inside one (`<a title="`" ...>`)
+                # would otherwise be read as opening a code span and copy the
+                # rest of the line verbatim.
+                end = _tag_end(text, i)
+                out.append(text[i:end])
+                i = end
+            else:
+                out.append("&lt;")
+                i += 1
             at_line_start = False
-            i += 1
             continue
 
         out.append(ch)
-        at_line_start = ch == "\n"
+        at_line_start = _is_line_break(ch)
         i += 1
 
     return "".join(out)
