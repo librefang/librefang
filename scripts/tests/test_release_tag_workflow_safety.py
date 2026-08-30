@@ -19,6 +19,7 @@ WORKFLOWS = (
     ROOT / ".github" / "workflows" / "release-cli.yml",
 )
 DESKTOP_WORKFLOW = ROOT / ".github" / "workflows" / "release-desktop.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 INPUTS_TOKEN = re.compile(r"\binputs\b")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -1234,6 +1235,52 @@ def main() -> None:
         )
     ):
         raise SystemExit("release-cli workflow does not verify the exact release tag")
+
+    # A published GitHub Release is what every user and mirror reads, so it must not exist until
+    # the artifacts do. release.yml used to create it published before a single job had run, which
+    # is how v2026.8.30 stayed permanently public with 23 of 48 assets and no SHA256SUMS — and why
+    # `sign_release_artifacts` refusing to sign changed nothing that anyone could observe.
+    release_document = yaml.safe_load(RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+    release_jobs = release_document.get("jobs", {})
+    create_steps = release_jobs.get("create_release", {}).get("steps", [])
+    create_script = "".join(
+        step.get("run", "") for step in create_steps if isinstance(step, dict)
+    )
+    if "gh release create" not in create_script:
+        raise SystemExit("release.yml no longer creates the release")
+    for command in ("gh release create", "gh release edit"):
+        for line in create_script.splitlines():
+            if command in line and "--draft" not in line:
+                raise SystemExit(f"release.yml runs `{command}` without --draft")
+
+    publish_job = release_jobs.get("publish_release")
+    if publish_job is None:
+        raise SystemExit("release.yml has no publish_release job to leave draft state")
+    publish_needs = publish_job.get("needs") or []
+    if isinstance(publish_needs, str):
+        publish_needs = [publish_needs]
+    # The gate is the signature plus the desktop bundles. `sign_release_artifacts` already waits on
+    # every CLI job and rejects an incomplete platform set, so requiring it requires them too.
+    for required in ("sign_release_artifacts", "desktop"):
+        if required not in publish_needs:
+            raise SystemExit(f"publish_release does not wait for {required}")
+    # Best-effort jobs must never hold a finished release back.
+    for optional in ("mobile_ios", "mobile_android"):
+        if optional in publish_needs:
+            raise SystemExit(f"publish_release gates on best-effort job {optional}")
+    publish_script = "".join(
+        step.get("run", "") for step in publish_job.get("steps", []) if isinstance(step, dict)
+    )
+    if "--draft=false" not in publish_script:
+        raise SystemExit("publish_release never leaves draft state")
+
+    # The two formulae that bake a public releases/download URL cannot run while it 404s.
+    for consumer in ("sync_homebrew", "sync_homebrew_cask"):
+        consumer_needs = release_jobs.get(consumer, {}).get("needs") or []
+        if isinstance(consumer_needs, str):
+            consumer_needs = [consumer_needs]
+        if "publish_release" not in consumer_needs:
+            raise SystemExit(f"{consumer} writes a download URL before the release is published")
 
     sign_job = release_cli_jobs.get("sign_release_artifacts", {})
     sign_steps = sign_job.get("steps", [])

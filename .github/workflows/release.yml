@@ -426,11 +426,14 @@ jobs:
 
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, updating..."
-            gh release edit "$TAG" \
+            gh release edit "$TAG" --draft \
               --title "$TAG" \
               --notes-file /tmp/release-body.md
           else
-            gh release create "$TAG" \
+            # Created as a draft on purpose.
+            # A published release is what users and every mirror read, so publishing one before a single artifact exists means any job failure leaves a permanently public, incomplete, unsigned release — which is exactly what v2026.8.30 became.
+            # `publish_release` flips it once the artifacts are all there and signed.
+            gh release create "$TAG" --draft \
               --title "$TAG" \
               --notes-file /tmp/release-body.md
           fi
@@ -1285,6 +1288,30 @@ jobs:
             SHA256SUMS.pem \
             --clobber
 
+  # The release is a draft until here.
+  # `sign_release_artifacts` already waits for all eight CLI jobs and refuses to sign an incomplete platform set, but nothing depended on it, so its verdict changed nothing about what the world could already download.
+  # Gating publication on it is what turns that check into a gate.
+  #
+  # `desktop` joins it because its bundles are release assets too.
+  # `mobile_ios` and `mobile_android` deliberately do not: both are `continue-on-error`, so gating on them would let a best-effort job hold back a complete release.
+  # Neither do the distribution jobs — npm, PyPI, AUR and Homebrew publish to registries of their own, and a flaky mirror must not keep a finished release unpublished.
+  publish_release:
+    name: Publish release
+    needs: [create_release, sign_release_artifacts, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Flip the release out of draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false
+          echo "Published $RELEASE_TAG"
+
   cli_npm:
     name: CLI / npm
     if: >
@@ -1369,7 +1396,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [cli_mac, cli_linux]
+    needs: [cli_mac, cli_linux, publish_release]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -2567,7 +2594,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [desktop]
+    needs: [desktop, publish_release]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
