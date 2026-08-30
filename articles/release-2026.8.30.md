@@ -1,4 +1,3 @@
-```markdown
 ---
 title: "LibreFang 2026.8.30 Released"
 published: true
@@ -122,4 +121,3 @@ pip install librefang-sdk
 - [GitHub](https://github.com/librefang/librefang)
 - [Discord](https://discord.gg/DzTYqAZZmc)
 - [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
-```
