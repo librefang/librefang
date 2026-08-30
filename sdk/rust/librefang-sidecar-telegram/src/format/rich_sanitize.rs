@@ -203,9 +203,14 @@ const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:"];
 
 /// True when `dest` carries no scheme at all (a relative target or `#anchor`) or carries
 /// one on the allowlist. A scheme we do not recognise is rejected.
+///
+/// The destination is normalised first, because the check has to hold on what the
+/// *parser* sees rather than on the literal bytes: `<…>`-wrapped destinations, HTML
+/// entities standing in for the colon (`javascript&#58;…`) and embedded whitespace or
+/// control characters (`java\tscript:…`) all reach a live scheme otherwise.
 fn scheme_is_allowed(dest: &str) -> bool {
-    let dest = dest.trim();
-    let bytes = dest.as_bytes();
+    let normalised = normalise_destination(dest);
+    let bytes = normalised.as_bytes();
     // `Option::is_none_or` is stable only from 1.82; the crate's MSRV is 1.80.
     if !bytes.first().is_some_and(|c| c.is_ascii_alphabetic()) {
         return true; // no scheme possible
@@ -220,80 +225,200 @@ fn scheme_is_allowed(dest: &str) -> bool {
     if bytes.get(j) != Some(&b':') {
         return true; // not a scheme, just text before a slash or space
     }
-    let scheme = &dest[..=j];
+    let scheme = &normalised[..=j];
     ALLOWED_HREF_SCHEMES
         .iter()
         .any(|s| scheme.eq_ignore_ascii_case(s))
 }
 
+/// Strip a `<…>` wrapper, decode HTML entities, and drop whitespace and control
+/// characters, so the scheme check sees the destination the parser will resolve.
+/// Only the leading run matters, so this stops at the first delimiter.
+fn normalise_destination(dest: &str) -> String {
+    let trimmed = dest.trim();
+    let inner = trimmed
+        .strip_prefix('<')
+        .map(|rest| rest.strip_suffix('>').unwrap_or(rest))
+        .unwrap_or(trimmed);
+
+    let mut out = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '&' => {
+                let mut entity = String::new();
+                while let Some(&next) = chars.peek() {
+                    if next == ';' || entity.len() >= 8 {
+                        break;
+                    }
+                    entity.push(next);
+                    chars.next();
+                }
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                }
+                match decode_entity(&entity) {
+                    Some(decoded) => out.push(decoded),
+                    // An entity we do not decode cannot be part of a scheme; whatever
+                    // follows is no longer a scheme prefix.
+                    None => break,
+                }
+            }
+            c if c.is_whitespace() || c.is_control() => {}
+            c => out.push(c),
+        }
+        // A scheme is short; past this the answer cannot change.
+        if out.len() > 64 {
+            break;
+        }
+    }
+    out
+}
+
+/// Decode the entity forms that can stand in for a character inside a scheme:
+/// `&#58;`, `&#x3a;` and the named `&colon;`.
+fn decode_entity(entity: &str) -> Option<char> {
+    if entity.eq_ignore_ascii_case("colon") {
+        return Some(':');
+    }
+    let digits = entity.strip_prefix('#')?;
+    let code = match digits.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => digits.parse::<u32>().ok()?,
+    };
+    char::from_u32(code)
+}
+
 /// Byte range of the destination in a `[label](destination)` starting at `i` (which must
 /// be `[`). `None` when this is not an inline link.
+///
+/// The label may contain balanced brackets (`[a[b]c]`) and the destination may contain
+/// balanced parentheses or be `<…>`-wrapped, so both are scanned with a depth counter
+/// rather than to the first closer.
 fn link_destination_at(bytes: &[u8], i: usize) -> Option<std::ops::Range<usize>> {
-    let mut j = i + 1;
-    while bytes.get(j).is_some_and(|&c| c != b']' && c != b'\n') {
+    let mut depth = 0_i32;
+    let mut j = i;
+    loop {
+        match bytes.get(j)? {
+            b'\\' => j += 1, // escaped bracket is literal
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
         j += 1;
     }
-    if bytes.get(j) != Some(&b']') || bytes.get(j + 1) != Some(&b'(') {
+    if bytes.get(j + 1) != Some(&b'(') {
         return None;
     }
     let start = j + 2;
+    // A `<…>` destination may hold anything up to the `>`.
+    if bytes.get(start) == Some(&b'<') {
+        let mut k = start + 1;
+        while bytes.get(k).is_some_and(|&c| c != b'>' && c != b'\n') {
+            k += 1;
+        }
+        return (bytes.get(k) == Some(&b'>')).then_some(start..k + 1);
+    }
     let mut k = start;
-    while bytes.get(k).is_some_and(|&c| c != b')' && c != b'\n') {
+    let mut parens = 0_i32;
+    while let Some(&c) = bytes.get(k) {
+        match c {
+            b'\\' => k += 1,
+            b'(' => parens += 1,
+            b')' => {
+                if parens == 0 {
+                    return Some(start..k);
+                }
+                parens -= 1;
+            }
+            // CommonMark forbids a newline in a bare destination.
+            b'\n' => return None,
+            _ => {}
+        }
         k += 1;
     }
-    (bytes.get(k) == Some(&b')')).then_some(start..k)
+    None
 }
 
 /// True when the `<a …>` tag opening at `i` has no href, or one whose scheme is allowed.
 /// A closing `</a>` carries no href and is always allowed.
+///
+/// Attributes are walked as `name [= value]` pairs rather than by searching for the
+/// substring `href`: HTML attribute names are case-insensitive (`HREF`), and a substring
+/// search matches inside *other* attributes, so `<a data-href="https://ok" href="…">`
+/// would be judged on the decoy and the real destination never inspected.
 fn anchor_href_allowed(input: &str, bytes: &[u8], i: usize) -> bool {
-    let mut j = i + 1;
-    if bytes.get(j) == Some(&b'/') {
+    if bytes.get(i + 1) == Some(&b'/') {
         return true;
     }
     let tag_end = {
-        let mut k = j;
+        let mut k = i + 1;
         while bytes.get(k).is_some_and(|&c| c != b'>' && c != b'\n') {
             k += 1;
         }
         k
     };
-    while j < tag_end {
-        if input[j..tag_end].starts_with("href") {
-            let mut k = j + 4;
-            while bytes.get(k).is_some_and(|c| c.is_ascii_whitespace()) {
-                k += 1;
-            }
-            if bytes.get(k) != Some(&b'=') {
-                j += 1;
-                continue;
-            }
-            k += 1;
-            while bytes.get(k).is_some_and(|c| c.is_ascii_whitespace()) {
-                k += 1;
-            }
-            let quote = bytes.get(k).copied();
-            let (start, end) = match quote {
-                Some(q @ (b'"' | b'\'')) => {
-                    let s = k + 1;
-                    let mut e = s;
-                    while e < tag_end && bytes[e] != q {
-                        e += 1;
-                    }
-                    (s, e)
-                }
-                _ => {
-                    let s = k;
-                    let mut e = s;
-                    while e < tag_end && !bytes[e].is_ascii_whitespace() {
-                        e += 1;
-                    }
-                    (s, e)
-                }
-            };
-            return scheme_is_allowed(&input[start..end.min(tag_end)]);
-        }
+    // Skip the tag name.
+    let mut j = i + 1;
+    while j < tag_end && !bytes[j].is_ascii_whitespace() {
         j += 1;
+    }
+
+    while j < tag_end {
+        while j < tag_end && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j >= tag_end {
+            break;
+        }
+        let name_start = j;
+        while j < tag_end && !bytes[j].is_ascii_whitespace() && bytes[j] != b'=' {
+            j += 1;
+        }
+        let name = &input[name_start..j];
+        let mut k = j;
+        while k < tag_end && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        if bytes.get(k) != Some(&b'=') {
+            // Valueless attribute. `j` advanced past a non-empty name, or must be nudged
+            // to guarantee progress.
+            if j == name_start {
+                j += 1;
+            }
+            continue;
+        }
+        k += 1;
+        while k < tag_end && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        let (value_start, value_end, next) = match bytes.get(k) {
+            Some(&quote @ (b'"' | b'\'')) => {
+                let start = k + 1;
+                let mut end = start;
+                while end < tag_end && bytes[end] != quote {
+                    end += 1;
+                }
+                (start, end, (end + 1).min(tag_end))
+            }
+            _ => {
+                let start = k;
+                let mut end = start;
+                while end < tag_end && !bytes[end].is_ascii_whitespace() {
+                    end += 1;
+                }
+                (start, end, end)
+            }
+        };
+        if name.eq_ignore_ascii_case("href") {
+            return scheme_is_allowed(&input[value_start..value_end]);
+        }
+        j = if next > j { next } else { j + 1 };
     }
     true // no href attribute at all
 }
@@ -380,9 +505,18 @@ fn copy_code_span(input: &str, bytes: &[u8], i: usize, out: &mut String) -> usiz
     i + run
 }
 
-/// True when the line starting at `i` ends the current paragraph — either it is blank
-/// (spaces and tabs only, tolerating CRLF) or its first non-space character opens a new
-/// block. Used to bound an inline code-span scan to a single paragraph.
+/// True when the line starting at `i` ends the current paragraph.
+///
+/// Used to bound an inline code-span scan to a single paragraph. The set below is taken
+/// from CommonMark's "can interrupt a paragraph" rules rather than assembled from
+/// memory — a list built by recalling cases closes the inputs you thought of and leaves
+/// the hole open on the rest, which is exactly how `***`, `---`, `___` and HTML blocks
+/// survived the first attempt at this function.
+///
+/// Erring towards `true` is safe: the backticks are then treated as ordinary text and
+/// their content is escaped. Erring towards `false` copies the region verbatim, which is
+/// the injection this whole module exists to prevent. So `|` (a GFM table row, which
+/// interrupts in GFM but not in plain CommonMark) and any `<` (HTML block) are included.
 fn starts_new_block(bytes: &[u8], i: usize) -> bool {
     if i >= bytes.len() {
         return true;
@@ -392,15 +526,20 @@ fn starts_new_block(bytes: &[u8], i: usize) -> bool {
         j += 1;
     }
     match bytes.get(j) {
-        // Blank line — the paragraph ends here. `\r` covers CRLF input, which reaches us
+        // Blank line ends the paragraph. `\r` covers CRLF input, which reaches us
         // verbatim from quoted email and web content.
         None | Some(b'\n') | Some(b'\r') => true,
-        // Block quotation, ATX heading, table row, thematic break / list bullet, fence.
-        Some(b'>') | Some(b'#') | Some(b'|') => true,
-        Some(b'`') | Some(b'~') => fence_at(bytes, i).is_some(),
-        Some(b'-') | Some(b'*') | Some(b'+') => {
-            matches!(bytes.get(j + 1), Some(b' ') | Some(b'\t'))
+        // Block quotation, ATX heading, GFM table row, HTML block.
+        Some(b'>') | Some(b'#') | Some(b'|') | Some(b'<') => true,
+        Some(b'`') => fence_at(bytes, i).is_some(),
+        // `~` opens a fence but is not a list bullet.
+        Some(b'~') => fence_at(bytes, i).is_some() || thematic_break_at(bytes, j),
+        // `-` and `=` runs are also setext heading underlines; `-`, `*` and `_` runs are
+        // thematic breaks, which may carry spaces between the markers (`- - -`).
+        Some(b'-') | Some(b'*') | Some(b'_') | Some(b'=') => {
+            thematic_break_at(bytes, j) || setext_underline_at(bytes, j) || is_bullet(bytes, j)
         }
+        Some(b'+') => is_bullet(bytes, j),
         Some(c) if c.is_ascii_digit() => {
             let mut k = j;
             while bytes.get(k).is_some_and(|c| c.is_ascii_digit()) {
@@ -411,6 +550,54 @@ fn starts_new_block(bytes: &[u8], i: usize) -> bool {
         }
         _ => false,
     }
+}
+
+/// A list bullet: `-`, `*` or `+` followed by a space or tab.
+fn is_bullet(bytes: &[u8], j: usize) -> bool {
+    matches!(bytes.get(j), Some(b'-') | Some(b'*') | Some(b'+'))
+        && matches!(bytes.get(j + 1), Some(b' ') | Some(b'\t'))
+}
+
+/// CommonMark thematic break: three or more `-`, `*` or `_`, all the same, with only
+/// spaces and tabs between them and nothing else on the line.
+fn thematic_break_at(bytes: &[u8], j: usize) -> bool {
+    let marker = match bytes.get(j) {
+        Some(&c @ (b'-' | b'*' | b'_')) => c,
+        _ => return false,
+    };
+    let mut count = 0;
+    let mut k = j;
+    while let Some(&c) = bytes.get(k) {
+        match c {
+            c if c == marker => count += 1,
+            b' ' | b'\t' => {}
+            b'\n' | b'\r' => break,
+            _ => return false,
+        }
+        k += 1;
+    }
+    count >= 3
+}
+
+/// Setext heading underline: a run of `=` or a run of `-`, optionally followed by spaces.
+/// Only `=` needs handling separately — a `-` run of three or more is already a thematic
+/// break, but `-` or `--` alone is a setext underline and nothing else.
+fn setext_underline_at(bytes: &[u8], j: usize) -> bool {
+    let marker = match bytes.get(j) {
+        Some(&c @ (b'=' | b'-')) => c,
+        _ => return false,
+    };
+    let mut k = j;
+    while bytes.get(k) == Some(&marker) {
+        k += 1;
+    }
+    if k == j {
+        return false;
+    }
+    while bytes.get(k).is_some_and(|c| matches!(c, b' ' | b'\t')) {
+        k += 1;
+    }
+    matches!(bytes.get(k), None | Some(b'\n') | Some(b'\r'))
 }
 
 /// Lower-cased tag name of the HTML tag opening at `i` (which must be `<`), for both
@@ -559,6 +746,39 @@ mod tests {
         }
     }
 
+    /// The block-starter set is taken from CommonMark, not from recall. These are the
+    /// cases a from-memory list misses — each one interrupts a paragraph, so a code span
+    /// must not pair across it.
+    #[test]
+    fn code_span_stops_at_every_paragraph_interrupting_construct() {
+        let button = r#"<tg-button type="callback_data" data="wipe">Confirm</tg-button>"#;
+        // A ``` separator is deliberately absent: it puts the button inside a real
+        // fenced code block, where CommonMark renders it as escaped text rather than
+        // live HTML, so copying it verbatim is correct.
+        for separator in [
+            "***", "---", "___", "* * *", "- - -", "___ _", "===", "--", "<div>", "<table>",
+            "> quote", "# head", "- item", "1. item", "+ item", "| a |",
+        ] {
+            let input = format!("He said `hello\n{separator}\n{button}\n{separator}\n`");
+            let out = sanitize_rich_markdown(&input);
+            assert!(
+                !out.contains("<tg-button"),
+                "separator {separator:?} let a raw button through: {out}"
+            );
+        }
+    }
+
+    /// A four-space indent is *not* a paragraph interrupter in CommonMark (it only opens
+    /// an indented code block after a blank line), and `~ x` is not a list bullet. Erring
+    /// towards "new block" here would needlessly break ordinary multi-line code spans.
+    #[test]
+    fn code_span_survives_lines_that_do_not_interrupt_a_paragraph() {
+        for continuation in ["    indented", "~ not a bullet", "plain text"] {
+            let input = format!("a `code\n{continuation}\nmore` b");
+            assert_eq!(sanitize_rich_markdown(&input), input);
+        }
+    }
+
     #[test]
     fn code_span_still_spans_lines_inside_one_paragraph() {
         let s = "a `code\nstill code` b";
@@ -594,6 +814,55 @@ mod tests {
         ] {
             assert_eq!(sanitize_rich_markdown(good), good);
         }
+    }
+
+    /// HTML attribute names are case-insensitive, and a substring search for `href`
+    /// matches inside other attribute names and values — both let a disallowed scheme
+    /// through on a tag we then emit live.
+    #[test]
+    fn anchor_href_is_found_regardless_of_case_or_decoy_attributes() {
+        for bad in [
+            r#"<a HREF="javascript:alert(1)">x</a>"#,
+            r#"<A Href="javascript:alert(1)">x</A>"#,
+            r#"<a data-href="https://ok.example" href="javascript:alert(1)">x</a>"#,
+            r#"<a title="href=x" href="javascript:alert(1)">x</a>"#,
+            r#"<a class="a" data-href="https://ok" HREF='javascript:alert(1)'>x</a>"#,
+        ] {
+            let out = sanitize_rich_markdown(bad);
+            assert!(
+                out.starts_with("&lt;a") || out.starts_with("&lt;A"),
+                "not escaped: {out}"
+            );
+        }
+        // A decoy alone, with no real href, is still a plain anchor.
+        let benign = r#"<a data-href="https://ok.example">x</a>"#;
+        assert_eq!(sanitize_rich_markdown(benign), benign);
+    }
+
+    /// The scheme check must hold on what the parser resolves, not on the literal bytes:
+    /// `<…>` wrappers, entity-encoded colons and embedded whitespace all hide a scheme.
+    #[test]
+    fn scheme_check_sees_through_wrappers_entities_and_whitespace() {
+        for bad in [
+            "[x](<javascript:alert(1)>)",
+            "[x](javascript&#58;alert(1))",
+            "[x](javascript&#x3a;alert(1))",
+            "[x](javascript&colon;alert(1))",
+            "[a[b]c](javascript:alert(1))",
+        ] {
+            let out = sanitize_rich_markdown(bad);
+            assert!(out.starts_with("\\["), "not escaped: {out}");
+        }
+        for bad in [
+            "<a href=\"java\tscript:alert(1)\">x</a>",
+            "<a href=\"<javascript:alert(1)>\">x</a>",
+        ] {
+            let out = sanitize_rich_markdown(bad);
+            assert!(out.starts_with("&lt;a"), "not escaped: {out}");
+        }
+        // Balanced parentheses in an ordinary destination still parse, and stay allowed.
+        let ok = "[x](https://example.com/a_(b)_c)";
+        assert_eq!(sanitize_rich_markdown(ok), ok);
     }
 
     #[test]

@@ -720,10 +720,72 @@ _SCHEME_CHARS = frozenset(
 )
 
 
+def _decode_entity(entity: str):
+    """Decode the entity forms that can stand in for a character inside a
+    scheme: ``&#58;``, ``&#x3a;`` and the named ``&colon;``."""
+    if entity.lower() == "colon":
+        return ":"
+    if not entity.startswith("#"):
+        return None
+    digits = entity[1:]
+    try:
+        if digits[:1].lower() == "x":
+            return chr(int(digits[1:], 16))
+        return chr(int(digits))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _normalise_destination(dest: str) -> str:
+    """Strip a ``<...>`` wrapper, decode HTML entities, and drop whitespace and
+    control characters, so the scheme check sees the destination the parser
+    will resolve. Only the leading run matters, so this stops at the first
+    delimiter."""
+    trimmed = dest.strip()
+    if trimmed.startswith("<"):
+        trimmed = trimmed[1:]
+        if trimmed.endswith(">"):
+            trimmed = trimmed[:-1]
+
+    out = []
+    i = 0
+    n = len(trimmed)
+    while i < n:
+        ch = trimmed[i]
+        if ch == "&":
+            j = i + 1
+            while j < n and trimmed[j] != ";" and j - i - 1 < 8:
+                j += 1
+            entity = trimmed[i + 1:j]
+            if j < n and trimmed[j] == ";":
+                j += 1
+            decoded = _decode_entity(entity)
+            if decoded is None:
+                # An entity we do not decode cannot be part of a scheme;
+                # whatever follows is no longer a scheme prefix.
+                break
+            out.append(decoded)
+            i = j
+            continue
+        if not (ch.isspace() or ord(ch) < 32 or ord(ch) == 127):
+            out.append(ch)
+        i += 1
+        # A scheme is short; past this the answer cannot change.
+        if len(out) > 64:
+            break
+    return "".join(out)
+
+
 def _scheme_is_allowed(dest: str) -> bool:
     """True when `dest` carries no scheme at all (a relative target or
-    ``#anchor``) or carries one on the allowlist."""
-    dest = dest.strip()
+    ``#anchor``) or carries one on the allowlist.
+
+    The destination is normalised first, because the check has to hold on what
+    the *parser* sees rather than on the literal bytes: ``<...>``-wrapped
+    destinations, HTML entities standing in for the colon
+    (``javascript&#58;...``) and embedded whitespace or control characters
+    (``java\\tscript:...``) all reach a live scheme otherwise."""
+    dest = _normalise_destination(dest)
     if not dest or not dest[0].isascii() or not dest[0].isalpha():
         return True  # no scheme possible
     j = 0
@@ -737,62 +799,173 @@ def _scheme_is_allowed(dest: str) -> bool:
 
 def _link_destination_at(s: str, i: int):
     """Destination of a ``[label](destination)`` starting at `i` (which must be
-    ``[``), or None when this is not an inline link."""
-    j = i + 1
-    while j < len(s) and s[j] not in "]\n":
+    ``[``), or None when this is not an inline link.
+
+    The label may contain balanced brackets (``[a[b]c]``) and the destination
+    may contain balanced parentheses or be ``<...>``-wrapped, so both are
+    scanned with a depth counter rather than to the first closer."""
+    n = len(s)
+    depth = 0
+    j = i
+    while j < n:
+        ch = s[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                break
         j += 1
-    if j >= len(s) or s[j] != "]" or j + 1 >= len(s) or s[j + 1] != "(":
+    if j >= n or j + 1 >= n or s[j + 1] != "(":
         return None
     start = j + 2
+    # A `<...>` destination may hold anything up to the `>`.
+    if start < n and s[start] == "<":
+        k = start + 1
+        while k < n and s[k] not in ">\n":
+            k += 1
+        return s[start:k + 1] if k < n and s[k] == ">" else None
     k = start
-    while k < len(s) and s[k] not in ")\n":
+    parens = 0
+    while k < n:
+        ch = s[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if ch == "(":
+            parens += 1
+        elif ch == ")":
+            if parens == 0:
+                return s[start:k]
+            parens -= 1
+        elif ch == "\n":
+            # CommonMark forbids a newline in a bare destination.
+            return None
         k += 1
-    if k >= len(s) or s[k] != ")":
-        return None
-    return s[start:k]
+    return None
 
 
 def _anchor_href_allowed(s: str, i: int) -> bool:
     """True when the ``<a ...>`` opening at `i` has no href, or one whose
-    scheme is allowed. A closing ``</a>`` carries no href and always passes."""
+    scheme is allowed. A closing ``</a>`` carries no href and always passes.
+
+    Attributes are walked as ``name [= value]`` pairs rather than by searching
+    for the substring ``href``: HTML attribute names are case-insensitive
+    (``HREF``), and a substring search matches inside *other* attributes, so
+    ``<a data-href="https://ok" href="...">`` would be judged on the decoy and
+    the real destination never inspected."""
     if i + 1 < len(s) and s[i + 1] == "/":
         return True
     tag_end = i + 1
     while tag_end < len(s) and s[tag_end] not in ">\n":
         tag_end += 1
+
+    # Skip the tag name.
     j = i + 1
-    while j < tag_end:
-        if s.startswith("href", j):
-            k = j + 4
-            while k < tag_end and s[k].isspace():
-                k += 1
-            if k >= tag_end or s[k] != "=":
-                j += 1
-                continue
-            k += 1
-            while k < tag_end and s[k].isspace():
-                k += 1
-            if k < tag_end and s[k] in "\"'":
-                quote = s[k]
-                start = k + 1
-                end = start
-                while end < tag_end and s[end] != quote:
-                    end += 1
-            else:
-                start = k
-                end = start
-                while end < tag_end and not s[end].isspace():
-                    end += 1
-            return _scheme_is_allowed(s[start:end])
+    while j < tag_end and not s[j].isspace():
         j += 1
+
+    while j < tag_end:
+        while j < tag_end and s[j].isspace():
+            j += 1
+        if j >= tag_end:
+            break
+        name_start = j
+        while j < tag_end and not s[j].isspace() and s[j] != "=":
+            j += 1
+        name = s[name_start:j]
+        k = j
+        while k < tag_end and s[k].isspace():
+            k += 1
+        if k >= tag_end or s[k] != "=":
+            # Valueless attribute; nudge past an empty name to guarantee
+            # forward progress.
+            if j == name_start:
+                j += 1
+            continue
+        k += 1
+        while k < tag_end and s[k].isspace():
+            k += 1
+        if k < tag_end and s[k] in "\"'":
+            quote = s[k]
+            start = k + 1
+            end = start
+            while end < tag_end and s[end] != quote:
+                end += 1
+            nxt = min(end + 1, tag_end)
+        else:
+            start = k
+            end = start
+            while end < tag_end and not s[end].isspace():
+                end += 1
+            nxt = end
+        if name.lower() == "href":
+            return _scheme_is_allowed(s[start:end])
+        j = nxt if nxt > j else j + 1
     return True  # no href attribute at all
 
 
+def _is_bullet(s: str, j: int) -> bool:
+    """A list bullet: ``-``, ``*`` or ``+`` followed by a space or tab."""
+    return (j < len(s) and s[j] in "-*+"
+            and j + 1 < len(s) and s[j + 1] in " \t")
+
+
+def _thematic_break_at(s: str, j: int) -> bool:
+    """CommonMark thematic break: three or more ``-``, ``*`` or ``_``, all the
+    same, with only spaces and tabs between them and nothing else."""
+    if j >= len(s) or s[j] not in "-*_":
+        return False
+    marker = s[j]
+    count = 0
+    k = j
+    while k < len(s):
+        ch = s[k]
+        if ch == marker:
+            count += 1
+        elif ch in " \t":
+            pass
+        elif ch in "\n\r":
+            break
+        else:
+            return False
+        k += 1
+    return count >= 3
+
+
+def _setext_underline_at(s: str, j: int) -> bool:
+    """Setext heading underline: a run of ``=`` or ``-``, optionally followed
+    by spaces. A ``-`` run of three or more is already a thematic break, but
+    ``-`` or ``--`` alone is a setext underline and nothing else."""
+    if j >= len(s) or s[j] not in "=-":
+        return False
+    marker = s[j]
+    k = j
+    while k < len(s) and s[k] == marker:
+        k += 1
+    if k == j:
+        return False
+    while k < len(s) and s[k] in " \t":
+        k += 1
+    return k >= len(s) or s[k] in "\n\r"
+
+
 def _starts_new_block(s: str, i: int) -> bool:
-    """True when the line starting at `i` ends the current paragraph — either
-    it is blank (spaces and tabs only, tolerating CRLF) or its first non-space
-    character opens a new block. Bounds an inline code-span scan to a single
-    paragraph."""
+    """True when the line starting at `i` ends the current paragraph.
+
+    Bounds an inline code-span scan to a single paragraph. The set below is
+    taken from CommonMark's "can interrupt a paragraph" rules rather than
+    assembled from memory — a list built by recalling cases closes the inputs
+    you thought of and leaves the hole open on the rest, which is exactly how
+    ``***``, ``---``, ``___`` and HTML blocks survived the first attempt.
+
+    Erring towards True is safe: the backticks are then treated as ordinary
+    text and their content is escaped. Erring towards False copies the region
+    verbatim, which is the injection this module exists to prevent. So ``|``
+    (a GFM table row) and any ``<`` (HTML block) are included."""
     if i >= len(s):
         return True
     j = i
@@ -801,12 +974,19 @@ def _starts_new_block(s: str, i: int) -> bool:
     if j >= len(s) or s[j] in "\n\r":
         return True  # blank line; \r covers CRLF from quoted email/web content
     ch = s[j]
-    if ch in "># |":
-        return ch in ">#|"
-    if ch in "`~":
+    # Block quotation, ATX heading, GFM table row, HTML block.
+    if ch in ">#|<":
+        return True
+    if ch == "`":
         return _fence_at(s, i) is not None
-    if ch in "-*+":
-        return j + 1 < len(s) and s[j + 1] in " \t"
+    # `~` opens a fence but is not a list bullet.
+    if ch == "~":
+        return _fence_at(s, i) is not None or _thematic_break_at(s, j)
+    if ch in "-*_=":
+        return (_thematic_break_at(s, j) or _setext_underline_at(s, j)
+                or _is_bullet(s, j))
+    if ch == "+":
+        return _is_bullet(s, j)
     if ch.isdigit():
         k = j
         while k < len(s) and s[k].isdigit():
@@ -984,9 +1164,23 @@ def _is_api_rejection(resp: dict) -> bool:
         # Telegram also reports failures with HTTP 200 and ``ok: false``;
         # ``_api_post`` returns that body verbatim, so the verdict is in
         # ``error_code``. Rust's ``call_json`` builds ``Error::Api`` from the
-        # same field.
-        code = resp.get("error_code")
-    return isinstance(code, int) and 400 <= code < 500
+        # same field. A 200 with ``ok: false`` and no ``error_code`` at all is
+        # still a verdict: Telegram answered, in JSON, that it did not
+        # create the message, so it counts as definitive. Reading it as
+        # "unknown"
+        # would silently disable the fallback for any Bot API deployment that
+        # reports failures with a 200, which is exactly the self-hosted
+        # pre-10.1 server the fallback exists for.
+        if resp.get("ok") is False:
+            code = resp.get("error_code")
+            if not isinstance(code, int):
+                return True
+        else:
+            code = None
+    # 429 is the one 4xx that means "try later", not "not like this". Treating
+    # it as a refusal re-sends the same answer into a chat Telegram has just
+    # asked us to back off from.
+    return isinstance(code, int) and code != 429 and 400 <= code < 500
 
 
 def _prepare_rich_markdown(text: str):

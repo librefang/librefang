@@ -200,14 +200,28 @@ pub async fn send_text_counting(
     send_text_legacy_counting(client, chat_id, text, thread_id).await
 }
 
-/// True when Telegram itself answered with a definitive refusal, i.e. a 4xx.
+/// True when Telegram itself answered with a definitive refusal — the message does not
+/// exist and sending different content instead cannot duplicate it.
 ///
 /// Everything else leaves the outcome unknown and must not be retried with different
 /// content: `Error::Http` / `Io` / `Decode` mean we never got a verdict, and a 5xx can be
 /// returned after the message was already created. Re-sending in those cases delivers the
 /// same answer twice, which the user sees and we cannot undo.
+///
+/// Two cases the plain "is it a 4xx" reading gets wrong:
+///
+/// * **429 is not definitive.** It is the one 4xx that means "try later", not "not like
+///   this". `call_json` has already spent its single retry by the time we see it, so
+///   treating it as a refusal sends the same answer again into a chat Telegram has just
+///   asked us to back off from.
+/// * **`code == 0` is definitive.** `call_json` builds it from
+///   `parsed.error_code.unwrap_or(0)`, which is only reachable on the HTTP-2xx-with-
+///   `ok: false` path — Telegram answered, in JSON, that it did not create the message.
+///   Reading the sentinel as "not a 4xx" would silently disable the fallback for any Bot
+///   API deployment that reports failures with a 200, which is exactly the self-hosted
+///   pre-10.1 server the fallback exists for.
 pub(crate) fn is_api_rejection(e: &Error) -> bool {
-    matches!(e, Error::Api { code, .. } if (400..500).contains(code))
+    matches!(e, Error::Api { code, .. } if *code != 429 && (*code == 0 || (400..500).contains(code)))
 }
 
 /// Legacy path: our own Markdown → sanitised Telegram HTML pipeline, chunked to the

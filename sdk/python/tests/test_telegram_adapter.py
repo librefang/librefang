@@ -1106,6 +1106,75 @@ def test_rich_sanitizer_code_span_does_not_pair_across_a_block_boundary():
     assert tg.sanitize_rich_markdown(same) == same
 
 
+def test_rich_sanitizer_stops_at_every_paragraph_interrupting_construct():
+    """The block-starter set is taken from CommonMark, not from recall. These
+    are the cases a from-memory list misses. A ``` separator is deliberately
+    absent: it puts the button inside a real fenced code block, where it
+    renders as escaped text rather than live HTML."""
+    btn = ('<tg-button type="callback_data" data="wipe">Confirm'
+           '</tg-button>')
+    for sep in ("***", "---", "___", "* * *", "- - -", "___ _", "===", "--",
+                "<div>", "<table>", "> quote", "# head", "- item", "1. item",
+                "+ item", "| a |"):
+        out = tg.sanitize_rich_markdown(
+            "He said `hello\n%s\n%s\n%s\n`" % (sep, btn, sep))
+        assert "<tg-button" not in out, "%r leaked: %s" % (sep, out)
+
+
+def test_rich_sanitizer_keeps_spans_over_non_interrupting_lines():
+    """A four-space indent does not interrupt a paragraph in CommonMark, and
+    `~ x` is not a list bullet; erring towards "new block" there would break
+    ordinary multi-line code spans."""
+    for cont in ("    indented", "~ not a bullet", "plain text"):
+        src = "a `code\n%s\nmore` b" % cont
+        assert tg.sanitize_rich_markdown(src) == src
+
+
+def test_rich_sanitizer_finds_href_regardless_of_case_or_decoys():
+    """HTML attribute names are case-insensitive, and a substring search for
+    `href` matches inside other attribute names and values."""
+    for bad in ('<a HREF="javascript:alert(1)">x</a>',
+                '<A Href="javascript:alert(1)">x</A>',
+                '<a data-href="https://ok" href="javascript:alert(1)">x</a>',
+                '<a title="href=x" href="javascript:alert(1)">x</a>'):
+        out = tg.sanitize_rich_markdown(bad)
+        assert out.lower().startswith("&lt;a"), "not escaped: %s" % out
+    benign = '<a data-href="https://ok.example">x</a>'
+    assert tg.sanitize_rich_markdown(benign) == benign
+
+
+def test_rich_sanitizer_sees_through_wrappers_entities_and_whitespace():
+    """The scheme check must hold on what the parser resolves, not on the
+    literal bytes."""
+    for bad in ("[x](<javascript:alert(1)>)",
+                "[x](javascript&#58;alert(1))",
+                "[x](javascript&#x3a;alert(1))",
+                "[x](javascript&colon;alert(1))",
+                "[a[b]c](javascript:alert(1))"):
+        out = tg.sanitize_rich_markdown(bad)
+        assert out.startswith("\\["), "not escaped: %s" % out
+    for bad in ('<a href="java\tscript:alert(1)">x</a>',
+                '<a href="<javascript:alert(1)>">x</a>'):
+        out = tg.sanitize_rich_markdown(bad)
+        assert out.startswith("&lt;a"), "not escaped: %s" % out
+    ok = "[x](https://example.com/a_(b)_c)"
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
+def test_is_api_rejection_excludes_429_and_treats_bare_ok_false_as_final():
+    """429 means "try later", not "not like this"; falling back would
+    re-send into a flood-wait. A 200 with ok:false is a verdict even without an
+    error_code, and reading that sentinel as "unknown" would disable the
+    fallback on servers that report failures with a 200."""
+    assert tg._is_api_rejection({"_http": 404}) is True
+    assert tg._is_api_rejection({"_http": 429}) is False
+    assert tg._is_api_rejection({"_http": 500}) is False
+    assert tg._is_api_rejection({"ok": False, "error_code": 404}) is True
+    assert tg._is_api_rejection({"ok": False}) is True
+    assert tg._is_api_rejection({"ok": False, "error_code": 429}) is False
+    assert tg._is_api_rejection({}) is False
+
+
 def test_rich_sanitizer_closing_fence_may_not_carry_an_info_string():
     fence = "```\nline\n```js\n<tg-button>x</tg-button>\n```\n"
     assert tg.sanitize_rich_markdown(fence) == fence
