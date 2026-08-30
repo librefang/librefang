@@ -36,14 +36,18 @@
 //! * **Guaranteed:** no raw HTML reaches Telegram, so no message text can produce a
 //!   button, a media fetch or any other active element. This holds by construction and
 //!   needs no agreement with any parser.
-//! * **Cost:** a `<` inside a user's code sample renders as the literal `&lt;`, because
-//!   Markdown does not decode entities inside code. `Vec<String>` in a fenced block will
-//!   read `Vec&lt;String>`. This is the price of the guarantee, and it is the reason to
-//!   move to `InputRichMessage.blocks`, where a preformatted block's text is a plain
-//!   string that Telegram never parses and nothing needs escaping at all.
-//! * **Also lost:** the Rich HTML tags with no Markdown equivalent (`<u>`, `<sub>`,
-//!   `<sup>`). Emphasis, strikethrough, spoilers, tables, lists and headings are all
-//!   plain Markdown and unaffected.
+//! * **Cost, inside code:** the escapes are applied everywhere, including inside code
+//!   spans and fenced blocks, where Markdown does not process them. `Vec<String>` in a
+//!   fence reads `Vec\<String>`, and an `![x](…)` or `[x](…)` there keeps its backslash
+//!   too. This is the price of the guarantee, and it is the reason to move to
+//!   `InputRichMessage.blocks`, where a preformatted block's text is a plain string that
+//!   Telegram never parses and nothing needs escaping at all.
+//! * **Also lost:** every Rich HTML construct, since they all start with `<`. That is
+//!   `<u>`, `<ins>`, `<sub>`, `<sup>`, `<br>`, `<details>` / `<summary>` (collapsible
+//!   blocks), `<aside>` / `<cite>` (pull quotes), `<a name>` anchors, `<tg-map>`,
+//!   `<tg-collage>`, `<tg-slideshow>`, `<tg-emoji>` and `<tg-time>`. Emphasis,
+//!   strikethrough, spoilers (`||…||`), highlight (`==…==`), tables, lists, headings,
+//!   code, math and footnotes are all plain Markdown and unaffected.
 //!
 //! Link destinations are still checked against `sanitize`'s scheme allowlist, but that
 //! check is **best-effort**, not a guarantee: locating a Markdown link exactly has the
@@ -53,7 +57,10 @@
 use std::ops::Range;
 
 /// Schemes a link destination may carry. Mirrors `sanitize::ALLOWED_HREF_SCHEMES`.
-const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:"];
+/// `tel:` is on the list because the Bot API's own Rich Markdown sample uses
+/// `[inline phone number](tel:+123456789)` and Rich HTML style states that `tel:` links
+/// render as phone links. Leaving it out escaped a documented, working feature.
+const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:", "tel:"];
 
 /// CommonMark caps a link label at 999 characters. Bounding the label scan keeps this
 /// pass linear — scanning to end of input for every unmatched `[` was quadratic, and a
@@ -66,13 +73,26 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
+    // Total characters the label scanner may examine across the whole message. A
+    // per-label window alone is not enough: `("[".repeat(998) + "]").repeat(n)` lets the
+    // scan succeed far enough to be re-run for every `[`, which is linear in the input
+    // but with a 999x constant — 72 s on a megabyte in the Python port. Once the budget
+    // is spent no further link is scheme-checked, which only weakens a check already
+    // documented as best-effort.
+    let mut budget = input.len().saturating_mul(2).max(MAX_LINK_LABEL * 16);
 
     while i < bytes.len() {
         match bytes[i] {
-            // The whole security property, in one arm: no `<` survives, so no raw HTML
-            // can reach Telegram regardless of what the surrounding text looks like.
+            // The whole security property, in one arm: no bare `<` survives, so no raw
+            // HTML can reach Telegram regardless of what the surrounding text looks like.
+            //
+            // A backslash escape rather than `&lt;`, because the spec documents this
+            // mechanism for the `markdown` field by example (`\#hashtag` in its own Rich
+            // Markdown sample) and says nothing about entity decoding there — the entity
+            // note appears only under the two HTML styles. It also keeps escaping to one
+            // mechanism, since `!` and `[` below are backslash-escaped too.
             b'<' => {
-                out.push_str("&lt;");
+                out.push_str("\\<");
                 i += 1;
             }
             // `![...](...)` is a real media block in Rich Markdown, fetched from the
@@ -86,8 +106,8 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
             // and the reference definition `[label]: destination`, which supplies the
             // destination for a `[x][label]` elsewhere in the message.
             b'[' => {
-                let disallowed = link_destination_at(bytes, i)
-                    .or_else(|| reference_definition_at(bytes, i))
+                let disallowed = link_destination_at(bytes, i, &mut budget)
+                    .or_else(|| reference_definition_at(bytes, i, &mut budget))
                     .is_some_and(|dest| !scheme_is_allowed(&input[dest]));
                 out.push_str(if disallowed { "\\[" } else { "[" });
                 i += 1;
@@ -210,8 +230,8 @@ fn decode_entity(entity: &str) -> Option<char> {
 
 /// Byte range of the destination in a `[label](destination)` starting at `i` (which must
 /// be `[`). `None` when this is not an inline link.
-fn link_destination_at(bytes: &[u8], i: usize) -> Option<Range<usize>> {
-    let label_end = link_label_end(bytes, i)?;
+fn link_destination_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Range<usize>> {
+    let label_end = link_label_end(bytes, i, budget)?;
     if bytes.get(label_end + 1) != Some(&b'(') {
         return None;
     }
@@ -253,8 +273,14 @@ fn link_destination_at(bytes: &[u8], i: usize) -> Option<Range<usize>> {
 
 /// Byte range of the destination in a link reference definition `[label]: destination`
 /// starting at `i`. `None` when this is not a definition.
-fn reference_definition_at(bytes: &[u8], i: usize) -> Option<Range<usize>> {
-    let label_end = link_label_end(bytes, i)?;
+fn reference_definition_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Range<usize>> {
+    // `[^id]: text` is a footnote definition, not a link reference. Reading it as one
+    // meant any footnote whose text opens `Word: …` was taken to carry a `word:` scheme
+    // and got escaped, which put a stray backslash in the user's message.
+    if bytes.get(i + 1) == Some(&b'^') {
+        return None;
+    }
+    let label_end = link_label_end(bytes, i, budget)?;
     if bytes.get(label_end + 1) != Some(&b':') {
         return None;
     }
@@ -275,11 +301,18 @@ fn reference_definition_at(bytes: &[u8], i: usize) -> Option<Range<usize>> {
 
 /// Index of the `]` closing the link label opening at `i`, honouring balanced brackets
 /// and backslash escapes. Bounded by [`MAX_LINK_LABEL`], which is CommonMark's own cap.
-fn link_label_end(bytes: &[u8], i: usize) -> Option<usize> {
+///
+/// The bound counts **characters**, not bytes: a byte bound let a label of 600 multibyte
+/// characters — well inside the cap — escape the check in this port while the Python one
+/// still applied it, so the two disagreed on a security outcome.
+///
+/// A label body of exactly 999 characters is legal, so the closing `]` is accepted at
+/// character offset 1000 from the opening `[`.
+fn link_label_end(bytes: &[u8], i: usize, budget: &mut usize) -> Option<usize> {
     let mut depth = 0_i32;
     let mut j = i;
-    let limit = i.saturating_add(MAX_LINK_LABEL);
-    while j <= limit {
+    let mut chars = 0_usize;
+    while chars <= MAX_LINK_LABEL + 1 {
         match bytes.get(j)? {
             b'\\' => j += 1,
             b'[' => depth += 1,
@@ -291,7 +324,12 @@ fn link_label_end(bytes: &[u8], i: usize) -> Option<usize> {
             }
             _ => {}
         }
-        j += 1;
+        j += utf8_char_len(*bytes.get(j)?);
+        chars += 1;
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
     }
     None
 }
@@ -328,7 +366,12 @@ mod tests {
             format!("<a title=\"`\" href=\"https://ok\">t</a> {BUTTON}"),
         ] {
             let out = sanitize_rich_markdown(&context);
-            assert!(!out.contains('<'), "raw `<` survived: {out}");
+            for (idx, _) in out.match_indices('<') {
+                assert!(
+                    idx > 0 && out.as_bytes()[idx - 1] == b'\\',
+                    "unescaped `<` survived: {out}"
+                );
+            }
         }
     }
 
@@ -354,7 +397,7 @@ mod tests {
     fn a_less_than_in_a_code_sample_is_escaped_too() {
         assert_eq!(
             sanitize_rich_markdown("```rust\nlet v: Vec<String>;\n```"),
-            "```rust\nlet v: Vec&lt;String>;\n```"
+            "```rust\nlet v: Vec\\<String>;\n```"
         );
     }
 
@@ -399,28 +442,88 @@ mod tests {
 
     /// Bounding the label scan at CommonMark's own 999-character cap keeps the pass
     /// linear. Unbounded, a megabyte of `[` took hours.
+    /// Two shapes, because only one of them is caught by a per-label window: a run of
+    /// bare `[` never finds a `]`, while `("[" * 998 + "]")` lets the scan succeed far
+    /// enough to be re-run for every bracket. The second shape is what cost 72 s on a
+    /// megabyte before the total budget was added.
     #[test]
-    fn unmatched_brackets_are_processed_linearly() {
-        let input = "[".repeat(200_000);
-        let start = Instant::now();
-        let out = sanitize_rich_markdown(&input);
-        assert_eq!(out.len(), input.len());
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "took {:?} — scan is superlinear",
-            start.elapsed()
-        );
+    fn bracket_dense_input_is_processed_within_budget() {
+        for input in [
+            "[".repeat(1_000_000),
+            ("[".repeat(998) + "]").repeat(1_001),
+            "[]".repeat(500_000),
+        ] {
+            let start = Instant::now();
+            let out = sanitize_rich_markdown(&input);
+            assert_eq!(out.len(), input.len());
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "took {:?} on a {}-byte input — scan is superlinear",
+                start.elapsed(),
+                input.len()
+            );
+        }
     }
 
-    /// CommonMark caps a link label at 999 characters, so a longer one is not a label
-    /// and the text is inert. Bounding the scan there is what keeps a run of unmatched
-    /// brackets cheap.
+    /// CommonMark's 999-character cap is on a *reference label*; inline link text has no
+    /// cap at all. An earlier version of this test asserted that a 1500-character inline
+    /// label was "inert" — it is a live link, so the test was pinning a bypass as
+    /// correct. These pin the real boundary instead.
     #[test]
-    fn label_longer_than_the_commonmark_cap_is_not_a_link() {
-        let long_label = format!("[{}](javascript:alert(1))", "x".repeat(1500));
-        assert_eq!(sanitize_rich_markdown(&long_label), long_label);
-        let short_label = format!("[{}](javascript:alert(1))", "x".repeat(500));
-        assert!(sanitize_rich_markdown(&short_label).starts_with("\\["));
+    fn reference_label_boundary_is_pinned_at_999() {
+        for len in [997, 998, 999] {
+            let label = "y".repeat(len);
+            let input = format!("[x][{label}]\n\n[{label}]: javascript:alert(1)");
+            let out = sanitize_rich_markdown(&input);
+            // Escaping the *definition* is what stops the reference resolving.
+            assert!(
+                out.contains(&format!("\\[{label}]:")),
+                "label of {len} not checked: {out}"
+            );
+        }
+        // Past the cap the reference does not resolve for CommonMark either, so leaving
+        // it alone is correct rather than a miss.
+        let over = "y".repeat(1000);
+        let input = format!("[x][{over}]\n\n[{over}]: javascript:alert(1)");
+        assert_eq!(sanitize_rich_markdown(&input), input);
+    }
+
+    /// The cap counts characters. Bounding it in bytes let a 600-character multibyte
+    /// label — well inside the cap — walk past the scheme check in this port while the
+    /// Python one still applied it.
+    #[test]
+    fn multibyte_labels_are_bounded_by_characters_not_bytes() {
+        for filler in ["é", "\u{4e2d}", "\u{1f600}"] {
+            let label = filler.repeat(600);
+            let input = format!("[{label}](javascript:alert(1))");
+            let out = sanitize_rich_markdown(&input);
+            assert!(out.starts_with("\\["), "{filler} label not checked: {out}");
+        }
+    }
+
+    /// A footnote definition is not a link reference. Reading `[^id]: Warning: …` as one
+    /// took `warning:` for a scheme and put a stray backslash in the user's message.
+    #[test]
+    fn footnote_definitions_are_left_alone() {
+        for source in [
+            "[^id2]: Warning: do not do this.",
+            "Text[^note] here.\n\n[^note]: Note: see above",
+        ] {
+            assert_eq!(sanitize_rich_markdown(source), source);
+        }
+    }
+
+    /// `tel:` is documented as a working Rich Markdown link scheme; escaping it showed
+    /// the user raw Markdown source.
+    #[test]
+    fn documented_link_schemes_are_allowed() {
+        for source in [
+            "[call](tel:+123456789)",
+            "[mail](mailto:a@b.c)",
+            "[user](tg://user?id=1)",
+        ] {
+            assert_eq!(sanitize_rich_markdown(source), source);
+        }
     }
 
     #[test]
@@ -429,7 +532,11 @@ mod tests {
         let out = sanitize_rich_markdown(s);
         assert!(out.contains("таблица — да"));
         assert!(out.contains('🎉'));
-        assert!(!out.contains('<'));
+        assert!(out.contains("\\<tg-button"));
+        // Every `<` in the output is backslash-escaped; none can open a tag.
+        assert!(out
+            .match_indices('<')
+            .all(|(idx, _)| idx > 0 && out.as_bytes()[idx - 1] == b'\\'));
     }
 
     #[test]

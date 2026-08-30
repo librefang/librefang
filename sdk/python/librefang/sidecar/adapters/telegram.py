@@ -82,6 +82,10 @@ TELEGRAM_MSG_LIMIT = 4096
 # text" (Bot API, Rich Message Limits). Counted in characters, unlike the
 # legacy sendMessage path which counts UTF-16 code units.
 RICH_MSG_LIMIT = 32768
+# Cap on a stream's accumulated buffer, mirroring the Rust adapter's
+# MAX_STREAM_BUFFER_BYTES. Without it a stream grows unbounded while
+# `_sync_stream_messages` re-sanitises the whole buffer on every edit tick.
+MAX_STREAM_BUFFER_BYTES = 1024 * 1024
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
@@ -664,7 +668,10 @@ def _format_and_sanitize(text: str) -> str:
 # Schemes a link destination may carry. Mirrors the Rust
 # `rich_sanitize::ALLOWED_HREF_SCHEMES` and `sanitize_telegram_html`'s own
 # allowlist.
-_ALLOWED_RICH_HREF_SCHEMES = ("https:", "http:", "mailto:", "tg:")
+# `tel:` is on the list because the Bot API's own Rich Markdown sample uses
+# `[inline phone number](tel:+123456789)` and Rich HTML style states that
+# `tel:` links render as phone links.
+_ALLOWED_RICH_HREF_SCHEMES = ("https:", "http:", "mailto:", "tg:", "tel:")
 _SCHEME_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
 )
@@ -761,20 +768,27 @@ def _skip_ascii_space(s: str, k: int) -> int:
     return k
 
 
-def _link_label_end(s: str, i: int):
+def _link_label_end(s: str, i: int, budget: list):
     """Index of the ``]`` closing the link label opening at `i`, honouring
-    balanced brackets and backslash escapes. Bounded by CommonMark's own
-    999-character cap."""
-    limit = min(i + _MAX_LINK_LABEL, len(s) - 1)
-    # Fast reject: without a `]` in range there is no label, and the scan
-    # below would walk the full 999-character window for every `[`. `find`
-    # does that check at C speed, which keeps a run of unmatched brackets
-    # cheap instead of merely non-quadratic.
+    balanced brackets and backslash escapes.
+
+    A label body of exactly 999 characters is legal, so the closing ``]`` is
+    accepted at offset 1000 from the opening ``[``. `budget` is a one-element
+    list holding the characters the scanner may still examine across the whole
+    message: a per-label window alone is not enough, because
+    ``("[" * 998 + "]") * n`` lets the scan succeed far enough to be re-run for
+    every `[`."""
+    limit = min(i + _MAX_LINK_LABEL + 1, len(s) - 1)
+    # Fast reject: without a `]` in range there is no label. `find` does that
+    # check at C speed, which keeps a run of unmatched brackets cheap.
     if s.find("]", i + 1, limit + 1) == -1:
         return None
     depth = 0
     j = i
     while j <= limit:
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
         ch = s[j]
         if ch == "\\":
             j += 2
@@ -789,11 +803,11 @@ def _link_label_end(s: str, i: int):
     return None
 
 
-def _link_destination_at(s: str, i: int):
+def _link_destination_at(s: str, i: int, budget: list):
     """Destination of a ``[label](destination)`` starting at `i`, or None
     when this is not an inline link."""
     n = len(s)
-    label_end = _link_label_end(s, i)
+    label_end = _link_label_end(s, i, budget)
     if label_end is None or label_end + 1 >= n or s[label_end + 1] != "(":
         return None
     # Whitespace may sit on either side of the destination, with an optional
@@ -831,11 +845,17 @@ def _link_destination_at(s: str, i: int):
     return dest if k < n and s[k] == ")" else None
 
 
-def _reference_definition_at(s: str, i: int):
+def _reference_definition_at(s: str, i: int, budget: list):
     """Destination of a link reference definition ``[label]: destination``
     starting at `i`, or None when this is not a definition."""
     n = len(s)
-    label_end = _link_label_end(s, i)
+    # `[^id]: text` is a footnote definition, not a link reference. Reading it
+    # as one meant any footnote whose text opens `Word: ...` was taken to carry
+    # a `word:` scheme and got escaped, putting a stray backslash in the
+    # user's message.
+    if i + 1 < n and s[i + 1] == "^":
+        return None
+    label_end = _link_label_end(s, i, budget)
     if label_end is None or label_end + 1 >= n or s[label_end + 1] != ":":
         return None
     start = _skip_ascii_space(s, label_end + 2)
@@ -878,12 +898,22 @@ def sanitize_rich_markdown(text: str) -> str:
     out = []
     i = 0
     n = len(text)
+    # Total characters the label scanner may examine across the whole message;
+    # see `_link_label_end`. Once spent, no further link is scheme-checked,
+    # which only weakens a check already documented as best-effort.
+    budget = [max(n * 2, _MAX_LINK_LABEL * 16)]
     while i < n:
         ch = text[i]
-        # The whole security property, in one branch: no `<` survives, so no
-        # raw HTML can reach Telegram regardless of context.
+        # The whole security property, in one branch: no bare `<` survives, so
+        # no raw HTML can reach Telegram regardless of context.
+        #
+        # A backslash escape rather than `&lt;`, because the spec documents
+        # this mechanism for the `markdown` field by example (`\#hashtag` in
+        # its own Rich Markdown sample) and says nothing about entity decoding
+        # there. It also keeps escaping to one mechanism, since `!` and `[`
+        # below are backslash-escaped too.
         if ch == "<":
-            out.append("&lt;")
+            out.append("\\<")
             i += 1
             continue
         # `![...](...)` is a real media block in Rich Markdown, fetched from
@@ -896,9 +926,9 @@ def sanitize_rich_markdown(text: str) -> str:
         # and on the reference definition `[label]: destination`, which
         # supplies the destination for a `[x][label]` elsewhere.
         if ch == "[":
-            dest = _link_destination_at(text, i)
+            dest = _link_destination_at(text, i, budget)
             if dest is None:
-                dest = _reference_definition_at(text, i)
+                dest = _reference_definition_at(text, i, budget)
             out.append("\\[" if dest is not None
                        and not _scheme_is_allowed(dest) else "[")
             i += 1
@@ -2013,6 +2043,14 @@ class TelegramAdapter(SidecarAdapter):
     def _stream_delta(self, sid: str, chunk: str) -> None:
         st = self._streams.get(sid)
         if st is None:
+            return
+        if len(st["text"]) + len(chunk) > MAX_STREAM_BUFFER_BYTES:
+            # Matches the Rust adapter: drop the stream rather than let the
+            # buffer grow without bound, since every edit tick re-sanitises
+            # the whole of it.
+            del self._streams[sid]
+            log.warn("telegram stream exceeded the buffer limit; dropped",
+                     stream_id=sid, limit=MAX_STREAM_BUFFER_BYTES)
             return
         st["text"] += chunk
         if not st["initial_attempted"]:

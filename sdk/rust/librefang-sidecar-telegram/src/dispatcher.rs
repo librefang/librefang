@@ -951,11 +951,12 @@ mod tests {
         let seen = server.join().expect("mock thread");
         assert!(seen[0].0.contains("/sendRichMessage"));
         assert!(
-            !seen[0].1.contains("<tg-button"),
+            !seen[0].1.contains(r#"said: <tg-button"#),
             "an injected button reached Telegram: {}",
             seen[0].1
         );
-        assert!(seen[0].1.contains("&lt;tg-button"));
+        // The payload is JSON, so the backslash escape is itself escaped on the wire.
+        assert!(seen[0].1.contains(r#"\\<tg-button"#));
     }
 
     #[test]

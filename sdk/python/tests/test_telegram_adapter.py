@@ -1027,8 +1027,8 @@ async def test_send_text_sanitizes_injected_buttons(monkeypatch):
     await a.on_command(tg.protocol.Send("c1", "x", {"Text": quoted}, None, {}))
 
     sent = calls[0][1]["rich_message"]["markdown"]
-    assert "<tg-button" not in sent
-    assert "&lt;tg-button" in sent
+    assert "said: <tg-button" not in sent
+    assert "\\<tg-button" in sent
 
 
 @pytest.mark.asyncio
@@ -1089,7 +1089,10 @@ def test_rich_sanitizer_no_raw_html_survives_any_context():
                     '<b a="1"b="%s">' % _BTN,
                     '<a title="`" href="https://ok">t</a> %s' % _BTN):
         out = tg.sanitize_rich_markdown(context)
-        assert "<" not in out, "raw < survived: %s" % out
+        for idx, ch in enumerate(out):
+            if ch == "<":
+                assert idx > 0 and out[idx - 1] == "\\", (
+                    "unescaped < survived: %s" % out)
 
 
 def test_rich_sanitizer_markdown_formatting_is_untouched():
@@ -1108,7 +1111,7 @@ def test_rich_sanitizer_less_than_in_a_code_sample_is_escaped_too():
     visible rather than discovered."""
     assert tg.sanitize_rich_markdown(
         "```rust\nlet v: Vec<String>;\n```"
-    ) == "```rust\nlet v: Vec&lt;String>;\n```"
+    ) == "```rust\nlet v: Vec\\<String>;\n```"
 
 
 def test_rich_sanitizer_disallowed_link_schemes_are_escaped():
@@ -1142,26 +1145,60 @@ def test_rich_sanitizer_image_syntax_is_escaped():
     ) == "see \\![alt](https://evil.example/x.jpg)"
 
 
-def test_rich_sanitizer_unmatched_brackets_are_linear():
-    """Bounding the label scan at CommonMark's 999-character cap, with a
-    C-speed fast reject, keeps this cheap. Unbounded it took hours."""
+def test_rich_sanitizer_bracket_dense_input_is_within_budget():
+    """Two shapes, because only one is caught by the fast reject: a run of
+    bare `[` never finds a `]`, while `("[" * 998 + "]")` lets the scan
+    succeed far enough to be re-run for every bracket — that shape cost
+    72 s on a megabyte before the total budget was added."""
     import time
-    src = "[" * 200000
-    start = time.time()
-    out = tg.sanitize_rich_markdown(src)
-    elapsed = time.time() - start
-    assert out == src
-    assert elapsed < 2.0, "took %.2fs — scan is superlinear" % elapsed
+    for src in ("[" * 1000000, ("[" * 998 + "]") * 1001):
+        start = time.time()
+        out = tg.sanitize_rich_markdown(src)
+        elapsed = time.time() - start
+        assert out == src
+        assert elapsed < 2.0, (
+            "took %.2fs on %d bytes — scan is superlinear"
+            % (elapsed, len(src)))
 
 
-def test_rich_sanitizer_label_longer_than_the_commonmark_cap():
-    """CommonMark caps a link label at 999 characters, so a longer one is
-    not a label and the text is inert. Bounding the scan there is what
-    keeps a run of unmatched brackets cheap."""
-    long_label = "[" + "x" * 1500 + "](javascript:alert(1))"
-    assert tg.sanitize_rich_markdown(long_label) == long_label
-    short_label = "[" + "x" * 500 + "](javascript:alert(1))"
-    assert tg.sanitize_rich_markdown(short_label).startswith("\\[")
+def test_rich_sanitizer_reference_label_boundary_is_pinned_at_999():
+    """CommonMark's 999-character cap is on a *reference label*; inline link
+    text has no cap. An earlier version of this test asserted a
+    1500-character inline label was inert — it is a live link, so the test
+    pinned a bypass as correct."""
+    for n in (997, 998, 999):
+        label = "y" * n
+        out = tg.sanitize_rich_markdown(
+            "[x][%s]\n\n[%s]: javascript:alert(1)" % (label, label))
+        assert "\\[%s]:" % label in out, "label of %d not checked" % n
+    over = "y" * 1000
+    src = "[x][%s]\n\n[%s]: javascript:alert(1)" % (over, over)
+    assert tg.sanitize_rich_markdown(src) == src
+
+
+def test_rich_sanitizer_multibyte_labels_bounded_by_characters():
+    """The Rust port bounded the label in bytes, so a 600-character
+    multibyte label walked past the check there but not here."""
+    for filler in ("é", "\u4e2d", "\U0001F600"):
+        src = "[" + filler * 600 + "](javascript:alert(1))"
+        assert tg.sanitize_rich_markdown(src).startswith("\\[")
+
+
+def test_rich_sanitizer_footnote_definitions_are_left_alone():
+    """`[^id]: Warning: ...` is a footnote, not a link reference; reading it
+    as one took `warning:` for a scheme and added a stray backslash."""
+    for src in ("[^id2]: Warning: do not do this.",
+                "Text[^note] here.\n\n[^note]: Note: see above"):
+        assert tg.sanitize_rich_markdown(src) == src
+
+
+def test_rich_sanitizer_documented_link_schemes_are_allowed():
+    """`tel:` is a documented Rich Markdown scheme; escaping it showed the
+    user raw Markdown source."""
+    for src in ("[call](tel:+123456789)",
+                "[mail](mailto:a@b.c)",
+                "[user](tg://user?id=1)"):
+        assert tg.sanitize_rich_markdown(src) == src
 
 
 def test_rich_sanitizer_control_filter_covers_the_c1_range():
@@ -1179,7 +1216,10 @@ def test_rich_sanitizer_multibyte_and_edge_inputs():
         "таблица — да, \U0001F389 <tg-button>нет</tg-button>")
     assert "таблица — да" in out
     assert "\U0001F389" in out
-    assert "<" not in out
+    assert "\\<tg-button" in out
+    for idx, ch in enumerate(out):
+        if ch == "<":
+            assert out[idx - 1] == "\\"
     for src in ("", " ", "<", "[", "![", "\\", "`", "\ufeff", "\r", "&#"):
         tg.sanitize_rich_markdown(src)
 
