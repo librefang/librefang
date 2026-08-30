@@ -1313,3 +1313,68 @@ def test_rich_sanitizer_uses_ascii_whitespace_like_rust():
     assert not tg._is_ascii_space("\u2028")
     out = tg.sanitize_rich_markdown('<a  href="javascript:x">t</a>')
     assert out.startswith("&lt;a"), "not escaped: %s" % out
+
+
+# ---- rich sanitizer: bypasses found in review round 4 ---------------
+
+
+def test_rich_sanitizer_unterminated_tag_does_not_swallow_what_follows():
+    """An HTML tag cannot hold `<` or `[` in an attribute name, so
+    `<b <tg-button ...>` is not a `<b>` tag with odd attributes — Markdown
+    rejects it and matches the inner construct. Treating the whole span as
+    one allowed tag copied a live button through verbatim."""
+    for prefix in ("<b ", "<i ", "<b \n\n", '<a href="https://ok" x '):
+        out = tg.sanitize_rich_markdown(prefix + _BTN)
+        assert "<tg-button" not in out, "%r leaked: %s" % (prefix, out)
+    out = tg.sanitize_rich_markdown("<b [x](javascript:alert(1))>")
+    assert not out.startswith("<b ["), "scheme check skipped: %s" % out
+    ok = '<a title="`" href="https://ok">t</a>'
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
+def test_rich_sanitizer_many_unclosed_tags_are_linear():
+    """Bounding the tag scan also keeps the pass linear; scanning to end of
+    input for every unclosed `<` was quadratic — 184 KB took 20 s."""
+    import time
+    src = '<a href="javascript:x" ' * 8000
+    start = time.time()
+    out = tg.sanitize_rich_markdown(src)
+    elapsed = time.time() - start
+    assert "<a " not in out, "unclosed tag emitted live"
+    assert elapsed < 2.0, "took %.2fs — scan is superlinear" % elapsed
+
+
+def test_rich_sanitizer_destination_with_leading_whitespace():
+    """Whitespace may sit on either side of a destination; skipping only the
+    right side made `[x]( javascript:... )` parse as empty and skip the
+    scheme check entirely."""
+    for bad in ("[x]( javascript:alert(1) )",
+                "[x](  javascript:alert(1))",
+                "[x](\njavascript:alert(1)\n)"):
+        out = tg.sanitize_rich_markdown(bad)
+        assert out.startswith("\\["), "not escaped: %s" % out
+    ok = "[x]( https://example.com )"
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
+def test_rich_sanitizer_indented_reference_definitions():
+    """CommonMark allows up to three spaces before a block, so an indented
+    definition still resolves; clearing at_line_start on the first space
+    meant it was never inspected."""
+    for indent in ("", " ", "  ", "   ", "\t"):
+        out = tg.sanitize_rich_markdown(
+            "[x][ref]\n\n%s[ref]: javascript:alert(1)" % indent)
+        assert "\\[ref]:" in out, "indent %r skipped: %s" % (indent, out)
+
+
+def test_rich_sanitizer_matches_rust_on_unicode_whitespace_and_controls():
+    """The two ports disagreed here: `_tag_name_at` still used str.isspace(),
+    and the control filter missed the C1 range."""
+    nbsp = "<a" + chr(0x00A0) + 'href="javascript:alert(1)">t</a>'
+    assert tg.sanitize_rich_markdown(nbsp).startswith("&lt;a")
+    ls = "<a" + chr(0x2028) + 'href="javascript:alert(1)">t</a>'
+    assert tg.sanitize_rich_markdown(ls).startswith("&lt;a")
+    assert not tg._scheme_is_allowed("java" + chr(0x80) + "script:alert(1)")
+    assert tg._is_control(chr(0x80))
+    assert tg._is_control(chr(0x9F))
+    assert not tg._is_control("a")

@@ -153,6 +153,14 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
         }
 
         if b == b'<' {
+            // A `<` that never closes, or that runs into another `<` first, is not a tag
+            // at all — escape it rather than guessing where it ends.
+            let Some(close) = tag_end(bytes, i) else {
+                out.push_str("&lt;");
+                at_line_start = false;
+                i += 1;
+                continue;
+            };
             let allowed = match tag_name_at(bytes, i) {
                 // `<a>` is allowed only when its href scheme is. Telegram does not
                 // filter schemes for us, and `sanitize::ALLOWED_HREF_SCHEMES`
@@ -166,10 +174,10 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
                 // Copy the whole tag, not just the `<`. Attribute values are not
                 // Markdown: a backtick inside one (`<a title="`" …>`) would otherwise be
                 // read as opening a code span and copy the rest of the line verbatim.
-                let end = tag_end(bytes, i);
-                out.push_str(&input[i..end]);
+                // `tag_end` has already established the span really is one tag.
+                out.push_str(&input[i..close]);
                 at_line_start = false;
-                i = end;
+                i = close;
             } else {
                 out.push_str("&lt;");
                 at_line_start = false;
@@ -180,7 +188,10 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
 
         let ch_len = utf8_char_len(b);
         out.push_str(&input[i..i + ch_len]);
-        at_line_start = is_line_break(b);
+        // Indentation does not end a line's opening position: CommonMark allows up
+        // to three leading spaces before a block, and clearing the flag here meant
+        // an indented `  [ref]: javascript:…` definition was never inspected.
+        at_line_start = is_line_break(b) || (at_line_start && matches!(b, b' ' | b'\t'));
         i += ch_len;
     }
 
@@ -352,7 +363,10 @@ fn link_destination_at(bytes: &[u8], i: usize) -> Option<std::ops::Range<usize>>
     if bytes.get(j + 1) != Some(&b'(') {
         return None;
     }
-    let start = j + 2;
+    // Whitespace may sit on *either* side of the destination; only the right side
+    // was skipped, so `[x]( javascript:…)` parsed as an empty destination and the
+    // link went unchecked entirely.
+    let start = skip_ascii_whitespace(bytes, j + 2);
     // A `<…>` destination may hold anything up to the `>`.
     if bytes.get(start) == Some(&b'<') {
         let mut k = start + 1;
@@ -442,8 +456,11 @@ fn anchor_href_allowed(input: &str, bytes: &[u8], i: usize) -> bool {
     if bytes.get(i + 1) == Some(&b'/') {
         return true;
     }
-    // Exclusive of the `>`; a tag may span lines, so this must not stop at a break.
-    let tag_end = tag_end(bytes, i).saturating_sub(1);
+    // Exclusive of the `>`. `tag_end` returning `None` means this is not a tag at
+    // all; the caller escapes it before we get here, so treat it as having no href.
+    let Some(tag_end) = tag_end(bytes, i).map(|end| end - 1) else {
+        return false;
+    };
     // Skip the tag name.
     let mut j = i + 1;
     while j < tag_end && !bytes[j].is_ascii_whitespace() {
@@ -561,15 +578,41 @@ fn next_line_start(bytes: &[u8], j: usize) -> usize {
     }
 }
 
-/// Index of the `>` closing the tag opening at `i`, exclusive of it, or end of input.
-/// A tag may span lines, so this deliberately does not stop at a line break: doing so
-/// left `<a\nhref="javascript:…">` with no attributes to inspect.
-fn tag_end(bytes: &[u8], i: usize) -> usize {
+/// Index just past the `>` closing the tag opening at `i`, or `None` when this is not a
+/// well-formed tag.
+///
+/// A tag may span lines, so the scan does not stop at a line break — stopping there left
+/// `<a\nhref="javascript:…">` with no attributes to inspect. It *does* stop at another
+/// `<`, for two reasons. HTML tags cannot contain one, so `<b <tg-button …>` is not a
+/// `<b>` tag with odd attributes: Markdown rejects it and then matches the inner tag,
+/// which means treating the whole span as one tag would copy a live `<tg-button>`
+/// through verbatim. And bounding the scan at the next `<` keeps the pass linear —
+/// scanning to end-of-input for every unclosed `<` made it quadratic.
+fn tag_end(bytes: &[u8], i: usize) -> Option<usize> {
     let mut k = i + 1;
-    while bytes.get(k).is_some_and(|&c| c != b'>') {
+    let mut quote: Option<u8> = None;
+    while let Some(&c) = bytes.get(k) {
+        match quote {
+            // Inside an attribute value anything goes, including the backtick that made
+            // copying the tag whole necessary in the first place.
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'>' => return Some(k + 1),
+                b'"' | b'\'' => quote = Some(c),
+                // Outside a value these cannot appear in an attribute name, so this is
+                // not a tag: Markdown rejects it and parses the construct inside instead.
+                // `<b [x](javascript:…)>` is a link, not a `<b>` with odd attributes.
+                b'<' | b'[' | b']' | b'`' => return None,
+                _ => {}
+            },
+        }
         k += 1;
     }
-    (k + 1).min(bytes.len())
+    None
 }
 
 /// Copy an inline code span verbatim. A run of N backticks closes on the next run of
@@ -735,6 +778,7 @@ fn tag_name_at(bytes: &[u8], i: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn strips_injected_buttons() {
@@ -986,6 +1030,69 @@ mod tests {
         assert!(!thematic_break_at(b"**\n", 0));
         // A control character inside a destination is dropped, not kept.
         assert!(!scheme_is_allowed("java\u{1}script:alert(1)"));
+    }
+
+    /// An HTML tag cannot contain `<`, so `<b <tg-button …>` is not a `<b>` tag with odd
+    /// attributes — Markdown rejects it and matches the inner tag instead. Treating the
+    /// whole span as one allowed tag copied a live button through verbatim: the same
+    /// copy-across-a-boundary defect the code-span scanner had, relocated.
+    #[test]
+    fn an_unterminated_tag_does_not_swallow_what_follows() {
+        let button = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
+        for prefix in ["<b ", "<i ", "<b \n\n", r#"<a href="https://ok" x "#] {
+            let input = format!("{prefix}{button}");
+            let out = sanitize_rich_markdown(&input);
+            assert!(!out.contains("<tg-button"), "{prefix:?} leaked: {out}");
+        }
+        // The same shape must not smuggle a disallowed scheme either.
+        let out = sanitize_rich_markdown("<b [x](javascript:alert(1))>");
+        assert!(!out.contains("<b ["), "scheme check skipped: {out}");
+        // A well-formed allowed tag is still copied whole.
+        let ok = r#"<a title="`" href="https://ok">t</a>"#;
+        assert_eq!(sanitize_rich_markdown(ok), ok);
+    }
+
+    /// Bounding the tag scan at the next `<` also keeps the pass linear. Scanning to
+    /// end-of-input for every unclosed `<` was quadratic: 184 KB took 20 s in the port.
+    #[test]
+    fn many_unclosed_tags_are_processed_linearly() {
+        let input = r#"<a href="javascript:x" "#.repeat(20_000);
+        let start = Instant::now();
+        let out = sanitize_rich_markdown(&input);
+        assert!(!out.contains("<a "), "unclosed tag emitted live");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "took {:?} — scan is superlinear",
+            start.elapsed()
+        );
+    }
+
+    /// Whitespace may sit on either side of a destination; skipping only the right side
+    /// made `[x]( javascript:… )` parse as empty and skip the scheme check entirely.
+    #[test]
+    fn destination_is_checked_with_leading_whitespace() {
+        for bad in [
+            "[x]( javascript:alert(1) )",
+            "[x](  javascript:alert(1))",
+            "[x](\njavascript:alert(1)\n)",
+        ] {
+            let out = sanitize_rich_markdown(bad);
+            assert!(out.starts_with("\\["), "not escaped: {out}");
+        }
+        let ok = "[x]( https://example.com )";
+        assert_eq!(sanitize_rich_markdown(ok), ok);
+    }
+
+    /// CommonMark allows up to three spaces of indentation before a block, so an
+    /// indented reference definition still resolves — clearing `at_line_start` on the
+    /// first space meant it was never inspected.
+    #[test]
+    fn indented_reference_definitions_are_checked() {
+        for indent in ["", " ", "  ", "   ", "\t"] {
+            let input = format!("[x][ref]\n\n{indent}[ref]: javascript:alert(1)");
+            let out = sanitize_rich_markdown(&input);
+            assert!(out.contains("\\[ref]:"), "indent {indent:?} skipped: {out}");
+        }
     }
 
     #[test]
