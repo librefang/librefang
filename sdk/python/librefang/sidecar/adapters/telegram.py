@@ -993,7 +993,11 @@ def _is_api_rejection(resp: dict) -> bool:
         # pre-10.1 server the fallback exists for.
         if resp.get("ok") is False:
             code = resp.get("error_code")
-            if not isinstance(code, int):
+            # An explicit `error_code: 0` is the same verdict as no code at
+            # all — Telegram answered that it did not create the message.
+            # Rust reaches `code == 0` either way; treating only the absent
+            # case as definitive made the ports disagree.
+            if not isinstance(code, int) or code == 0:
                 return True
         else:
             code = None

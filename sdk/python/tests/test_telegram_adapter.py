@@ -1353,5 +1353,8 @@ def test_is_api_rejection_excludes_429_and_treats_bare_ok_false_as_final():
     assert tg._is_api_rejection({"_http": 500}) is False
     assert tg._is_api_rejection({"ok": False, "error_code": 404}) is True
     assert tg._is_api_rejection({"ok": False}) is True
+    # An explicit zero is the same verdict as no code at all; Rust
+    # reaches `code == 0` either way.
+    assert tg._is_api_rejection({"ok": False, "error_code": 0}) is True
     assert tg._is_api_rejection({"ok": False, "error_code": 429}) is False
     assert tg._is_api_rejection({}) is False
