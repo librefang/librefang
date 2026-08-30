@@ -575,6 +575,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # `rust-toolchain.toml` pins the workspace to its MSRV, so cargo builds with that toolchain no matter which one the step above installed.
+      # `targets:` adds the target to `stable`, leaving the pinned toolchain with no std for it, so every cross target fails with "can't find crate for `std`" while the native ones pass — which is exactly how v2026.8.30 shipped 23 of its 48 assets.
+      # rustup names the trap itself in that log: "the toolchain '1.94.1-aarch64-apple-darwin' is currently in use (overridden by .../rust-toolchain.toml)".
+      # `rustup target add` with no `--toolchain` applies to the overridden toolchain, which is the one that builds. A native target already has its std, so this is a no-op there.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -665,6 +672,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
         # by the keyring crate's secret-service backend on glibc Linux
@@ -815,6 +826,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
         # by the keyring crate's secret-service backend on glibc Linux.
@@ -872,6 +887,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
@@ -949,6 +968,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1009,6 +1032,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1065,6 +1092,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1685,6 +1716,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.platform.rust_target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.platform.rust_target }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
