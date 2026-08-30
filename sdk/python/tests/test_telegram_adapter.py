@@ -1262,6 +1262,44 @@ def test_rich_sanitizer_budget_survives_a_full_size_ordinary_message():
         "budget ran out before the end of an ordinary message")
 
 
+def test_rich_sanitizer_budget_floor_is_load_bearing():
+    """The floor binds on any message shorter than len*2, and nested brackets
+    push the scan cost per byte above two. Removing it used to pass the whole
+    suite, so it was reported as an equivalent mutant when it is not."""
+    src = "[[[[y]]]]" * 100 + "\n\n[x](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(src).endswith(
+        "\\[x](javascript:alert(1))"), (
+        "the floor is not covering a short bracket-nested message")
+
+
+def test_rich_sanitizer_fast_reject_saves_the_budget():
+    """The `find` shortcut is not made redundant by the budget: without it a
+    run of brackets whose `]` is out of range pays a full scan each."""
+    src = "[" * 20 + "y" * 8100 + "\n\n[x](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(src).endswith(
+        "\\[x](javascript:alert(1))"), (
+        "brackets with no `]` in range spent the budget")
+
+
+def test_rich_sanitizer_label_of_escape_pairs_is_bounded_by_characters():
+    """A 600-character label made of `\\y` pairs is inside the 999 cap. An
+    index-based bound, or a window half as wide, skips it — those were the
+    two changes round 2 asked of this port, and nothing pinned them."""
+    src = "[" + "\\y" * 600 + "](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(src).startswith("\\[")
+
+
+def test_rich_sanitizer_reference_definitions_with_titles():
+    """A definition carrying a title is a shape no test covered, and the
+    branch handling it was added without one."""
+    for tail in ('"t"', "'t'", "(t)", '"multi\nline"', "(multi\nline)"):
+        out = tg.sanitize_rich_markdown(
+            "[y][x]\n\n[x]: javascript:alert(1) " + tail)
+        assert "\\[x]:" in out, "tail %r not checked: %s" % (tail, out)
+    ok = '[y][x]\n\n[x]: https://example.com "t"'
+    assert tg.sanitize_rich_markdown(ok) == ok
+
+
 def test_rich_sanitizer_documented_escape_hatches():
     """The two known holes in the best-effort scheme check, pinned so they
     cannot change silently. Neither touches the HTML guarantee."""
@@ -1286,12 +1324,14 @@ async def test_stream_buffer_cap_drops_the_stream(monkeypatch):
                                             "result": {"message_id": 1}})
     a = _adapter()
     await a.on_command(tg.protocol.StreamStart("c1", "big"))
-    await a.on_command(tg.protocol.StreamDelta("big", "x" * 40))
+    # 20 CJK characters: 20 by len(), 60 bytes. Under the cap either way.
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 20))
     assert "big" in a._streams
-    # 40 multibyte characters are 120 bytes, past the cap even though
-    # len() on the string would say otherwise.
-    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 40))
-    assert "big" not in a._streams, "stream was not dropped at the cap"
+    # 10 more: 30 characters — still under a character-counted cap of 64 —
+    # but 90 bytes, which is over. Only the byte-based comparison drops the
+    # stream here, so a character-counted cap fails this assertion.
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 10))
+    assert "big" not in a._streams, "cap counted characters, not bytes"
 
 
 def test_rich_sanitizer_multibyte_and_edge_inputs():

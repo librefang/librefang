@@ -666,8 +666,11 @@ def _format_and_sanitize(text: str) -> str:
 # ====================================================================
 
 # Schemes a link destination may carry. Mirrors the Rust
-# `rich_sanitize::ALLOWED_HREF_SCHEMES` and `sanitize_telegram_html`'s own
-# allowlist.
+# `rich_sanitize::ALLOWED_HREF_SCHEMES`, which is deliberately one wider than
+# `sanitize_telegram_html`'s own list: `tel:` is documented as a working Rich
+# Markdown scheme, so escaping it hid a real feature. A `tel:` link therefore
+# renders on the rich path and loses its href on the legacy fallback — a
+# formatting difference on an already-degraded path, not a security one.
 # `tel:` is on the list because the Bot API's own Rich Markdown sample uses
 # `[inline phone number](tel:+123456789)` and Rich HTML style states that
 # `tel:` links render as phone links.
@@ -878,15 +881,11 @@ def _reference_definition_at(s: str, i: int, budget: list):
     while k < n and s[k] in " \t":
         k += 1
     if k < n and s[k] in "\"'(":
-        closer = ")" if s[k] == "(" else s[k]
-        k += 1
-        while k < n and s[k] != closer and s[k] != "\n":
-            k += 1
-        if k >= n or s[k] != closer:
-            return None
-        k += 1
-        while k < n and s[k] in " \t":
-            k += 1
+        # A title opener is proof enough that this is a definition. A
+        # CommonMark title may span lines, so its closer need not be on this
+        # one — bailing out when it is not left the destination unchecked and
+        # the `[` bare, which is a live link. Fail closed instead.
+        return s[start:end]
     return s[start:end] if k >= n or s[k] in "\n\r" else None
 
 
@@ -2078,10 +2077,12 @@ class TelegramAdapter(SidecarAdapter):
         if st is None:
             return
         # Bytes, not characters: Rust compares `String::len()`, so a CJK or
-        # emoji stream would otherwise be allowed several times the cap.
-        buffered = len(st["text"].encode("utf-8", "replace"))
+        # emoji stream would otherwise be allowed several times the cap. The
+        # running total is kept on the state rather than re-encoding the whole
+        # buffer per delta, which was O(n^2) — 7.6 s of pure encoding to fill
+        # the cap with CJK.
         incoming = len(chunk.encode("utf-8", "replace"))
-        if buffered + incoming > MAX_STREAM_BUFFER_BYTES:
+        if st["bytes"] + incoming > MAX_STREAM_BUFFER_BYTES:
             # Matches the Rust adapter: drop the stream rather than let the
             # buffer grow without bound, since every edit tick re-sanitises
             # the whole of it.
@@ -2090,6 +2091,7 @@ class TelegramAdapter(SidecarAdapter):
                      stream_id=sid, limit=MAX_STREAM_BUFFER_BYTES)
             return
         st["text"] += chunk
+        st["bytes"] += incoming
         if not st["initial_attempted"]:
             st["initial_attempted"] = True
             self._sync_stream_messages(st)
@@ -2187,7 +2189,8 @@ class TelegramAdapter(SidecarAdapter):
             self._streams[cmd.stream_id] = {
                 "chat_id": cmd.channel_id,
                 "thread_id": getattr(cmd, "thread_id", None),
-                "text": "", "message_ids": [], "initial_attempted": False,
+                "text": "", "bytes": 0,
+                "message_ids": [], "initial_attempted": False,
                 "last_edit": 0.0,
             }
         elif isinstance(cmd, protocol.StreamDelta):

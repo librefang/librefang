@@ -71,10 +71,18 @@
 
 use std::ops::Range;
 
-/// Schemes a link destination may carry. Mirrors `sanitize::ALLOWED_HREF_SCHEMES`.
-/// `tel:` is on the list because the Bot API's own Rich Markdown sample uses
+/// Schemes a link destination may carry.
+///
+/// Deliberately **one wider** than `sanitize::ALLOWED_HREF_SCHEMES`: `tel:` is here
+/// because the Bot API's own Rich Markdown sample uses
 /// `[inline phone number](tel:+123456789)` and Rich HTML style states that `tel:` links
-/// render as phone links. Leaving it out escaped a documented, working feature.
+/// render as phone links, so escaping it hid a documented, working feature. The legacy
+/// HTML sanitiser has no such sample behind it and was left alone.
+///
+/// The visible consequence: a `tel:` link renders on the rich path and has its `href`
+/// stripped if the same message falls back to the legacy pipeline. That is a formatting
+/// difference on an already-degraded path, not a security one — the legacy list is the
+/// stricter of the two.
 const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:", "tel:"];
 
 /// CommonMark caps a link label at 999 characters. Bounding the label scan keeps this
@@ -97,8 +105,9 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
     let mut budget = input.len().saturating_mul(2).max(MAX_LINK_LABEL * 16);
     // Monotone cursor to the next `]`. A `[` with no `]` within the widest window a
     // label could span is not a label at all, and the cursor proves that in amortised
-    // O(1) instead of a fresh scan per bracket. It also matches the Python port's
-    // `str.find` shortcut, so the two agree on when a label scan happens at all.
+    // O(1) instead of a fresh scan per bracket. The window is measured in characters, to
+    // match the Python port's `str.find` shortcut exactly: a byte-sized window let the
+    // two ports disable the scheme check at different points in the same message.
     //
     // It does not rescue the budget from a bracket run placed just before a link: those
     // brackets do see a `]` in range and scan for real. That is the documented
@@ -138,11 +147,13 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
             // and the reference definition `[label]: destination`, which supplies the
             // destination for a `[x][label]` elsewhere in the message.
             b'[' => {
-                // In bytes, so it must allow for the widest characters a label of
-                // `MAX_LINK_LABEL` escape pairs could be made of.
-                let window = i.saturating_add(4 * (2 * MAX_LINK_LABEL + 2));
-                let has_close = next_close_at(bytes, i + 1, &mut next_close)
-                    .is_some_and(|close| close <= window);
+                // The gate must be the same size *and unit* as the Python port's
+                // `str.find` window, or the two disable the scheme check at different
+                // points in the same message — and the wider side, Rust, was the
+                // production path. Both count characters.
+                let has_close = next_close_at(bytes, i + 1, &mut next_close).is_some_and(|close| {
+                    input[i + 1..close].chars().count() <= 2 * MAX_LINK_LABEL + 1
+                });
                 let disallowed = has_close
                     && link_destination_at(bytes, i, &mut budget)
                         .or_else(|| reference_definition_at(bytes, i, &mut budget))
@@ -340,14 +351,15 @@ fn reference_definition_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option
     let mut k = skip_ascii_whitespace_inline(bytes, end);
     if let Some(&quote @ (b'"' | b'\'' | b'(')) = bytes.get(k) {
         let closer = if quote == b'(' { b')' } else { quote };
+        // A title opener is proof enough that this is a definition. A CommonMark title
+        // may span lines, so its closer need not be on this one — bailing out when it
+        // is not left the destination unchecked and the `[` bare, which is a live link.
+        // Fail closed instead: check the scheme and let the title end where it ends.
         k += 1;
-        while bytes.get(k).is_some_and(|&c| c != closer && c != b'\n') {
+        while bytes.get(k).is_some_and(|&c| c != closer) {
             k += 1;
         }
-        if bytes.get(k) != Some(&closer) {
-            return None;
-        }
-        k = skip_ascii_whitespace_inline(bytes, k + 1);
+        return Some(start..end);
     }
     match bytes.get(k) {
         None | Some(b'\n') | Some(b'\r') => Some(start..end),
@@ -663,6 +675,46 @@ mod tests {
             sanitize_rich_markdown(&with_payload).ends_with("\\[x](javascript:alert(1))"),
             "budget ran out before the end of an ordinary message"
         );
+    }
+
+    /// The budget floor binds on any message shorter than `len*2`, and nested brackets
+    /// push the scan cost per byte well above two. Removing `.max(…)` used to pass the
+    /// whole suite, so this was reported as an equivalent mutant when it is not.
+    #[test]
+    fn the_budget_floor_is_load_bearing_on_short_nested_input() {
+        let input = format!("{}\n\n[x](javascript:alert(1))", "[[[[y]]]]".repeat(100));
+        assert!(
+            sanitize_rich_markdown(&input).ends_with("\\[x](javascript:alert(1))"),
+            "the floor is not covering a short bracket-nested message"
+        );
+    }
+
+    /// The cursor gate is not made redundant by the budget: without it a run of brackets
+    /// whose `]` is out of range still pays a full scan each and drains the allowance.
+    #[test]
+    fn the_cursor_gate_saves_the_budget_for_a_real_link() {
+        let input = format!(
+            "{}{}\n\n[x](javascript:alert(1))",
+            "[".repeat(20),
+            "y".repeat(8_100)
+        );
+        assert!(
+            sanitize_rich_markdown(&input).ends_with("\\[x](javascript:alert(1))"),
+            "brackets with no `]` in range spent the budget"
+        );
+    }
+
+    /// A reference definition carrying a title is a shape no test covered, and the
+    /// branch handling it was added without one.
+    #[test]
+    fn reference_definitions_with_titles_are_scheme_checked() {
+        for tail in ["\"t\"", "'t'", "(t)", "\"multi\nline\"", "(multi\nline)"] {
+            let input = format!("[y][x]\n\n[x]: javascript:alert(1) {tail}");
+            let out = sanitize_rich_markdown(&input);
+            assert!(out.contains("\\[x]:"), "tail {tail:?} not checked: {out}");
+        }
+        let ok = "[y][x]\n\n[x]: https://example.com \"t\"";
+        assert_eq!(sanitize_rich_markdown(ok), ok);
     }
 
     /// The two known escape hatches, pinned so they cannot change silently — they are
