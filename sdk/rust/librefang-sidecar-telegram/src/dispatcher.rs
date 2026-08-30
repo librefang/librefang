@@ -948,7 +948,9 @@ mod tests {
             "expected the 429 to surface as-is, got {error:?}"
         );
         let seen = server.join().expect("mock thread");
-        assert!(seen.iter().all(|(path, _)| path.contains("/sendRichMessage")));
+        assert!(seen
+            .iter()
+            .all(|(path, _)| path.contains("/sendRichMessage")));
     }
 
     /// A bare `ok:false` with no `error_code` reaches us as code 0. It is still a

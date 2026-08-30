@@ -16,8 +16,8 @@
 //!
 //! # What this pass does, and what it deliberately does not
 //!
-//! Three unconditional, character-local rules. No lookahead, no scanning, no attempt to
-//! locate a Markdown construct or to find where one ends:
+//! Two character-local rules. No lookahead, no scanning, no attempt to locate a Markdown
+//! construct or to find where one ends:
 //!
 //! * `<` is escaped so that the run of backslashes preceding it is **odd**, which is
 //!   what makes Markdown treat it as literal. A `<` the author already escaped is left
