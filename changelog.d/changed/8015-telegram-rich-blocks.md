@@ -1,0 +1,5 @@
+The Telegram sidecar now builds `InputRichMessage.blocks` from the agent's Markdown instead of handing Telegram a Markdown string to parse.
+Telegram runs no Markdown or HTML parser over a block's text, so a quoted `<tg-button type="callback_data">` arrives as characters in a paragraph rather than as a button whose tap would come back as a genuine `ButtonCallback` — and a button can only exist as a `RichTextButton` object the converter never constructs, which makes the property structural rather than argued.
+The parser moves to our side of the wire, where a mistake in it renders the italics wrong instead of making a button real, the same reason a parameterised query beats escaping quotes.
+It also removes the fidelity cost of escaping: a fenced code sample containing `Vec<String>` no longer reaches the reader as `Vec\<String>`, because a preformatted block carries its text verbatim.
+Paragraphs, headings, lists (including numbering and task items), tables with header and alignment, block quotes, dividers, code and inline emphasis are converted; anything not modelled degrades to its text rather than disappearing (#8015) (@nevgenov)

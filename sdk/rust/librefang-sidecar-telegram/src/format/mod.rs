@@ -12,11 +12,13 @@
 
 pub mod chunk;
 pub mod markdown;
+pub mod rich_blocks;
 pub mod rich_sanitize;
 pub mod sanitize;
 
 pub use chunk::{split_to_utf16_chunks, truncate_to_utf16_limit, TELEGRAM_MSG_LIMIT};
 pub use markdown::markdown_to_telegram_html;
+pub use rich_blocks::{markdown_to_blocks, Block};
 pub use rich_sanitize::sanitize_rich_markdown;
 pub use sanitize::sanitize_telegram_html;
 
@@ -30,6 +32,25 @@ pub const RICH_MSG_LIMIT: usize = 32_768;
 pub fn prepare_rich_markdown(text: &str) -> Option<String> {
     let sanitized = sanitize_rich_markdown(text);
     (sanitized.chars().count() <= RICH_MSG_LIMIT).then_some(sanitized)
+}
+
+/// Prepare agent text for `sendRichMessage` as structured blocks, which is the preferred
+/// rich path: Telegram runs no parser over a block's text, so quoted content cannot become
+/// markup and code samples keep their angle brackets.
+///
+/// Returns `None` when the caller should not use blocks — either the text does not fit the
+/// rich limit, or conversion produced nothing for text that was not empty. The second case
+/// should not happen; it is a guard, because losing the whole message to a converter bug is
+/// far worse than falling back to a lower-fidelity path.
+pub fn prepare_rich_blocks(text: &str) -> Option<Vec<Block>> {
+    if text.chars().count() > RICH_MSG_LIMIT {
+        return None;
+    }
+    let blocks = markdown_to_blocks(text);
+    if blocks.is_empty() && !text.trim().is_empty() {
+        return None;
+    }
+    Some(blocks)
 }
 
 /// Two-stage Markdown → sanitized Telegram HTML.
