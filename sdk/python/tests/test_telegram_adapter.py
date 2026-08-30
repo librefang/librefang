@@ -1068,104 +1068,125 @@ async def test_stream_edit_prefers_rich_message(monkeypatch):
     assert "s1" not in a._streams
 
 
-def test_rich_sanitizer_keeps_passive_formatting_and_code_verbatim():
-    keep = "<b>bold</b> <u>under</u> <tg-spoiler>x</tg-spoiler> <sup>2</sup>"
-    assert tg.sanitize_rich_markdown(keep) == keep
+# ---- rich sanitizer -------------------------------------------------
 
-    span = "use `<tg-button>` carefully"
-    assert tg.sanitize_rich_markdown(span) == span
-
-    fence = '```html\n<tg-button type="url">x</tg-button>\n```\n'
-    assert tg.sanitize_rich_markdown(fence) == fence
-
-    table = "| a | b |\n|:--|--:|\n| _x_ | **y _z_** |\n"
-    assert tg.sanitize_rich_markdown(table) == table
+_BTN = ('<tg-button type="callback_data" data="wipe">Tap'
+        '</tg-button>')
 
 
-def test_rich_sanitizer_code_span_does_not_pair_across_a_block_boundary():
-    """Markdown resolves block structure before inline structure, so backticks
-    in different blocks never form a span. Pairing them would copy everything
-    between verbatim — exactly how a quoted page could smuggle a live button
-    past this pass."""
-    btn = ('<tg-button type="callback_data" data="wipe">Confirm'
-           '</tg-button>')
-    for label, blank in (("crlf", "\r\n\r\n"), ("space-only", "\n \n"),
-                         ("tab-only", "\n\t\n"), ("plain", "\n\n")):
-        out = tg.sanitize_rich_markdown("He said `hello%s%s%s`"
-                                        % (blank, btn, blank))
-        assert "<tg-button" not in out, "%s leaked: %s" % (label, out)
-    for label, prefix in (("blockquote", "> "), ("heading", "# "),
-                          ("list", "- "), ("ordered", "1. "),
-                          ("table row", "| ")):
-        out = tg.sanitize_rich_markdown("He said `hello\n%s%s\n%s`"
-                                        % (prefix, btn, prefix))
-        assert "<tg-button" not in out, "%s leaked: %s" % (label, out)
-
-    # A span may still cover several lines inside one paragraph.
-    same = "a `code\nstill code` b"
-    assert tg.sanitize_rich_markdown(same) == same
+def test_rich_sanitizer_no_raw_html_survives_any_context():
+    """The guarantee: no `<` survives, so no raw HTML can reach Telegram.
+    These are the inputs five rounds of review found against the earlier
+    exemption-based design; none needs a special case now."""
+    for context in (_BTN,
+                    "a `hello\n\n%s\n\n` b" % _BTN,
+                    "a `hello\r> %s\r> ` b" % _BTN,
+                    "a \\` %s \\` b" % _BTN,
+                    "<b %s" % _BTN,
+                    "    ```\n%s\n" % _BTN,
+                    "```a`b\n%s\n" % _BTN,
+                    "```\n%s\n```\n" % _BTN,
+                    '<b a="1"b="%s">' % _BTN,
+                    '<a title="`" href="https://ok">t</a> %s' % _BTN):
+        out = tg.sanitize_rich_markdown(context)
+        assert "<" not in out, "raw < survived: %s" % out
 
 
-def test_rich_sanitizer_stops_at_every_paragraph_interrupting_construct():
-    """The block-starter set is taken from CommonMark, not from recall. These
-    are the cases a from-memory list misses. A ``` separator is deliberately
-    absent: it puts the button inside a real fenced code block, where it
-    renders as escaped text rather than live HTML."""
-    btn = ('<tg-button type="callback_data" data="wipe">Confirm'
-           '</tg-button>')
-    for sep in ("***", "---", "___", "* * *", "- - -", "___ _", "===", "--",
-                "<div>", "<table>", "> quote", "# head", "- item", "1. item",
-                "+ item", "| a |"):
-        out = tg.sanitize_rich_markdown(
-            "He said `hello\n%s\n%s\n%s\n`" % (sep, btn, sep))
-        assert "<tg-button" not in out, "%r leaked: %s" % (sep, out)
-
-
-def test_rich_sanitizer_keeps_spans_over_non_interrupting_lines():
-    """A four-space indent does not interrupt a paragraph in CommonMark, and
-    `~ x` is not a list bullet; erring towards "new block" there would break
-    ordinary multi-line code spans."""
-    for cont in ("    indented", "~ not a bullet", "plain text"):
-        src = "a `code\n%s\nmore` b" % cont
+def test_rich_sanitizer_markdown_formatting_is_untouched():
+    for src in ("| a | b |\n|:--|--:|\n| _x_ | **y _z_** |\n",
+                "**bold _italic_ bold** ~~strike~~ ||spoiler|| `code`",
+                "# Heading\n\n- item\n- item\n\n1. one\n2. two\n",
+                "> quote\n> more\n\n---\n",
+                "```rust\nfn main() {}\n```\n",
+                "[x](https://example.com/a_(b)_c)",
+                "[x][ref]\n\n[ref]: https://example.com"):
         assert tg.sanitize_rich_markdown(src) == src
 
 
-def test_rich_sanitizer_finds_href_regardless_of_case_or_decoys():
-    """HTML attribute names are case-insensitive, and a substring search for
-    `href` matches inside other attribute names and values."""
-    for bad in ('<a HREF="javascript:alert(1)">x</a>',
-                '<A Href="javascript:alert(1)">x</A>',
-                '<a data-href="https://ok" href="javascript:alert(1)">x</a>',
-                '<a title="href=x" href="javascript:alert(1)">x</a>'):
-        out = tg.sanitize_rich_markdown(bad)
-        assert out.lower().startswith("&lt;a"), "not escaped: %s" % out
-    benign = '<a data-href="https://ok.example">x</a>'
-    assert tg.sanitize_rich_markdown(benign) == benign
+def test_rich_sanitizer_less_than_in_a_code_sample_is_escaped_too():
+    """The documented cost of the guarantee, pinned so the trade-off is
+    visible rather than discovered."""
+    assert tg.sanitize_rich_markdown(
+        "```rust\nlet v: Vec<String>;\n```"
+    ) == "```rust\nlet v: Vec&lt;String>;\n```"
 
 
-def test_rich_sanitizer_sees_through_wrappers_entities_and_whitespace():
-    """The scheme check must hold on what the parser resolves, not on the
-    literal bytes."""
-    for bad in ("[x](<javascript:alert(1)>)",
+def test_rich_sanitizer_disallowed_link_schemes_are_escaped():
+    for bad in ("[click](javascript:alert(1))",
+                "[x](<javascript:alert(1)>)",
                 "[x](javascript&#58;alert(1))",
                 "[x](javascript&#x3a;alert(1))",
                 "[x](javascript&colon;alert(1))",
-                "[a[b]c](javascript:alert(1))"):
+                "[x](&#32;javascript:alert(1))",
+                "[x](&Tab;javascript:alert(1))",
+                "[a[b]c](javascript:alert(1))",
+                "[x]( javascript:alert(1) )",
+                "[x](javascript:alert(1)\n)",
+                '[x](javascript:alert(1) "title")'):
         out = tg.sanitize_rich_markdown(bad)
         assert out.startswith("\\["), "not escaped: %s" % out
-    for bad in ('<a href="java\tscript:alert(1)">x</a>',
-                '<a href="<javascript:alert(1)>">x</a>'):
-        out = tg.sanitize_rich_markdown(bad)
-        assert out.startswith("&lt;a"), "not escaped: %s" % out
-    ok = "[x](https://example.com/a_(b)_c)"
+
+
+def test_rich_sanitizer_reference_definitions_at_any_indent():
+    for indent in ("", " ", "  ", "   ", "\t"):
+        out = tg.sanitize_rich_markdown(
+            "[x][ref]\n\n%s[ref]: javascript:alert(1)" % indent)
+        assert "\\[ref]:" in out, "indent %r skipped: %s" % (indent, out)
+    ok = "[x][ref]\n\n[ref]: https://example.com"
     assert tg.sanitize_rich_markdown(ok) == ok
 
 
+def test_rich_sanitizer_image_syntax_is_escaped():
+    assert tg.sanitize_rich_markdown(
+        "see ![alt](https://evil.example/x.jpg)"
+    ) == "see \\![alt](https://evil.example/x.jpg)"
+
+
+def test_rich_sanitizer_unmatched_brackets_are_linear():
+    """Bounding the label scan at CommonMark's 999-character cap, with a
+    C-speed fast reject, keeps this cheap. Unbounded it took hours."""
+    import time
+    src = "[" * 200000
+    start = time.time()
+    out = tg.sanitize_rich_markdown(src)
+    elapsed = time.time() - start
+    assert out == src
+    assert elapsed < 2.0, "took %.2fs — scan is superlinear" % elapsed
+
+
+def test_rich_sanitizer_label_longer_than_the_commonmark_cap():
+    """CommonMark caps a link label at 999 characters, so a longer one is
+    not a label and the text is inert. Bounding the scan there is what
+    keeps a run of unmatched brackets cheap."""
+    long_label = "[" + "x" * 1500 + "](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(long_label) == long_label
+    short_label = "[" + "x" * 500 + "](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(short_label).startswith("\\[")
+
+
+def test_rich_sanitizer_control_filter_covers_the_c1_range():
+    """Rust's char::is_control includes U+0080-U+009F; checking only < 32
+    and 127 let the two ports disagree."""
+    assert tg._is_control(chr(0x80))
+    assert tg._is_control(chr(0x9F))
+    assert tg._is_control(chr(0x1F))
+    assert not tg._is_control("a")
+    assert not tg._scheme_is_allowed("java" + chr(0x80) + "script:alert(1)")
+
+
+def test_rich_sanitizer_multibyte_and_edge_inputs():
+    out = tg.sanitize_rich_markdown(
+        "таблица — да, \U0001F389 <tg-button>нет</tg-button>")
+    assert "таблица — да" in out
+    assert "\U0001F389" in out
+    assert "<" not in out
+    for src in ("", " ", "<", "[", "![", "\\", "`", "\ufeff", "\r", "&#"):
+        tg.sanitize_rich_markdown(src)
+
+
 def test_is_api_rejection_excludes_429_and_treats_bare_ok_false_as_final():
-    """429 means "try later", not "not like this"; falling back would
-    re-send into a flood-wait. A 200 with ok:false is a verdict even without an
-    error_code, and reading that sentinel as "unknown" would disable the
-    fallback on servers that report failures with a 200."""
+    """429 means "try later"; falling back would re-send into a flood-wait.
+    A 200 with ok:false is a verdict even without an error_code."""
     assert tg._is_api_rejection({"_http": 404}) is True
     assert tg._is_api_rejection({"_http": 429}) is False
     assert tg._is_api_rejection({"_http": 500}) is False
@@ -1173,208 +1194,3 @@ def test_is_api_rejection_excludes_429_and_treats_bare_ok_false_as_final():
     assert tg._is_api_rejection({"ok": False}) is True
     assert tg._is_api_rejection({"ok": False, "error_code": 429}) is False
     assert tg._is_api_rejection({}) is False
-
-
-def test_rich_sanitizer_closing_fence_may_not_carry_an_info_string():
-    fence = "```\nline\n```js\n<tg-button>x</tg-button>\n```\n"
-    assert tg.sanitize_rich_markdown(fence) == fence
-
-
-def test_rich_sanitizer_rejects_disallowed_link_schemes():
-    """`sanitize_telegram_html` drops javascript:/data: links on the legacy
-    path; the rich path must not be the weaker of the two."""
-    for bad in ('<a href="javascript:alert(1)">x</a>',
-                "<a href='data:text/html,y'>x</a>",
-                "<a href=javascript:alert(1)>x</a>",
-                '<a  href = "javascript:alert(1)" >x</a>'):
-        out = tg.sanitize_rich_markdown(bad)
-        assert out.startswith("&lt;a"), "not escaped: %s" % out
-    assert tg.sanitize_rich_markdown("[click](javascript:alert(1))") == (
-        "\\[click](javascript:alert(1))")
-    for good in ('<a href="https://example.com">x</a>',
-                 '<a href="mailto:a@b.c">x</a>',
-                 '<a href="tg://user?id=1">x</a>',
-                 '<a href="#anchor">x</a>',
-                 '<a name="chapter">x</a>',
-                 "[x](https://example.com/a?b=1)",
-                 "[x](#section)",
-                 "[x](relative/path)"):
-        assert tg.sanitize_rich_markdown(good) == good
-
-
-def test_rich_sanitizer_escapes_active_constructs():
-    for tag in ("tg-button", "tg-button-row", "tg-map", "tg-collage",
-                "tg-slideshow", "tg-thinking", "details", "summary",
-                "img", "video"):
-        out = tg.sanitize_rich_markdown("<%s>x" % tag)
-        assert out.startswith("&lt;"), "%s was not escaped: %s" % (tag, out)
-
-    # Image syntax would otherwise become a real media block fetched from
-    # the URL; today it is inert text.
-    assert tg.sanitize_rich_markdown(
-        "see ![alt](https://evil.example/x.jpg)"
-    ) == "see \\![alt](https://evil.example/x.jpg)"
-
-    # A bare `<` in prose is escaped, not mistaken for a tag.
-    assert tg.sanitize_rich_markdown("5 < 3") == "5 &lt; 3"
-
-    # Multibyte text survives the byte-level scan.
-    out = tg.sanitize_rich_markdown(
-        "таблица — да, <tg-button>нет</tg-button> 🎉")
-    assert "таблица — да" in out
-    assert "🎉" in out
-    assert "&lt;tg-button" in out
-
-
-# ---- rich sanitizer: parser-level bypasses found in review round 3 --
-
-_BTN = ('<tg-button type="callback_data" data="wipe">Tap'
-        '</tg-button>')
-
-
-def test_rich_sanitizer_handles_lone_cr_line_endings():
-    """A lone \\r is a line ending in Markdown, and lone-CR text arrives
-    verbatim from quoted mail. Matching only \\n meant the block-boundary
-    check never ran at all on such input."""
-    for sep in ("\r> q\r> ", "\r\r", "\r# h\r", "\r---\r", "\r<div>\r"):
-        out = tg.sanitize_rich_markdown(
-            "He said `hello%s%s%s`" % (sep, _BTN, sep))
-        assert "<tg-button" not in out, "%r leaked: %s" % (sep, out)
-
-
-def test_rich_sanitizer_escaped_and_attribute_backticks():
-    """A backslash-escaped backtick is literal, and a backtick inside an
-    attribute value is not Markdown at all; both used to open a span that
-    copied everything up to the next backtick verbatim."""
-    assert "<tg-button" not in tg.sanitize_rich_markdown(
-        "a \\` %s \\` b" % _BTN)
-    assert "<tg-button" not in tg.sanitize_rich_markdown(
-        '<a title="`" href="https://ok">t</a> %s `x`' % _BTN)
-
-
-def test_rich_sanitizer_entities_cannot_hide_a_scheme():
-    """An entity decoding to whitespace, and an entity we cannot decode,
-    both used to hide the scheme behind them."""
-    for bad in ("&#32;javascript:alert(1)", "&#9;javascript:alert(1)",
-                "java&#10;script:alert(1)", "&Tab;javascript:alert(1)",
-                "java&NewLine;script:alert(1)"):
-        assert not tg._scheme_is_allowed(bad), "slipped through: %s" % bad
-    assert tg._scheme_is_allowed("https://example.com/s?a=1&b=2&c=3")
-
-
-def test_rich_sanitizer_tag_spanning_lines_is_still_checked():
-    """HTML allows a line break inside a tag; stopping the attribute scan
-    there left the href uninspected."""
-    out = tg.sanitize_rich_markdown('<a\nhref="javascript:alert(1)">t</a>')
-    assert out.startswith("&lt;a"), "not escaped: %s" % out
-    ok = '<a\nhref="https://example.com">t</a>'
-    assert tg.sanitize_rich_markdown(ok) == ok
-
-
-def test_rich_sanitizer_destination_across_whitespace_and_titles():
-    """Whitespace — including one line break — may sit between a
-    destination and its closing paren, with an optional title in between."""
-    for bad in ("[x](javascript:alert(1)\n)",
-                "[x](javascript:alert(1) )",
-                '[x](javascript:alert(1) "title")'):
-        out = tg.sanitize_rich_markdown(bad)
-        assert out.startswith("\\["), "not escaped: %s" % out
-    for good in ('[x](https://example.com "title")',
-                 "[x](https://example.com)"):
-        assert tg.sanitize_rich_markdown(good) == good
-
-
-def test_rich_sanitizer_reference_definitions_are_checked():
-    """A reference definition carries the destination for `[x][ref]`
-    elsewhere in the message, and was not inspected at all."""
-    out = tg.sanitize_rich_markdown(
-        "[x][ref]\n\n[ref]: javascript:alert(1)")
-    assert "\\[ref]:" in out, "definition not escaped: %s" % out
-    ok = "[x][ref]\n\n[ref]: https://example.com"
-    assert tg.sanitize_rich_markdown(ok) == ok
-
-
-def test_rich_sanitizer_block_starter_boundaries_are_pinned():
-    """Boundaries no test pinned before: mutating any of these left the
-    whole suite green."""
-    assert tg._starts_new_block("1. item\n", 0) is True
-    assert tg._starts_new_block("1.item\n", 0) is False
-    assert tg._thematic_break_at("***\n", 0) is True
-    assert tg._thematic_break_at("**\n", 0) is False
-    assert not tg._scheme_is_allowed("javascript:alert(1)")
-
-
-def test_rich_sanitizer_uses_ascii_whitespace_like_rust():
-    """HTML5 tag whitespace is ASCII. Python's str.isspace() is
-    Unicode-aware and diverged from the Rust port on U+00A0 / U+2028."""
-    assert tg._is_ascii_space(" ")
-    assert tg._is_ascii_space("\t")
-    assert not tg._is_ascii_space("\u00a0")
-    assert not tg._is_ascii_space("\u2028")
-    out = tg.sanitize_rich_markdown('<a  href="javascript:x">t</a>')
-    assert out.startswith("&lt;a"), "not escaped: %s" % out
-
-
-# ---- rich sanitizer: bypasses found in review round 4 ---------------
-
-
-def test_rich_sanitizer_unterminated_tag_does_not_swallow_what_follows():
-    """An HTML tag cannot hold `<` or `[` in an attribute name, so
-    `<b <tg-button ...>` is not a `<b>` tag with odd attributes — Markdown
-    rejects it and matches the inner construct. Treating the whole span as
-    one allowed tag copied a live button through verbatim."""
-    for prefix in ("<b ", "<i ", "<b \n\n", '<a href="https://ok" x '):
-        out = tg.sanitize_rich_markdown(prefix + _BTN)
-        assert "<tg-button" not in out, "%r leaked: %s" % (prefix, out)
-    out = tg.sanitize_rich_markdown("<b [x](javascript:alert(1))>")
-    assert not out.startswith("<b ["), "scheme check skipped: %s" % out
-    ok = '<a title="`" href="https://ok">t</a>'
-    assert tg.sanitize_rich_markdown(ok) == ok
-
-
-def test_rich_sanitizer_many_unclosed_tags_are_linear():
-    """Bounding the tag scan also keeps the pass linear; scanning to end of
-    input for every unclosed `<` was quadratic — 184 KB took 20 s."""
-    import time
-    src = '<a href="javascript:x" ' * 8000
-    start = time.time()
-    out = tg.sanitize_rich_markdown(src)
-    elapsed = time.time() - start
-    assert "<a " not in out, "unclosed tag emitted live"
-    assert elapsed < 2.0, "took %.2fs — scan is superlinear" % elapsed
-
-
-def test_rich_sanitizer_destination_with_leading_whitespace():
-    """Whitespace may sit on either side of a destination; skipping only the
-    right side made `[x]( javascript:... )` parse as empty and skip the
-    scheme check entirely."""
-    for bad in ("[x]( javascript:alert(1) )",
-                "[x](  javascript:alert(1))",
-                "[x](\njavascript:alert(1)\n)"):
-        out = tg.sanitize_rich_markdown(bad)
-        assert out.startswith("\\["), "not escaped: %s" % out
-    ok = "[x]( https://example.com )"
-    assert tg.sanitize_rich_markdown(ok) == ok
-
-
-def test_rich_sanitizer_indented_reference_definitions():
-    """CommonMark allows up to three spaces before a block, so an indented
-    definition still resolves; clearing at_line_start on the first space
-    meant it was never inspected."""
-    for indent in ("", " ", "  ", "   ", "\t"):
-        out = tg.sanitize_rich_markdown(
-            "[x][ref]\n\n%s[ref]: javascript:alert(1)" % indent)
-        assert "\\[ref]:" in out, "indent %r skipped: %s" % (indent, out)
-
-
-def test_rich_sanitizer_matches_rust_on_unicode_whitespace_and_controls():
-    """The two ports disagreed here: `_tag_name_at` still used str.isspace(),
-    and the control filter missed the C1 range."""
-    nbsp = "<a" + chr(0x00A0) + 'href="javascript:alert(1)">t</a>'
-    assert tg.sanitize_rich_markdown(nbsp).startswith("&lt;a")
-    ls = "<a" + chr(0x2028) + 'href="javascript:alert(1)">t</a>'
-    assert tg.sanitize_rich_markdown(ls).startswith("&lt;a")
-    assert not tg._scheme_is_allowed("java" + chr(0x80) + "script:alert(1)")
-    assert tg._is_control(chr(0x80))
-    assert tg._is_control(chr(0x9F))
-    assert not tg._is_control("a")
