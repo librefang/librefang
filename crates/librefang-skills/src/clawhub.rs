@@ -1330,6 +1330,75 @@ mod tests {
         server.await.unwrap();
     }
 
+    // -- #7387: marketplace-answers-with-HTML degrades gracefully -------------
+
+    #[tokio::test]
+    async fn search_degrades_gracefully_when_marketplace_returns_html() {
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+
+        let error = client
+            .search("test", 5)
+            .await
+            .expect_err("HTML body must not be silently accepted as JSON");
+
+        match error {
+            SkillError::MarketplaceUnavailable(msg) => {
+                assert!(
+                    msg.contains(&base_url),
+                    "message should name the dead endpoint: {msg}"
+                );
+            }
+            other => panic!("expected MarketplaceUnavailable, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_skill_degrades_gracefully_when_marketplace_returns_html() {
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+
+        let error = client
+            .get_skill("some-skill")
+            .await
+            .expect_err("HTML body must not be silently accepted as JSON");
+
+        assert!(matches!(error, SkillError::MarketplaceUnavailable(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_fails_closed_when_marketplace_returns_html_instead_of_detail_json() {
+        let html_body = "<!DOCTYPE html><html><body>Not an API</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html_body}",
+            html_body.len()
+        );
+        let (base_url, server) = scripted_http_server(vec![response]).await;
+        let client = ClawHubClient::with_url(&base_url, PathBuf::new());
+        let target = tempfile::tempdir().unwrap();
+
+        let error = client
+            .install("missing-skill", target.path())
+            .await
+            .expect_err("HTML detail response must stop before an unverified download");
+
+        assert!(matches!(error, SkillError::MarketplaceUnavailable(_)));
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn late_conversion_failure_removes_staging_directory() {
         let target = tempfile::tempdir().unwrap();

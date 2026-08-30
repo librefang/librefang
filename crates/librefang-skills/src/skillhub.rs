@@ -289,45 +289,7 @@ impl SkillhubClient {
             SkillError::Network(format!("Failed to read Skillhub search response: {e}"))
         })?;
 
-        // Markup first: both parses below fail on an HTML body, and the second one's
-        // `serde_json` complaint is exactly the cryptic "expected value at line 1 column 1"
-        // this check exists to replace (#7387).
-        if crate::looks_like_markup(&body) {
-            return Err(SkillError::MarketplaceUnavailable(format!(
-                "Skillhub search at {url} answered with a webpage instead of JSON — the marketplace is unreachable or has moved. Searching, browsing and installing from it are unavailable until it returns; skills already installed locally are unaffected."
-            )));
-        }
-
-        // Try SkillHub-native format first (snake_case, `skills` or `results` key).
-        // We parse this first because ClawHubSearchResponse with serde(default)
-        // would accept any JSON as empty results, masking the real data.
-        if let Ok(skillhub_resp) = serde_json::from_slice::<SkillhubSearchResponse>(&body) {
-            if !skillhub_resp.results.is_empty() {
-                return Ok(ClawHubSearchResponse {
-                    results: skillhub_resp
-                        .results
-                        .into_iter()
-                        .map(|e| ClawHubSearchEntry {
-                            score: e.score,
-                            slug: e.slug,
-                            display_name: e.name,
-                            summary: e.description,
-                            version: if e.version.is_empty() {
-                                None
-                            } else {
-                                Some(e.version)
-                            },
-                            updated_at: e.updated_at,
-                        })
-                        .collect(),
-                });
-            }
-        }
-
-        // Fall back to ClawHub-compatible format (camelCase, `results` key).
-        serde_json::from_slice::<ClawHubSearchResponse>(&body).map_err(|e| {
-            SkillError::Network(format!("Failed to parse Skillhub search response: {e}"))
-        })
+        parse_skillhub_search_body(&body, &url)
     }
 
     /// Get detailed info about a specific skill.
@@ -365,15 +327,14 @@ impl SkillhubClient {
             .bytes()
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read Skillhub index: {e}")))?;
-        let index: SkillhubIndexResponse =
-            crate::parse_marketplace_json("Skillhub index", &self.index_url, &index_body)?;
+        let index: SkillhubIndexResponse = parse_skillhub_index_body(&index_body, &self.index_url)?;
 
         let entry = index
             .skills
             .iter()
             .find(|s| s.slug == slug)
             .ok_or_else(|| {
-                SkillError::Network(format!("Skill '{slug}' not found in Skillhub index"))
+                SkillError::NotFound(format!("Skill '{slug}' not found in Skillhub index"))
             })?;
         let version = &entry.version;
 
@@ -463,8 +424,7 @@ impl SkillhubClient {
             .bytes()
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read Skillhub index: {e}")))?;
-        let mut data: SkillhubIndexResponse =
-            crate::parse_marketplace_json("Skillhub index", &self.index_url, &body)?;
+        let mut data: SkillhubIndexResponse = parse_skillhub_index_body(&body, &self.index_url)?;
 
         // Client-side sort
         match sort {
@@ -488,6 +448,76 @@ impl SkillhubClient {
         );
         Ok(data)
     }
+}
+
+/// Parse a Skillhub `/search` response body, degrading gracefully when the
+/// upstream sends back markup instead of JSON.
+///
+/// See #7387: `skillhub.tencent.com` now answers every API path with a
+/// `200 OK` full of its SPA shell instead of JSON. Handing that straight to
+/// `serde_json` produces a cryptic "expected value at line 1 column 1"
+/// failure with no indication of the real cause, so this checks for markup
+/// first and returns a clear, actionable [`SkillError::MarketplaceUnavailable`].
+///
+/// Split out from [`SkillhubClient::search`] so the parsing logic — including
+/// the SkillHub-native vs. ClawHub-compatible format fallback — is testable
+/// without a live network call.
+///
+/// The markup gate is spelled out here rather than delegated to
+/// [`crate::parse_marketplace_json`] because neither of the two parses below is
+/// the single deserialization that helper performs; the message is the same one
+/// it emits, so an operator sees one offline state whichever hub or endpoint
+/// went dark.
+fn parse_skillhub_search_body(body: &[u8], url: &str) -> Result<ClawHubSearchResponse, SkillError> {
+    // Markup first: both parses below fail on an HTML body, and the second one's
+    // `serde_json` complaint is exactly the cryptic "expected value at line 1 column 1"
+    // this check exists to replace (#7387).
+    if crate::looks_like_markup(body) {
+        return Err(SkillError::MarketplaceUnavailable(format!(
+            "Skillhub search at {url} answered with a webpage instead of JSON — the marketplace is unreachable or has moved. Searching, browsing and installing from it are unavailable until it returns; skills already installed locally are unaffected."
+        )));
+    }
+
+    // Try SkillHub-native format first (snake_case, `skills` or `results` key).
+    // We parse this first because ClawHubSearchResponse with serde(default)
+    // would accept any JSON as empty results, masking the real data.
+    if let Ok(skillhub_resp) = serde_json::from_slice::<SkillhubSearchResponse>(body) {
+        if !skillhub_resp.results.is_empty() {
+            return Ok(ClawHubSearchResponse {
+                results: skillhub_resp
+                    .results
+                    .into_iter()
+                    .map(|e| ClawHubSearchEntry {
+                        score: e.score,
+                        slug: e.slug,
+                        display_name: e.name,
+                        summary: e.description,
+                        version: if e.version.is_empty() {
+                            None
+                        } else {
+                            Some(e.version)
+                        },
+                        updated_at: e.updated_at,
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    // Fall back to ClawHub-compatible format (camelCase, `results` key).
+    serde_json::from_slice::<ClawHubSearchResponse>(body)
+        .map_err(|e| SkillError::Network(format!("Failed to parse Skillhub search response: {e}")))
+}
+
+/// Parse the static Skillhub COS index body, degrading gracefully when the
+/// bucket answers with markup instead of JSON (same #7387 failure mode as
+/// [`parse_skillhub_search_body`], applied to `browse` and `install`'s
+/// version lookup).
+fn parse_skillhub_index_body(
+    body: &[u8],
+    index_url: &str,
+) -> Result<SkillhubIndexResponse, SkillError> {
+    crate::parse_marketplace_json("Skillhub index", index_url, body)
 }
 
 /// URL query parameter encoding (`application/x-www-form-urlencoded`).
@@ -682,5 +712,70 @@ mod tests {
 
         assert!(matches!(result, Err(SkillError::InvalidManifest(_))));
         assert!(!skill_dir.exists());
+    }
+
+    // -- #7387: Skillhub API is dead — graceful-degradation regression tests ---
+
+    #[test]
+    fn search_body_html_response_degrades_to_marketplace_unavailable() {
+        let html = b"<!DOCTYPE html><html><head><title>SkillHub</title></head></html>";
+        let result = parse_skillhub_search_body(html, DEFAULT_SKILLHUB_URL);
+        match result {
+            Err(SkillError::MarketplaceUnavailable(msg)) => {
+                assert!(msg.contains(DEFAULT_SKILLHUB_URL), "{msg}");
+                assert!(msg.contains("webpage instead of JSON"), "{msg}");
+            }
+            other => panic!("expected MarketplaceUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_body_valid_json_still_parses() {
+        let json = br#"{"results": [{"slug": "rust-helper", "name": "Rust Helper"}]}"#;
+        let resp = parse_skillhub_search_body(json, DEFAULT_SKILLHUB_URL).unwrap();
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].slug, "rust-helper");
+    }
+
+    #[test]
+    fn search_body_genuinely_malformed_json_is_a_network_error_not_marketplace_unavailable() {
+        let garbage = b"{not valid json";
+        let result = parse_skillhub_search_body(garbage, DEFAULT_SKILLHUB_URL);
+        assert!(matches!(result, Err(SkillError::Network(_))));
+    }
+
+    #[test]
+    fn index_body_html_response_degrades_to_marketplace_unavailable() {
+        let html = b"<html><body>not json</body></html>";
+        let result = parse_skillhub_index_body(html, DEFAULT_SKILLHUB_INDEX_URL);
+        assert!(matches!(result, Err(SkillError::MarketplaceUnavailable(_))));
+    }
+
+    #[test]
+    fn index_body_valid_json_still_parses() {
+        let json = br#"{"total": 1, "skills": [{"slug": "rust"}]}"#;
+        let resp = parse_skillhub_index_body(json, DEFAULT_SKILLHUB_INDEX_URL).unwrap();
+        assert_eq!(resp.total, 1);
+        assert_eq!(resp.skills.len(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial(skillhub_env_url)]
+    fn with_defaults_honors_env_var_override() {
+        std::env::set_var(
+            "LIBREFANG_SKILLHUB_URL",
+            "https://mirror.example.test/api/v1",
+        );
+        let client = SkillhubClient::with_defaults(PathBuf::from("/tmp/cache"));
+        assert_eq!(client.base_url, "https://mirror.example.test/api/v1");
+        std::env::remove_var("LIBREFANG_SKILLHUB_URL");
+    }
+
+    #[test]
+    #[serial_test::serial(skillhub_env_url)]
+    fn with_defaults_falls_back_when_env_var_unset() {
+        std::env::remove_var("LIBREFANG_SKILLHUB_URL");
+        let client = SkillhubClient::with_defaults(PathBuf::from("/tmp/cache"));
+        assert_eq!(client.base_url, DEFAULT_SKILLHUB_URL);
     }
 }

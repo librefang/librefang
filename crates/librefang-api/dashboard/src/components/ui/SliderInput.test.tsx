@@ -119,4 +119,62 @@ describe("SliderInput", () => {
       expect(screen.getByRole("slider").className).not.toMatch(/opacity-40/);
     });
   });
+
+  /**
+   * The legend is a reading aid for the track above it, so a label has to sit
+   * over the position its own value occupies. Even spacing (`justify-between`)
+   * looks tidy and lies: on the real context-window row — min 1024, max 2M,
+   * ticks 32K/128K/512K/1M — it drew "1M" hard right when 1M is the midpoint,
+   * and "128K" a third of the way across when its true position is 6%.
+   */
+  describe("tick legend", () => {
+    const ladder = {
+      label: "Context window",
+      value: 131072,
+      min: 1024,
+      max: 2097152,
+      ticks: [32768, 131072, 524288, 1048576],
+      formatTick: (v: number) =>
+        v >= 1048576 ? `${Math.round(v / 1048576)}M` : `${Math.round(v / 1024)}K`,
+    };
+
+    const leftOf = (text: string) =>
+      Number.parseFloat((screen.getByText(text) as HTMLElement).style.left);
+
+    it("places each label at the position its value maps to", () => {
+      render(<SliderInput {...ladder} onChange={() => {}} />);
+
+      // (value - min) / (max - min), the same expression the filled track uses.
+      expect(leftOf("32K")).toBeCloseTo(1.51, 1);
+      expect(leftOf("128K")).toBeCloseTo(6.2, 1);
+      expect(leftOf("512K")).toBeCloseTo(24.96, 1);
+      expect(leftOf("1M")).toBeCloseTo(49.97, 1);
+    });
+
+    it("does not fall back to even spacing when the values are not evenly spread", () => {
+      render(<SliderInput {...ladder} onChange={() => {}} />);
+
+      // The exact regression: evenly spaced would put these at 0 / 33 / 66 / 100.
+      expect(leftOf("128K")).toBeLessThan(20);
+      expect(leftOf("1M")).toBeLessThan(60);
+    });
+
+    it("pulls the end labels back inside the track instead of centring them", () => {
+      render(
+        <SliderInput
+          label="Temperature"
+          value={1}
+          min={0}
+          max={2}
+          ticks={[0, 1, 2]}
+          onChange={() => {}}
+        />,
+      );
+
+      // Centring at 0% and 100% would hang half of each label off the track.
+      expect(screen.getByText("0").className).toMatch(/translate-x-0(\s|$)/);
+      expect(screen.getByText("2").className).toMatch(/-translate-x-full/);
+      expect(screen.getByText("1").className).toMatch(/-translate-x-1\/2/);
+    });
+  });
 });

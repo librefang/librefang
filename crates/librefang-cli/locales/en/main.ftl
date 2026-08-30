@@ -1119,6 +1119,13 @@ model-header-auth = AUTH
 model-header-models = MODELS
 model-header-base-url = BASE URL
 model-picker-item =     { $idx }. { $id } { $tier }
+model-overrides-cleared = Overrides cleared for model { $model }.
+model-overrides-clear-failed = Failed to clear overrides for { $model }: { $status }
+model-overrides-header-field = FIELD
+model-overrides-header-value = VALUE
+model-overrides-none-set = No overrides set for { $model }.
+model-overrides-saved = Overrides saved for { $model }.
+model-overrides-save-failed = Failed to save overrides for { $model }: { $status }
 
 # Approvals command specific keys
 approval-none-pending = No pending approvals.
@@ -1424,7 +1431,8 @@ tui-event-session-management-not-available-in-process = Session management not a
 tui-event-kv-save-failed = Failed to save KV pair
 tui-event-kv-not-available-in-process = Memory KV not available in in-process mode
 tui-event-kv-delete-failed = Failed to delete KV pair
-tui-event-skill-install-failed = Failed to install { $slug }
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = Failed to install { $slug }: { $detail }
 tui-event-skill-install-not-available-in-process = Skill installation not available in in-process mode
 tui-event-skill-uninstall-failed = Failed to uninstall { $name }
 tui-event-skill-uninstall-not-available-in-process = Skill uninstall not available in in-process mode
@@ -2374,3 +2382,6 @@ tui-groups-header-description = DESCRIPTION
 tui-groups-loading = Loading groups…
 tui-groups-empty = No groups configured. Create one with `librefang group create <name>`.
 tui-groups-hints = ↑/↓ navigate · r refresh
+
+tui-goals-judge-label = { "  " }Goal Judge:{ " " }
+tui-goals-phase-label = { "  " }Run Phase:{ " " }

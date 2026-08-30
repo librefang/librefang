@@ -1391,6 +1391,26 @@ pub(crate) enum ModelsCommands {
         /// Model ID or alias (e.g. "gpt-4o", "claude-sonnet"). Interactive picker if omitted.
         model: Option<String>,
     },
+    /// View, set, or clear per-model inference overrides (context_window, max_output_tokens).
+    #[command(
+        long_about = "View, set, or clear per-model inference parameter overrides.\n\nUseful when a self-hosted gateway misreports context_window or max_output_tokens.\n\nExamples:\n  librefang models overrides gpt-4o\n  librefang models overrides gpt-4o --context-window 131072\n  librefang models overrides gpt-4o --max-output-tokens 16384\n  librefang models overrides gpt-4o --clear\n  librefang models overrides gpt-4o --json"
+    )]
+    Overrides {
+        /// Model ID to view or modify overrides for.
+        model: String,
+        /// Override the model's context window size.
+        #[arg(long)]
+        context_window: Option<u64>,
+        /// Override the model's max output tokens.
+        #[arg(long)]
+        max_output_tokens: Option<u64>,
+        /// Remove all overrides for this model.
+        #[arg(long)]
+        clear: bool,
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
     /// Register an external AI gateway as an LLM provider.
     #[command(
         long_about = "Register an external AI gateway as a custom LLM provider.\n\nReads the gateway's own credentials file, fetches its live model list, and writes a provider entry plus the API key into the LibreFang home directory.\n\nSupported targets:\n  everyapi  # reads ~/.config/everyapi/credentials.json\n\nExamples:\n  librefang models connect everyapi\n  librefang models connect everyapi --set-default"

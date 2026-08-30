@@ -146,8 +146,9 @@ impl LibreFangKernel {
         if let Some(entry) = self.agents.registry.find_by_name(name) {
             return Ok(entry.id);
         }
-        let manifest = router::load_template_manifest(&self.home_dir_boot, name)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
+        let (manifest, _source_path) =
+            crate::agent_template::load_agent_template(self.home_dir(), name)
+                .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
         Ok(id)

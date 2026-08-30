@@ -1,0 +1,3 @@
+A goal run whose loop ended immediately no longer leaks its registry entry.
+`GoalRunner::start` spawned the loop and registered its `RunHandle` afterwards, so a loop that finished inside that window ran its self-cleanup against a registry that did not hold it yet: the removal found nothing, the registration then landed a handle for a run that was already over, and nothing collected it — `state()` reported the run indefinitely and the map grew by one each time.
+The loop now waits on an `installed` oneshot until its entry is in place, the same gate `background.rs` uses for the identical race. (@DaBlitzStein)

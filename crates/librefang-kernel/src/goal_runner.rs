@@ -41,6 +41,7 @@ use librefang_types::goal::{
 };
 
 use crate::background::{classify_tick_error, TickOutcome};
+use crate::KernelApi;
 
 fn lock_goal_run_start_stop(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     match lock.lock() {
@@ -62,6 +63,80 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// the background executor's circuit breaker (#5168) so a quota-exhausted
 /// provider does not get hammered on every iteration.
 const MAX_RATE_LIMIT_STREAK: u32 = 3;
+
+/// Result of [`create_and_start_goal`]: the persisted goal id and whether a
+/// run was scheduled for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoalLaunch {
+    pub goal_id: GoalId,
+    pub started: bool,
+}
+
+impl GoalLaunch {
+    /// Confirmation text for surfaces without a localized message catalog
+    /// (channel adapters, dashboard chat WebSocket).
+    pub fn message(&self, description: &str) -> String {
+        let goal_id = self.goal_id;
+        if self.started {
+            format!("Goal created and started: {description} (ID: {goal_id})")
+        } else {
+            format!(
+                "Goal created (ID: {goal_id}) but the run could not start — \
+                 kernel self-handle unset. Restart the daemon and resume the goal."
+            )
+        }
+    }
+}
+
+/// Persist a goal for `agent_id` and immediately start a run for it.
+///
+/// Every chat surface that exposes `/goal` — the channel bridge, the dashboard
+/// chat WebSocket and the TUI chat runner — goes through this one function, so
+/// a goal created from Telegram is identical in shape to one created from the
+/// dashboard (upstream #3355).
+pub fn create_and_start_goal(
+    kernel: &dyn KernelApi,
+    agent_id: AgentId,
+    description: &str,
+    loop_engineering: bool,
+) -> Result<GoalLaunch, String> {
+    if description.chars().count() > 4096 {
+        return Err(format!(
+            "Goal description too long ({} chars, max 4096)",
+            description.chars().count()
+        ));
+    }
+
+    let goal_id = GoalId::new();
+    let now = Utc::now().to_rfc3339();
+    let title: String = description.chars().take(256).collect();
+    let entry = serde_json::json!({
+        "id": goal_id.to_string(),
+        "title": title,
+        "description": description,
+        "status": GoalStatus::Pending.to_string(),
+        "progress": 0,
+        "agent_id": agent_id.to_string(),
+        "loop_engineering": loop_engineering,
+        "created_at": now,
+        "updated_at": now,
+    });
+
+    kernel
+        .memory_substrate()
+        .structured_modify(goals_storage_agent_id(), GOALS_STORAGE_KEY, |current| {
+            let mut goals: Vec<serde_json::Value> = match current {
+                Some(serde_json::Value::Array(arr)) => arr,
+                _ => Vec::new(),
+            };
+            goals.push(entry.clone());
+            Ok((serde_json::Value::Array(goals), ()))
+        })
+        .map_err(|e| format!("Failed to create goal: {e}"))?;
+
+    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    Ok(GoalLaunch { goal_id, started })
+}
 
 /// Result of parsing one agent reply for goal-control markers.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -146,6 +221,18 @@ fn load_goal(substrate: &MemorySubstrate, goal_id: GoalId) -> Option<Goal> {
     let target = goal_id.to_string();
     arr.into_iter()
         .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(target.as_str()))
+        .map(|mut v| {
+            // Goals written before the loop-engineering PR may store
+            // UUID-typed Option fields as "" instead of null.  An empty
+            // string fails UUID parsing and silently drops the whole
+            // Goal via the downstream `.ok()`.  Normalise here.
+            for key in ["verify_agent_id", "agent_id", "parent_id"] {
+                if v.get(key).and_then(|s| s.as_str()) == Some("") {
+                    v[key] = serde_json::Value::Null;
+                }
+            }
+            v
+        })
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
@@ -233,10 +320,13 @@ fn delete_persisted_run(store: &Option<GoalRunStore>, goal_id: GoalId) {
 /// A single goal run entry: the spawned loop task plus its observable state
 /// and a cooperative stop flag.
 struct RunHandle {
-    /// The spawned loop task. `None` for a terminal entry reconstructed at boot
-    /// by [`GoalRunner::recover_stale_runs`] — that run's process already died,
-    /// so there is no live loop to abort; the entry exists only so the demoted
-    /// `Stopped` state stays observable via [`GoalRunner::state`].
+    /// The spawned loop task.
+    ///
+    /// `None` in three cases, none of which have a task to abort: a terminal
+    /// entry reconstructed at boot by [`GoalRunner::recover_stale_runs`] (that
+    /// run's process already died); the brief window inside [`GoalRunner::start`]
+    /// between registering the handle and backfilling the join handle; and a
+    /// run whose loop finished before that backfill could happen.
     task: Option<JoinHandle<()>>,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
@@ -394,7 +484,34 @@ impl GoalRunner {
         let loop_stop = stop.clone();
         let loop_store = self.store.clone();
 
+        // Do not let the task reach self-cleanup before its entry is in the
+        // map. `tokio::spawn` may run the loop to completion on another worker
+        // before this thread reaches the insert below: the loop's `remove_if`
+        // then finds nothing, the insert lands a handle for a run that has
+        // already ended, and that entry is never collected — `state()` reports
+        // the run forever and the registry grows by one per occurrence.
+        //
+        // The window is a few instructions wide, but the exits that fit inside
+        // it are the fast ones: a pre-signalled shutdown, or a goal deleted
+        // between the API's read and this call, both of which end the loop
+        // before its first agent turn.
+        //
+        // Gating on a oneshot rather than reordering the insert is what
+        // `background.rs` already does for the same race (`installed_tx` /
+        // `installed_rx` there). It makes the ordering a property of a
+        // primitive instead of the adjacency of two statements, and it keeps
+        // `task` populated for every live run — an insert-first ordering has to
+        // leave `task: None` until a backfill, which is a second window and a
+        // second reason for `stop()` to find nothing to abort.
+        let (installed_tx, installed_rx) = tokio::sync::oneshot::channel::<()>();
+
         let task = tokio::spawn(async move {
+            // The sender is dropped without a send only if `start()` unwound
+            // between the spawn and the insert, in which case there is no
+            // entry to clean up and nothing to run.
+            if installed_rx.await.is_err() {
+                return;
+            }
             run_loop(
                 goal_id,
                 agent_id,
@@ -426,6 +543,9 @@ impl GoalRunner {
                 generation,
             },
         );
+        // Release the loop now that its entry is visible. Nothing between the
+        // spawn and here can observe the run, which is the point.
+        let _ = installed_tx.send(());
         info!(goal_id = %goal_id, agent_id = %agent_id, max_iterations, "Goal run started");
         true
     }
@@ -1205,6 +1325,128 @@ mod tests {
             "a new run must not inherit the predecessor's started_at"
         );
 
+        assert!(runner.stop(goal_id));
+    }
+
+    /// A loop that ends immediately must not leave its registry entry behind.
+    ///
+    /// `start()` used to spawn the loop and register its `RunHandle`
+    /// afterwards. A loop that finished inside that window ran its self-cleanup
+    /// `remove_if` against a registry that did not hold it yet: the removal
+    /// found nothing, the registration then landed a handle for a run that was
+    /// already over, and nothing ever collected it — `state()` reported the run
+    /// forever and the map grew by one every time it happened.
+    ///
+    /// Shutdown is pre-signalled so the loop breaks on its first check, before
+    /// any store read or agent turn — the shortest path from spawn to
+    /// `remove_if`, and so the likeliest interleaving to expose the old
+    /// ordering.
+    ///
+    /// This test is a smoke check, not the guarantee. Racing the old ordering
+    /// deliberately is a poor detector: measured against a replica of it, a
+    /// finished loop left an entry behind on roughly 0.09% of rounds, so
+    /// catching it reliably needs thousands of rounds and seconds of CI time.
+    /// What actually rules the ordering out is the `installed` oneshot in
+    /// `start()`: the loop cannot reach `remove_if` before the entry exists,
+    /// because it is parked on the channel until the insert has happened. That
+    /// is a property of the primitive, and the reason this test does not need
+    /// to win a race to be meaningful.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_ends_immediately_leaves_no_entry_behind() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+
+        for round in 0..25 {
+            // Per round, so the `Running` rows a shutdown-interrupted run
+            // leaves behind cannot accumulate across rounds and change what
+            // later rounds are reading.
+            let store = store_from(&substrate);
+            // `true` = shutdown already signalled.
+            let (_tx, rx) = watch::channel(true);
+            let runner = GoalRunner::new_with_store(rx, store.clone());
+            let agent_id = AgentId::new();
+            let goal = test_goal(agent_id);
+            seed_goal(&substrate, &goal);
+            let goal_id = goal.id;
+
+            // Asserted, not discarded: `start()` returns false when the goal is
+            // missing from the store, and then nothing is inserted and nothing
+            // spawned — under which the assertion below would pass having
+            // exercised nothing at all.
+            assert!(
+                runner.start(
+                    goal_id,
+                    agent_id,
+                    10,
+                    substrate.clone(),
+                    |_agent_id, _message| async move { Ok::<String, String>(String::new()) },
+                ),
+                "round {round}: start() rejected a seeded goal, so this round tested nothing"
+            );
+
+            // Probe the registry directly rather than through `state()`:
+            // `state()` answers `None` both for "no entry" and for "the state
+            // lock was momentarily held", and the run loop takes that lock on
+            // its way out. Conflating the two would let a transient lock read
+            // as a clean registry.
+            //
+            // The budget bounds how long the spawned task takes to be
+            // scheduled, so exhausting it on a loaded machine is possible in
+            // principle — generous here because this exit path does two atomic
+            // loads and a `remove_if`, with no store write.
+            for _ in 0..500 {
+                if !runner.runs.contains_key(&goal_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            assert!(
+                !runner.runs.contains_key(&goal_id),
+                "round {round}: a finished goal loop left its registry entry behind"
+            );
+        }
+    }
+
+    /// The loop does not begin before its registry entry is visible.
+    ///
+    /// This is the invariant the smoke test above can only sample. It is
+    /// checked without racing anything: the loop's first act is a
+    /// `send_message` call, so a closure that reports what the registry held at
+    /// that moment answers the question directly. If the `installed` gate is
+    /// removed, this fails deterministically rather than 9 runs out of 10.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_loop_does_not_run_before_its_entry_is_registered() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let store = store_from(&substrate);
+        let (_tx, rx) = watch::channel(false);
+        let runner = Arc::new(GoalRunner::new_with_store(rx, store.clone()));
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let goal_id = goal.id;
+
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel::<bool>();
+        let probe = runner.clone();
+        assert!(runner.start(
+            goal_id,
+            agent_id,
+            1,
+            substrate.clone(),
+            move |_agent_id, _message| {
+                // Report registry visibility from inside the first turn, then
+                // park: the loop must not finish while the assertion runs.
+                let _ = seen_tx.send(probe.runs.contains_key(&goal_id));
+                async move { std::future::pending::<Result<String, String>>().await }
+            },
+        ));
+
+        let seen = seen_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the loop must reach its first turn");
+        assert!(
+            seen,
+            "the loop ran before its RunHandle was registered: a fast exit here would self-clean against an empty registry and strand the entry the insert lands afterwards"
+        );
         assert!(runner.stop(goal_id));
     }
 

@@ -31,6 +31,30 @@ fn find_ci(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     None
 }
 
+/// Find an opening tag whose *name* is exactly `needle`'s, e.g. `<p` matching `<p>` and
+/// `<p class=…>` but not `<pre>`.
+///
+/// [`find_ci`] matches a prefix, and the tags this module converts are prefixes of one
+/// another: `<p` of `<pre`, `<b` of `<blockquote>`, `<i` of `<img`. Since the rules run in
+/// sequence over the whole document, the shorter name consumed the longer element before its
+/// own rule ever saw it — `<pre>` was rewritten as a paragraph and looked for a `</p>` that
+/// does not exist, and `<blockquote>` came out as bold. Requiring the character after the
+/// name to end it is what keeps each rule to its own element.
+fn find_tag_ci(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let mut at = from;
+    while let Some(i) = find_ci(haystack, needle, at) {
+        let after = haystack.as_bytes().get(i + needle.len());
+        match after {
+            // `>` closes the tag, `/` closes it self-closing, whitespace starts its attributes.
+            Some(b'>') | Some(b'/') | None => return Some(i),
+            Some(c) if c.is_ascii_whitespace() => return Some(i),
+            // The name continues, so this is a different element: keep looking.
+            _ => at = i + 1,
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // External content markers
 // ---------------------------------------------------------------------------
@@ -74,11 +98,111 @@ pub fn html_to_markdown(html: &str) -> String {
     // Phase 2: Extract main content area
     let content = extract_main_content(&cleaned);
 
-    // Phase 3: Convert HTML elements to Markdown
+    // Phase 3: Lift preformatted blocks out before anything can reflow them.
+    // A code block is the one place where the whitespace *is* the content: `collapse_whitespace`
+    // trims every line, and the inline `<code>` rule would put backticks inside the fence.
+    let (content, pre_blocks) = lift_pre_blocks(&content);
+
+    // Phase 4: Convert HTML elements to Markdown
     let markdown = convert_elements(&content);
 
-    // Phase 4: Clean up whitespace
-    collapse_whitespace(&markdown)
+    // Phase 5: Clean up whitespace
+    let collapsed = collapse_whitespace(&markdown);
+
+    // Phase 6: Put the preformatted blocks back, fenced.
+    restore_pre_blocks(&collapsed, &pre_blocks)
+}
+
+/// Sentinel standing in for a lifted `<pre>` block.
+///
+/// U+E000 is a private-use character: it carries no meaning of its own, cannot appear in
+/// decoded page text, and survives `collapse_whitespace`, which trims each line.
+const PRE_SENTINEL: char = '\u{e000}';
+
+/// Replace every `<pre>…</pre>` with a sentinel, returning the fenced blocks in order.
+///
+/// The fence is emitted for *any* `<pre>`, not only `<pre><code>`: a plain `<pre>` is how
+/// Python's documentation, RFCs and compiler diagnostics are marked up, and the whitespace
+/// inside it is as load-bearing there as it is in a highlighted listing.
+fn lift_pre_blocks(html: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(html.len());
+    let mut blocks: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while pos < html.len() {
+        let Some(start) = find_tag_ci(html, "<pre", pos) else {
+            out.push_str(&html[pos..]);
+            break;
+        };
+        out.push_str(&html[pos..start]);
+        let Some(gt) = html[start..].find('>') else {
+            out.push_str(&html[start..]);
+            break;
+        };
+        let open_tag = &html[start..start + gt + 1];
+        let inner_start = start + gt + 1;
+        let Some(end) = find_ci(html, "</pre>", inner_start) else {
+            out.push_str(&html[start..]);
+            break;
+        };
+        let inner = &html[inner_start..end];
+        let lang = code_language(open_tag)
+            .or_else(|| code_language(inner))
+            .unwrap_or_default();
+        let text = decode_entities(&strip_all_tags(inner));
+        blocks.push(format!("```{lang}\n{}\n```", text.trim_matches('\n')));
+        out.push('\n');
+        out.push(PRE_SENTINEL);
+        out.push_str(&blocks.len().to_string());
+        out.push(PRE_SENTINEL);
+        out.push('\n');
+        pos = end + "</pre>".len();
+    }
+    (out, blocks)
+}
+
+/// Read a language hint out of a `class="language-rust"` / `class="lang-rust"` attribute.
+fn code_language(fragment: &str) -> Option<String> {
+    for marker in ["language-", "lang-"] {
+        if let Some(i) = find_ci(fragment, marker, 0) {
+            let rest = &fragment[i + marker.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '#' || *c == '-')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// Substitute the fenced blocks back in place of their sentinels.
+fn restore_pre_blocks(md: &str, blocks: &[String]) -> String {
+    if blocks.is_empty() {
+        return md.to_string();
+    }
+    let mut out = String::with_capacity(md.len() + blocks.iter().map(String::len).sum::<usize>());
+    let mut rest = md;
+    while let Some(i) = rest.find(PRE_SENTINEL) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + PRE_SENTINEL.len_utf8()..];
+        match after.find(PRE_SENTINEL) {
+            Some(j) => {
+                let idx: usize = after[..j].parse().unwrap_or(0);
+                if let Some(block) = idx.checked_sub(1).and_then(|k| blocks.get(k)) {
+                    out.push_str(block);
+                }
+                rest = &after[j + PRE_SENTINEL.len_utf8()..];
+            }
+            None => {
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Remove script, style, nav, footer, iframe, svg, and form blocks.
@@ -109,7 +233,7 @@ fn remove_tag_blocks(html: &str, tag: &str) -> String {
 
     let mut pos = 0;
     while pos < html.len() {
-        if let Some(abs_start) = find_ci(html, &open_tag, pos) {
+        if let Some(abs_start) = find_tag_ci(html, &open_tag, pos) {
             result.push_str(&html[pos..abs_start]);
 
             // Find the matching close tag
@@ -218,7 +342,7 @@ fn convert_inline_tag(
     let mut pos = 0;
 
     while pos < html.len() {
-        if let Some(abs_start) = find_ci(html, open_prefix, pos) {
+        if let Some(abs_start) = find_tag_ci(html, open_prefix, pos) {
             result.push_str(&html[pos..abs_start]);
 
             // Find the end of the opening tag
@@ -312,7 +436,10 @@ fn strip_all_tags(s: &str) -> String {
     for ch in s.chars() {
         match ch {
             '<' => in_tag = true,
-            '>' => in_tag = false,
+            // Only a `>` that closes something is markup.
+            // Treating every `>` as one dropped it from ordinary text — the `> ` this module
+            // emits for a blockquote, and any page that writes `5 > 3`.
+            '>' if in_tag => in_tag = false,
             _ if !in_tag => result.push(ch),
             _ => {}
         }
@@ -368,6 +495,10 @@ fn collapse_whitespace(s: &str) -> String {
     let mut blank_count = 0;
 
     for line in lines {
+        // A quote marker with nothing after it is not content.
+        // `<blockquote><pre>` — how SQLite's manual indents its examples — leaves one behind,
+        // because the code block is lifted onto its own line and the marker stays where it was.
+        let line = if line == ">" { "" } else { line };
         if line.is_empty() {
             blank_count += 1;
             if blank_count <= 2 {
@@ -485,5 +616,85 @@ mod tests {
         let md = html_to_markdown(html);
         assert!(md.contains("# Title"), "Expected heading, got: {md}");
         assert!(md.contains("**world**"), "Expected bold, got: {md}");
+    }
+
+    /// A shorter tag name must not consume an element whose name merely starts with it.
+    ///
+    /// The rules run in sequence over the whole document, so `<p` reached `<pre>` first and
+    /// rewrote it as a paragraph looking for a `</p>` that is not there, and `<b` reached
+    /// `<blockquote>` and made it bold.
+    #[test]
+    fn test_tag_rules_do_not_match_longer_tag_names() {
+        assert_eq!(find_tag_ci("<pre>x</pre>", "<p", 0), None);
+        assert_eq!(find_tag_ci("<p>x</p>", "<p", 0), Some(0));
+        assert_eq!(find_tag_ci("<p class=lead>x</p>", "<p", 0), Some(0));
+        assert_eq!(find_tag_ci("<blockquote>x</blockquote>", "<b", 0), None);
+        assert_eq!(find_tag_ci("<b>x</b>", "<b", 0), Some(0));
+        // The longer element is still found by its own rule, wherever it sits.
+        assert_eq!(find_tag_ci("<p>a</p><pre>b</pre>", "<pre", 0), Some(8));
+    }
+
+    /// A `>` that closes nothing is text, not markup.
+    ///
+    /// Dropping every `>` took the blockquote marker this module emits, and any page that
+    /// writes a comparison in prose.
+    #[test]
+    fn test_bare_angle_bracket_survives_tag_stripping() {
+        assert_eq!(strip_all_tags("5 > 3"), "5 > 3");
+        assert_eq!(strip_all_tags("<b>x</b> > y"), "x > y");
+        let md = html_to_markdown("<body><p>If 5 &gt; 3 then stop.</p></body>");
+        assert!(md.contains("5 > 3"), "comparison lost: {md}");
+    }
+
+    /// Preformatted text reaches the model fenced, with its whitespace intact.
+    #[test]
+    fn test_pre_becomes_a_fenced_block() {
+        let html =
+            "<body><p>Before.</p><pre>fn main() {\n    let x = 1;\n}</pre><p>After.</p></body>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("```"), "no fence: {md}");
+        assert!(md.contains("    let x = 1;"), "indentation lost: {md}");
+        assert!(md.contains("Before."), "surrounding prose lost: {md}");
+        assert!(md.contains("After."), "prose after the block lost: {md}");
+    }
+
+    /// The fence is emitted for a bare `<pre>`, not only for `<pre><code>`.
+    ///
+    /// Python's documentation and the RFC series mark listings up that way — highlighted
+    /// spans inside a `<pre>` with no `<code>` element anywhere.
+    #[test]
+    fn test_bare_pre_is_fenced_too() {
+        let html = "<body><pre><span class=\"gp\">&gt;&gt;&gt; </span>len(x)\n3</pre></body>";
+        let md = html_to_markdown(html);
+        assert!(md.starts_with("```"), "bare pre not fenced: {md}");
+        assert!(md.contains(">>> len(x)"), "prompt lost: {md}");
+    }
+
+    /// A `class="language-…"` hint reaches the fence so the reader knows what it is looking at.
+    #[test]
+    fn test_pre_carries_its_language() {
+        let html = "<body><pre class=\"playground\"><code class=\"language-rust\">fn main() {}</code></pre></body>";
+        let md = html_to_markdown(html);
+        assert!(md.contains("```rust"), "language hint lost: {md}");
+        // The inner `<code>` must not also become inline backticks inside the fence.
+        assert!(
+            !md.contains("`fn main"),
+            "inline code marker inside a fence: {md}"
+        );
+    }
+
+    /// A blockquote is quoted, not bolded, and an empty quote line is not left behind.
+    #[test]
+    fn test_blockquote_is_quoted() {
+        let md = html_to_markdown("<body><blockquote>Quoted.</blockquote></body>");
+        assert!(md.contains("> Quoted."), "not quoted: {md}");
+        assert!(!md.contains("**Quoted"), "quoted text came out bold: {md}");
+        // SQLite's manual wraps its examples this way; the marker has nothing to quote.
+        let md = html_to_markdown("<body><blockquote><pre>SELECT 1;</pre></blockquote></body>");
+        assert!(
+            !md.lines().any(|l| l.trim() == ">"),
+            "empty quote line left: {md}"
+        );
+        assert!(md.contains("SELECT 1;"), "example lost: {md}");
     }
 }

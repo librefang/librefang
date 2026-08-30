@@ -1362,6 +1362,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn create_and_start_goal(
+        &self,
+        agent_id: AgentId,
+        description: &str,
+        loop_engineering: bool,
+    ) -> Result<String, String> {
+        librefang_kernel::goal_runner::create_and_start_goal(
+            self.kernel.as_ref(),
+            agent_id,
+            description,
+            loop_engineering,
+        )
+        .map(|launch| launch.message(description))
+    }
+
     async fn list_triggers_text(&self) -> String {
         let triggers = self.kernel.trigger_engine().list_all();
         if triggers.is_empty() {

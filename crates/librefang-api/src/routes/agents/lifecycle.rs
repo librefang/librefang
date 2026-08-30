@@ -1062,6 +1062,18 @@ pub async fn get_agent(
             entry.manifest.model.model.as_str()
         };
 
+    // Static footprint every request to this agent carries before the first
+    // user message: system prompt plus the assembled tool definitions
+    // (skills, MCP servers, built-ins — `available_tools` is the exact list
+    // that travels in the prompt). Same heuristic the compactor uses to
+    // decide when to fold history, so this number cannot drift from that one.
+    let tools = state.kernel.available_tools(agent_id);
+    let injected_footprint_tokens = librefang_kernel::compactor::estimate_token_count(
+        &[],
+        Some(&entry.manifest.model.system_prompt),
+        Some(tools.as_slice()),
+    );
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -1109,6 +1121,7 @@ pub async fn get_agent(
             "fallback_models": entry.manifest.fallback_models,
             "auto_evolve": entry.manifest.auto_evolve,
             "web_search_augmentation": entry.manifest.web_search_augmentation,
+            "injected_footprint_tokens": injected_footprint_tokens,
         })),
     )
         .into_response()

@@ -30,30 +30,30 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.101.4",
+    "@tanstack/react-query": "^5.102.2",
     "clsx": "^2.1.1",
-    "framer-motion": "^13.0.0",
-    "lucide-react": "^1.31.0",
+    "framer-motion": "^13.1.1",
+    "lucide-react": "^1.33.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
     "@lhci/cli": "0.15.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.0.5",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.0",
     "autoprefixer": "^10.5.4",
     "jsdom": "^30.0.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   }
 }

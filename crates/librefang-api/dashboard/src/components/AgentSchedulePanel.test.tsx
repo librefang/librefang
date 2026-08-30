@@ -200,11 +200,14 @@ describe("AgentSchedulePanel — mode toggles", () => {
 // Pre-fix the panel collapsed periodic/proactive into the "manual" branch,
 // which then offered a "Switch to continuous" button that would silently
 // clobber the manifest-driven schedule. We now render the actual mode and
-// hide the toggle to keep the manifest the source of truth for those modes.
+// swap the toggle for a dedicated inline editor (#7742) so those modes stay
+// editable without falling back to "switch to continuous" and losing the
+// cron / conditions.
 describe("AgentSchedulePanel — non-continuous schedule modes", () => {
   beforeEach(() => {
     vi.mocked(http.listCronJobs).mockResolvedValue([]);
     vi.mocked(http.listTriggers).mockResolvedValue([]);
+    vi.mocked(http.patchAgent).mockResolvedValue({ status: "ok" });
   });
 
   it("renders a periodic schedule with the cron expression, no switch-to-continuous offered", async () => {
@@ -212,12 +215,31 @@ describe("AgentSchedulePanel — non-continuous schedule modes", () => {
       <AgentSchedulePanel agent={{ ...agent, schedule: "0 9 * * *" }} />,
     );
     expect(await screen.findByText("Periodic (0 9 * * *)")).toBeInTheDocument();
-    // The "manifest-controlled" marker replaces the toggle so users can't
-    // accidentally overwrite a periodic schedule with a continuous one.
-    expect(await screen.findByText("manifest-controlled")).toBeInTheDocument();
+    // An "Edit" affordance (#7742) replaces the old static
+    // "manifest-controlled" marker — periodic schedules are now editable
+    // in-panel — but still never offers to silently switch to continuous.
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Switch to continuous" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("editing a periodic schedule's cron expression PATCHes the new cron (#7742)", async () => {
+    const user = userEvent.setup();
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "0 9 * * *" }} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const cronInput = await screen.findByLabelText("Cron expression");
+    expect(cronInput).toHaveValue("0 9 * * *");
+    await user.clear(cronInput);
+    await user.type(cronInput, "0 12 * * *");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(http.patchAgent).toHaveBeenCalledWith(agent.id, {
+        schedule: { periodic: { cron: "0 12 * * *" } },
+      }),
+    );
   });
 
   it("renders a proactive schedule with no switch-to-continuous offered", async () => {
@@ -225,10 +247,69 @@ describe("AgentSchedulePanel — non-continuous schedule modes", () => {
       <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
     );
     expect(await screen.findByText("Proactive")).toBeInTheDocument();
-    expect(await screen.findByText("manifest-controlled")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Switch to continuous" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("editing a proactive schedule's conditions PATCHes a replacement list (#7742)", async () => {
+    const user = userEvent.setup();
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const conditionsInput = await screen.findByLabelText(
+      "Conditions (comma-separated)",
+    );
+    await user.type(conditionsInput, "agent.tags contains 'urgent', another");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(http.patchAgent).toHaveBeenCalledWith(agent.id, {
+        schedule: { proactive: { conditions: ["agent.tags contains 'urgent'", "another"] } },
+      }),
+    );
+  });
+
+  // Saving the conditions editor empty must not clear the agent's conditions.
+  //
+  // The textarea starts empty and is never seeded from the live schedule — the
+  // panel has no read of the current list to seed it with — so an empty field
+  // means "nothing typed", not "no conditions wanted". Without a guard, opening
+  // Edit and pressing Save sends `conditions: []`, wipes a proactive schedule
+  // the operator never looked at, and reports it as a successful save.
+  //
+  // `saveCron` has refused a blank cron since it was written; this is the same
+  // rule on the sibling field.
+  it("refuses to save an empty condition list instead of clearing the schedule", async () => {
+    const user = userEvent.setup();
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await screen.findByLabelText("Conditions (comma-separated)");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(http.patchAgent).not.toHaveBeenCalled();
+  });
+
+  // Whitespace and stray separators are "nothing typed" too: `", ,"` filters
+  // down to an empty list, so it must take the same branch rather than
+  // slipping past a bare `.trim()` check.
+  it("treats a comma-and-whitespace-only entry as empty", async () => {
+    const user = userEvent.setup();
+    withQueryClient(
+      <AgentSchedulePanel agent={{ ...agent, schedule: "proactive" }} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const conditionsInput = await screen.findByLabelText(
+      "Conditions (comma-separated)",
+    );
+    await user.type(conditionsInput, " , ,  ");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(http.patchAgent).not.toHaveBeenCalled();
   });
 });
 

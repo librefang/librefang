@@ -70,6 +70,72 @@ async fn get_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn goal_is_served_by_the_command_catalog() {
+    let harness = boot().await;
+
+    let (status, body) = get_json(&harness.app, "/api/commands").await;
+    assert_eq!(status, StatusCode::OK);
+    let commands = body["commands"].as_array().unwrap();
+    let goal = commands
+        .iter()
+        .find(|entry| entry["cmd"] == "/goal")
+        .unwrap_or_else(|| {
+            panic!(
+                "/goal missing from the catalog; served: {:?}",
+                commands
+                    .iter()
+                    .filter_map(|c| c["cmd"].as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(goal["exec"], "backend");
+    assert_eq!(goal["args_hint"], "<description> [--loop-engineering]");
+    assert_eq!(goal["no_args"], false);
+    assert_eq!(goal["desc_key"], "cmd_goal");
+    assert!(
+        goal.get("source").is_none(),
+        "/goal is a builtin, not a skill"
+    );
+
+    let (status, goal) = get_json(&harness.app, "/api/commands/goal").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(goal["cmd"], "/goal");
+    assert_eq!(goal["exec"], "backend");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn catalog_still_serves_every_historical_builtin() {
+    let harness = boot().await;
+    let (status, body) = get_json(&harness.app, "/api/commands").await;
+    assert_eq!(status, StatusCode::OK);
+    let served: Vec<&str> = body["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["cmd"].as_str())
+        .collect();
+
+    for cmd in [
+        "/help", "/new", "/reboot", "/compact", "/model", "/stop", "/usage", "/think", "/status",
+        "/clear", "/exit",
+    ] {
+        assert!(
+            served.contains(&cmd),
+            "{cmd} disappeared; served: {served:?}"
+        );
+        let (status, _) = get_json(&harness.app, &format!("/api/commands{cmd}")).await;
+        assert_eq!(status, StatusCode::OK, "{cmd} not resolvable by name");
+    }
+
+    for cmd in ["/btw", "/agent", "/approve", "/schedule"] {
+        assert!(
+            !served.contains(&cmd),
+            "channel-only {cmd} leaked into the catalog"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn builtins_win_collisions_and_skill_commands_remain_queryable() {
     let harness = boot().await;
     let skills_dir = harness.test.tmp_path().join("command-skills");

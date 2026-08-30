@@ -155,6 +155,32 @@ pub fn goals_storage_agent_id() -> AgentId {
 }
 
 // ---------------------------------------------------------------------------
+// Argument parsing for `/goal`
+// ---------------------------------------------------------------------------
+
+/// The `/goal` flag that switches the run into loop-engineering mode.
+pub const GOAL_LOOP_ENGINEERING_FLAG: &str = "--loop-engineering";
+
+/// Split a raw `/goal` argument string into `(description, loop_engineering)`.
+///
+/// Returns `None` when the input is empty or whitespace-only, or when the
+/// flag was the only thing supplied, which callers surface as a usage hint.
+pub fn parse_goal_args(args: &str) -> Option<(String, bool)> {
+    let loop_engineering = args.contains(GOAL_LOOP_ENGINEERING_FLAG);
+    let description = if loop_engineering {
+        args.replace(GOAL_LOOP_ENGINEERING_FLAG, " ")
+    } else {
+        args.to_string()
+    };
+    let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if description.is_empty() {
+        None
+    } else {
+        Some((description, loop_engineering))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GoalRunState — long-horizon autonomous execution (#5744)
 // ---------------------------------------------------------------------------
 
@@ -329,5 +355,32 @@ mod tests {
         let g = valid_goal();
         let json = serde_json::to_string(&g).unwrap();
         assert!(!json.contains("parent_id"));
+    }
+
+    #[test]
+    fn parse_goal_args_extracts_description_and_flag() {
+        assert_eq!(
+            parse_goal_args("ship the release"),
+            Some(("ship the release".to_string(), false))
+        );
+        assert_eq!(
+            parse_goal_args("ship the release --loop-engineering"),
+            Some(("ship the release".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn parse_goal_args_collapses_whitespace_around_the_flag() {
+        assert_eq!(
+            parse_goal_args("ship   --loop-engineering   the release"),
+            Some(("ship the release".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn parse_goal_args_rejects_empty_and_flag_only_input() {
+        assert_eq!(parse_goal_args(""), None);
+        assert_eq!(parse_goal_args("   "), None);
+        assert_eq!(parse_goal_args("--loop-engineering"), None);
     }
 }

@@ -452,7 +452,12 @@ fn is_marketplace_unavailable(err: &librefang_skills::SkillError) -> bool {
 
 /// Map a marketplace error to an HTTP status, uniformly across every hub and every operation.
 ///
-/// `fallback` is the status the handler used before this classification existed — `502` for the read endpoints, `404` for detail, `500` for install — and stays in force for every error that is not one of the two the caller can act on.
+/// `fallback` is the status the handler used before this classification existed — `502` for the read endpoints, `404` for detail, `500` for install — and stays in force for every error that is not one the caller can act on.
+///
+/// `400 Bad Request` is the answer for [`SkillError::YamlParse`], which is the published skill's own `SKILL.md` frontmatter failing to parse.
+/// Nothing on this server is broken and retrying downloads the same broken file again, so `500` was wrong twice over: it told the operator the daemon had faulted, and the install handlers scrub the body on `500` (audit: rusqlite-errors-leak), which threw away the one message that named the offending file and the syntax error in it.
+/// This overrides the read endpoints' `502` and detail's `404` as well, deliberately and for the same reason `503` does: the condition means one thing wherever it surfaces — that published skill is malformed — and a caller who gets `404` from detail and `500` from install for the same broken file cannot tell it is the same fault.
+/// `404` in particular said the skill does not exist, when it does exist and is unusable.
 ///
 /// `503 Service Unavailable` is the answer for [`SkillError::MarketplaceUnavailable`] because the condition is exactly what that status describes: the daemon is healthy, the request was well-formed, the upstream is temporarily not a marketplace.
 /// It also has to be the *same* answer everywhere. A `404` from detail told the reader the skill does not exist, and a scrubbed `500` from install told them the daemon broke; both are wrong in the same way, and both sent the dashboard down a different render path for one underlying fault.
@@ -465,6 +470,8 @@ fn marketplace_error_status(
         StatusCode::SERVICE_UNAVAILABLE
     } else if is_clawhub_rate_limit(err) {
         StatusCode::TOO_MANY_REQUESTS
+    } else if matches!(err, librefang_skills::SkillError::YamlParse(_)) {
+        StatusCode::BAD_REQUEST
     } else {
         fallback
     }
@@ -1319,6 +1326,57 @@ fn status_str_for_catalog(
 mod tests {
     use super::*;
     use librefang_types::config::{McpServerConfigEntry, McpTransportEntry};
+
+    /// A published skill whose own `SKILL.md` frontmatter does not parse is something the caller can act on, not a daemon fault, so it is a `400` — and it is a `400` from every handler, whatever fallback that handler passes in.
+    ///
+    /// It used to reach the fallback arm, which is `500` for install, and the install handlers scrub the body on `500` (audit: rusqlite-errors-leak) — so the one error whose text says which file is broken and why was replaced with "Internal server error", and retrying re-downloads the same broken file.
+    /// Detail's `404` was wrong in the other direction: it said the skill does not exist, when it exists and is unusable.
+    #[test]
+    fn malformed_skill_frontmatter_is_a_bad_request_from_every_handler() {
+        let err = librefang_skills::SkillError::YamlParse(
+            "Invalid YAML frontmatter: mapping values are not allowed here".to_string(),
+        );
+        for fallback in [
+            StatusCode::INTERNAL_SERVER_ERROR, // install
+            StatusCode::BAD_GATEWAY,           // browse / search
+            StatusCode::NOT_FOUND,             // detail
+        ] {
+            assert_eq!(
+                marketplace_error_status(&err, fallback),
+                StatusCode::BAD_REQUEST,
+                "fallback {fallback}"
+            );
+        }
+    }
+
+    /// The `400` arm must not swallow the classifications that were already there, nor start overriding a caller's fallback for errors it has no opinion about.
+    #[test]
+    fn marketplace_error_status_keeps_its_other_arms() {
+        for (err, fallback, want) in [
+            (
+                librefang_skills::SkillError::MarketplaceUnavailable("html".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                librefang_skills::SkillError::RateLimited("slow down".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+            (
+                librefang_skills::SkillError::NotFound("no such skill".to_string()),
+                StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                librefang_skills::SkillError::Network("connection reset".to_string()),
+                StatusCode::BAD_GATEWAY,
+                StatusCode::BAD_GATEWAY,
+            ),
+        ] {
+            assert_eq!(marketplace_error_status(&err, fallback), want, "{err:?}");
+        }
+    }
 
     /// #6581 hardened `librefang_skills::marketplace::copy_dir_recursive` against symlinks but left this installer — which copies out of the same registry checkout — dereferencing them, so a link planted in a skill directory still exfiltrated the target's contents into the install.
     #[test]

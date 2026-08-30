@@ -745,11 +745,11 @@
       "schedule_periodic_desc": "매니페스트에 설정된 cron 표현식에서 에이전트가 실행됩니다. - agent.toml을 통해 편집하세요.",
       "schedule_proactive": "사전 예방적인",
       "schedule_proactive_desc": "에이전트는 매니페스트에 설정된 조건을 모니터링합니다. - agent.toml을 통해 편집합니다.",
-      "schedule_manifest_only": "매니페스트 제어",
       "switch_to_continuous": "연속으로 전환",
       "switch_to_manual": "수동으로 전환",
       "check_interval_secs": "확인 간격(초)",
       "schedule_invalid_interval": "간격은 양의 정수(초)여야 합니다.",
+      "proactive_conditions_required": "쉼표로 구분하여 조건을 하나 이상 입력하세요",
       "schedule_updated": "일정이 업데이트되었습니다.",
       "cron_jobs": "크론 작업",
       "add_cron": "크론 추가",
@@ -840,7 +840,10 @@
       "tools_reset_to_all": "모든 도구를 사용하려면 재설정하세요.",
       "events_tail": "이벤트 · 꼬리",
       "no_logs": "이 에이전트에 대해서는 아직 기록된 회전이 없습니다.",
-      "crashed_title": "{{name}}이(가) 오류 상태입니다."
+      "crashed_title": "{{name}}이(가) 오류 상태입니다.",
+      "proactive_conditions": "조건 (쉼표로 구분)",
+      "proactive_conditions_hint": "이것은 전체 조건 목록을 대체합니다 — 현재 항목으로 미리 채워지지 않습니다. 현재 활성화된 내용을 보려면 전체 매니페스트 편집기를 사용하세요.",
+      "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'"
     },
     "tab": {
       "conversation": "대화",
@@ -1074,6 +1077,7 @@
     "pending_tab": "보류 중",
     "install": "설치",
     "installing": "설치 중...",
+    "viewOnMarketplace": "{{marketplace}}에서 보기",
     "installed_count": "{{count}} 설치됨",
     "browse": "찾아보기",
     "browse_registry": "레지스트리",

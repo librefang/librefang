@@ -99,12 +99,42 @@ export function SliderInput({
         }}
       />
       {ticks ? (
-        <div
-          className={`flex justify-between text-[9px] text-text-dim/50 font-mono px-0.5${dimmed}`}
-        >
-          {ticks.map((t, index) => (
-            <span key={`${t}-${index}`}>{formatTick ? formatTick(t) : t}</span>
-          ))}
+        // Each label sits at the position its own value maps to, from the same
+        // expression the filled track above uses, so the legend and the thumb
+        // agree about where a value lives.
+        //
+        // This was `flex justify-between`, which spaces labels evenly whatever
+        // they say. On a range whose ticks are not evenly spaced that is
+        // actively misleading: the context-window row runs 1024..2097152 with
+        // ticks at 32K/128K/512K/1M, so "1M" was drawn hard right when 1M is
+        // the midpoint, and "128K" a third of the way across when its true
+        // position is 6%. Reading a value off the legend was wrong by an order
+        // of magnitude.
+        <div className={`relative h-3 text-[9px] text-text-dim/50 font-mono${dimmed}`}>
+          {ticks.map((t, index) => {
+            const position =
+              upperBound === lowerBound
+                ? 0
+                : ((t - lowerBound) / (upperBound - lowerBound)) * 100;
+            const clamped = Math.min(100, Math.max(0, position));
+            // Centre each label on its mark, except at the ends, where centring
+            // would push half the text outside the track.
+            const align =
+              clamped <= 0
+                ? "translate-x-0"
+                : clamped >= 100
+                  ? "-translate-x-full"
+                  : "-translate-x-1/2";
+            return (
+              <span
+                key={`${t}-${index}`}
+                className={`absolute whitespace-nowrap ${align}`}
+                style={{ left: `${clamped}%` }}
+              >
+                {formatTick ? formatTick(t) : t}
+              </span>
+            );
+          })}
         </div>
       ) : null}
     </div>

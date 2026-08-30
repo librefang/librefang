@@ -1305,6 +1305,60 @@ pub fn patch_skill(
     })
 }
 
+/// Resolve the directory that holds the installed skill known as `name`.
+///
+/// The install paths name the directory after whatever identifier the source
+/// used — the ClawHub / Skillhub slug, or the local-registry entry id — while
+/// the registry keys every skill by `[skill] name` from its manifest
+/// (`registry::load_skill`). Those two disagree whenever a `SKILL.md`
+/// declares a `name` that differs from its slug: ClawHub's `frontend-design-2`
+/// installs into `skills/frontend-design-2/` but surfaces everywhere — the
+/// dashboard list, the CLI, `GET /api/skills/{name}` — as `frontend-design`.
+/// A plain `skills_dir.join(name)` then misses, and the caller reports
+/// `NotFound` for a skill the operator can see is installed.
+///
+/// The direct directory hit wins, so the common case costs a single
+/// `exists()` and a directory keeps precedence over some *other* directory's
+/// manifest claiming the same name. Only on a miss do we read the manifests.
+/// The result is always a direct child of `skills_dir`, so callers keep the
+/// containment guarantee their name validation gives them.
+fn resolve_installed_skill_dir(skills_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let direct = skills_dir.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    let mut matches: Vec<std::path::PathBuf> = std::fs::read_dir(skills_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && manifest_declares_name(path, name))
+        .collect();
+    // Two directories can only claim one name through hand-editing; sort so
+    // the choice is at least deterministic across processes.
+    matches.sort();
+    matches.into_iter().next()
+}
+
+/// Whether the skill in `skill_dir` is published under `name`.
+///
+/// Reads `skill.toml` when present. A directory that still only carries a
+/// `SKILL.md` is checked through the same converter the loader uses, because
+/// the loader writes `skill.toml` lazily — an extraction that has not been
+/// loaded yet (or a read-only skills dir) would otherwise be invisible here.
+fn manifest_declares_name(skill_dir: &Path, name: &str) -> bool {
+    let manifest_path = skill_dir.join("skill.toml");
+    if manifest_path.exists() {
+        return std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|toml_str| toml::from_str::<SkillManifest>(&toml_str).ok())
+            .is_some_and(|manifest| manifest.skill.name == name);
+    }
+    crate::openclaw_compat::detect_skillmd(skill_dir)
+        && crate::openclaw_compat::convert_skillmd(skill_dir)
+            .is_ok_and(|converted| converted.manifest.skill.name == name)
+}
+
 /// Delete an agent-evolved skill.
 ///
 /// Holds the skill lock across the entire deletion so concurrent
@@ -1333,18 +1387,23 @@ pub fn uninstall_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult,
         )));
     }
 
-    let skill_dir = skills_dir.join(name);
+    // Resolve through the manifest when the directory is not named after the
+    // skill (slug ≠ `[skill] name`) — see `resolve_installed_skill_dir`.
+    let Some(skill_dir) = resolve_installed_skill_dir(skills_dir, name) else {
+        return Err(SkillError::NotFound(name.to_string()));
+    };
 
-    // Acquire the lock first so concurrent evolve/uninstall on the same
-    // name serialise here instead of racing on `remove_dir_all`.
+    // Acquire the lock so concurrent evolve/uninstall on the same skill
+    // serialise here instead of racing on `remove_dir_all`.
     let _lock = acquire_skill_lock(&skill_dir)?;
 
+    // Re-check under the lock: another uninstall may have won the race.
     if !skill_dir.exists() {
         return Err(SkillError::NotFound(name.to_string()));
     }
 
     std::fs::remove_dir_all(&skill_dir)?;
-    info!(skill = name, "Uninstalled skill");
+    info!(skill = name, dir = %skill_dir.display(), "Uninstalled skill");
 
     Ok(EvolutionResult {
         success: true,
@@ -1364,10 +1423,12 @@ pub fn delete_skill(skills_dir: &Path, name: &str) -> Result<EvolutionResult, Sk
     // via create_skill too.
     validate_name(name)?;
 
-    let skill_dir = skills_dir.join(name);
-    if !skill_dir.exists() {
+    // Same slug-vs-manifest-name resolution as `uninstall_skill`: the
+    // agent-facing delete addresses the skill by the name the registry
+    // publishes, which is not necessarily the directory name.
+    let Some(skill_dir) = resolve_installed_skill_dir(skills_dir, name) else {
         return Err(SkillError::NotFound(name.to_string()));
-    }
+    };
 
     // Safety check: only delete local/agent-evolved skills. A *missing
     // manifest file* is treated as orphaned scaffolding and allowed —
@@ -1879,12 +1940,14 @@ pub fn load_installed_skill_from_disk(
     name: &str,
 ) -> Result<InstalledSkill, SkillError> {
     validate_name(name)?;
-    let skill_dir = skills_dir.join(name);
-    if !skill_dir.exists() {
+    // Resolve through the manifest when the directory is named after the
+    // install slug rather than the skill (see `resolve_installed_skill_dir`),
+    // so the evolve paths reach the same skill the registry publishes.
+    let Some(skill_dir) = resolve_installed_skill_dir(skills_dir, name) else {
         return Err(SkillError::NotFound(format!(
             "Skill '{name}' directory does not exist"
         )));
-    }
+    };
     let manifest_path = skill_dir.join("skill.toml");
     let toml_str = std::fs::read_to_string(&manifest_path)?;
     let mut manifest: SkillManifest = toml::from_str(&toml_str)?;

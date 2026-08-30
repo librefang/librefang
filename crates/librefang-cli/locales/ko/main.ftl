@@ -1118,6 +1118,13 @@ model-header-resolves-to = 확인 대상
 model-header-auth = 인증
 model-header-models = 모델
 model-header-base-url = BASE URL
+model-overrides-cleared = 모델 { $model }의 오버라이드가 초기화되었습니다.
+model-overrides-clear-failed = { $model }의 오버라이드 초기화 실패: { $status }
+model-overrides-header-field = 필드
+model-overrides-header-value = 값
+model-overrides-none-set = 모델 { $model }에 설정된 오버라이드가 없습니다.
+model-overrides-saved = 모델 { $model }의 오버라이드가 저장되었습니다.
+model-overrides-save-failed = { $model }의 오버라이드 저장 실패: { $status }
 model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys
@@ -1424,7 +1431,8 @@ tui-event-session-management-not-available-in-process = 인프로세스 모드�
 tui-event-kv-save-failed = KV 쌍을 저장하지 못했습니다
 tui-event-kv-not-available-in-process = 인프로세스 모드에서는 메모리 KV를 사용할 수 없습니다
 tui-event-kv-delete-failed = KV 쌍을 삭제하지 못했습니다
-tui-event-skill-install-failed = { $slug }을(를) 설치하지 못했습니다
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = { $slug }을(를) 설치하지 못했습니다: { $detail }
 tui-event-skill-install-not-available-in-process = 인프로세스 모드에서는 스킬 설치를 사용할 수 없습니다
 tui-event-skill-uninstall-failed = { $name }을(를) 제거하지 못했습니다
 tui-event-skill-uninstall-not-available-in-process = 인프로세스 모드에서는 스킬 제거를 사용할 수 없습니다
@@ -2373,3 +2381,6 @@ tui-groups-header-description = 설명
 tui-groups-loading = 그룹을 불러오는 중…
 tui-groups-empty = 구성된 그룹이 없습니다. `librefang group create <name>`으로 만드세요.
 tui-groups-hints = ↑/↓ 이동 · r 새로고침
+
+tui-goals-judge-label = { "  " }목표 심사자:{ " " }
+tui-goals-phase-label = { "  " }실행 단계:{ " " }

@@ -83,3 +83,67 @@ describe("skill hub configuration", () => {
     );
   });
 });
+
+describe("skillHubUrl", () => {
+  it("points ClawHub and its CN mirror at their public skill pages", async () => {
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("clawhub", "git-helper")).toBe(
+      "https://clawhub.ai/skills/git-helper",
+    );
+    expect(skillHubUrl("clawhub-cn", "git-helper")).toBe(
+      "https://mirror-cn.clawhub.com/skills/git-helper",
+    );
+  });
+
+  it("offers no link for FangHub, which has no public skill page", async () => {
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("fanghub", "pdf-tools")).toBeNull();
+  });
+
+  it("offers no link for an unconfigured self-hosted SkillHub", async () => {
+    vi.stubEnv("VITE_SKILLHUB_REGISTRY_URL", "");
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("skillhub", "pdf-tools")).toBeNull();
+  });
+
+  it("derives the SkillHub page from the configured registry origin", async () => {
+    vi.stubEnv(
+      "VITE_SKILLHUB_REGISTRY_URL",
+      "https://skills.example.com/api/v1",
+    );
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("skillhub", "pdf-tools")).toBe(
+      "https://skills.example.com/skills/pdf-tools",
+    );
+  });
+
+  it("returns null for unknown hubs and blank slugs", async () => {
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("unknown-runtime-hub", "git-helper")).toBeNull();
+    expect(skillHubUrl(undefined, "git-helper")).toBeNull();
+    expect(skillHubUrl("clawhub", undefined)).toBeNull();
+    expect(skillHubUrl("clawhub", "   ")).toBeNull();
+  });
+
+  it("escapes the slug so it cannot rewrite the path", async () => {
+    const { skillHubUrl } = await import("./skillHubs");
+
+    expect(skillHubUrl("clawhub", "../../evil")).toBe(
+      "https://clawhub.ai/skills/..%2F..%2Fevil",
+    );
+  });
+
+  it("never yields a non-https URL for any hub", async () => {
+    const { SKILL_HUBS } = await import("./skillHubs");
+
+    for (const hub of SKILL_HUBS) {
+      const url = hub.skillUrl("sample");
+      if (url !== null) expect(url.startsWith("https://")).toBe(true);
+    }
+  });
+});

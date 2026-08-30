@@ -585,6 +585,13 @@ fn main() {
             ModelsCommands::Aliases { json } => cmd_models_aliases(json),
             ModelsCommands::Providers { json } => cmd_models_providers(json),
             ModelsCommands::Set { model } => cmd_models_set(model),
+            ModelsCommands::Overrides {
+                model,
+                context_window,
+                max_output_tokens,
+                clear,
+                json,
+            } => cmd_models_overrides(&model, context_window, max_output_tokens, clear, json),
             ModelsCommands::Connect {
                 target,
                 set_default,

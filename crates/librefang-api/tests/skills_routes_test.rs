@@ -711,8 +711,62 @@ async fn skillhub_install_accepts_canonical_max_length_hand_identifier() {
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/skills/uninstall — error path only.
+// POST /api/skills/uninstall
 // ---------------------------------------------------------------------------
+
+/// A hub install names the directory after the *slug* it downloaded, while
+/// the registry keys every skill by `[skill] name` from the manifest — which
+/// is the name the dashboard hands straight back to this endpoint. ClawHub's
+/// `frontend-design-2` installs into `skills/frontend-design-2/` and lists as
+/// `frontend-design`; the uninstall resolved `<home>/skills/frontend-design`,
+/// missed, and answered `404 Skill not found: frontend-design` for a skill
+/// the operator had just installed and could see in the list.
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_uninstall_resolves_a_slug_named_directory() {
+    let h = boot().await;
+    // Exactly the on-disk shape a ClawHub install leaves behind: directory
+    // named after the slug, published name in the SKILL.md frontmatter.
+    let skill_dir = h.home().join("skills").join("frontend-design-2");
+    std::fs::create_dir_all(&skill_dir).expect("mkdir slug dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: frontend-design\ndescription: \"Frontend design skill\"\n---\n\n# Body\n",
+    )
+    .expect("write SKILL.md");
+    h._state.kernel.reload_skills();
+
+    let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["items"][0]["name"], "frontend-design",
+        "the registry publishes the manifest name, not the slug: {body:?}"
+    );
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/skills/uninstall",
+        Some(serde_json::json!({"name": "frontend-design"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "uninstall must find the skill under its slug directory: {body:?}"
+    );
+
+    assert!(
+        !skill_dir.exists(),
+        "the slug directory must be gone: {}",
+        skill_dir.display()
+    );
+    let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        body["total"], 0,
+        "skill must be gone from the list: {body:?}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_uninstall_unknown_returns_4xx() {

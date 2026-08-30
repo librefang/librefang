@@ -1,0 +1,4 @@
+The Skills marketplace no longer shows "Installing…" on every card that happens to share a slug with the one being installed.
+The in-flight install was tracked by bare slug, which is not unique across marketplaces: FangHub addresses entries by `name` and the ClawHub-style hubs by `slug`, and the browse grid merges all of them into one list, so a slug published on two hubs is ordinary rather than a corner case.
+Installing "prd" from one hub therefore put the pending state on the other hub's "prd" as well — its button went disabled and span, for an install nobody had asked for, and the detail drawer for that other entry did the same.
+The pending state is now keyed by hub and slug together, through a `marketplaceInstallKey` helper that every comparison site shares, matching the identity the browse list already uses for its React keys. (@DaBlitzStein)

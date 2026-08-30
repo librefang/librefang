@@ -1,0 +1,2 @@
+Skill cards on the Skills page now link out to the skill's page on the marketplace it came from, so the comments, ratings and full description are one click away — for browse results and for installed skills alike.
+The link is only offered where a public page exists: ClawHub and its CN mirror always, a self-hosted SkillHub when `VITE_SKILLHUB_REGISTRY_URL` names its origin, and never for FangHub, which publishes no browsable skill page (#7751) (@DaBlitzStein)

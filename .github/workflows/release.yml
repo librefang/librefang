@@ -426,11 +426,14 @@ jobs:
 
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, updating..."
-            gh release edit "$TAG" \
+            gh release edit "$TAG" --draft \
               --title "$TAG" \
               --notes-file /tmp/release-body.md
           else
-            gh release create "$TAG" \
+            # Created as a draft on purpose.
+            # A published release is what users and every mirror read, so publishing one before a single artifact exists means any job failure leaves a permanently public, incomplete, unsigned release — which is exactly what v2026.8.30 became.
+            # `publish_release` flips it once the artifacts are all there and signed.
+            gh release create "$TAG" --draft \
               --title "$TAG" \
               --notes-file /tmp/release-body.md
           fi
@@ -575,6 +578,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # `rust-toolchain.toml` pins the workspace to its MSRV, so cargo builds with that toolchain no matter which one the step above installed.
+      # `targets:` adds the target to `stable`, leaving the pinned toolchain with no std for it, so every cross target fails with "can't find crate for `std`" while the native ones pass — which is exactly how v2026.8.30 shipped 23 of its 48 assets.
+      # rustup names the trap itself in that log: "the toolchain '1.94.1-aarch64-apple-darwin' is currently in use (overridden by .../rust-toolchain.toml)".
+      # `rustup target add` with no `--toolchain` applies to the overridden toolchain, which is the one that builds.
+      # A native target already has its std, so this is a no-op there.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -665,6 +676,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
         # by the keyring crate's secret-service backend on glibc Linux
@@ -815,6 +830,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         # libdbus-1-dev is required by libdbus-sys, pulled in transitively
         # by the keyring crate's secret-service backend on glibc Linux.
@@ -872,6 +891,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
@@ -949,6 +972,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1009,6 +1036,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1065,6 +1096,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ env.RELEASE_TAG }}
@@ -1253,6 +1288,30 @@ jobs:
             SHA256SUMS.pem \
             --clobber
 
+  # The release is a draft until here.
+  # `sign_release_artifacts` already waits for all eight CLI jobs and refuses to sign an incomplete platform set, but nothing depended on it, so its verdict changed nothing about what the world could already download.
+  # Gating publication on it is what turns that check into a gate.
+  #
+  # `desktop` joins it because its bundles are release assets too.
+  # `mobile_ios` and `mobile_android` deliberately do not: both are `continue-on-error`, so gating on them would let a best-effort job hold back a complete release.
+  # Neither do the distribution jobs — npm, PyPI, AUR and Homebrew publish to registries of their own, and a flaky mirror must not keep a finished release unpublished.
+  publish_release:
+    name: Publish release
+    needs: [create_release, sign_release_artifacts, desktop]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Flip the release out of draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false
+          echo "Published $RELEASE_TAG"
+
   cli_npm:
     name: CLI / npm
     if: >
@@ -1337,7 +1396,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [cli_mac, cli_linux]
+    needs: [cli_mac, cli_linux, publish_release]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -1686,6 +1745,10 @@ jobs:
         with:
           targets: ${{ matrix.platform.rust_target }}
 
+      # The pinned toolchain needs the target too — see the note in the `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.platform.rust_target }}
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: 24
@@ -1904,6 +1967,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
@@ -2132,6 +2199,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
@@ -2505,7 +2576,7 @@ jobs:
         # warning instead of failing the whole release. The .ipa still
         # landed on the GitHub Release in the prior step.
         continue-on-error: true
-        uses: Apple-Actions/upload-testflight-build@1ad58030672057aa084b4e96beb6f7a8c627f9e6 # v5.2.1
+        uses: Apple-Actions/upload-testflight-build@5e75ff58276689011512ba87a381d93dc67dbcf8 # v5.3.0
         with:
           app-path: ${{ steps.art.outputs.ipa }}
           issuer-id: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
@@ -2523,7 +2594,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(inputs.tag, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [desktop]
+    needs: [desktop, publish_release]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -2986,7 +3057,7 @@ jobs:
         # `!cancelled()` so a failed gate still publishes the findings that failed it; `conclusion != 'skipped'` keeps this quiet when the scan never ran; `continue-on-error` keeps a repository without code scanning enabled from turning a green scan red on the upload alone.
         if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' && github.repository == 'librefang/librefang' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: ${{ runner.temp }}/trivy-reports/release-${{ matrix.slug }}.sarif
           # Per-architecture: code scanning replaces the previous results for a category, so a shared one would discard one of the two platforms.
@@ -3086,8 +3157,13 @@ jobs:
       - name: Deploy public demo
         # This job owns the intentionally unauthenticated official demo.
         # Keep that exception out of fly.toml so user deployments remain secure by default and must explicitly provision authentication.
+        # The image is pinned to the tag being released for the same reason the auth exception lives here: fly.toml is a file users copy, and a release-specific tag baked into it goes stale the moment the next release lands.
+        # `docker-manifest`, which this job needs, has just pushed both `:$VERSION` and `:latest`, so the tag is guaranteed to exist.
+        # `${RELEASE_TAG#v}` strips the `v` prefix to match `$VERSION` as pushed by `docker-manifest` — `RELEASE_TAG` itself (e.g. `v2026.7.31`) was never a tag pushed to the registry.
+        # `--image` means there is nothing to build, which is why `--remote-only` is gone rather than merely unused.
         run: >-
-          flyctl deploy --remote-only --config deploy/fly/fly.toml
+          flyctl deploy --config deploy/fly/fly.toml
+          --image "ghcr.io/librefang/librefang:${RELEASE_TAG#v}"
           --env LIBREFANG_ALLOW_NO_AUTH=1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

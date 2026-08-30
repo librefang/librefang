@@ -221,6 +221,13 @@ mod tests {
     }
 
     #[test]
+    fn goals_labels_preserve_significant_whitespace() {
+        init("en");
+        assert_eq!(t("tui-goals-judge-label"), "  Goal Judge: ");
+        assert_eq!(t("tui-goals-phase-label"), "  Run Phase: ");
+    }
+
+    #[test]
     fn falls_back_to_english_for_missing_locale_key() {
         let lang_id: LanguageIdentifier = "zh-CN".parse().expect("language id must parse");
         let mut localized_bundle = FluentBundle::new(vec![lang_id]);

@@ -99,6 +99,7 @@ result
 *.swo
 *~
 .gitnexus
+.todo_pak
 
 # graphify knowledge-graph output (local-only, regenerable).
 graphify-out/

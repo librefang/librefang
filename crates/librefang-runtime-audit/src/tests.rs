@@ -2419,3 +2419,85 @@ fn verify_integrity_accepts_legacy_hashed_entries() {
         "legacy-hashed entries must verify via the v1 fallback"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #7702: chain-break detection, boot recovery, and offline re-anchor
+// ---------------------------------------------------------------------------
+
+fn audit_schema_pool() -> Pool<SqliteConnectionManager> {
+    let pool = Pool::builder()
+        .max_size(1)
+        .build(SqliteConnectionManager::memory())
+        .unwrap();
+    pool.get()
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+    pool
+}
+
+fn corrupt_prev_hash(pool: &Pool<SqliteConnectionManager>, seq: u64, bogus_prev_hash: &str) {
+    pool.get()
+        .unwrap()
+        .execute(
+            "UPDATE audit_entries SET prev_hash = ?1 WHERE seq = ?2",
+            rusqlite::params![bogus_prev_hash, seq as i64],
+        )
+        .unwrap();
+}
+
+#[test]
+fn boot_detects_chain_break_reports_exact_seq_and_does_not_prevent_startup() {
+    let pool = audit_schema_pool();
+
+    {
+        let log = AuditLog::with_db(pool.clone());
+        for i in 0..5 {
+            log.record(
+                "agent-1",
+                AuditAction::ToolInvoke,
+                format!("action {i}"),
+                "ok",
+            );
+        }
+    }
+
+    let bogus = "f".repeat(64);
+    corrupt_prev_hash(&pool, 3, &bogus);
+
+    let log = AuditLog::with_db(pool.clone());
+    assert_eq!(log.len(), 5, "all rows must still load into memory");
+
+    let error = log
+        .verify_integrity()
+        .expect_err("a corrupted prev_hash must fail verification");
+    assert!(
+        error.contains("chain break at seq 3"),
+        "error must name the exact seq: {error}"
+    );
+    assert!(
+        error.contains(&bogus),
+        "error must include the actually-found prev_hash: {error}"
+    );
+
+    log.record(
+        "agent-1",
+        AuditAction::ToolInvoke,
+        "post-break append",
+        "ok",
+    );
+    assert_eq!(log.len(), 6);
+}

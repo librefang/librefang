@@ -745,11 +745,11 @@
       "schedule_periodic_desc": "agent uruchamia się zgodnie z wyrażeniem cron ustawionym w manifeście — edycja przez agent.toml",
       "schedule_proactive": "Proaktywny",
       "schedule_proactive_desc": "agent monitoruje warunki ustawione w manifeście — edycja przez agent.toml",
-      "schedule_manifest_only": "kontrolowany przez manifest",
       "switch_to_continuous": "Przełącz na ciągły",
       "switch_to_manual": "Przełącz na ręczny",
       "check_interval_secs": "Interwał sprawdzania (sekundy)",
       "schedule_invalid_interval": "Interwał musi być dodatnią liczbą całkowitą (sekundy)",
+      "proactive_conditions_required": "Podaj co najmniej jeden warunek, oddzielone przecinkami",
       "schedule_updated": "Zaktualizowano harmonogram",
       "cron_jobs": "Zadania cron",
       "add_cron": "Dodaj cron",
@@ -840,7 +840,10 @@
       "tools_reset_to_all": "Resetuj, aby używać wszystkich narzędzi",
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
-      "crashed_title": "{{name}} jest w stanie błędu"
+      "crashed_title": "{{name}} jest w stanie błędu",
+      "proactive_conditions": "Warunki (oddzielone przecinkami)",
+      "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",
+      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'"
     },
     "tab": {
       "conversation": "Rozmowa",
@@ -1074,6 +1077,7 @@
     "pending_tab": "Oczekujące",
     "install": "Zainstaluj",
     "installing": "Instalowanie...",
+    "viewOnMarketplace": "Zobacz w {{marketplace}}",
     "installed_count": "{{count}} zainstalowanych",
     "browse": "Przeglądaj",
     "browse_registry": "Rejestr",

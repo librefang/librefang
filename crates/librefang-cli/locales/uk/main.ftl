@@ -1132,6 +1132,13 @@ model-header-resolves-to = ВКАЗУЄ НА
 model-header-auth = АВТОРИЗАЦІЯ
 model-header-models = МОДЕЛІ
 model-header-base-url = БАЗОВИЙ URL
+model-overrides-cleared = Перевизначення для моделі { $model } очищено.
+model-overrides-clear-failed = Не вдалося очистити перевизначення для { $model }: { $status }
+model-overrides-header-field = ПОЛЕ
+model-overrides-header-value = ЗНАЧЕННЯ
+model-overrides-none-set = Для моделі { $model } не встановлено перевизначень.
+model-overrides-saved = Перевизначення для моделі { $model } збережено.
+model-overrides-save-failed = Не вдалося зберегти перевизначення для { $model }: { $status }
 model-picker-item =     { $idx }. { $id } { $tier }
 
 # Approvals command specific keys
@@ -1438,7 +1445,8 @@ tui-event-session-management-not-available-in-process = Управління с�
 tui-event-kv-save-failed = Не вдалося зберегти пару ключ-значення
 tui-event-kv-not-available-in-process = Memory KV недоступне в інпроцес-режимі
 tui-event-kv-delete-failed = Не вдалося видалити пару ключ-значення
-tui-event-skill-install-failed = Не вдалося встановити { $slug }
+tui-event-skill-install-http-fallback = HTTP { $status }
+tui-event-skill-install-failed-detail = Не вдалося встановити { $slug }: { $detail }
 tui-event-skill-install-not-available-in-process = Встановлення скілів недоступне в інпроцес-режимі
 tui-event-skill-uninstall-failed = Не вдалося видалити { $name }
 tui-event-skill-uninstall-not-available-in-process = Видалення скілів недоступне в інпроцес-режимі
@@ -2397,3 +2405,6 @@ tui-groups-header-description = ОПИС
 tui-groups-loading = Завантаження груп…
 tui-groups-empty = Груп не налаштовано. Створіть за допомогою `librefang group create <name>`.
 tui-groups-hints = ↑/↓ навігація · r оновити
+
+tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
+tui-goals-phase-label = { "  " }Фаза запуску:{ " " }

@@ -255,6 +255,52 @@ async fn test_get_agent_happy_path() {
 
 /// #6565: a consumer deciding whether an MCP server is reachable needs both halves of the kernel's gate (`!mcp_disabled && !mcp_servers.is_empty()`).
 /// `mcp_servers` / `mcp_servers_mode` were already emitted; `mcp_disabled` was not, so `mcp_servers = ["*"]` on a disabled agent looked like a live grant.
+/// `injected_footprint_tokens` is the static cost every request to this
+/// agent carries before a single user message — system prompt plus tool
+/// definitions. A longer system prompt must estimate to more tokens than a
+/// short one, and the value must not be a fixed placeholder.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_agent_reports_injected_footprint_tokens_from_system_prompt() {
+    let h = boot(TEST_TOKEN).await;
+    let short_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "footprint-short".to_string(),
+            ..AgentManifest::default()
+        })
+        .expect("spawn_agent");
+    let long_id = h
+        .state
+        .kernel
+        .spawn_agent_typed(AgentManifest {
+            name: "footprint-long".to_string(),
+            model: librefang_types::agent::ModelConfig {
+                system_prompt: "You are a helpful AI agent. ".repeat(200),
+                ..Default::default()
+            },
+            ..AgentManifest::default()
+        })
+        .expect("spawn_agent");
+
+    let (status, short_body) = send(h.app.clone(), get(&format!("/api/agents/{}", short_id))).await;
+    assert_eq!(status, StatusCode::OK);
+    let short_tokens = short_body["injected_footprint_tokens"]
+        .as_u64()
+        .expect("injected_footprint_tokens must be a number");
+    assert!(short_tokens > 0);
+
+    let (status, long_body) = send(h.app.clone(), get(&format!("/api/agents/{}", long_id))).await;
+    assert_eq!(status, StatusCode::OK);
+    let long_tokens = long_body["injected_footprint_tokens"]
+        .as_u64()
+        .expect("injected_footprint_tokens must be a number");
+    assert!(
+        long_tokens > short_tokens,
+        "a longer system prompt must estimate to more tokens: long={long_tokens} short={short_tokens}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_agent_exposes_the_full_mcp_grant_state_6565() {
     let h = boot(TEST_TOKEN).await;

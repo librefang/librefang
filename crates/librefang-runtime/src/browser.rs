@@ -1499,6 +1499,12 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
         return text.replace(/⟨(\d+)⟩/g, '($1)');
     }
 
+    // Read a language hint out of a `language-rust` / `lang-rust` class, so the reader knows what it is looking at.
+    function codeLanguage(cls) {
+        const m = /(?:language|lang)-([A-Za-z0-9+#-]+)/.exec(cls || '');
+        return m ? m[1] : '';
+    }
+
     const lines = [];
     // Parallel to `lines`: whether that line is a bullet a nested `li` already emitted.
     // A list item folds its children onto one line, and it has to fold only its *own* text — re-folding a sub-list's bullets would put their `- ` markers mid-sentence.
@@ -1522,6 +1528,15 @@ const EXTRACT_CONTENT_JS_TEMPLATE: &str = r#"(() => {
             const heading = lines.splice(start).join(' ').replace(/\s+/g, ' ').trim();
             isBullet.splice(start);
             if (heading) emit('\n' + level + ' ' + heading);
+            return;
+        }
+        if (tag === 'pre') {
+            // A listing is the one place where the whitespace *is* the content, so it is taken as text rather than walked.
+            // Descending would trim every line in the text-node branch above and fold the block into the prose around it, which is what a compiler diagnostic or a Python session loses first.
+            // The fence is emitted for any `pre`, not only `pre > code`: Python's documentation, the RFC series and diagnostics all mark listings up with no `code` element anywhere.
+            const lang = codeLanguage(node.className) || codeLanguage((node.querySelector('code') || {}).className);
+            const body = plain(node.textContent.replace(/^\n+/, '').replace(/\n+$/, ''));
+            if (body) emit('\n```' + lang + '\n' + body + '\n```\n');
             return;
         }
         if (tag === 'a' && node.href && node.textContent.trim()) {
@@ -1998,6 +2013,52 @@ mod tests {
                 .expect("extraction script must return encoded JSON"),
         )
         .expect("extraction result must remain valid JSON")
+    }
+
+    /// A listing reaches the model fenced, with its whitespace and its language.
+    ///
+    /// The walk had no `pre` branch at all, so a listing fell through to the text-node branch, which trims every line: 15 of 15 blocks on a Rust book chapter and 35 of 35 on a Python tutorial arrived as prose with their indentation gone.
+    /// The fence is emitted for any `pre`, so the two shapes that carry no `code` element — Python's highlighted spans and a plain RFC listing — are covered as well as a highlighted one.
+    #[tokio::test]
+    async fn live_extraction_fences_preformatted_blocks() {
+        let Some(session) = live_browser_session().await else {
+            return;
+        };
+
+        load_html_fixture(
+            &session,
+            r##"<!doctype html><html><head><title>listings</title></head><body><main><p>Before.</p><pre class="playground"><code class="language-rust">fn main() {
+    let x = 1;
+}</code></pre><p>Between.</p><pre><span class="gp">&gt;&gt;&gt; </span>len(x)
+3</pre><p>After.</p></main></body></html>"##,
+        )
+        .await;
+        let extracted = extract_fixture(&session, 10_000).await;
+        let content = extracted["content"].as_str().unwrap();
+
+        assert!(
+            content.contains("```rust"),
+            "a language hint on the inner code element must reach the fence: {content}"
+        );
+        assert!(
+            content.contains("    let x = 1;"),
+            "indentation is the content of a listing and must survive: {content}"
+        );
+        assert!(
+            content.contains(">>> len(x)"),
+            "a listing with no code element must be fenced too: {content}"
+        );
+        assert_eq!(
+            content.matches("```").count(),
+            4,
+            "each listing must open and close exactly once: {content}"
+        );
+        for prose in ["Before.", "Between.", "After."] {
+            assert!(
+                content.contains(prose),
+                "prose around a listing must survive: {prose} missing from {content}"
+            );
+        }
     }
 
     #[tokio::test]

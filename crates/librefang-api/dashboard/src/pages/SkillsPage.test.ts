@@ -7,6 +7,7 @@ import {
   isInstalledFromMarketplace,
   isCurrentSkillVersion,
   isRateLimitError,
+  marketplaceInstallKey,
   tryStartInstall,
 } from "./SkillsPage";
 
@@ -104,5 +105,21 @@ describe("SkillsPage marketplace state helpers", () => {
     expect(tryStartInstall(installing, "first")).toBe(true);
     expect(tryStartInstall(installing, "second")).toBe(false);
     expect(installing.current).toBe("first");
+  });
+
+  it("tells two hubs apart when they publish the same slug", () => {
+    // The browse list merges every hub into one grid, and the same slug on
+    // two of them is ordinary, not a corner case. Keyed by slug alone, the
+    // pending state matched both cards and the wrong one showed as busy.
+    expect(marketplaceInstallKey("clawhub", "prd")).not.toBe(
+      marketplaceInstallKey("fanghub", "prd"),
+    );
+  });
+
+  it("matches the identity the browse list already keys its cards by", () => {
+    // SkillsPage renders `key={`fanghub:${entry.name}`}`; the pending state has
+    // to agree with that or a card is busy according to one identity and idle
+    // according to the other.
+    expect(marketplaceInstallKey("fanghub", "prd")).toBe("fanghub:prd");
   });
 });

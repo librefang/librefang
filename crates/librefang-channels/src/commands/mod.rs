@@ -2,7 +2,8 @@
 //!
 //! Single source of truth for every `/cmd` LibreFang understands. Every
 //! consumer (channel bridge dispatch / `/help` text, Telegram BotCommands menu,
-//! TUI chat runner, future Dashboard command palette) derives from
+//! TUI chat runner, and the dashboard chat catalog served by
+//! `GET /api/commands`) derives from
 //! [`COMMAND_REGISTRY`] instead of maintaining its own copy.
 //!
 //! See `.plans/slash-command-registry.md` for the design rationale and
@@ -55,6 +56,26 @@ impl Category {
     }
 }
 
+/// How the dashboard chat runs a command that carries [`Scope::DASHBOARD`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardExec {
+    /// Resolved entirely inside the SPA — no round-trip to the daemon.
+    Client,
+    /// Dispatched over the chat WebSocket and answered by
+    /// `librefang_api::ws::handle_command`.
+    Backend,
+}
+
+impl DashboardExec {
+    /// Stable wire token used by `GET /api/commands`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Backend => "backend",
+        }
+    }
+}
+
 /// One sub-form of a multi-action command (e.g. `/trigger add …` vs
 /// `/trigger del …`). Renders as its own `/help` line.
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +110,13 @@ pub struct CommandDef {
     /// Whether to include this command in the Telegram BotCommands menu
     /// (the popup shown when the user types `/`). Telegram limits to 100.
     pub telegram_menu: bool,
+    /// How the dashboard chat executes this command.
+    ///
+    /// `None` means the command is listed in the `GET /api/commands` catalog
+    /// but is not offered in the chat slash menu, because no dashboard
+    /// execution path exists for it yet. Only meaningful together with
+    /// [`Scope::DASHBOARD`].
+    pub dashboard_exec: Option<DashboardExec>,
 }
 
 // Sub-command tables for multi-form commands.
@@ -138,6 +166,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "agent",
@@ -148,78 +177,95 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "<name>",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "new",
         aliases: &[],
         category: Category::Session,
-        // Also reachable from CLI/TUI chat surfaces; both reset the agent session the same way.
-        scope: Scope::CHANNEL.union(Scope::CLI),
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Reset session (clear messages)",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
+    },
+    CommandDef {
+        name: "reset",
+        aliases: &[],
+        category: Category::Session,
+        scope: Scope::DASHBOARD,
+        description: "Reset current session (clear history, same session id)",
+        args_hint: "",
+        subcommands: &[],
+        telegram_menu: false,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "reboot",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
         description: "Hard reset session (full context clear, no summary)",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "compact",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
         description: "Trigger LLM session compaction",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "model",
         aliases: &[],
         category: Category::Session,
-        // TUI uses /model for direct switch / picker; channels use it for show/switch.
-        scope: Scope::CHANNEL.union(Scope::CLI),
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Show or switch agent model",
         args_hint: "[name]",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "stop",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
         description: "Cancel current agent run",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "usage",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
         description: "Show session token usage and cost",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     CommandDef {
         name: "think",
         aliases: &[],
         category: Category::Session,
-        scope: Scope::CHANNEL,
+        scope: Scope::CHANNEL.union(Scope::DASHBOARD),
         description: "Toggle extended thinking",
         args_hint: "[on|off]",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
     // ---- Info ----
     CommandDef {
@@ -231,6 +277,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "providers",
@@ -241,6 +288,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "skills",
@@ -251,6 +299,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "hands",
@@ -261,17 +310,18 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "status",
         aliases: &[],
         category: Category::Info,
-        // Channels show system status; TUI shows connection / agent info.
-        scope: Scope::CHANNEL.union(Scope::CLI),
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Show system status",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     // ---- Automation ----
     CommandDef {
@@ -283,6 +333,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "workflow",
@@ -293,6 +344,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "run <name> [input]",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "triggers",
@@ -303,6 +355,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "trigger",
@@ -313,6 +366,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: TRIGGER_SUBCOMMANDS,
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "schedules",
@@ -323,6 +377,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "schedule",
@@ -333,6 +388,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: SCHEDULE_SUBCOMMANDS,
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "approvals",
@@ -343,6 +399,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "approve",
@@ -353,6 +410,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "<id>",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "reject",
@@ -363,6 +421,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "<id>",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     // ---- Monitoring ----
     CommandDef {
@@ -374,6 +433,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "peers",
@@ -384,6 +444,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "a2a",
@@ -394,6 +455,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     // ---- Misc (no header in /help) ----
     CommandDef {
@@ -405,6 +467,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "<question>",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "start",
@@ -415,27 +478,30 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "help",
         aliases: &[],
         category: Category::Misc,
-        scope: Scope::CHANNEL.union(Scope::CLI),
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
         description: "Show this help",
         args_hint: "",
         subcommands: &[],
         telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Client),
     },
     // ---- TUI-only control commands (Scope::CLI) ----
     CommandDef {
         name: "clear",
         aliases: &[],
         category: Category::Misc,
-        scope: Scope::CLI,
+        scope: Scope::CLI.union(Scope::DASHBOARD),
         description: "Clear chat history",
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: Some(DashboardExec::Client),
     },
     CommandDef {
         name: "kill",
@@ -446,18 +512,43 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: None,
     },
     CommandDef {
         name: "exit",
         aliases: &["quit"],
         category: Category::Misc,
-        scope: Scope::CLI,
+        scope: Scope::CLI.union(Scope::DASHBOARD),
         description: "End chat session",
         args_hint: "",
         subcommands: &[],
         telegram_menu: false,
+        dashboard_exec: Some(DashboardExec::Client),
+    },
+    // ---- Goal (automation, all surfaces) ----
+    CommandDef {
+        name: "goal",
+        aliases: &[],
+        category: Category::Automation,
+        scope: Scope::CHANNEL.union(Scope::CLI).union(Scope::DASHBOARD),
+        description: "Create an autonomous goal and start driving it",
+        args_hint: "<description> [--loop-engineering]",
+        subcommands: &[],
+        telegram_menu: true,
+        dashboard_exec: Some(DashboardExec::Backend),
     },
 ];
+
+impl CommandDef {
+    /// One-line usage hint, e.g. `Usage: /goal <description> [--loop-engineering]`.
+    pub fn usage(&self) -> String {
+        if self.args_hint.is_empty() {
+            format!("Usage: /{}", self.name)
+        } else {
+            format!("Usage: /{} {}", self.name, self.args_hint)
+        }
+    }
+}
 
 /// Look up a command by its bare name or any alias. The leading `/` is
 /// optional and stripped if present.
@@ -664,6 +755,7 @@ mod tests {
             "budget",
             "peers",
             "a2a",
+            "goal",
         ];
 
         let actual: std::collections::BTreeSet<&str> =

@@ -440,6 +440,16 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Workflows not available.".to_string()
     }
 
+    /// Create an autonomous goal and start driving it with the given agent.
+    async fn create_and_start_goal(
+        &self,
+        _agent_id: AgentId,
+        _description: &str,
+        _loop_engineering: bool,
+    ) -> Result<String, String> {
+        Err("Goals not available.".to_string())
+    }
+
     /// List all registered triggers as formatted text.
     async fn list_triggers_text(&self) -> String {
         "Triggers not available.".to_string()
@@ -7303,6 +7313,23 @@ async fn handle_command(
                 "Usage: /workflow run <name> [input]".to_string()
             }
         }
+        "goal" => {
+            let usage = || {
+                crate::commands::lookup("goal")
+                    .map(|def| def.usage())
+                    .unwrap_or_default()
+            };
+            match librefang_types::goal::parse_goal_args(&args.join(" ")) {
+                None => usage(),
+                Some((description, loop_engineering)) => match resolve_for_command() {
+                    Some(aid) => handle
+                        .create_and_start_goal(aid, &description, loop_engineering)
+                        .await
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    None => "No agent selected. Use /agent <name> first.".to_string(),
+                },
+            }
+        }
         "triggers" => handle.list_triggers_text().await,
         "trigger" => {
             if args.len() >= 4 && args[0] == "add" {
@@ -8310,6 +8337,54 @@ mod tests {
         )
         .await;
         assert!(result.contains("/agents"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_goal_is_dispatched() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let usage = handle_command(
+            "goal",
+            &[],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            usage.contains("Usage: /goal"),
+            "expected the /goal usage string, got: {usage}"
+        );
+
+        let dispatched = handle_command(
+            "goal",
+            &["ship".to_string(), "the report".to_string()],
+            &handle,
+            &router,
+            &sender,
+            &ChannelType::CLI,
+            None,
+            None,
+            &sender.platform_id,
+        )
+        .await;
+        assert!(
+            !dispatched.contains("Unknown command"),
+            "/goal fell through to the unknown-command arm: {dispatched}"
+        );
     }
 
     #[tokio::test]

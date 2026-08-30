@@ -122,6 +122,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
@@ -188,6 +192,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       - name: Install cross
@@ -307,6 +315,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
@@ -358,6 +370,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
@@ -431,6 +447,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-${{ matrix.target }}-${{ inputs.tag }}
@@ -487,6 +507,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
@@ -539,6 +563,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
+
+      # The pinned toolchain needs the target too — see the note in release.yml's `cli_mac` job.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}

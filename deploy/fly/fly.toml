@@ -2,7 +2,9 @@ app = "librefang"
 primary_region = "nrt"
 
 [build]
-image = "ghcr.io/librefang/librefang:v2026.7.31"
+# `:latest` rather than a pinned release, because a pinned one rots: this line sat at v2026.7.31 until that image was gone from ghcr.io and the demo deploy failed with "Could not find image".
+# The release workflow passes `--image` with the exact tag it just pushed, so the official demo is still deployed deterministically; this value is what a user copying the file gets.
+image = "ghcr.io/librefang/librefang:latest"
 
 [env]
   LIBREFANG_HOME = "/data"

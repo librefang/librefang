@@ -745,11 +745,11 @@
       "schedule_periodic_desc": "Agent 根据 manifest 中的 cron 表达式触发 — 请编辑 agent.toml",
       "schedule_proactive": "主动监听",
       "schedule_proactive_desc": "Agent 监控 manifest 中配置的条件 — 请编辑 agent.toml",
-      "schedule_manifest_only": "由 manifest 控制",
       "switch_to_continuous": "切换为持续运行",
       "switch_to_manual": "切换为手动",
       "check_interval_secs": "检查间隔（秒）",
       "schedule_invalid_interval": "间隔必须是正整数（秒）",
+      "proactive_conditions_required": "请输入至少一个条件，以逗号分隔",
       "schedule_updated": "调度已更新",
       "cron_jobs": "定时任务",
       "add_cron": "新增定时",
@@ -840,7 +840,10 @@
       "tools_reset_to_all": "重置为使用所有工具",
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
-      "crashed_title": "{{name}} 处于错误状态"
+      "crashed_title": "{{name}} 处于错误状态",
+      "proactive_conditions": "条件（逗号分隔）",
+      "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",
+      "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'"
     },
     "tab": {
       "conversation": "对话",
@@ -1074,6 +1077,7 @@
     "pending_tab": "待审",
     "install": "安装",
     "installing": "安装中...",
+    "viewOnMarketplace": "在 {{marketplace}} 上查看",
     "installed_count": "已安装 {{count}} 个",
     "browse": "浏览",
     "browse_registry": "注册表",

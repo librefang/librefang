@@ -245,23 +245,45 @@ fn fanout_registry_content(home_dir: &Path, registry_cache: &Path) {
         }
     }
 
-    // Pre-install agent templates from registry (e.g. hello-world).
-    // The lookup goes through the shared resolver so a checkout without the directory is reported at error level rather than skipping this whole block in silence (#7767).
-    if let Some(agents_src) =
-        librefang_types::registry_paths::resolve_agent_templates_dir(registry_cache)
+    // Pre-install agent types from registry (e.g. hello-world) into this
+    // installation's canonical agent-types store — NOT
+    // `workspaces/agents/` (that's where DEPLOYED agent instances live;
+    // dumping registry content there used to manufacture dozens of agents
+    // the operator never asked to run) and NOT `templates/` (unrelated
+    // starter-TOML scaffolding for a different domain, #7758).
+    // `resolve_agent_types_dir` prefers the registry's canonical `agent-types/`
+    // directory name, falls back to the legacy `agents/` name with a warning,
+    // and errors loudly (instead of silently skipping this whole block) when
+    // neither is present — see its doc comment for why that distinction
+    // matters (a renamed registry must never look like an empty one).
+    //
+    // The registry ships each agent type as its own directory
+    // (`agent-types/<name>/agent.toml`), mirroring a deployed agent's own
+    // workspace layout. This installation's agent-types store is flat
+    // (`agent-types/<name>.toml`) so this fan-out, the CRUD API
+    // (`agent_templates.rs`), the ephemeral/persistent spawn resolvers, and
+    // the CLI all read/write the exact same shape — flatten on copy rather
+    // than mirroring the registry's directory-per-type layout.
+    if let Some(agent_types_src) =
+        librefang_types::registry_paths::resolve_agent_types_dir(registry_cache)
     {
-        let agents_dest = home_dir.join("workspaces").join("agents");
-        if let Ok(entries) = std::fs::read_dir(&agents_src) {
+        let agent_types_dest = librefang_types::registry_paths::installed_agent_types_dir(home_dir);
+        if let Ok(entries) = std::fs::read_dir(&agent_types_src) {
             for entry in entries.flatten() {
                 let src = entry.path();
-                if !src.is_dir() || !src.join("agent.toml").exists() {
+                let manifest_src = src.join("agent.toml");
+                if !src.is_dir() || !manifest_src.exists() {
                     continue;
                 }
-                let name = src.file_name().unwrap_or_default();
-                let dest = agents_dest.join(name);
+                let name = src
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let dest = agent_types_dest.join(format!("{name}.toml"));
                 if !dest.exists() {
-                    let _ = std::fs::create_dir_all(&dest);
-                    let _ = copy_dir_recursive(&src, &dest);
+                    let _ = std::fs::create_dir_all(&agent_types_dest);
+                    let _ = std::fs::copy(&manifest_src, &dest);
                 }
             }
         }
@@ -904,7 +926,13 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// The fan-out must reach the agent-template pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
+    /// The fan-out must reach the agent-type pre-install through the shared resolver, not its own `join("agents")`, so a missing directory is reported once rather than skipping the block in silence (#7767).
+    ///
+    /// The fixture uses the registry's *legacy* `agents/` directory name on purpose: that is the case an ad-hoc `join("agent-types")` would silently drop, so resolving it is what proves the shared resolver — and its legacy fallback — is on the path.
+    ///
+    /// The destination is the installed agent-types store, not `workspaces/agents/`.
+    /// #7758 moved it there: the old destination is where *deployed* agent instances live, and pre-installing registry content into it manufactured dozens of agents the operator never asked to run.
+    /// `fanout_registry_content_never_touches_deployed_agents` guards that half; this test guards that the content still lands somewhere.
     #[test]
     fn fanout_agent_templates_goes_through_the_shared_resolver() {
         let tmp = tempfile::tempdir().unwrap();
@@ -923,13 +951,15 @@ mod tests {
         fanout_registry_content(&home_dir, &registry_cache);
 
         assert!(
-            home_dir
-                .join("workspaces")
-                .join("agents")
-                .join("hello-world")
-                .join("agent.toml")
+            librefang_types::registry_paths::installed_agent_types_dir(&home_dir)
+                .join("hello-world.toml")
                 .exists(),
-            "a resolved agents directory pre-installs its templates",
+            "a resolved agents directory pre-installs its types into the canonical store, \
+             flattened to `<name>.toml`",
+        );
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "and never into `workspaces/agents/`, which holds deployed instances (#7758)",
         );
     }
 
@@ -948,8 +978,17 @@ mod tests {
 
         fanout_registry_content(&home_dir, &registry_cache);
 
+        // Asserted against the store the fan-out actually writes to (#7758).
+        // Pointing this at `workspaces/agents/` instead would hold whatever the
+        // fan-out did, since nothing writes there any more.
+        let agent_types_dest =
+            librefang_types::registry_paths::installed_agent_types_dir(&home_dir);
         assert!(
-            !home_dir.join("workspaces").join("agents").exists(),
+            !agent_types_dest.exists()
+                || std::fs::read_dir(&agent_types_dest)
+                    .unwrap()
+                    .next()
+                    .is_none(),
             "nothing is pre-installed when the directory cannot be resolved",
         );
     }
@@ -1493,5 +1532,131 @@ mod tests {
             "id=\"groq\"\nversion=\"1.0.0\"",
         );
         assert!(extract_root.join("hands/clip/HAND.toml").exists());
+    }
+
+    // ---- agent-types/ vs legacy agents/ rename compatibility ----------
+
+    /// Write a minimal agent template `{registry_cache}/{dir_name}/{template}/agent.toml`
+    /// so `fanout_registry_content`'s agent-templates block has something to
+    /// fan out. `marker` is embedded in the manifest so a test can tell which
+    /// of two candidate directories actually got copied.
+    fn write_fixture_agent_template(
+        registry_cache: &Path,
+        dir_name: &str,
+        template: &str,
+        marker: &str,
+    ) {
+        let dir = registry_cache.join(dir_name).join(template);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!(
+                "name = \"{template}\"\ndescription = \"{marker}\"\nmodule = \"builtin:chat\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Registry cache with only the legacy `agents/` directory: the fan-out
+    /// must still resolve it and install the type — flattened into
+    /// `agent-types/<name>.toml`, NOT `workspaces/agents/<name>/agent.toml`
+    /// (that directory holds deployed agent instances, not types).
+    #[test]
+    fn fanout_agent_templates_resolves_legacy_agents_dir_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = tmp.path().join("registry_cache");
+        write_fixture_agent_template(&registry_cache, "agents", "hello-world", "legacy");
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        let installed = home_dir.join("agent-types").join("hello-world.toml");
+        assert!(
+            installed.exists(),
+            "legacy-only registry must still install its agent types"
+        );
+        assert!(std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("legacy"));
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "the fan-out must never create anything under workspaces/agents/"
+        );
+    }
+
+    /// Registry cache with only the canonical `agent-types/` directory: the
+    /// fan-out must resolve it the same way, with no legacy fallback involved.
+    #[test]
+    fn fanout_agent_templates_resolves_agent_types_dir_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = tmp.path().join("registry_cache");
+        write_fixture_agent_template(&registry_cache, "agent-types", "hello-world", "canonical");
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        let installed = home_dir.join("agent-types").join("hello-world.toml");
+        assert!(
+            installed.exists(),
+            "canonical-only registry must install its agent types"
+        );
+        assert!(std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("canonical"));
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "the fan-out must never create anything under workspaces/agents/"
+        );
+    }
+
+    /// Registry cache shipping both directories (transitional upstream state):
+    /// the canonical `agent-types/` content must win.
+    #[test]
+    fn fanout_agent_templates_prefers_agent_types_when_both_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = tmp.path().join("registry_cache");
+        write_fixture_agent_template(&registry_cache, "agents", "hello-world", "legacy");
+        write_fixture_agent_template(&registry_cache, "agent-types", "hello-world", "canonical");
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        let installed = home_dir.join("agent-types").join("hello-world.toml");
+        assert!(installed.exists());
+        assert!(
+            std::fs::read_to_string(&installed)
+                .unwrap()
+                .contains("canonical"),
+            "canonical agent-types/ content must win when both directories exist"
+        );
+    }
+
+    /// Registry cache with neither directory: the fan-out must not install
+    /// anything and must not panic — the loud error is asserted separately in
+    /// `librefang_types::registry_paths`'s own unit tests, which capture the
+    /// log output directly.
+    #[test]
+    fn fanout_agent_templates_neither_dir_is_a_safe_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("home");
+        let registry_cache = tmp.path().join("registry_cache");
+        std::fs::create_dir_all(&registry_cache).unwrap();
+
+        fanout_registry_content(&home_dir, &registry_cache);
+
+        let agent_types_dest =
+            librefang_types::registry_paths::installed_agent_types_dir(&home_dir);
+        assert!(
+            !agent_types_dest.exists()
+                || std::fs::read_dir(&agent_types_dest)
+                    .unwrap()
+                    .next()
+                    .is_none(),
+            "neither directory present must not install anything"
+        );
+        assert!(
+            !home_dir.join("workspaces").join("agents").exists(),
+            "and must not create the old destination either"
+        );
     }
 }
