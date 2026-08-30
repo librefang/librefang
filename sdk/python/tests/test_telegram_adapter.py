@@ -1074,6 +1074,24 @@ _BTN = ('<tg-button type="callback_data" data="wipe">Tap'
         '</tg-button>')
 
 
+def _every_less_than_is_escaped(out):
+    """The guarantee as a predicate: every `<` is preceded by an *odd* run of
+    backslashes. "There is a backslash before it" is a different, weaker
+    property — `\\<` satisfies it and is a bare `<` to the parser, which is
+    how a leak once passed two tests named for the guarantee."""
+    for idx, ch in enumerate(out):
+        if ch != "<":
+            continue
+        run = 0
+        k = idx - 1
+        while k >= 0 and out[k] == "\\":
+            run += 1
+            k -= 1
+        if run % 2 != 1:
+            return False
+    return True
+
+
 def test_rich_sanitizer_no_raw_html_survives_any_context():
     """The guarantee: no `<` survives, so no raw HTML can reach Telegram.
     These are the inputs five rounds of review found against the earlier
@@ -1089,10 +1107,8 @@ def test_rich_sanitizer_no_raw_html_survives_any_context():
                     '<b a="1"b="%s">' % _BTN,
                     '<a title="`" href="https://ok">t</a> %s' % _BTN):
         out = tg.sanitize_rich_markdown(context)
-        for idx, ch in enumerate(out):
-            if ch == "<":
-                assert idx > 0 and out[idx - 1] == "\\", (
-                    "unescaped < survived: %s" % out)
+        assert _every_less_than_is_escaped(out), (
+            "unescaped < survived: %s" % out)
 
 
 def test_rich_sanitizer_backslash_before_a_tag_cannot_cancel_escape():
@@ -1102,15 +1118,8 @@ def test_rich_sanitizer_backslash_before_a_tag_cannot_cancel_escape():
     escape cancels itself out and the tag goes live."""
     for prefix in ("\\", "\\\\", "\\\\\\", "text \\"):
         out = tg.sanitize_rich_markdown(prefix + _BTN)
-        for idx, ch in enumerate(out):
-            if ch == "<":
-                run = 0
-                k = idx - 1
-                while k >= 0 and out[k] == "\\":
-                    run += 1
-                    k -= 1
-                assert run % 2 == 1, (
-                    "prefix %r left an unescaped <: %s" % (prefix, out))
+        assert _every_less_than_is_escaped(out), (
+            "prefix %r left an unescaped <: %s" % (prefix, out))
 
 
 def test_rich_sanitizer_markdown_formatting_is_untouched():
@@ -1229,15 +1238,69 @@ def test_rich_sanitizer_control_filter_covers_the_c1_range():
     assert not tg._scheme_is_allowed("java" + chr(0x80) + "script:alert(1)")
 
 
+def test_escape_predicate_rejects_an_even_run_of_backslashes():
+    """Pin the helper itself: without this, weakening it to "a backslash is
+    present" is invisible, because no sanitiser output contains `\\<`."""
+    assert _every_less_than_is_escaped("a \\<tg-button")
+    assert _every_less_than_is_escaped("a \\\\\\<tg-button")
+    assert not _every_less_than_is_escaped("a <tg-button")
+    # The shape that once passed two tests named for the guarantee.
+    assert not _every_less_than_is_escaped("a \\\\<tg-button")
+
+
+def test_rich_sanitizer_budget_survives_a_full_size_ordinary_message():
+    """The budget's magnitude matters, not just its existence: shrinking it to
+    the floor would take the scheme check dark on ordinary messages, and both
+    mutations used to pass the whole suite."""
+    label = "a descriptive link text of the sort a model actually writes"
+    body = ""
+    while len(body) < 32000:
+        body += ("Prose. [%s](https://example.com/page) more.\n\n" % label)
+    assert tg.sanitize_rich_markdown(body) == body
+    out = tg.sanitize_rich_markdown(body + "[x](javascript:alert(1))")
+    assert out.endswith("\\[x](javascript:alert(1))"), (
+        "budget ran out before the end of an ordinary message")
+
+
+def test_rich_sanitizer_documented_escape_hatches():
+    """The two known holes in the best-effort scheme check, pinned so they
+    cannot change silently. Neither touches the HTML guarantee."""
+    long_label = "[" + "y" * 1000 + "](javascript:alert(1))"
+    assert tg.sanitize_rich_markdown(long_label) == long_label
+    prefix = ("[" * 998 + "]") * 1025
+    src = prefix + "\n\n[x](javascript:alert(1))"
+    out = tg.sanitize_rich_markdown(src)
+    assert out.endswith("[x](javascript:alert(1))")
+    for source in (long_label, src):
+        assert _every_less_than_is_escaped(
+            tg.sanitize_rich_markdown(source))
+
+
+@pytest.mark.asyncio
+async def test_stream_buffer_cap_drops_the_stream(monkeypatch):
+    """Mirrors the Rust adapter's MAX_STREAM_BUFFER_BYTES. The cap counts
+    bytes, so a multibyte stream must not be allowed several times over."""
+    monkeypatch.setattr(tg, "MAX_STREAM_BUFFER_BYTES", 64)
+    monkeypatch.setattr(tg.TelegramAdapter, "_call",
+                        lambda self, m, p: {"ok": True,
+                                            "result": {"message_id": 1}})
+    a = _adapter()
+    await a.on_command(tg.protocol.StreamStart("c1", "big"))
+    await a.on_command(tg.protocol.StreamDelta("big", "x" * 40))
+    assert "big" in a._streams
+    # 40 multibyte characters are 120 bytes, past the cap even though
+    # len() on the string would say otherwise.
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 40))
+    assert "big" not in a._streams, "stream was not dropped at the cap"
+
+
 def test_rich_sanitizer_multibyte_and_edge_inputs():
     out = tg.sanitize_rich_markdown(
         "таблица — да, \U0001F389 <tg-button>нет</tg-button>")
     assert "таблица — да" in out
     assert "\U0001F389" in out
     assert "\\<tg-button" in out
-    for idx, ch in enumerate(out):
-        if ch == "<":
-            assert out[idx - 1] == "\\"
+    assert _every_less_than_is_escaped(out)
     for src in ("", " ", "<", "[", "![", "\\", "`", "\ufeff", "\r", "&#"):
         tg.sanitize_rich_markdown(src)
 

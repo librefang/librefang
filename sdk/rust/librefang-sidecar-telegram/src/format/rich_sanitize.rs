@@ -28,8 +28,12 @@
 //!
 //! The general rule, from the wider Markdown/HTML sanitiser world, is that you cannot
 //! decide what a parser will do without being that parser — anything less is an
-//! illusion of security. So this pass no longer tries. Every `<` becomes `&lt;`,
-//! unconditionally, with no attempt to find code spans, fences or well-formed tags.
+//! illusion of security. So this pass no longer tries. Every `<` is backslash-escaped,
+//! unconditionally, with no attempt to find code spans, fences or well-formed tags. A
+//! literal backslash is doubled first, because otherwise an input already carrying one
+//! before a `<` would leave as `\\<` — an escaped backslash and then a *bare* `<`. The
+//! spec warns about exactly this: "'\' character usually must be escaped with a
+//! preceding '\' character".
 //!
 //! What that guarantees, and what it costs:
 //!
@@ -53,6 +57,17 @@
 //! check is **best-effort**, not a guarantee: locating a Markdown link exactly has the
 //! same problem as everything above. It is defence in depth. The property this module
 //! actually promises is the HTML one.
+//!
+//! Two escape hatches are known and deliberately left open, because closing either means
+//! going back to reimplementing the parser:
+//!
+//! * A link label longer than [`MAX_LINK_LABEL`] is not scanned, so
+//!   `[<1000 chars>](javascript:…)` is not scheme-checked. CommonMark caps *reference*
+//!   labels at 999 characters but places no cap on inline link text.
+//! * The scanner works to a per-message budget, so a prefix crafted to spend it — around
+//!   a kilobyte of `("[" * 998 + "]")` — turns the check off for the rest of the message.
+//!
+//! Both leave the HTML guarantee untouched; only the scheme check goes dark.
 
 use std::ops::Range;
 
@@ -80,6 +95,15 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
     // is spent no further link is scheme-checked, which only weakens a check already
     // documented as best-effort.
     let mut budget = input.len().saturating_mul(2).max(MAX_LINK_LABEL * 16);
+    // Monotone cursor to the next `]`. A `[` with no `]` within the widest window a
+    // label could span is not a label at all, and the cursor proves that in amortised
+    // O(1) instead of a fresh scan per bracket. It also matches the Python port's
+    // `str.find` shortcut, so the two agree on when a label scan happens at all.
+    //
+    // It does not rescue the budget from a bracket run placed just before a link: those
+    // brackets do see a `]` in range and scan for real. That is the documented
+    // budget-exhaustion escape hatch above, not something this cursor closes.
+    let mut next_close = 0usize;
 
     while i < bytes.len() {
         match bytes[i] {
@@ -114,9 +138,15 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
             // and the reference definition `[label]: destination`, which supplies the
             // destination for a `[x][label]` elsewhere in the message.
             b'[' => {
-                let disallowed = link_destination_at(bytes, i, &mut budget)
-                    .or_else(|| reference_definition_at(bytes, i, &mut budget))
-                    .is_some_and(|dest| !scheme_is_allowed(&input[dest]));
+                // In bytes, so it must allow for the widest characters a label of
+                // `MAX_LINK_LABEL` escape pairs could be made of.
+                let window = i.saturating_add(4 * (2 * MAX_LINK_LABEL + 2));
+                let has_close = next_close_at(bytes, i + 1, &mut next_close)
+                    .is_some_and(|close| close <= window);
+                let disallowed = has_close
+                    && link_destination_at(bytes, i, &mut budget)
+                        .or_else(|| reference_definition_at(bytes, i, &mut budget))
+                        .is_some_and(|dest| !scheme_is_allowed(&input[dest]));
                 out.push_str(if disallowed { "\\[" } else { "[" });
                 i += 1;
             }
@@ -282,12 +312,6 @@ fn link_destination_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Ran
 /// Byte range of the destination in a link reference definition `[label]: destination`
 /// starting at `i`. `None` when this is not a definition.
 fn reference_definition_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Range<usize>> {
-    // `[^id]: text` is a footnote definition, not a link reference. Reading it as one
-    // meant any footnote whose text opens `Word: …` was taken to carry a `word:` scheme
-    // and got escaped, which put a stray backslash in the user's message.
-    if bytes.get(i + 1) == Some(&b'^') {
-        return None;
-    }
     let label_end = link_label_end(bytes, i, budget)?;
     if bytes.get(label_end + 1) != Some(&b':') {
         return None;
@@ -304,7 +328,40 @@ fn reference_definition_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option
     if bytes.get(end) == Some(&b'>') {
         end += 1;
     }
-    (end > start).then_some(start..end)
+    if end == start {
+        return None;
+    }
+    // CommonMark allows only an optional title after the destination, and nothing else
+    // on the line. Skipping this check treated `[^id]: Warning: do not do this.` as a
+    // definition carrying a `warning:` scheme, and escaped a footnote that is not a link
+    // at all. Guarding on the `^` instead would have been a guess about what the parser
+    // does with `[^…]` — and it opened a bypass, since `^` is legal in a link label and
+    // `[y][^x]` + `[^x]: javascript:…` really does resolve.
+    let mut k = skip_ascii_whitespace_inline(bytes, end);
+    if let Some(&quote @ (b'"' | b'\'' | b'(')) = bytes.get(k) {
+        let closer = if quote == b'(' { b')' } else { quote };
+        k += 1;
+        while bytes.get(k).is_some_and(|&c| c != closer && c != b'\n') {
+            k += 1;
+        }
+        if bytes.get(k) != Some(&closer) {
+            return None;
+        }
+        k = skip_ascii_whitespace_inline(bytes, k + 1);
+    }
+    match bytes.get(k) {
+        None | Some(b'\n') | Some(b'\r') => Some(start..end),
+        _ => None,
+    }
+}
+
+/// Skip spaces and tabs, but not line breaks — a reference definition's title and
+/// terminator must sit on the same line as the destination.
+fn skip_ascii_whitespace_inline(bytes: &[u8], mut k: usize) -> usize {
+    while bytes.get(k).is_some_and(|c| matches!(c, b' ' | b'\t')) {
+        k += 1;
+    }
+    k
 }
 
 /// Index of the `]` closing the link label opening at `i`, honouring balanced brackets
@@ -342,6 +399,18 @@ fn link_label_end(bytes: &[u8], i: usize, budget: &mut usize) -> Option<usize> {
     None
 }
 
+/// Index of the next `]` at or after `from`, using a cursor that never moves backwards.
+/// Amortised O(1) per call across a whole message.
+fn next_close_at(bytes: &[u8], from: usize, cursor: &mut usize) -> Option<usize> {
+    if *cursor < from {
+        *cursor = from;
+    }
+    while bytes.get(*cursor).is_some_and(|&c| c != b']') {
+        *cursor += 1;
+    }
+    (*cursor < bytes.len()).then_some(*cursor)
+}
+
 fn skip_ascii_whitespace(bytes: &[u8], mut k: usize) -> usize {
     while bytes.get(k).is_some_and(u8::is_ascii_whitespace) {
         k += 1;
@@ -353,6 +422,32 @@ fn skip_ascii_whitespace(bytes: &[u8], mut k: usize) -> usize {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// The guarantee, as a predicate: every `<` in the output is preceded by an **odd**
+    /// run of backslashes, so Markdown reads it as escaped. Asserting merely "there is a
+    /// backslash before it" is not the same property — `\\<` satisfies that and is a bare
+    /// `<` to the parser, which is how a leak passed two tests named for the guarantee.
+    fn every_less_than_is_escaped(out: &str) -> bool {
+        out.match_indices('<').all(|(idx, _)| {
+            out.as_bytes()[..idx]
+                .iter()
+                .rev()
+                .take_while(|&&c| c == b'\\')
+                .count()
+                % 2
+                == 1
+        })
+    }
+
+    #[test]
+    fn the_escape_predicate_rejects_an_even_run_of_backslashes() {
+        assert!(every_less_than_is_escaped("a \\<tg-button"));
+        assert!(every_less_than_is_escaped("a \\\\\\<tg-button"));
+        assert!(!every_less_than_is_escaped("a <tg-button"));
+        // The shape that once passed two tests named for the guarantee: an even run
+        // leaves the `<` bare as far as Markdown is concerned.
+        assert!(!every_less_than_is_escaped("a \\\\<tg-button"));
+    }
 
     const BUTTON: &str = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
 
@@ -374,12 +469,10 @@ mod tests {
             format!("<a title=\"`\" href=\"https://ok\">t</a> {BUTTON}"),
         ] {
             let out = sanitize_rich_markdown(&context);
-            for (idx, _) in out.match_indices('<') {
-                assert!(
-                    idx > 0 && out.as_bytes()[idx - 1] == b'\\',
-                    "unescaped `<` survived: {out}"
-                );
-            }
+            assert!(
+                every_less_than_is_escaped(&out),
+                "unescaped `<` survived: {out}"
+            );
         }
     }
 
@@ -392,17 +485,10 @@ mod tests {
         for prefix in ["\\", "\\\\", "\\\\\\", "text \\"] {
             let input = format!("{prefix}{BUTTON}");
             let out = sanitize_rich_markdown(&input);
-            for (idx, _) in out.match_indices('<') {
-                let preceding = out.as_bytes()[..idx]
-                    .iter()
-                    .rev()
-                    .take_while(|&&c| c == b'\\')
-                    .count();
-                assert!(
-                    preceding % 2 == 1,
-                    "prefix {prefix:?} left an unescaped `<`: {out}"
-                );
-            }
+            assert!(
+                every_less_than_is_escaped(&out),
+                "prefix {prefix:?} left an unescaped `<`: {out}"
+            );
         }
     }
 
@@ -557,6 +643,47 @@ mod tests {
         }
     }
 
+    /// The budget's *magnitude* matters, not just its existence: shrinking it to the
+    /// floor would take the scheme check dark on ordinary messages, and both mutations
+    /// used to pass the whole suite. A 32 K message of ordinary prose and links must
+    /// still be checked end to end.
+    #[test]
+    fn budget_survives_a_full_size_ordinary_message() {
+        let label = "a descriptive link text of the sort a model actually writes";
+        let mut body = String::new();
+        while body.len() < 32_000 {
+            body.push_str(&format!(
+                "Prose. [{label}](https://example.com/page) more.\n\n"
+            ));
+        }
+        assert_eq!(sanitize_rich_markdown(&body), body);
+        // The last link in a full-size message is still scheme-checked.
+        let with_payload = format!("{body}[x](javascript:alert(1))");
+        assert!(
+            sanitize_rich_markdown(&with_payload).ends_with("\\[x](javascript:alert(1))"),
+            "budget ran out before the end of an ordinary message"
+        );
+    }
+
+    /// The two known escape hatches, pinned so they cannot change silently — they are
+    /// documented in the module comment, and a test that says so is cheaper than
+    /// rediscovering them.
+    #[test]
+    fn documented_scheme_check_escape_hatches_behave_as_documented() {
+        // A label past the cap is not scanned.
+        let long = format!("[{}](javascript:alert(1))", "y".repeat(1000));
+        assert_eq!(sanitize_rich_markdown(&long), long);
+        // A budget-exhausting prefix turns the check off for the rest.
+        let prefix = ("[".repeat(998) + "]").repeat(1025);
+        let input = format!("{prefix}\n\n[x](javascript:alert(1))");
+        let out = sanitize_rich_markdown(&input);
+        assert!(out.ends_with("[x](javascript:alert(1))"));
+        // Neither touches the HTML guarantee.
+        for source in [&long, &input] {
+            assert!(every_less_than_is_escaped(&sanitize_rich_markdown(source)));
+        }
+    }
+
     #[test]
     fn multibyte_text_is_preserved() {
         let s = "таблица — да, 🎉 <tg-button>нет</tg-button>";
@@ -564,10 +691,7 @@ mod tests {
         assert!(out.contains("таблица — да"));
         assert!(out.contains('🎉'));
         assert!(out.contains("\\<tg-button"));
-        // Every `<` in the output is backslash-escaped; none can open a tag.
-        assert!(out
-            .match_indices('<')
-            .all(|(idx, _)| idx > 0 && out.as_bytes()[idx - 1] == b'\\'));
+        assert!(every_less_than_is_escaped(&out));
     }
 
     #[test]

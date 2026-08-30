@@ -778,20 +778,26 @@ def _link_label_end(s: str, i: int, budget: list):
     message: a per-label window alone is not enough, because
     ``("[" * 998 + "]") * n`` lets the scan succeed far enough to be re-run for
     every `[`."""
-    limit = min(i + _MAX_LINK_LABEL + 1, len(s) - 1)
-    # Fast reject: without a `]` in range there is no label. `find` does that
-    # check at C speed, which keeps a run of unmatched brackets cheap.
-    if s.find("]", i + 1, limit + 1) == -1:
+    # Fast reject: without a `]` within the widest window a label could span
+    # there is no label. `find` does that at C speed, which keeps a run of
+    # unmatched brackets cheap. A backslash escape consumes two characters for
+    # one label character, so the window is twice the cap.
+    if s.find("]", i + 1, i + 2 * _MAX_LINK_LABEL + 2) == -1:
         return None
     depth = 0
     j = i
-    while j <= limit:
+    chars = 0
+    n = len(s)
+    # The bound counts label *characters*, matching Rust: an escape pair is one
+    # character, so an index-based bound diverged on labels full of `\x`.
+    while j < n and chars <= _MAX_LINK_LABEL + 1:
         if budget[0] <= 0:
             return None
         budget[0] -= 1
         ch = s[j]
         if ch == "\\":
             j += 2
+            chars += 1
             continue
         if ch == "[":
             depth += 1
@@ -800,6 +806,7 @@ def _link_label_end(s: str, i: int, budget: list):
             if depth == 0:
                 return j
         j += 1
+        chars += 1
     return None
 
 
@@ -849,12 +856,6 @@ def _reference_definition_at(s: str, i: int, budget: list):
     """Destination of a link reference definition ``[label]: destination``
     starting at `i`, or None when this is not a definition."""
     n = len(s)
-    # `[^id]: text` is a footnote definition, not a link reference. Reading it
-    # as one meant any footnote whose text opens `Word: ...` was taken to carry
-    # a `word:` scheme and got escaped, putting a stray backslash in the
-    # user's message.
-    if i + 1 < n and s[i + 1] == "^":
-        return None
     label_end = _link_label_end(s, i, budget)
     if label_end is None or label_end + 1 >= n or s[label_end + 1] != ":":
         return None
@@ -864,7 +865,29 @@ def _reference_definition_at(s: str, i: int, budget: list):
         end += 1
     if end < n and s[end] == ">":
         end += 1
-    return s[start:end] if end > start else None
+    if end == start:
+        return None
+    # CommonMark allows only an optional title after the destination, and
+    # nothing else on the line. Skipping this check treated
+    # `[^id]: Warning: do not do this.` as a definition carrying a `warning:`
+    # scheme and escaped a footnote that is not a link at all. Guarding on the
+    # `^` instead would have been a guess about what the parser does with
+    # `[^...]` — and it opened a bypass, since `^` is legal in a link
+    # label and `[y][^x]` + `[^x]: javascript:...` really does resolve.
+    k = end
+    while k < n and s[k] in " \t":
+        k += 1
+    if k < n and s[k] in "\"'(":
+        closer = ")" if s[k] == "(" else s[k]
+        k += 1
+        while k < n and s[k] != closer and s[k] != "\n":
+            k += 1
+        if k >= n or s[k] != closer:
+            return None
+        k += 1
+        while k < n and s[k] in " \t":
+            k += 1
+    return s[start:end] if k >= n or s[k] in "\n\r" else None
 
 
 def sanitize_rich_markdown(text: str) -> str:
@@ -887,10 +910,11 @@ def sanitize_rich_markdown(text: str) -> str:
     previous one. The guarantee here is structural instead: no raw HTML
     reaches Telegram, whatever the surrounding text looks like.
 
-    The cost is that a ``<`` inside a code sample renders as a literal
-    ``&lt;``, because Markdown does not decode entities inside code — which
-    is the reason to move to ``InputRichMessage.blocks``, where a
-    preformatted block's text is a plain string Telegram never parses.
+    The cost is that the escapes land inside code spans and fenced blocks
+    too, where Markdown does not process them: ``Vec<String>`` in a fence
+    reads ``Vec\\<String>``, and a literal backslash is doubled. That is the
+    reason to move to ``InputRichMessage.blocks``, where a preformatted
+    block's text is a plain string Telegram never parses.
 
     Link destinations are still scheme-checked, but that check is
     best-effort: locating a Markdown link exactly has the same problem as
@@ -2053,7 +2077,11 @@ class TelegramAdapter(SidecarAdapter):
         st = self._streams.get(sid)
         if st is None:
             return
-        if len(st["text"]) + len(chunk) > MAX_STREAM_BUFFER_BYTES:
+        # Bytes, not characters: Rust compares `String::len()`, so a CJK or
+        # emoji stream would otherwise be allowed several times the cap.
+        buffered = len(st["text"].encode("utf-8", "replace"))
+        incoming = len(chunk.encode("utf-8", "replace"))
+        if buffered + incoming > MAX_STREAM_BUFFER_BYTES:
             # Matches the Rust adapter: drop the stream rather than let the
             # buffer grow without bound, since every edit tick re-sanitises
             # the whole of it.
