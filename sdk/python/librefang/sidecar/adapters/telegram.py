@@ -665,229 +665,6 @@ def _format_and_sanitize(text: str) -> str:
 # (port of format::rich_sanitize::sanitize_rich_markdown)
 # ====================================================================
 
-# Schemes a link destination may carry. Mirrors the Rust
-# `rich_sanitize::ALLOWED_HREF_SCHEMES`, which is deliberately one wider than
-# `sanitize_telegram_html`'s own list: `tel:` is documented as a working Rich
-# Markdown scheme, so escaping it hid a real feature. A `tel:` link therefore
-# renders on the rich path and loses its href on the legacy fallback — a
-# formatting difference on an already-degraded path, not a security one.
-# `tel:` is on the list because the Bot API's own Rich Markdown sample uses
-# `[inline phone number](tel:+123456789)` and Rich HTML style states that
-# `tel:` links render as phone links.
-_ALLOWED_RICH_HREF_SCHEMES = ("https:", "http:", "mailto:", "tg:", "tel:")
-_SCHEME_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-"
-)
-# CommonMark caps a link label at 999 characters. Bounding the label scan
-# keeps this pass linear — scanning to end of input for every unmatched `[`
-# was quadratic, and a megabyte of them stalled the sidecar for hours.
-_MAX_LINK_LABEL = 999
-
-
-def _is_control(ch: str) -> bool:
-    """Unicode category Cc, matching Rust's ``char::is_control``."""
-    code = ord(ch)
-    return code < 32 or 127 <= code <= 159
-
-
-def _decode_entity(entity: str):
-    """Decode the entity forms that can stand in for a character inside a
-    scheme: ``&#58;``, ``&#x3a;`` and the named ``&colon;``."""
-    if entity.lower() == "colon":
-        return ":"
-    if not entity.startswith("#"):
-        return None
-    digits = entity[1:]
-    try:
-        if digits[:1].lower() == "x":
-            return chr(int(digits[1:], 16))
-        return chr(int(digits))
-    except (ValueError, OverflowError):
-        return None
-
-
-def _normalise_destination(dest: str) -> str:
-    """Strip a ``<...>`` wrapper, decode HTML entities, and drop whitespace
-    and control characters, so the scheme check sees the destination the
-    parser will resolve. Only the leading run matters, so this stops at the
-    first delimiter."""
-    trimmed = dest.strip()
-    if trimmed.startswith("<"):
-        trimmed = trimmed[1:]
-        if trimmed.endswith(">"):
-            trimmed = trimmed[:-1]
-
-    out = []
-    i = 0
-    n = len(trimmed)
-    while i < n:
-        ch = trimmed[i]
-        if ch == "&":
-            j = i + 1
-            while j < n and trimmed[j] != ";" and j - i - 1 < 8:
-                j += 1
-            entity = trimmed[i + 1:j]
-            if j < n and trimmed[j] == ";":
-                j += 1
-            decoded = _decode_entity(entity)
-            # A decoded character goes through the same filter as a literal
-            # one; an entity we cannot decode is skipped rather than ending
-            # the scan.
-            if decoded is not None and not (decoded.isspace()
-                                            or _is_control(decoded)):
-                out.append(decoded)
-            i = j
-            continue
-        if not (ch.isspace() or _is_control(ch)):
-            out.append(ch)
-        i += 1
-        if len(out) > 64:
-            break
-    return "".join(out)
-
-
-def _scheme_is_allowed(dest: str) -> bool:
-    """True when `dest` carries no scheme at all (a relative target or
-    ``#anchor``) or carries one on the allowlist."""
-    dest = _normalise_destination(dest)
-    if not dest or not dest[0].isascii() or not dest[0].isalpha():
-        return True  # no scheme possible
-    j = 0
-    while j < len(dest) and dest[j] in _SCHEME_CHARS:
-        j += 1
-    if j >= len(dest) or dest[j] != ":":
-        return True  # not a scheme, just text before a slash or space
-    return dest[:j + 1].lower() in _ALLOWED_RICH_HREF_SCHEMES
-
-
-def _is_ascii_space(ch: str) -> bool:
-    """ASCII whitespace only, matching Rust's ``is_ascii_whitespace``."""
-    return ch in " \t\n\r\x0c"
-
-
-def _skip_ascii_space(s: str, k: int) -> int:
-    while k < len(s) and _is_ascii_space(s[k]):
-        k += 1
-    return k
-
-
-def _link_label_end(s: str, i: int, budget: list):
-    """Index of the ``]`` closing the link label opening at `i`, honouring
-    balanced brackets and backslash escapes.
-
-    A label body of exactly 999 characters is legal, so the closing ``]`` is
-    accepted at offset 1000 from the opening ``[``. `budget` is a one-element
-    list holding the characters the scanner may still examine across the whole
-    message: a per-label window alone is not enough, because
-    ``("[" * 998 + "]") * n`` lets the scan succeed far enough to be re-run for
-    every `[`."""
-    # Fast reject: without a `]` within the widest window a label could span
-    # there is no label. `find` does that at C speed, which keeps a run of
-    # unmatched brackets cheap. A backslash escape consumes two characters for
-    # one label character, so the window is twice the cap.
-    if s.find("]", i + 1, i + 2 * _MAX_LINK_LABEL + 2) == -1:
-        return None
-    depth = 0
-    j = i
-    chars = 0
-    n = len(s)
-    # The bound counts label *characters*, matching Rust: an escape pair is one
-    # character, so an index-based bound diverged on labels full of `\x`.
-    while j < n and chars <= _MAX_LINK_LABEL + 1:
-        if budget[0] <= 0:
-            return None
-        budget[0] -= 1
-        ch = s[j]
-        if ch == "\\":
-            j += 2
-            chars += 1
-            continue
-        if ch == "[":
-            depth += 1
-        elif ch == "]":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-        chars += 1
-    return None
-
-
-def _link_destination_at(s: str, i: int, budget: list):
-    """Destination of a ``[label](destination)`` starting at `i`, or None
-    when this is not an inline link."""
-    n = len(s)
-    label_end = _link_label_end(s, i, budget)
-    if label_end is None or label_end + 1 >= n or s[label_end + 1] != "(":
-        return None
-    # Whitespace may sit on either side of the destination, with an optional
-    # title in between.
-    start = _skip_ascii_space(s, label_end + 2)
-    if start < n and s[start] == "<":
-        k = start + 1
-        while k < n and s[k] not in ">\n":
-            k += 1
-        return s[start:k + 1] if k < n and s[k] == ">" else None
-    k = start
-    parens = 0
-    while k < n:
-        ch = s[k]
-        if ch == "\\":
-            k += 2
-            continue
-        if ch == "(":
-            parens += 1
-        elif ch == ")":
-            if parens == 0:
-                return s[start:k]
-            parens -= 1
-        elif _is_ascii_space(ch):
-            break
-        k += 1
-    dest = s[start:k]
-    k = _skip_ascii_space(s, k)
-    if k < n and s[k] in "\"'(":
-        closer = ")" if s[k] == "(" else s[k]
-        k += 1
-        while k < n and s[k] != closer:
-            k += 1
-        k = _skip_ascii_space(s, k + 1)
-    return dest if k < n and s[k] == ")" else None
-
-
-def _reference_definition_at(s: str, i: int, budget: list):
-    """Destination of a link reference definition ``[label]: destination``
-    starting at `i`, or None when this is not a definition."""
-    n = len(s)
-    label_end = _link_label_end(s, i, budget)
-    if label_end is None or label_end + 1 >= n or s[label_end + 1] != ":":
-        return None
-    start = _skip_ascii_space(s, label_end + 2)
-    end = start
-    while end < n and not _is_ascii_space(s[end]) and s[end] != ">":
-        end += 1
-    if end < n and s[end] == ">":
-        end += 1
-    if end == start:
-        return None
-    # CommonMark allows only an optional title after the destination, and
-    # nothing else on the line. Skipping this check treated
-    # `[^id]: Warning: do not do this.` as a definition carrying a `warning:`
-    # scheme and escaped a footnote that is not a link at all. Guarding on the
-    # `^` instead would have been a guess about what the parser does with
-    # `[^...]` — and it opened a bypass, since `^` is legal in a link
-    # label and `[y][^x]` + `[^x]: javascript:...` really does resolve.
-    k = end
-    while k < n and s[k] in " \t":
-        k += 1
-    if k < n and s[k] in "\"'(":
-        # A title opener is proof enough that this is a definition. A
-        # CommonMark title may span lines, so its closer need not be on this
-        # one — bailing out when it is not left the destination unchecked and
-        # the `[` bare, which is a live link. Fail closed instead.
-        return s[start:end]
-    return s[start:end] if k >= n or s[k] in "\n\r" else None
-
 
 def sanitize_rich_markdown(text: str) -> str:
     """Neutralise "active" constructs in agent-authored Rich Markdown before
@@ -900,74 +677,69 @@ def sanitize_rich_markdown(text: str) -> str:
     whose ``callback_data`` comes back to the adapter as a genuine
     ButtonCallback event.
 
-    Every ``<`` is escaped, with no exceptions for code spans, fenced blocks
-    or well-formed tags. Each such exemption needs to know where the
-    construct ends, which means reimplementing a piece of CommonMark; five
-    rounds of adversarial review found five inputs where that
-    reimplementation disagreed with a real parser and copied a live
-    ``<tg-button>`` through, two of them introduced by the fix for the
-    previous one. The guarantee here is structural instead: no raw HTML
-    reaches Telegram, whatever the surrounding text looks like.
+    Three unconditional, character-local rules. No lookahead, no scanning,
+    no attempt to locate a Markdown construct or to find where one ends:
 
-    The cost is that the escapes land inside code spans and fenced blocks
-    too, where Markdown does not process them: ``Vec<String>`` in a fence
-    reads ``Vec\\<String>``, and a literal backslash is doubled. That is the
-    reason to move to ``InputRichMessage.blocks``, where a preformatted
-    block's text is a plain string Telegram never parses.
+    * ``<`` is escaped so that the run of backslashes preceding it is
+      **odd**, which is what makes Markdown treat it as literal. A ``<``
+      the author already escaped is left exactly as it is. The parity
+      matters: the Bot API warns that "'\\' character usually must be
+      escaped with a preceding '\\' character", and an even run leaves the
+      ``<`` bare.
+    * ``!`` before ``[`` is backslash-escaped, so ``![](url)`` stays inert
+      text rather than becoming a media block fetched from that URL.
 
-    Link destinations are still scheme-checked, but that check is
-    best-effort: locating a Markdown link exactly has the same problem as
-    everything above. The property this function promises is the HTML one."""
+    Author-written backslashes are left alone. An earlier revision doubled
+    every one, which reached the same parity but silently rewrote the text:
+    ``\\*not italic\\*`` came back as emphasis with stray backslashes, and
+    ``[a\\](https://x)`` — not a link at all — turned into one.
+
+    **Link destinations are not filtered.** Earlier revisions checked them
+    against the legacy scheme allowlist, which meant locating Markdown
+    links: a label scanner with a length cap, a per-message budget, a
+    forward cursor, reference-definition and title parsing. Five rounds of
+    adversarial review found a defect in that machinery every time, four of
+    them introduced by the fix for the previous one. The legacy
+    ``sanitize_telegram_html`` can filter schemes because it *constructs*
+    the anchor itself; here we would be guessing at someone else's parse.
+    Telegram renders only schemes it supports, the client confirms before
+    opening a link, and the legacy fallback path still filters.
+
+    The cost: the escapes land inside code spans and fenced blocks too,
+    where Markdown does not process them, and every Rich HTML construct is
+    lost since they all start with ``<``. ``InputRichMessage.blocks``
+    removes both and is tracked separately."""
     out = []
     i = 0
     n = len(text)
-    # Total characters the label scanner may examine across the whole message;
-    # see `_link_label_end`. Once spent, no further link is scheme-checked,
-    # which only weakens a check already documented as best-effort.
-    budget = [max(n * 2, _MAX_LINK_LABEL * 16)]
+    # Length of the run of backslashes immediately before the current
+    # position. An odd run already escapes whatever follows it.
+    backslashes = 0
     while i < n:
         ch = text[i]
-        # A literal backslash is doubled first. Without this an input already
-        # containing `\<` would leave the sanitiser as `\\<`, which Markdown
-        # reads as an escaped backslash followed by a *bare* `<` — the escape
-        # cancels itself out and opens a tag. Any odd run of backslashes
-        # before a `<` does it.
         if ch == "\\":
-            out.append("\\\\")
+            out.append(ch)
+            backslashes += 1
             i += 1
             continue
-        # The whole security property, in one branch: no bare `<` survives, so
-        # no raw HTML can reach Telegram regardless of context.
-        #
-        # A backslash escape rather than `&lt;`, because the spec documents
-        # this mechanism for the `markdown` field by example (`\#hashtag` in
-        # its own Rich Markdown sample) and says nothing about entity decoding
-        # there. It also keeps escaping to one mechanism, since `!` and `[`
-        # below are backslash-escaped too.
         if ch == "<":
-            out.append("\\<")
+            if backslashes % 2 == 0:
+                out.append("\\")
+            out.append("<")
+            backslashes = 0
             i += 1
             continue
-        # `![...](...)` is a real media block in Rich Markdown, fetched from
-        # the URL — today it is inert text.
-        if ch == "!" and i + 1 < n and text[i + 1] == "[":
+        if (ch == "!" and i + 1 < n and text[i + 1] == "["
+                and backslashes % 2 == 0):
             out.append("\\!")
-            i += 1
-            continue
-        # Best-effort scheme check on the inline form `[label](destination)`
-        # and on the reference definition `[label]: destination`, which
-        # supplies the destination for a `[x][label]` elsewhere.
-        if ch == "[":
-            dest = _link_destination_at(text, i, budget)
-            if dest is None:
-                dest = _reference_definition_at(text, i, budget)
-            out.append("\\[" if dest is not None
-                       and not _scheme_is_allowed(dest) else "[")
+            backslashes = 0
             i += 1
             continue
         out.append(ch)
+        backslashes = 0
         i += 1
     return "".join(out)
+
 
 
 def _is_api_rejection(resp: dict) -> bool:

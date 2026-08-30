@@ -14,81 +14,64 @@
 //! attacker-chosen payload. Interactive buttons must stay an explicit
 //! `ChannelContent::Interactive` feature, never a side effect of formatting text.
 //!
-//! # Why this escapes every `<` with no exceptions
+//! # What this pass does, and what it deliberately does not
 //!
-//! Earlier versions of this module kept exemptions — inline code spans, fenced blocks
-//! and allowed HTML tags were copied through verbatim so a user's code sample would
-//! render as written. Each exemption needs to know where the construct *ends*, which
-//! means reimplementing a piece of CommonMark. Five rounds of adversarial review found
-//! five separate inputs where that reimplementation disagreed with a real parser, and
-//! each disagreement copied a live `<tg-button>` through: a code span pairing across a
-//! blank line, then across a lone `\r`, then across an escaped backtick; a tag scan
-//! running past its tag; a four-space-indented ` ``` ` mistaken for a fence. Two of the
-//! five were introduced *by the fix for the previous one*.
+//! Three unconditional, character-local rules. No lookahead, no scanning, no attempt to
+//! locate a Markdown construct or to find where one ends:
 //!
-//! The general rule, from the wider Markdown/HTML sanitiser world, is that you cannot
-//! decide what a parser will do without being that parser — anything less is an
-//! illusion of security. So this pass no longer tries. Every `<` is backslash-escaped,
-//! unconditionally, with no attempt to find code spans, fences or well-formed tags. A
-//! literal backslash is doubled first, because otherwise an input already carrying one
-//! before a `<` would leave as `\\<` — an escaped backslash and then a *bare* `<`. The
-//! spec warns about exactly this: "'\' character usually must be escaped with a
-//! preceding '\' character".
+//! * `<` is escaped so that the run of backslashes preceding it is **odd**, which is
+//!   what makes Markdown treat it as literal. A `<` the author already escaped is left
+//!   exactly as it is; only an unescaped one gains a backslash. The parity matters: the
+//!   Bot API warns that "'\' character usually must be escaped with a preceding '\'
+//!   character", and an even run leaves the `<` bare.
+//! * `!` before `[` is backslash-escaped, so `![](url)` stays inert text rather than
+//!   becoming a media block fetched from that URL.
 //!
-//! What that guarantees, and what it costs:
+//! Author-written backslashes are left alone. An earlier revision doubled every one of
+//! them, which reached the same parity but silently rewrote the text: `\*not italic\*`
+//! became `\\*not italic\\*`, so the emphasis the author had escaped came back with
+//! stray backslashes, and `[a\](https://x)` — not a link at all — turned into one.
 //!
-//! * **Guaranteed:** no raw HTML reaches Telegram, so no message text can produce a
-//!   button, a media fetch or any other active element. This holds by construction and
-//!   needs no agreement with any parser.
-//! * **Cost, inside code:** the escapes are applied everywhere, including inside code
-//!   spans and fenced blocks, where Markdown does not process them. `Vec<String>` in a
-//!   fence reads `Vec\<String>`, an `![x](…)` or `[x](…)` there keeps its backslash, and
-//!   a literal backslash is doubled. This is the price of the guarantee, and it is the reason to move to
-//!   `InputRichMessage.blocks`, where a preformatted block's text is a plain string that
-//!   Telegram never parses and nothing needs escaping at all.
-//! * **Also lost:** every Rich HTML construct, since they all start with `<`. That is
-//!   `<u>`, `<ins>`, `<sub>`, `<sup>`, `<br>`, `<details>` / `<summary>` (collapsible
-//!   blocks), `<aside>` / `<cite>` (pull quotes), `<a name>` anchors, `<tg-map>`,
-//!   `<tg-collage>`, `<tg-slideshow>`, `<tg-emoji>` and `<tg-time>`. Emphasis,
-//!   strikethrough, spoilers (`||…||`), highlight (`==…==`), tables, lists, headings,
-//!   code, math and footnotes are all plain Markdown and unaffected.
+//! Backslash rather than `&lt;`, because the Bot API documents that mechanism for the
+//! `markdown` field by example — `\#hashtag` appears in its own Rich Markdown sample —
+//! and says nothing about entity decoding there; the entity note appears only under the
+//! two HTML styles.
 //!
-//! Link destinations are still checked against `sanitize`'s scheme allowlist, but that
-//! check is **best-effort**, not a guarantee: locating a Markdown link exactly has the
-//! same problem as everything above. It is defence in depth. The property this module
-//! actually promises is the HTML one.
+//! **Link destinations are not filtered.** Earlier revisions checked them against
+//! `sanitize`'s scheme allowlist, which meant locating Markdown links: a label scanner
+//! with a length cap, a per-message budget, a forward cursor, reference-definition and
+//! title parsing. Five rounds of adversarial review found a defect in that machinery
+//! every single time, four of them introduced by the fix for the previous one, and the
+//! last of them turned an input containing no link at all into a live `javascript:` one.
+//! Nine of this module's ten functions existed to serve that check; every defect lived
+//! in them, and none ever touched the rule above.
 //!
-//! Two escape hatches are known and deliberately left open, because closing either means
-//! going back to reimplementing the parser:
+//! The distinction that matters: `sanitize::sanitize_telegram_html` filters schemes
+//! correctly because it *constructs* the `<a href>` itself and therefore knows where the
+//! href is. Here we would be guessing at someone else's parse of someone else's text.
+//! The established libraries for this problem — `telegramify-markdown` on
+//! pulldown-cmark, GramIO's entity builders — all parse with a real parser rather than
+//! scan. We have no parser on this path, so we do not pretend to have one.
 //!
-//! * A link label longer than [`MAX_LINK_LABEL`] is not scanned, so
-//!   `[<1000 chars>](javascript:…)` is not scheme-checked. CommonMark caps *reference*
-//!   labels at 999 characters but places no cap on inline link text.
-//! * The scanner works to a per-message budget, so a prefix crafted to spend it — around
-//!   a kilobyte of `("[" * 998 + "]")` — turns the check off for the rest of the message.
+//! What guards a hostile link instead: Telegram renders only schemes it supports ("other
+//! *supported* links are rendered as regular inline links"), the client shows an "Open
+//! this link?" confirmation carrying the full URL, and a chat client has no script
+//! context. The legacy `sendMessage` path we fall back to on a 4xx still filters, since
+//! it builds the HTML itself.
 //!
-//! Both leave the HTML guarantee untouched; only the scheme check goes dark.
-
-use std::ops::Range;
-
-/// Schemes a link destination may carry.
-///
-/// Deliberately **one wider** than `sanitize::ALLOWED_HREF_SCHEMES`: `tel:` is here
-/// because the Bot API's own Rich Markdown sample uses
-/// `[inline phone number](tel:+123456789)` and Rich HTML style states that `tel:` links
-/// render as phone links, so escaping it hid a documented, working feature. The legacy
-/// HTML sanitiser has no such sample behind it and was left alone.
-///
-/// The visible consequence: a `tel:` link renders on the rich path and has its `href`
-/// stripped if the same message falls back to the legacy pipeline. That is a formatting
-/// difference on an already-degraded path, not a security one — the legacy list is the
-/// stricter of the two.
-const ALLOWED_HREF_SCHEMES: &[&str] = &["https:", "http:", "mailto:", "tg:", "tel:"];
-
-/// CommonMark caps a link label at 999 characters. Bounding the label scan keeps this
-/// pass linear — scanning to end of input for every unmatched `[` was quadratic, and a
-/// megabyte of them stalled the sidecar for hours.
-const MAX_LINK_LABEL: usize = 999;
+//! # Cost
+//!
+//! The escapes are applied everywhere, including inside code spans and fenced blocks
+//! where Markdown does not process them, so `Vec<String>` in a fence reads
+//! `Vec\<String>` and a literal backslash is doubled. Every Rich HTML construct is lost,
+//! since they all start with `<`: `<u>`, `<ins>`, `<sub>`, `<sup>`, `<br>`,
+//! `<details>` / `<summary>`, `<aside>` / `<cite>`, `<a name>` anchors, `<tg-map>`,
+//! `<tg-collage>`, `<tg-slideshow>`, `<tg-emoji>`, `<tg-time>`. Emphasis, strikethrough,
+//! spoilers (`||…||`), highlight (`==…==`), tables, lists, headings, code, math and
+//! footnotes are plain Markdown and unaffected.
+//!
+//! `InputRichMessage.blocks` removes both the cost and the need for this pass entirely —
+//! Telegram runs no parser on a block's text — and is tracked separately.
 
 /// Escape agent text so Telegram's Rich Markdown parser cannot be steered into
 /// producing interactive or media-fetching elements.
@@ -96,74 +79,39 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
-    // Total characters the label scanner may examine across the whole message. A
-    // per-label window alone is not enough: `("[".repeat(998) + "]").repeat(n)` lets the
-    // scan succeed far enough to be re-run for every `[`, which is linear in the input
-    // but with a 999x constant — 72 s on a megabyte in the Python port. Once the budget
-    // is spent no further link is scheme-checked, which only weakens a check already
-    // documented as best-effort.
-    let mut budget = input.len().saturating_mul(2).max(MAX_LINK_LABEL * 16);
-    // Monotone cursor to the next `]`. A `[` with no `]` within the widest window a
-    // label could span is not a label at all, and the cursor proves that in amortised
-    // O(1) instead of a fresh scan per bracket. The window is measured in characters, to
-    // match the Python port's `str.find` shortcut exactly: a byte-sized window let the
-    // two ports disable the scheme check at different points in the same message.
-    //
-    // It does not rescue the budget from a bracket run placed just before a link: those
-    // brackets do see a `]` in range and scan for real. That is the documented
-    // budget-exhaustion escape hatch above, not something this cursor closes.
-    let mut next_close = 0usize;
+    // Length of the run of backslashes immediately before the current position. An odd
+    // run already escapes whatever follows it, so a `<` there needs nothing added.
+    let mut backslashes = 0_usize;
 
     while i < bytes.len() {
         match bytes[i] {
-            // A literal backslash is doubled first. Without this an input already
-            // containing `\<` would leave the sanitiser as `\\<`, which Markdown reads
-            // as an escaped backslash followed by a *bare* `<` — the escape would cancel
-            // itself out and open a tag. Any odd run of backslashes before a `<` does it.
             b'\\' => {
-                out.push_str("\\\\");
+                out.push('\\');
+                backslashes += 1;
                 i += 1;
             }
-            // The whole security property, in one arm: no bare `<` survives, so no raw
-            // HTML can reach Telegram regardless of what the surrounding text looks like.
-            //
-            // A backslash escape rather than `&lt;`, because the spec documents this
-            // mechanism for the `markdown` field by example (`\#hashtag` in its own Rich
-            // Markdown sample) and says nothing about entity decoding there — the entity
-            // note appears only under the two HTML styles. It also keeps escaping to one
-            // mechanism, since `!` and `[` below are backslash-escaped too.
+            // The whole security property, in one arm: every `<` ends up behind an odd
+            // run of backslashes, so no bare `<` survives and no raw HTML can reach
+            // Telegram regardless of what the surrounding text looks like.
             b'<' => {
-                out.push_str("\\<");
+                if backslashes % 2 == 0 {
+                    out.push('\\');
+                }
+                out.push('<');
+                backslashes = 0;
                 i += 1;
             }
             // `![...](...)` is a real media block in Rich Markdown, fetched from the
-            // URL — today it is inert text. Escape the `!` so the link (if any) renders
-            // the way the legacy HTML pipeline renders it, without attaching media.
-            b'!' if bytes.get(i + 1) == Some(&b'[') => {
+            // URL — today it is inert text. Escaping the `!` keeps it that way.
+            b'!' if bytes.get(i + 1) == Some(&b'[') && backslashes % 2 == 0 => {
                 out.push_str("\\!");
-                i += 1;
-            }
-            // Best-effort scheme check on both the inline form `[label](destination)`
-            // and the reference definition `[label]: destination`, which supplies the
-            // destination for a `[x][label]` elsewhere in the message.
-            b'[' => {
-                // The gate must be the same size *and unit* as the Python port's
-                // `str.find` window, or the two disable the scheme check at different
-                // points in the same message — and the wider side, Rust, was the
-                // production path. Both count characters.
-                let has_close = next_close_at(bytes, i + 1, &mut next_close).is_some_and(|close| {
-                    input[i + 1..close].chars().count() <= 2 * MAX_LINK_LABEL + 1
-                });
-                let disallowed = has_close
-                    && link_destination_at(bytes, i, &mut budget)
-                        .or_else(|| reference_definition_at(bytes, i, &mut budget))
-                        .is_some_and(|dest| !scheme_is_allowed(&input[dest]));
-                out.push_str(if disallowed { "\\[" } else { "[" });
+                backslashes = 0;
                 i += 1;
             }
             b => {
                 let len = utf8_char_len(b);
                 out.push_str(&input[i..i + len]);
+                backslashes = 0;
                 i += len;
             }
         }
@@ -182,263 +130,18 @@ fn utf8_char_len(first: u8) -> usize {
     }
 }
 
-/// True when `dest` carries no scheme at all (a relative target or `#anchor`) or carries
-/// one on the allowlist. A scheme we do not recognise is rejected.
-///
-/// The destination is normalised first, because the check has to hold on what the
-/// *parser* sees rather than on the literal bytes: `<…>`-wrapped destinations, HTML
-/// entities standing in for the colon (`javascript&#58;…`) and embedded whitespace or
-/// control characters (`java\tscript:…`) all reach a live scheme otherwise.
-fn scheme_is_allowed(dest: &str) -> bool {
-    let normalised = normalise_destination(dest);
-    let bytes = normalised.as_bytes();
-    // `Option::is_none_or` is stable only from 1.82; the crate's MSRV is 1.80.
-    if !bytes.first().is_some_and(|c| c.is_ascii_alphabetic()) {
-        return true; // no scheme possible
-    }
-    let mut j = 0;
-    while bytes
-        .get(j)
-        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-'))
-    {
-        j += 1;
-    }
-    if bytes.get(j) != Some(&b':') {
-        return true; // not a scheme, just text before a slash or space
-    }
-    let scheme = &normalised[..=j];
-    ALLOWED_HREF_SCHEMES
-        .iter()
-        .any(|s| scheme.eq_ignore_ascii_case(s))
-}
-
-/// Strip a `<…>` wrapper, decode HTML entities, and drop whitespace and control
-/// characters, so the scheme check sees the destination the parser will resolve.
-/// Only the leading run matters, so this stops at the first delimiter.
-fn normalise_destination(dest: &str) -> String {
-    let trimmed = dest.trim();
-    let inner = trimmed
-        .strip_prefix('<')
-        .map(|rest| rest.strip_suffix('>').unwrap_or(rest))
-        .unwrap_or(trimmed);
-
-    let mut out = String::new();
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '&' => {
-                let mut entity = String::new();
-                while let Some(&next) = chars.peek() {
-                    if next == ';' || entity.len() >= 8 {
-                        break;
-                    }
-                    entity.push(next);
-                    chars.next();
-                }
-                if chars.peek() == Some(&';') {
-                    chars.next();
-                }
-                match decode_entity(&entity) {
-                    // A decoded character goes through the same filter as a literal one.
-                    // Pushing it unconditionally let `&#32;javascript:` start with a
-                    // space, which reads as "no scheme here" while the HTML and URL
-                    // parsers both discard that space and resolve the scheme.
-                    Some(decoded) if decoded.is_whitespace() || decoded.is_control() => {}
-                    Some(decoded) => out.push(decoded),
-                    // An entity we cannot decode is skipped rather than ending the scan:
-                    // `&Tab;` and `&NewLine;` are real HTML5 entities we do not know, and
-                    // stopping here truncated the destination so the scheme behind it was
-                    // never examined.
-                    None => {}
-                }
-            }
-            c if c.is_whitespace() || c.is_control() => {}
-            c => out.push(c),
-        }
-        // A scheme is short; past this the answer cannot change.
-        if out.len() > 64 {
-            break;
-        }
-    }
-    out
-}
-
-/// Decode the entity forms that can stand in for a character inside a scheme:
-/// `&#58;`, `&#x3a;` and the named `&colon;`.
-fn decode_entity(entity: &str) -> Option<char> {
-    if entity.eq_ignore_ascii_case("colon") {
-        return Some(':');
-    }
-    let digits = entity.strip_prefix('#')?;
-    let code = match digits.strip_prefix(['x', 'X']) {
-        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-        None => digits.parse::<u32>().ok()?,
-    };
-    char::from_u32(code)
-}
-
-/// Byte range of the destination in a `[label](destination)` starting at `i` (which must
-/// be `[`). `None` when this is not an inline link.
-fn link_destination_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Range<usize>> {
-    let label_end = link_label_end(bytes, i, budget)?;
-    if bytes.get(label_end + 1) != Some(&b'(') {
-        return None;
-    }
-    // Whitespace may sit on either side of the destination, with an optional title in
-    // between.
-    let start = skip_ascii_whitespace(bytes, label_end + 2);
-    if bytes.get(start) == Some(&b'<') {
-        let mut k = start + 1;
-        while bytes.get(k).is_some_and(|&c| c != b'>' && c != b'\n') {
-            k += 1;
-        }
-        return (bytes.get(k) == Some(&b'>')).then_some(start..k + 1);
-    }
-    let mut k = start;
-    let mut parens = 0_i32;
-    while let Some(&c) = bytes.get(k) {
-        match c {
-            b'\\' => k += 1,
-            b'(' => parens += 1,
-            b')' if parens == 0 => return Some(start..k),
-            b')' => parens -= 1,
-            c if c.is_ascii_whitespace() => break,
-            _ => {}
-        }
-        k += 1;
-    }
-    let dest = start..k;
-    let mut k = skip_ascii_whitespace(bytes, k);
-    if let Some(&quote @ (b'"' | b'\'' | b'(')) = bytes.get(k) {
-        let closer = if quote == b'(' { b')' } else { quote };
-        k += 1;
-        while bytes.get(k).is_some_and(|&c| c != closer) {
-            k += 1;
-        }
-        k = skip_ascii_whitespace(bytes, k + 1);
-    }
-    (bytes.get(k) == Some(&b')')).then_some(dest)
-}
-
-/// Byte range of the destination in a link reference definition `[label]: destination`
-/// starting at `i`. `None` when this is not a definition.
-fn reference_definition_at(bytes: &[u8], i: usize, budget: &mut usize) -> Option<Range<usize>> {
-    let label_end = link_label_end(bytes, i, budget)?;
-    if bytes.get(label_end + 1) != Some(&b':') {
-        return None;
-    }
-    let start = skip_ascii_whitespace(bytes, label_end + 2);
-    let mut end = start;
-    while bytes
-        .get(end)
-        .is_some_and(|c| !c.is_ascii_whitespace() && *c != b'>')
-    {
-        end += 1;
-    }
-    // `<…>` wrapping is allowed here too; `normalise_destination` strips it.
-    if bytes.get(end) == Some(&b'>') {
-        end += 1;
-    }
-    if end == start {
-        return None;
-    }
-    // CommonMark allows only an optional title after the destination, and nothing else
-    // on the line. Skipping this check treated `[^id]: Warning: do not do this.` as a
-    // definition carrying a `warning:` scheme, and escaped a footnote that is not a link
-    // at all. Guarding on the `^` instead would have been a guess about what the parser
-    // does with `[^…]` — and it opened a bypass, since `^` is legal in a link label and
-    // `[y][^x]` + `[^x]: javascript:…` really does resolve.
-    let mut k = skip_ascii_whitespace_inline(bytes, end);
-    if let Some(&quote @ (b'"' | b'\'' | b'(')) = bytes.get(k) {
-        let closer = if quote == b'(' { b')' } else { quote };
-        // A title opener is proof enough that this is a definition. A CommonMark title
-        // may span lines, so its closer need not be on this one — bailing out when it
-        // is not left the destination unchecked and the `[` bare, which is a live link.
-        // Fail closed instead: check the scheme and let the title end where it ends.
-        k += 1;
-        while bytes.get(k).is_some_and(|&c| c != closer) {
-            k += 1;
-        }
-        return Some(start..end);
-    }
-    match bytes.get(k) {
-        None | Some(b'\n') | Some(b'\r') => Some(start..end),
-        _ => None,
-    }
-}
-
-/// Skip spaces and tabs, but not line breaks — a reference definition's title and
-/// terminator must sit on the same line as the destination.
-fn skip_ascii_whitespace_inline(bytes: &[u8], mut k: usize) -> usize {
-    while bytes.get(k).is_some_and(|c| matches!(c, b' ' | b'\t')) {
-        k += 1;
-    }
-    k
-}
-
-/// Index of the `]` closing the link label opening at `i`, honouring balanced brackets
-/// and backslash escapes. Bounded by [`MAX_LINK_LABEL`], which is CommonMark's own cap.
-///
-/// The bound counts **characters**, not bytes: a byte bound let a label of 600 multibyte
-/// characters — well inside the cap — escape the check in this port while the Python one
-/// still applied it, so the two disagreed on a security outcome.
-///
-/// A label body of exactly 999 characters is legal, so the closing `]` is accepted at
-/// character offset 1000 from the opening `[`.
-fn link_label_end(bytes: &[u8], i: usize, budget: &mut usize) -> Option<usize> {
-    let mut depth = 0_i32;
-    let mut j = i;
-    let mut chars = 0_usize;
-    while chars <= MAX_LINK_LABEL + 1 {
-        match bytes.get(j)? {
-            b'\\' => j += 1,
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(j);
-                }
-            }
-            _ => {}
-        }
-        j += utf8_char_len(*bytes.get(j)?);
-        chars += 1;
-        if *budget == 0 {
-            return None;
-        }
-        *budget -= 1;
-    }
-    None
-}
-
-/// Index of the next `]` at or after `from`, using a cursor that never moves backwards.
-/// Amortised O(1) per call across a whole message.
-fn next_close_at(bytes: &[u8], from: usize, cursor: &mut usize) -> Option<usize> {
-    if *cursor < from {
-        *cursor = from;
-    }
-    while bytes.get(*cursor).is_some_and(|&c| c != b']') {
-        *cursor += 1;
-    }
-    (*cursor < bytes.len()).then_some(*cursor)
-}
-
-fn skip_ascii_whitespace(bytes: &[u8], mut k: usize) -> usize {
-    while bytes.get(k).is_some_and(u8::is_ascii_whitespace) {
-        k += 1;
-    }
-    k
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    const BUTTON: &str = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
+
     /// The guarantee, as a predicate: every `<` in the output is preceded by an **odd**
     /// run of backslashes, so Markdown reads it as escaped. Asserting merely "there is a
-    /// backslash before it" is not the same property — `\\<` satisfies that and is a bare
-    /// `<` to the parser, which is how a leak passed two tests named for the guarantee.
+    /// backslash before it" is a weaker property — `\\<` satisfies that and is a bare
+    /// `<` to the parser, which is how a leak once passed two tests named for the
+    /// guarantee.
     fn every_less_than_is_escaped(out: &str) -> bool {
         out.match_indices('<').all(|(idx, _)| {
             out.as_bytes()[..idx]
@@ -456,16 +159,13 @@ mod tests {
         assert!(every_less_than_is_escaped("a \\<tg-button"));
         assert!(every_less_than_is_escaped("a \\\\\\<tg-button"));
         assert!(!every_less_than_is_escaped("a <tg-button"));
-        // The shape that once passed two tests named for the guarantee: an even run
-        // leaves the `<` bare as far as Markdown is concerned.
+        // The shape that once passed two tests named for the guarantee.
         assert!(!every_less_than_is_escaped("a \\\\<tg-button"));
     }
 
-    const BUTTON: &str = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
-
-    /// The guarantee: no `<` survives, so no raw HTML can reach Telegram. These are the
-    /// five inputs that five rounds of review found against the exemption-based design;
-    /// none of them needs a special case now.
+    /// The guarantee: no bare `<` survives, in any context. These are every input the
+    /// review rounds found against the earlier exemption-based and scanner-based
+    /// designs; not one of them needs a special case now.
     #[test]
     fn no_raw_html_survives_any_context() {
         for context in [
@@ -473,6 +173,8 @@ mod tests {
             format!("a `hello\n\n{BUTTON}\n\n` b"),
             format!("a `hello\r> {BUTTON}\r> ` b"),
             format!("a \\` {BUTTON} \\` b"),
+            format!("\\{BUTTON}"),
+            format!("\\\\\\{BUTTON}"),
             format!("<b {BUTTON}"),
             format!("    ```\n{BUTTON}\n"),
             format!("```a`b\n{BUTTON}\n"),
@@ -488,20 +190,22 @@ mod tests {
         }
     }
 
-    /// An input that already contains a backslash immediately before a `<` would, without
-    /// doubling the backslash first, leave as `\\<` — which Markdown reads as an escaped
-    /// backslash followed by a *bare* `<`, so the escape cancels itself out and the tag
-    /// goes live. Any odd-length run of backslashes does it.
+    /// The pass must not change what the text *means*, only neutralise raw HTML. An
+    /// earlier revision doubled every backslash, which un-escaped whatever the author
+    /// had escaped: `[a\](https://x)` is not a link, and doubling made it one.
     #[test]
-    fn a_backslash_before_a_tag_cannot_cancel_the_escape() {
-        for prefix in ["\\", "\\\\", "\\\\\\", "text \\"] {
-            let input = format!("{prefix}{BUTTON}");
-            let out = sanitize_rich_markdown(&input);
-            assert!(
-                every_less_than_is_escaped(&out),
-                "prefix {prefix:?} left an unescaped `<`: {out}"
-            );
+    fn author_written_escapes_are_preserved() {
+        for source in [
+            "\\*not italic\\*",
+            "[a\\](https://example.com)",
+            "a \\< b",
+            "\\`not code\\`",
+            "\\!\\[not an image](x)",
+        ] {
+            assert_eq!(sanitize_rich_markdown(source), source);
         }
+        // An even run is still not an escape, so the `<` gains one.
+        assert_eq!(sanitize_rich_markdown("\\\\<b>"), "\\\\\\<b>");
     }
 
     #[test]
@@ -514,51 +218,25 @@ mod tests {
             "```rust\nfn main() {}\n```\n",
             "[x](https://example.com/a_(b)_c)",
             "[x][ref]\n\n[ref]: https://example.com",
+            "[^id2]: Warning: do not do this.",
+            "[call](tel:+123456789)",
         ] {
             assert_eq!(sanitize_rich_markdown(source), source);
         }
     }
 
-    /// The documented cost of the guarantee: a `<` in a code sample is escaped like any
-    /// other, and Markdown does not decode entities inside code. Pinned so the trade-off
-    /// is visible rather than discovered.
+    /// The documented cost of the guarantee, pinned so the trade-off is visible rather
+    /// than discovered: Markdown does not process escapes inside code.
     #[test]
-    fn a_less_than_in_a_code_sample_is_escaped_too() {
+    fn escapes_land_inside_code_samples_too() {
         assert_eq!(
             sanitize_rich_markdown("```rust\nlet v: Vec<String>;\n```"),
             "```rust\nlet v: Vec\\<String>;\n```"
         );
-    }
-
-    #[test]
-    fn disallowed_link_schemes_are_escaped() {
-        for bad in [
-            "[click](javascript:alert(1))",
-            "[x](<javascript:alert(1)>)",
-            "[x](javascript&#58;alert(1))",
-            "[x](javascript&#x3a;alert(1))",
-            "[x](javascript&colon;alert(1))",
-            "[x](&#32;javascript:alert(1))",
-            "[x](&Tab;javascript:alert(1))",
-            "[a[b]c](javascript:alert(1))",
-            "[x]( javascript:alert(1) )",
-            "[x](javascript:alert(1)\n)",
-            "[x](javascript:alert(1) \"title\")",
-        ] {
-            let out = sanitize_rich_markdown(bad);
-            assert!(out.starts_with("\\["), "not escaped: {out}");
-        }
-    }
-
-    #[test]
-    fn reference_definitions_are_scheme_checked_at_any_indent() {
-        for indent in ["", " ", "  ", "   ", "\t"] {
-            let input = format!("[x][ref]\n\n{indent}[ref]: javascript:alert(1)");
-            let out = sanitize_rich_markdown(&input);
-            assert!(out.contains("\\[ref]:"), "indent {indent:?} skipped: {out}");
-        }
-        let ok = "[x][ref]\n\n[ref]: https://example.com";
-        assert_eq!(sanitize_rich_markdown(ok), ok);
+        assert_eq!(
+            sanitize_rich_markdown("```\n![x](https://a/b.png)\n```"),
+            "```\n\\![x](https://a/b.png)\n```"
+        );
     }
 
     #[test]
@@ -569,170 +247,38 @@ mod tests {
         );
     }
 
-    /// Bounding the label scan at CommonMark's own 999-character cap keeps the pass
-    /// linear. Unbounded, a megabyte of `[` took hours.
-    /// Two shapes, because only one of them is caught by a per-label window: a run of
-    /// bare `[` never finds a `]`, while `("[" * 998 + "]")` lets the scan succeed far
-    /// enough to be re-run for every bracket. The second shape is what cost 72 s on a
-    /// megabyte before the total budget was added.
+    /// Link destinations are deliberately not filtered — see the module comment. Pinned
+    /// so the decision stays visible and cannot be reverted by accident.
     #[test]
-    fn bracket_dense_input_is_processed_within_budget() {
+    fn link_destinations_are_passed_through_unfiltered() {
+        for source in [
+            "[x](javascript:alert(1))",
+            "[y][x]\n\n[x]: javascript:alert(1)",
+        ] {
+            assert_eq!(sanitize_rich_markdown(source), source);
+        }
+    }
+
+    /// Every rule is character-local, so the pass is linear on any input. These shapes
+    /// each defeated the scanner-based design; the last cost 15 s on a megabyte.
+    #[test]
+    fn every_input_shape_is_processed_linearly() {
         for input in [
             "[".repeat(1_000_000),
+            "[".repeat(1_000_000) + "]",
             ("[".repeat(998) + "]").repeat(1_001),
             "[]".repeat(500_000),
+            "\\".repeat(1_000_000),
+            "<".repeat(1_000_000),
         ] {
             let start = Instant::now();
-            let out = sanitize_rich_markdown(&input);
-            assert_eq!(out.len(), input.len());
+            let _ = sanitize_rich_markdown(&input);
             assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "took {:?} on a {}-byte input — scan is superlinear",
+                start.elapsed() < Duration::from_secs(2),
+                "took {:?} on a {}-byte input",
                 start.elapsed(),
                 input.len()
             );
-        }
-    }
-
-    /// CommonMark's 999-character cap is on a *reference label*; inline link text has no
-    /// cap at all. An earlier version of this test asserted that a 1500-character inline
-    /// label was "inert" — it is a live link, so the test was pinning a bypass as
-    /// correct. These pin the real boundary instead.
-    #[test]
-    fn reference_label_boundary_is_pinned_at_999() {
-        for len in [997, 998, 999] {
-            let label = "y".repeat(len);
-            let input = format!("[x][{label}]\n\n[{label}]: javascript:alert(1)");
-            let out = sanitize_rich_markdown(&input);
-            // Escaping the *definition* is what stops the reference resolving.
-            assert!(
-                out.contains(&format!("\\[{label}]:")),
-                "label of {len} not checked: {out}"
-            );
-        }
-        // Past the cap the reference does not resolve for CommonMark either, so leaving
-        // it alone is correct rather than a miss.
-        let over = "y".repeat(1000);
-        let input = format!("[x][{over}]\n\n[{over}]: javascript:alert(1)");
-        assert_eq!(sanitize_rich_markdown(&input), input);
-    }
-
-    /// The cap counts characters. Bounding it in bytes let a 600-character multibyte
-    /// label — well inside the cap — walk past the scheme check in this port while the
-    /// Python one still applied it.
-    #[test]
-    fn multibyte_labels_are_bounded_by_characters_not_bytes() {
-        for filler in ["é", "\u{4e2d}", "\u{1f600}"] {
-            let label = filler.repeat(600);
-            let input = format!("[{label}](javascript:alert(1))");
-            let out = sanitize_rich_markdown(&input);
-            assert!(out.starts_with("\\["), "{filler} label not checked: {out}");
-        }
-    }
-
-    /// A footnote definition is not a link reference. Reading `[^id]: Warning: …` as one
-    /// took `warning:` for a scheme and put a stray backslash in the user's message.
-    #[test]
-    fn footnote_definitions_are_left_alone() {
-        for source in [
-            "[^id2]: Warning: do not do this.",
-            "Text[^note] here.\n\n[^note]: Note: see above",
-        ] {
-            assert_eq!(sanitize_rich_markdown(source), source);
-        }
-    }
-
-    /// `tel:` is documented as a working Rich Markdown link scheme; escaping it showed
-    /// the user raw Markdown source.
-    #[test]
-    fn documented_link_schemes_are_allowed() {
-        for source in [
-            "[call](tel:+123456789)",
-            "[mail](mailto:a@b.c)",
-            "[user](tg://user?id=1)",
-        ] {
-            assert_eq!(sanitize_rich_markdown(source), source);
-        }
-    }
-
-    /// The budget's *magnitude* matters, not just its existence: shrinking it to the
-    /// floor would take the scheme check dark on ordinary messages, and both mutations
-    /// used to pass the whole suite. A 32 K message of ordinary prose and links must
-    /// still be checked end to end.
-    #[test]
-    fn budget_survives_a_full_size_ordinary_message() {
-        let label = "a descriptive link text of the sort a model actually writes";
-        let mut body = String::new();
-        while body.len() < 32_000 {
-            body.push_str(&format!(
-                "Prose. [{label}](https://example.com/page) more.\n\n"
-            ));
-        }
-        assert_eq!(sanitize_rich_markdown(&body), body);
-        // The last link in a full-size message is still scheme-checked.
-        let with_payload = format!("{body}[x](javascript:alert(1))");
-        assert!(
-            sanitize_rich_markdown(&with_payload).ends_with("\\[x](javascript:alert(1))"),
-            "budget ran out before the end of an ordinary message"
-        );
-    }
-
-    /// The budget floor binds on any message shorter than `len*2`, and nested brackets
-    /// push the scan cost per byte well above two. Removing `.max(…)` used to pass the
-    /// whole suite, so this was reported as an equivalent mutant when it is not.
-    #[test]
-    fn the_budget_floor_is_load_bearing_on_short_nested_input() {
-        let input = format!("{}\n\n[x](javascript:alert(1))", "[[[[y]]]]".repeat(100));
-        assert!(
-            sanitize_rich_markdown(&input).ends_with("\\[x](javascript:alert(1))"),
-            "the floor is not covering a short bracket-nested message"
-        );
-    }
-
-    /// The cursor gate is not made redundant by the budget: without it a run of brackets
-    /// whose `]` is out of range still pays a full scan each and drains the allowance.
-    #[test]
-    fn the_cursor_gate_saves_the_budget_for_a_real_link() {
-        let input = format!(
-            "{}{}\n\n[x](javascript:alert(1))",
-            "[".repeat(20),
-            "y".repeat(8_100)
-        );
-        assert!(
-            sanitize_rich_markdown(&input).ends_with("\\[x](javascript:alert(1))"),
-            "brackets with no `]` in range spent the budget"
-        );
-    }
-
-    /// A reference definition carrying a title is a shape no test covered, and the
-    /// branch handling it was added without one.
-    #[test]
-    fn reference_definitions_with_titles_are_scheme_checked() {
-        for tail in ["\"t\"", "'t'", "(t)", "\"multi\nline\"", "(multi\nline)"] {
-            let input = format!("[y][x]\n\n[x]: javascript:alert(1) {tail}");
-            let out = sanitize_rich_markdown(&input);
-            assert!(out.contains("\\[x]:"), "tail {tail:?} not checked: {out}");
-        }
-        let ok = "[y][x]\n\n[x]: https://example.com \"t\"";
-        assert_eq!(sanitize_rich_markdown(ok), ok);
-    }
-
-    /// The two known escape hatches, pinned so they cannot change silently — they are
-    /// documented in the module comment, and a test that says so is cheaper than
-    /// rediscovering them.
-    #[test]
-    fn documented_scheme_check_escape_hatches_behave_as_documented() {
-        // A label past the cap is not scanned.
-        let long = format!("[{}](javascript:alert(1))", "y".repeat(1000));
-        assert_eq!(sanitize_rich_markdown(&long), long);
-        // A budget-exhausting prefix turns the check off for the rest.
-        let prefix = ("[".repeat(998) + "]").repeat(1025);
-        let input = format!("{prefix}\n\n[x](javascript:alert(1))");
-        let out = sanitize_rich_markdown(&input);
-        assert!(out.ends_with("[x](javascript:alert(1))"));
-        // Neither touches the HTML guarantee.
-        for source in [&long, &input] {
-            assert!(every_less_than_is_escaped(&sanitize_rich_markdown(source)));
         }
     }
 
