@@ -904,6 +904,15 @@ def sanitize_rich_markdown(text: str) -> str:
     budget = [max(n * 2, _MAX_LINK_LABEL * 16)]
     while i < n:
         ch = text[i]
+        # A literal backslash is doubled first. Without this an input already
+        # containing `\<` would leave the sanitiser as `\\<`, which Markdown
+        # reads as an escaped backslash followed by a *bare* `<` — the escape
+        # cancels itself out and opens a tag. Any odd run of backslashes
+        # before a `<` does it.
+        if ch == "\\":
+            out.append("\\\\")
+            i += 1
+            continue
         # The whole security property, in one branch: no bare `<` survives, so
         # no raw HTML can reach Telegram regardless of context.
         #

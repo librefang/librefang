@@ -38,8 +38,8 @@
 //!   needs no agreement with any parser.
 //! * **Cost, inside code:** the escapes are applied everywhere, including inside code
 //!   spans and fenced blocks, where Markdown does not process them. `Vec<String>` in a
-//!   fence reads `Vec\<String>`, and an `![x](…)` or `[x](…)` there keeps its backslash
-//!   too. This is the price of the guarantee, and it is the reason to move to
+//!   fence reads `Vec\<String>`, an `![x](…)` or `[x](…)` there keeps its backslash, and
+//!   a literal backslash is doubled. This is the price of the guarantee, and it is the reason to move to
 //!   `InputRichMessage.blocks`, where a preformatted block's text is a plain string that
 //!   Telegram never parses and nothing needs escaping at all.
 //! * **Also lost:** every Rich HTML construct, since they all start with `<`. That is
@@ -83,6 +83,14 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
 
     while i < bytes.len() {
         match bytes[i] {
+            // A literal backslash is doubled first. Without this an input already
+            // containing `\<` would leave the sanitiser as `\\<`, which Markdown reads
+            // as an escaped backslash followed by a *bare* `<` — the escape would cancel
+            // itself out and open a tag. Any odd run of backslashes before a `<` does it.
+            b'\\' => {
+                out.push_str("\\\\");
+                i += 1;
+            }
             // The whole security property, in one arm: no bare `<` survives, so no raw
             // HTML can reach Telegram regardless of what the surrounding text looks like.
             //
@@ -370,6 +378,29 @@ mod tests {
                 assert!(
                     idx > 0 && out.as_bytes()[idx - 1] == b'\\',
                     "unescaped `<` survived: {out}"
+                );
+            }
+        }
+    }
+
+    /// An input that already contains a backslash immediately before a `<` would, without
+    /// doubling the backslash first, leave as `\\<` — which Markdown reads as an escaped
+    /// backslash followed by a *bare* `<`, so the escape cancels itself out and the tag
+    /// goes live. Any odd-length run of backslashes does it.
+    #[test]
+    fn a_backslash_before_a_tag_cannot_cancel_the_escape() {
+        for prefix in ["\\", "\\\\", "\\\\\\", "text \\"] {
+            let input = format!("{prefix}{BUTTON}");
+            let out = sanitize_rich_markdown(&input);
+            for (idx, _) in out.match_indices('<') {
+                let preceding = out.as_bytes()[..idx]
+                    .iter()
+                    .rev()
+                    .take_while(|&&c| c == b'\\')
+                    .count();
+                assert!(
+                    preceding % 2 == 1,
+                    "prefix {prefix:?} left an unescaped `<`: {out}"
                 );
             }
         }

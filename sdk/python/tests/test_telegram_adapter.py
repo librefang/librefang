@@ -1095,6 +1095,24 @@ def test_rich_sanitizer_no_raw_html_survives_any_context():
                     "unescaped < survived: %s" % out)
 
 
+def test_rich_sanitizer_backslash_before_a_tag_cannot_cancel_escape():
+    """An input already containing a backslash immediately before a `<`
+    would, without doubling the backslash first, leave as `\\<` — which
+    Markdown reads as an escaped backslash followed by a *bare* `<`, so the
+    escape cancels itself out and the tag goes live."""
+    for prefix in ("\\", "\\\\", "\\\\\\", "text \\"):
+        out = tg.sanitize_rich_markdown(prefix + _BTN)
+        for idx, ch in enumerate(out):
+            if ch == "<":
+                run = 0
+                k = idx - 1
+                while k >= 0 and out[k] == "\\":
+                    run += 1
+                    k -= 1
+                assert run % 2 == 1, (
+                    "prefix %r left an unescaped <: %s" % (prefix, out))
+
+
 def test_rich_sanitizer_markdown_formatting_is_untouched():
     for src in ("| a | b |\n|:--|--:|\n| _x_ | **y _z_** |\n",
                 "**bold _italic_ bold** ~~strike~~ ||spoiler|| `code`",
