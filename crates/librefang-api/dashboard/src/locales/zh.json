@@ -563,6 +563,7 @@
     "children": "子代理",
     "origin_root": "根代理",
     "origin_unknown": "未知（迁移前）",
+    "origin_unloaded": "未加载",
     "children_count_one": "{{count}} 个子代理",
     "children_count_other": "{{count}} 个子代理",
     "show_hand_agents": "显示 Hands 智能体",

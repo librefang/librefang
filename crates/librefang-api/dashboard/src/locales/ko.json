@@ -563,6 +563,7 @@
     "children": "자식 에이전트",
     "origin_root": "루트 에이전트",
     "origin_unknown": "알 수 없음 (마이그레이션 이전)",
+    "origin_unloaded": "불러오지 않음",
     "children_count_other": "자식 에이전트 {{count}}개",
     "show_hand_agents": "핸드 에이전트 표시",
     "show_hand_agents_short": "핸드",

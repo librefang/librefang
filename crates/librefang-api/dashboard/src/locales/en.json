@@ -563,6 +563,7 @@
     "children": "Children",
     "origin_root": "Root agent",
     "origin_unknown": "Unknown (pre-migration)",
+    "origin_unloaded": "Not loaded",
     "children_count_one": "{{count}} child",
     "children_count_other": "{{count}} children",
     "show_hand_agents": "Show hand agents",

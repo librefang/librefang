@@ -563,6 +563,7 @@
     "children": "Agenty podrzędne",
     "origin_root": "Agent główny",
     "origin_unknown": "Nieznane (sprzed migracji)",
+    "origin_unloaded": "Nie wczytano",
     "children_count_one": "{{count}} agent podrzędny",
     "children_count_few": "{{count}} agenty podrzędne",
     "children_count_many": "{{count}} agentów podrzędnych",

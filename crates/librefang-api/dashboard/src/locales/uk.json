@@ -563,6 +563,7 @@
     "children": "Дочірні агенти",
     "origin_root": "Кореневий агент",
     "origin_unknown": "Невідомо (до міграції)",
+    "origin_unloaded": "Не завантажено",
     "children_count_one": "{{count}} дочірній агент",
     "children_count_few": "{{count}} дочірні агенти",
     "children_count_many": "{{count}} дочірніх агентів",
