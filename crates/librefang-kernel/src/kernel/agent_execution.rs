@@ -1092,9 +1092,7 @@ impl LibreFangKernel {
             .snapshot();
 
         // Load workspace-scoped skills (override global skills with same name).
-        // No `.exists()` guard: `load_workspace_skills` returns `Ok(0)` for a
-        // missing directory, and gating on existence made the log volume
-        // depend on whether an empty directory happened to be there (#7964).
+        // No `.exists()` guard: `load_workspace_skills` returns `Ok(0)` for a missing directory, and gating on existence made the log volume depend on whether an empty directory happened to be there (#7964).
         if let Some(ref workspace) = manifest.workspace {
             match skill_snapshot.load_workspace_skills(&workspace.join("skills")) {
                 Ok(_) => {}

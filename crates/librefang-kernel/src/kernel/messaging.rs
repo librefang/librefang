@@ -3051,10 +3051,8 @@ impl LibreFangKernel {
                 .unwrap_or_else(|e| e.into_inner())
                 .snapshot();
 
-            // Load workspace-scoped skills (override global skills with same
-            // name). See the non-streaming path in `agent_execution.rs` for why
-            // there is no `.exists()` guard and why a frozen registry is debug
-            // rather than warn (#7964).
+            // Load workspace-scoped skills (override global skills with same name).
+            // See the non-streaming path in `agent_execution.rs` for why there is no `.exists()` guard and why a frozen registry is debug rather than warn (#7964).
             if let Some(ref workspace) = manifest.workspace {
                 match skill_snapshot.load_workspace_skills(&workspace.join("skills")) {
                     Ok(_) => {}

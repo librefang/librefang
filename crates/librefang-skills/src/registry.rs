@@ -835,12 +835,8 @@ impl SkillRegistry {
     /// scan, blocks critical threats. Skills loaded here override global ones
     /// with the same name (insert semantics).
     ///
-    /// In Stable mode the registry is frozen and cannot take new skills
-    /// (#6540). The freeze is reported only when this call would actually have
-    /// loaded something: an empty `<workspace>/skills` directory returns
-    /// `Ok(0)` either way, so reporting it as an error described a skipped
-    /// no-op as a failure, once per turn per agent, for the lifetime of the
-    /// daemon (#7964).
+    /// In Stable mode the registry is frozen and cannot take new skills (#6540).
+    /// The freeze is reported only when this call would actually have loaded something: an empty `<workspace>/skills` directory returns `Ok(0)` either way, so reporting it as an error described a skipped no-op as a failure, once per turn per agent, for the lifetime of the daemon (#7964).
     pub fn load_workspace_skills(
         &mut self,
         workspace_skills_dir: &Path,
@@ -1500,10 +1496,7 @@ input_schema = { type = "object" }
 
     // ── Stable-mode workspace-skill reporting (#7964) ────────────────
     //
-    // The freeze is a configured steady state, so it must only be reported
-    // when this call would actually have loaded something. Reported
-    // unconditionally it produced 39-100 WARN/day on one deployment, all of it
-    // describing a no-op that was skipped.
+    // The freeze is a configured steady state, so it must only be reported when this call would actually have loaded something. Reported unconditionally it produced 39-100 WARN/day on one deployment, all of it describing a no-op that was skipped.
 
     #[test]
     fn frozen_registry_accepts_an_empty_workspace_skills_dir() {

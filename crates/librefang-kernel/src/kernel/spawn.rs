@@ -288,14 +288,9 @@ impl LibreFangKernel {
         }
         manifest.workspace = Some(workspace_dir);
 
-        // #7964: Stable mode freezes the skill registry, so this agent's own
-        // `<workspace>/skills` can never load. The per-turn load path reports
-        // that at `debug` — a frozen registry is a configured steady state,
-        // not a fault, and reporting it per turn produced 39-100 WARN/day of
-        // pure noise — so a real workspace skill would otherwise be dropped
-        // without anyone being told. Say it exactly once, here, where the
-        // workspace is set up. The `#6540` reload report covers the global
-        // `skills_dir` only, not per-agent workspaces.
+        // #7964: Stable mode freezes the skill registry, so this agent's own `<workspace>/skills` can never load.
+        // The per-turn load path reports that at `debug` — a frozen registry is a configured steady state, not a fault, and reporting it per turn produced 39-100 WARN/day of pure noise — so a real workspace skill would otherwise be dropped without anyone being told.
+        // Say it exactly once, here, where the workspace is set up. The `#6540` reload report covers the global `skills_dir` only, not per-agent workspaces.
         if let Some(ref workspace) = manifest.workspace {
             let frozen = self
                 .skills
