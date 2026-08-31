@@ -692,17 +692,28 @@ fn ordered_fields(fields: &[ChannelFieldInfo]) -> Vec<ChannelFieldInfo> {
 }
 
 /// Advance a `select` field to its next (or previous) option.
+///
+/// A value that is not among `options` (a select field with no default,
+/// which has not been touched yet) is treated as sitting *before* the first
+/// option rather than *on* it — otherwise the first `Right` press would jump
+/// straight to `options[1]`, silently skipping `options[0]`.
 fn cycle_option(field: &mut ChannelFieldInfo, forward: bool) {
     let len = field.options.len();
-    let current = field
-        .options
-        .iter()
-        .position(|o| o == &field.value)
-        .unwrap_or(0);
-    let next = if forward {
-        (current + 1) % len
-    } else {
-        (current + len - 1) % len
+    let next = match field.options.iter().position(|o| o == &field.value) {
+        Some(current) => {
+            if forward {
+                (current + 1) % len
+            } else {
+                (current + len - 1) % len
+            }
+        }
+        None => {
+            if forward {
+                0
+            } else {
+                len - 1
+            }
+        }
     };
     field.value = field.options[next].clone();
 }
@@ -1381,6 +1392,24 @@ mod tests {
         assert_eq!(state.form.fields[1].value, "intl");
         state.handle_key(key(KeyCode::Left));
         assert_eq!(state.form.fields[1].value, "cn");
+    }
+
+    #[test]
+    fn a_select_field_with_no_default_lands_on_the_first_option_not_the_second() {
+        let mut field = ChannelFieldInfo {
+            key: "REGION".to_string(),
+            label: "Region".to_string(),
+            field_type: "select".to_string(),
+            options: vec!["cn".to_string(), "intl".to_string()],
+            value: String::new(),
+            ..Default::default()
+        };
+        cycle_option(&mut field, true);
+        assert_eq!(field.value, "cn");
+
+        field.value = String::new();
+        cycle_option(&mut field, false);
+        assert_eq!(field.value, "intl");
     }
 
     #[test]
