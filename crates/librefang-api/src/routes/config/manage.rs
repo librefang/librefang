@@ -1407,6 +1407,28 @@ pub async fn config_set(
         );
     }
 
+    // SECURITY (#8085): the path check above governs only the name being
+    // assigned. A write one level below a writable section assigns the
+    // submitted JSON wholesale, so an innocuous-looking path can carry a
+    // scrubbed field as a member of the table it replaces — the
+    // `{"path": "media.custom_stt", "value": {"api_key_env": "..."}}` shape.
+    // Scan the payload for the same key names the path check refuses, so a
+    // credential-shaped field is unreachable by either route.
+    if let Some(offending) = super::scrubbed_key_in_payload(&value) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "value posted to '{path}' contains '{offending}', which is not \
+                     user-tunable via /api/config/set; post the other fields \
+                     individually (e.g. '{path}.<field>') and edit \
+                     '{offending}' in ~/.librefang/config.toml directly"
+                )
+            })),
+        );
+    }
+
     // No basename / traversal check on `config_path`: it is the kernel's boot-resolved path, not anything the request supplied.
     // Under `LIBREFANG_CONFIG_PATH` the operator's chosen filename is the point, so rejecting a name that is not literally `config.toml` would refuse to write the very file this daemon loaded (#6695).
     let config_path = state.kernel.config_path().to_path_buf();
