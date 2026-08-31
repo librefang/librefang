@@ -4,13 +4,9 @@
 //! code markers, conversation depth) and picks the cheapest model that can
 //! handle the task.
 //!
-//! Every input is a property of the *request*. Properties of the agent —
-//! how many tools it exposes, how long its system prompt is — were scored here
-//! until #7952 and are not any more: they are identical on every turn, so they
-//! shifted the whole distribution instead of separating easy turns from hard
-//! ones. An agent with ~50 MCP tools scored +1000 from tool count alone,
-//! past any usable `complex_threshold`, so routing degenerated into
-//! pinned-complex and saved nothing.
+//! Every input is a property of the *request*.
+//! Properties of the agent — how many tools it exposes, how long its system prompt is — were scored here until #7952 and are not any more: they are identical on every turn, so they shifted the whole distribution instead of separating easy turns from hard ones.
+//! An agent with ~50 MCP tools scored +1000 from tool count alone, past any usable `complex_threshold`, so routing degenerated into pinned-complex and saved nothing.
 
 use crate::llm_driver::CompletionRequest;
 use librefang_types::agent::ModelRoutingConfig;
@@ -63,8 +59,8 @@ impl ModelRouter {
     /// - **Code markers**: backticks, `fn`, `def`, `class`, etc.
     /// - **Conversation depth**: more messages = more context = harder reasoning
     ///
-    /// Tool count and system-prompt length are deliberately not scored — see
-    /// the module docs (#7952). The decision is invariant under both.
+    /// Tool count and system-prompt length are deliberately not scored — see the module docs (#7952).
+    /// The decision is invariant under both.
     pub fn score(&self, request: &CompletionRequest) -> TaskComplexity {
         // 1. Total message content length (rough token proxy: ~4 chars per token)
         let total_chars = request.messages.iter().fold(0u64, |total, message| {
@@ -255,11 +251,8 @@ mod tests {
             .collect()
     }
 
-    /// #7952: the routing decision must be a property of the request, not of
-    /// the agent's shape. A tool-rich agent (50 MCP tools was the reported
-    /// case) scored +20 per tool, so every turn — including "hi" — landed
-    /// above `complex_threshold` and the router degenerated into
-    /// pinned-complex.
+    /// #7952: the routing decision must be a property of the request, not of the agent's shape.
+    /// A tool-rich agent (50 MCP tools was the reported case) scored +20 per tool, so every turn — including "hi" — landed above `complex_threshold` and the router degenerated into pinned-complex.
     #[test]
     fn tool_count_does_not_change_the_tier() {
         let router = ModelRouter::new(default_config());
@@ -279,8 +272,7 @@ mod tests {
     }
 
     /// The same turn on a tool-rich agent must still be routed cheaply.
-    /// Asserting invariance alone would pass if every tier collapsed to
-    /// Complex, which is the bug.
+    /// Asserting invariance alone would pass if every tier collapsed to Complex, which is the bug.
     #[test]
     fn a_trivial_message_stays_simple_on_a_tool_rich_agent() {
         let router = ModelRouter::new(default_config());
@@ -407,8 +399,7 @@ mod tests {
         );
     }
 
-    /// #7952: system-prompt length is the same on every turn of an agent, so
-    /// scoring it moved the whole distribution rather than separating turns.
+    /// #7952: system-prompt length is the same on every turn of an agent, so scoring it moved the whole distribution rather than separating turns.
     /// A long SOUL.md must not make "Hi" a complex request.
     #[test]
     fn system_prompt_length_does_not_change_the_tier() {
