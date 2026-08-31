@@ -227,6 +227,11 @@ impl Builder {
     }
 
     /// Emit any buffered block-level HTML as its own paragraph.
+    ///
+    /// Called from `push` on the first event that is not more block HTML. `pulldown-cmark`
+    /// always closes a run with `End(HtmlBlock)`, so that event is the flush point and a
+    /// second one in `finish` would be unreachable — it was there, and no mutation of it
+    /// could fail a test, which is how it was found.
     fn flush_html_block(&mut self) {
         if self.html_block.is_empty() {
             return;
@@ -503,8 +508,6 @@ impl Builder {
     }
 
     fn finish(mut self) -> Vec<Block> {
-        // A document ending in block HTML has nothing after it to trigger the flush.
-        self.flush_html_block();
         while self.frames.len() > 1 {
             self.frames.pop();
         }
