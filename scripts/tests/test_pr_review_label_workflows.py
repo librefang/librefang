@@ -49,6 +49,21 @@ class PrReviewLabelWorkflowTests(unittest.TestCase):
         self.assertIn("freshLabels.includes('has-conflicts')", self.applier)
         self.assertIn("await removeLabel(READY)", self.applier)
 
+    def test_applier_job_can_write_pull_request_labels(self) -> None:
+        # The labels endpoint lives under `/issues/{n}/labels`, but GitHub gates it on the
+        # pull_requests scope when `{n}` is a pull request.
+        # #7546 moved permissions to the job level and narrowed this to `pull-requests: read`;
+        # every applier run 403'd with "Resource not accessible by integration" from then on.
+        apply_job = self.applier.split("\n  apply:\n", 1)[1]
+        self.assertIn("issues: write", apply_job)
+        self.assertIn("pull-requests: write", apply_job)
+        self.assertNotIn("pull-requests: read", apply_job)
+
+    def test_prepare_job_can_read_the_collector_artifact(self) -> None:
+        # `actions/download-artifact` needs `actions: read` to reach another run's artifact.
+        prepare_job = self.applier.split("\n  prepare:\n", 1)[1].split("\n  apply:\n", 1)[0]
+        self.assertIn("actions: read", prepare_job)
+
     def test_applier_reconciles_latest_review_instead_of_payload_order(self) -> None:
         self.assertIn("github.rest.pulls.listReviews", self.applier)
         self.assertIn("const latestReview = reviews", self.applier)
