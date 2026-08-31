@@ -57,8 +57,8 @@ describe("useSaveMediaModelEndpoint", () => {
       provider: "local-whisper",
     });
 
-    // `media.custom_stt.base_url` is three segments and rejected by
-    // `is_writable_config_path`, so the whole table goes over as one object.
+    // The table goes over as one object rather than field-by-field, so an
+    // untouched key like `api_key_env` is never dropped by the write.
     expect(setConfigValueMock).toHaveBeenCalledTimes(1);
     expect(setConfigValueMock).toHaveBeenCalledWith("media.custom_stt", {
       base_url: "http://whisper.internal/v1/audio/transcriptions",

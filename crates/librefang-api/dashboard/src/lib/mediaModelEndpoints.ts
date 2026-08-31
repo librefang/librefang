@@ -96,12 +96,16 @@ export function selectMediaModelEndpoints(
 /**
  * Build the wholesale table `POST /api/config/set` writes back.
  *
- * The write allowlist accepts `media.` / `tts.` paths one or two segments deep
- * (`is_writable_config_path` in `crates/librefang-api/src/routes/config/mod.rs`),
- * so `media.custom_stt.base_url` is three segments and rejected — the table has
- * to go over as one object. That means every key the operator is *not* editing
- * must be carried across explicitly or `toml_edit` drops it when it replaces the
- * inline table.
+ * The write allowlist counts segments *after* stripping the `media.` / `tts.`
+ * prefix (`is_writable_config_path` in
+ * `crates/librefang-api/src/routes/config/mod.rs`), so a per-field write like
+ * `media.custom_stt.base_url` is only two segments there and would in fact be
+ * accepted — same shape as the existing `channels.telegram.enabled` case the
+ * allowlist's own test asserts writable. The table still goes over as one
+ * object because field-by-field would be one round trip per field, and every
+ * key the operator is *not* editing would still have to be carried across
+ * explicitly either way, since `toml_edit` drops whatever a write omits when
+ * it replaces the table.
  *
  * `api_key_env` is echoed back exactly as read rather than taken from the draft:
  * the dashboard shows the env-var name but does not offer to repoint it, which

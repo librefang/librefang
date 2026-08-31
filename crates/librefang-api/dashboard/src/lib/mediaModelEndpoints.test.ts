@@ -111,7 +111,7 @@ describe("selectMediaModelEndpoints", () => {
 describe("buildMediaEndpointPayload", () => {
   const stt = () => selectMediaModelEndpoints(fullConfig)[0];
 
-  it("writes the whole table because the leaf path is not writable", () => {
+  it("writes the whole table so an untouched key is never dropped", () => {
     const endpoint = stt();
     const payload = buildMediaEndpointPayload(endpoint, {
       base_url: "  http://whisper.internal/v1/audio/transcriptions  ",
