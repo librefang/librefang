@@ -562,6 +562,21 @@ impl Builder {
     }
 
     fn finish(mut self) -> Vec<Block> {
+        // The style stacks move in lockstep, so both must be empty here. Asserting it is
+        // what makes the invariant testable at all: an imbalance has no effect on the
+        // output — the stray entry sits at the bottom and never resurfaces — so no
+        // assertion on converted text can catch it, and a mutation that reintroduces it
+        // otherwise survives every test in this file.
+        debug_assert_eq!(
+            self.styles.len(),
+            self.style_starts.len(),
+            "style stacks drifted apart"
+        );
+        debug_assert!(
+            self.style_starts.is_empty(),
+            "unclosed style spans: {:?}",
+            self.style_starts
+        );
         while self.frames.len() > 1 {
             self.frames.pop();
         }
