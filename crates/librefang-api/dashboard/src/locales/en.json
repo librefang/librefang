@@ -3173,6 +3173,9 @@
     "media_api_key_env_hint": "Name of the env var holding the key, never the key itself. Read-only here: change it in config.toml so repointing a credential variable leaves a file trail.",
     "media_saved": "Media endpoint saved",
     "media_save_error": "Could not save the media endpoint",
+    "media_modality_disabled": "Inert: {{path}} is off, so this endpoint is never called. Turn the modality on in config.toml.",
+    "media_model_overridden": "{{path}} = {{model}} takes precedence over this field, so editing it here has no effect.",
+    "media_key_required_inert": "No effect while the API key env var is unset — enforcement only runs when a variable is named.",
     "filter_provider": "Filter by provider",
     "filter_tier": "Filter by tier"
   },

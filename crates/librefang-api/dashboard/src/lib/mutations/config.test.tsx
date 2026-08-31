@@ -33,6 +33,10 @@ function sttEndpoint(
       model: "large-v3",
     },
     configured: true,
+    modality_enabled: true,
+    modality_enabled_path: "media.audio_transcription",
+    model_override: null,
+    model_override_path: "media.audio_model",
     ...overrides,
   };
 }
@@ -43,7 +47,7 @@ describe("useSaveMediaModelEndpoint", () => {
     setConfigValueMock.mockResolvedValue({ status: "ok" });
   });
 
-  it("posts the endpoint table wholesale at its two-segment config path", async () => {
+  it("posts one leaf at a time and never mentions api_key_env", async () => {
     const { wrapper } = createQueryClientWrapper();
     const { result } = renderHook(() => useSaveMediaModelEndpoint(), { wrapper });
 
@@ -57,15 +61,18 @@ describe("useSaveMediaModelEndpoint", () => {
       provider: "local-whisper",
     });
 
-    // The table goes over as one object rather than field-by-field, so an
-    // untouched key like `api_key_env` is never dropped by the write.
-    expect(setConfigValueMock).toHaveBeenCalledTimes(1);
-    expect(setConfigValueMock).toHaveBeenCalledWith("media.custom_stt", {
-      base_url: "http://whisper.internal/v1/audio/transcriptions",
-      api_key_env: "MY_LOCAL_WHISPER_KEY",
-      key_required: true,
-      model: "medium.en",
-    });
+    // Per-leaf, not one wholesale table: a depth-2 table write would have to
+    // either echo `api_key_env` back — refused with 403 by the payload scrub in
+    // #8085 — or omit it and delete the operator's env-var name from
+    // config.toml, since the handler replaces the table it assigns.
+    expect(setConfigValueMock.mock.calls).toEqual([
+      ["media.custom_stt.base_url", "http://whisper.internal/v1/audio/transcriptions"],
+      ["media.custom_stt.model", "medium.en"],
+      ["media.custom_stt.key_required", true],
+    ]);
+    expect(
+      setConfigValueMock.mock.calls.some(([path]) => String(path).includes("api_key_env")),
+    ).toBe(false);
   });
 
   it("writes the provider selector after the table, and only when it changed", async () => {
@@ -79,11 +86,14 @@ describe("useSaveMediaModelEndpoint", () => {
     });
 
     expect(saved.writes.map((w) => w.path)).toEqual([
-      "media.custom_stt",
+      "media.custom_stt.base_url",
+      "media.custom_stt.model",
+      "media.custom_stt.key_required",
       "media.audio_provider",
     ]);
-    expect(setConfigValueMock).toHaveBeenNthCalledWith(
-      2,
+    // The selector goes last, so a provider name is never pointed at a table
+    // that has not been written yet.
+    expect(setConfigValueMock).toHaveBeenLastCalledWith(
       "media.audio_provider",
       "local-whisper",
     );
@@ -99,14 +109,13 @@ describe("useSaveMediaModelEndpoint", () => {
       provider: "",
     });
 
-    expect(setConfigValueMock).toHaveBeenNthCalledWith(
-      2,
+    expect(setConfigValueMock).toHaveBeenLastCalledWith(
       "media.audio_provider",
       null,
     );
   });
 
-  it("posts the TTS table at tts.custom with voice and format", async () => {
+  it("posts the TTS leaves under tts.custom, voice and format included", async () => {
     const { wrapper } = createQueryClientWrapper();
     const { result } = renderHook(() => useSaveMediaModelEndpoint(), { wrapper });
 
@@ -135,14 +144,13 @@ describe("useSaveMediaModelEndpoint", () => {
       provider: "local-piper",
     });
 
-    expect(setConfigValueMock).toHaveBeenCalledWith("tts.custom", {
-      base_url: "http://piper.internal/v1/audio/speech",
-      api_key_env: "",
-      key_required: false,
-      model: "tts-1",
-      voice: "en_US-lessac-medium",
-      format: "wav",
-    });
+    expect(setConfigValueMock.mock.calls).toEqual([
+      ["tts.custom.base_url", "http://piper.internal/v1/audio/speech"],
+      ["tts.custom.model", "tts-1"],
+      ["tts.custom.voice", "en_US-lessac-medium"],
+      ["tts.custom.format", "wav"],
+      ["tts.custom.key_required", false],
+    ]);
   });
 
   it("invalidates the whole config domain, which is what holds the tables", async () => {
@@ -163,7 +171,7 @@ describe("useSaveMediaModelEndpoint", () => {
 
   it("surfaces a rejected write instead of reporting success", async () => {
     setConfigValueMock.mockRejectedValueOnce(
-      new Error("config path 'media.custom_stt' is not user-tunable"),
+      new Error("config path 'media.custom_stt.base_url' is not user-tunable"),
     );
     const { wrapper } = createQueryClientWrapper();
     const { result } = renderHook(() => useSaveMediaModelEndpoint(), { wrapper });

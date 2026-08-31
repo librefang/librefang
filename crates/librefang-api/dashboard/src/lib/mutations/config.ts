@@ -9,7 +9,7 @@ import {
   type ReloadConfigResult,
 } from "../http/client";
 import { configKeys, overviewKeys } from "../queries/keys";
-import { buildMediaEndpointPayload } from "../mediaModelEndpoints";
+import { buildMediaEndpointWrites } from "../mediaModelEndpoints";
 import type { MediaModelEndpoint, MediaModelEndpointDraft } from "../../api";
 
 export type SetConfigResult = {
@@ -101,12 +101,21 @@ export type SaveMediaModelEndpointResult = {
  * Persist one custom media endpoint through the config API that already
  * serves it (refs #8038, #8011).
  *
- * Two writes at most, in this order: the endpoint table (`media.custom_stt`,
- * `tts.custom`, …) and then the provider selector, so a provider name is never
- * pointed at a table that has not been written yet. Both are sequential rather
- * than concurrent because `POST /api/config/set` serializes on one
- * `config.toml` read-modify-write lock — issuing them in parallel just queues
- * them behind each other with a less predictable order.
+ * One `POST /api/config/set` per non-secret leaf
+ * (`media.custom_stt.base_url`, `.model`, `.key_required`, plus `.voice` /
+ * `.format` for TTS), then the provider selector last so a provider name is
+ * never pointed at a table that has not been written yet.
+ *
+ * Per-leaf rather than one wholesale table write: `buildMediaEndpointWrites`
+ * carries the full reasoning, but the short version is that a depth-2 write
+ * replaces the whole table, which would force this save to either echo
+ * `api_key_env` back (refused with `403` by the payload scrub in PR #8085) or
+ * drop it from `config.toml`.
+ *
+ * Sequential rather than concurrent: `config_set` serializes on
+ * `AppState::config_write_lock` anyway, so parallel requests only queue behind
+ * each other with a less predictable final ordering, and a mid-save failure
+ * leaves a prefix of the writes applied rather than an arbitrary subset.
  */
 export function useSaveMediaModelEndpoint(
   options?: Partial<
@@ -118,12 +127,9 @@ export function useSaveMediaModelEndpoint(
     ...options,
     mutationFn: async ({ endpoint, draft, provider }) => {
       const writes: SaveMediaModelEndpointResult["writes"] = [];
-      const table = buildMediaEndpointPayload(endpoint, draft);
-      writes.push({
-        path: endpoint.config_path,
-        value: table,
-        data: await setConfigValue(endpoint.config_path, table),
-      });
+      for (const { path, value } of buildMediaEndpointWrites(endpoint, draft)) {
+        writes.push({ path, value, data: await setConfigValue(path, value) });
+      }
       const nextProvider = provider.trim();
       if (nextProvider !== endpoint.provider) {
         // `null` removes the key rather than writing an empty string, which is

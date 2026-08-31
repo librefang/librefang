@@ -11,7 +11,7 @@ import { FormEvent, memo, useCallback, useEffect, useId, useReducer, useRef, use
 import { useTranslation } from "react-i18next";
 import { useModels, useModelOverrides } from "../lib/queries/models";
 import { useAddCustomModel, useRemoveCustomModel, useUpdateModelOverrides, useDeleteModelOverrides } from "../lib/mutations/models";
-import { useMediaModelEndpoints } from "../lib/queries/config";
+import { useConfigStatus, useMediaModelEndpoints } from "../lib/queries/config";
 import { useSaveMediaModelEndpoint } from "../lib/mutations/config";
 import {
   mediaEndpointDraftFrom,
@@ -596,6 +596,13 @@ function MediaEndpointCard({
         <KindBadge kind={endpoint.kind} />
       </div>
 
+      {endpoint.configured && !endpoint.modality_enabled && (
+        <div className="flex items-start gap-1 text-[10px] text-warning leading-snug">
+          <AlertCircle className="w-3 h-3 shrink-0 mt-px" />
+          <span>{t("models.media_modality_disabled", { path: endpoint.modality_enabled_path })}</span>
+        </div>
+      )}
+
       <div className="text-[11px] text-text-dim font-mono truncate" title={endpoint.config.base_url || undefined}>
         {endpoint.config.base_url || t("models.media_not_configured")}
       </div>
@@ -634,11 +641,14 @@ const mediaInputClass = "w-full rounded-xl border border-border-subtle bg-main p
  */
 function MediaEndpointEditor({
   endpoint,
+  managed,
   onClose,
   onSaved,
   onError,
 }: {
   endpoint: MediaModelEndpoint;
+  /** Managed deployment (#6695) — every config write answers `423`. */
+  managed: boolean;
   onClose: () => void;
   onSaved: () => void;
   onError: (msg?: string) => void;
@@ -650,6 +660,11 @@ function MediaEndpointEditor({
   const [draft, setDraft] = useState<MediaModelEndpointDraft>(() => mediaEndpointDraftFrom(endpoint));
   const [provider, setProvider] = useState(endpoint.provider);
   const hasVoice = mediaEndpointHasVoiceAndFormat(endpoint.kind);
+  // `key_required` is only ever consulted inside the `!api_key_env.is_empty()`
+  // branch of every enforcement site (`tts.rs`, `media_understanding.rs`), and
+  // `api_key_env` is read-only here — so with no env var named, the toggle
+  // cannot take effect and must not pretend otherwise.
+  const keyEnv = (endpoint.config.api_key_env ?? "").trim();
 
   const setField = useCallback(
     <K extends keyof MediaModelEndpointDraft>(field: K, value: MediaModelEndpointDraft[K]) =>
@@ -673,6 +688,18 @@ function MediaEndpointEditor({
   return (
     <DrawerPanel isOpen onClose={onClose} title={t("models.media_edit_title")} size="lg">
       <form onSubmit={handleSubmit} className="p-5 space-y-4">
+        {managed && (
+          <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+            <span>{t("config.managed_title")}</span>
+          </div>
+        )}
+        {!endpoint.modality_enabled && (
+          <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
+            <span>{t("models.media_modality_disabled", { path: endpoint.modality_enabled_path })}</span>
+          </div>
+        )}
         <div className="flex items-center gap-3">
           <Server className="w-5 h-5 text-brand" />
           <div className="min-w-0">
@@ -689,6 +716,7 @@ function MediaEndpointEditor({
           <input id={`${fieldId}-provider`} value={provider}
             onChange={(e) => setProvider(e.target.value)}
             placeholder={t("models.media_provider_placeholder")}
+            readOnly={managed} disabled={managed}
             className={mediaInputClass} />
           <p className="mt-1 text-[11px] text-text-dim leading-snug">
             {t("models.media_provider_hint", { path: endpoint.provider_path })}
@@ -700,6 +728,7 @@ function MediaEndpointEditor({
           <input id={`${fieldId}-base-url`} value={draft.base_url}
             onChange={(e) => setField("base_url", e.target.value)}
             placeholder="http://localhost:8080/v1/audio/transcriptions"
+            readOnly={managed} disabled={managed}
             className={mediaInputClass} />
         </div>
 
@@ -708,13 +737,23 @@ function MediaEndpointEditor({
             <label htmlFor={`${fieldId}-model`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.media_model")}</label>
             <input id={`${fieldId}-model`} value={draft.model}
               onChange={(e) => setField("model", e.target.value)}
+              readOnly={managed} disabled={managed}
               className={mediaInputClass} />
+            {endpoint.model_override && endpoint.model_override_path && (
+              <p className="mt-1 text-[11px] text-warning leading-snug">
+                {t("models.media_model_overridden", {
+                  path: endpoint.model_override_path,
+                  model: endpoint.model_override,
+                })}
+              </p>
+            )}
           </div>
           {hasVoice && (
             <div>
               <label htmlFor={`${fieldId}-voice`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.media_voice")}</label>
               <input id={`${fieldId}-voice`} value={draft.voice ?? ""}
                 onChange={(e) => setField("voice", e.target.value)}
+                readOnly={managed} disabled={managed}
                 className={mediaInputClass} />
             </div>
           )}
@@ -723,6 +762,7 @@ function MediaEndpointEditor({
               <label htmlFor={`${fieldId}-format`} className="text-[10px] font-bold text-text-dim uppercase">{t("models.media_format")}</label>
               <input id={`${fieldId}-format`} value={draft.format ?? ""}
                 onChange={(e) => setField("format", e.target.value)}
+                readOnly={managed} disabled={managed}
                 className={mediaInputClass} />
             </div>
           )}
@@ -741,18 +781,30 @@ function MediaEndpointEditor({
           value={draft.key_required}
           onChange={(v) => setField("key_required", v)}
           label={t("models.media_key_required")}
+          disabled={managed || keyEnv === ""}
         />
+        {keyEnv === "" && (
+          <p className="-mt-2 text-[11px] text-text-dim leading-snug">
+            {t("models.media_key_required_inert")}
+          </p>
+        )}
 
         {saveMut.error && (
           <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {saveMut.error.message}</div>
         )}
 
         <div className="flex gap-2 pt-2">
-          <Button type="submit" variant="primary" className="flex-1" disabled={saveMut.isPending}>
-            {saveMut.isPending && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
-            {t("common.save")}
+          {/* Suppressed in managed mode: the write can only answer `423`, so
+              offering the button is the failure #6695 removed elsewhere. */}
+          {!managed && (
+            <Button type="submit" variant="primary" className="flex-1" disabled={saveMut.isPending}>
+              {saveMut.isPending && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
+              {t("common.save")}
+            </Button>
+          )}
+          <Button type="button" variant="secondary" className={managed ? "flex-1" : ""} onClick={onClose}>
+            {managed ? t("common.close") : t("common.cancel")}
           </Button>
-          <Button type="button" variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
       </form>
     </DrawerPanel>
@@ -792,6 +844,11 @@ export function ModelsPage() {
 
   const modelsQuery = useModels();
   const mediaEndpointsQuery = useMediaModelEndpoints();
+  // #6695: a managed deployment answers `423 config_managed` to every
+  // `POST /api/config/set`, so the media editor must show its fields as locked
+  // rather than offer a save that cannot succeed.
+  const configStatusQuery = useConfigStatus();
+  const configManaged = configStatusQuery.data?.writable === false;
   const addMut = useAddCustomModel();
   const deleteMut = useRemoveCustomModel();
 
@@ -861,12 +918,29 @@ export function ModelsPage() {
 
   // Media endpoints obey the same search box as the models, matched on the
   // modality, the selected provider name and the endpoint URL.
+  //
+  // Three of the catalogue filters deliberately do NOT apply:
+  //
+  // - `availableOnly` defaults to `true` and is persisted (`lib/store.ts`), so
+  //   gating on `configured` would hide all four rows on every fresh install —
+  //   exactly the "I could not find where to configure this" gap #8011 filed.
+  //   An unconfigured slot is the thing the operator came here to find.
+  // - `tierFilter` is an LLM-catalogue concept: the tier list is derived from
+  //   `allModels`, so no media endpoint can ever match a specific tier.
+  // - `showHidden` is the hidden-models view, and media endpoints are not
+  //   hideable.
+  //
+  // The last two therefore suppress the media section rather than being
+  // ignored, so a narrowed view does not keep showing rows that do not match
+  // it. `providerFilter` does apply — a media endpoint has a provider name.
   const mediaEndpoints = useMemo(() => {
+    if (showHidden) return [];
+    if (tierFilter !== "all") return [];
     const all = mediaEndpointsQuery.data ?? [];
     const q = search.trim().toLowerCase();
     return all.filter((endpoint) => {
       if (kindFilter !== "all" && kindFilter !== endpoint.kind) return false;
-      if (availableOnly && !endpoint.configured) return false;
+      if (providerFilter !== "all" && endpoint.provider !== providerFilter) return false;
       if (!q) return true;
       return (
         endpoint.kind.includes(q)
@@ -875,7 +949,7 @@ export function ModelsPage() {
         || (endpoint.config.model ?? "").toLowerCase().includes(q)
       );
     });
-  }, [mediaEndpointsQuery.data, search, kindFilter, availableOnly]);
+  }, [mediaEndpointsQuery.data, search, kindFilter, providerFilter, tierFilter, showHidden]);
 
   const showLlmModels = kindFilter === "all" || kindFilter === "llm";
 
@@ -1049,7 +1123,10 @@ export function ModelsPage() {
           </button>
         )}
 
-        <span className="text-[11px] text-text-dim ml-auto">{filtered.length + mediaEndpoints.length} {t("models.results")}</span>
+        {/* Count only what is actually rendered: `filtered` is not narrowed by
+            `kindFilter`, so including it while the LLM sections are suppressed
+            would report ~138 results next to a single visible card. */}
+        <span className="text-[11px] text-text-dim ml-auto">{(showLlmModels ? filtered.length : 0) + mediaEndpoints.length} {t("models.results")}</span>
       </div>
 
       {/* Media endpoints first, then the model catalogue grouped by provider
@@ -1077,6 +1154,12 @@ export function ModelsPage() {
                 ))}
               </div>
             </section>
+          )}
+          {/* The media section can keep the page non-empty while the catalogue
+              filters down to nothing, which would otherwise silently swallow
+              the "no results" signal for the models themselves. */}
+          {showLlmModels && filtered.length === 0 && mediaEndpoints.length > 0 && (
+            <p className="text-xs text-text-dim px-1">{t("models.no_results")}</p>
           )}
           {showLlmModels && Array.from(grouped.entries()).map(([provider, models]) => {
             const availCount = models.filter(m => m.available).length;
@@ -1201,6 +1284,7 @@ export function ModelsPage() {
         <MediaEndpointEditor
           key={editEndpoint.config_path}
           endpoint={editEndpoint}
+          managed={configManaged}
           onClose={() => setEditEndpoint(null)}
           onSaved={() => addToast(t("models.media_saved"), "success")}
           onError={(msg) => addToast(msg || t("models.media_save_error"), "error")}
@@ -1230,12 +1314,12 @@ export function ModelsPage() {
 
 // ── Toggle helper (defined outside render to avoid remount) ──────
 
-function SettingsToggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label: string }) {
+function SettingsToggle({ value, onChange, label, disabled = false }: { value: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
   return (
-    <label className="flex items-center justify-between gap-2 py-1.5 cursor-pointer">
+    <label className={`flex items-center justify-between gap-2 py-1.5 ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
       <span className="text-xs text-text">{label}</span>
-      <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-brand" : "bg-border-subtle"}`}>
+      <button type="button" disabled={disabled} onClick={() => onChange(!value)}
+        className={`relative w-9 h-5 rounded-full transition-colors ${disabled ? "cursor-not-allowed" : "cursor-pointer"} ${value ? "bg-brand" : "bg-border-subtle"}`}>
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "translate-x-4.5" : "translate-x-0.5"}`} />
       </button>
     </label>

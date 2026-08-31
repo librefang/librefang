@@ -3179,6 +3179,9 @@
     "media_api_key_env_hint": "Nazwa zmiennej środowiskowej przechowującej klucz, a nie sam klucz. Tutaj tylko do odczytu: zmień ją w config.toml, aby przekierowanie zmiennej z danymi uwierzytelniającymi pozostawiło ślad w pliku.",
     "media_saved": "Punkt końcowy multimediów zapisany",
     "media_save_error": "Nie udało się zapisać punktu końcowego multimediów",
+    "media_modality_disabled": "Bezczynny: {{path}} jest wyłączone, więc ten endpoint nigdy nie jest wywoływany. Włącz tę modalność w config.toml.",
+    "media_model_overridden": "{{path}} = {{model}} ma pierwszeństwo nad tym polem, więc edycja tutaj nie ma efektu.",
+    "media_key_required_inert": "Bez efektu, dopóki zmienna środowiskowa klucza API nie jest ustawiona — wymuszanie działa tylko wtedy, gdy zmienna jest wskazana.",
     "filter_provider": "Filtruj według dostawcy",
     "filter_tier": "Filtruj według poziomu"
   },

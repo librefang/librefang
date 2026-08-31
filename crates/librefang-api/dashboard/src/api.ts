@@ -3369,6 +3369,22 @@ export interface MediaModelEndpoint {
   config: MediaModelEndpointConfig;
   /** Whether a base URL is set — an endpoint without one is never consulted. */
   configured: boolean;
+  /**
+   * Whether the modality's master switch is on (`[media] audio_transcription`,
+   * `[tts] enabled`, …). A fully filled-in endpoint whose modality is off is
+   * never reached at runtime, so the tab has to say so.
+   */
+  modality_enabled: boolean;
+  /** Dotted path of that master switch, for the warning text. */
+  modality_enabled_path: string;
+  /**
+   * Value of the `[media]` scalar that takes precedence over this table's
+   * `model` (`audio_model` / `image_model` / `video_model`), or `null` when it
+   * is unset or the modality has no such scalar. TTS has none.
+   */
+  model_override: string | null;
+  /** Dotted path of that scalar, or `null` when the modality has none. */
+  model_override_path: string | null;
 }
 
 /* ------------------------------------------------------------------ */
