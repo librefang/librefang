@@ -124,7 +124,8 @@ The lexical arm is the daemon's own index rather than a reimplementation of BM25
 
 **`fts5` and `rrf` need a corpus at migration v50 or later.**
 `memories_fts` arrives in v50 (#7808), and `--corpus` explicitly wants a copy of a production database, which is exactly where an older schema comes from.
-The harness probes the index before spending any judging and refuses those arms rather than scoring them, printing the migration version it needs; if they were the only arms requested it aborts.
+The harness probes the index before spending any judging — and before the `--reembed` pass, which is a real spend against a real endpoint — and refuses those arms rather than scoring them, naming the migration version it needs; if they were the only arms requested it aborts.
+That refusal is recorded the way a withholding is, under the table and in the run JSON's `withheld_arms`, so a pasted result carries it and a later `--noise-floor` cannot pick a refused arm as its instrument.
 That refusal exists because an arm that cannot issue a query scores 0.0 on every query, and nothing downstream can tell that apart from an arm that ran and lost — the reported run certified `fts5 | 0.0000 | +0.8709 [+0.7864, +0.9351] significant` for an arm that never executed, while `rrf` silently became the cosine arm under a second name, because fusing a ranking with an empty list returns that ranking (#7950).
 The same refusal applies to any arm that comes back empty for every counted query, whatever the reason.
 
@@ -197,6 +198,9 @@ When it is, the report says so under the table and gives no score, no interval a
 
 That block is part of the result, so keep it when you paste the table.
 A withheld arm is also removed from `stable_arms`, and `--noise-floor` refuses to use one: an arm that issued no query shows zero movement between two runs, and a floor measured that way is 0.0000, which licenses every difference.
+When the run itself declares no stable arm left, `--noise-floor` says so and names the withheld arm rather than reporting an arm-set mismatch.
+
+The run JSON also carries `empty_rankings` — how many counted queries each arm returned nothing for — which is the evidence behind every withholding decision and the only way to see the borderline the harness deliberately still scores: an arm that answered some queries and not others.
 
 Measure the floor for your own setup rather than inheriting 0.04:
 

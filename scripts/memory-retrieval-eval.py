@@ -266,6 +266,11 @@ def fts_rank_ids(
     Returns an empty list when the query contains no indexable token, which is the same "no usable pre-selection" signal `fts_candidate_ids` uses in `semantic.rs`.
     It also returns one when the index is absent or unusable, but that case is caught up front by `fts_unavailable_reason` so the arm is withheld rather than scored — see that function for why an empty ranking must never reach the metric as a zero.
 
+    Soft-deleted rows are filtered out here even though `fts_candidate_ids` does not filter them, because the two sides differ in what happens next.
+    `memories_fts` carries every row of `memories` regardless of `deleted`: `rebuild_memories_fts` inserts the lot, and a soft delete is an `UPDATE`, so the v50 `memories_fts_au` trigger re-indexes the row rather than dropping it.
+    The daemon then hydrates its candidate ids through a `deleted = 0` read and the tombstones fall out; this harness resolves them against a corpus loaded with the same filter, so an unfiltered candidate is a `KeyError` mid-judging on any real production copy — every corpus has soft-deleted rows, and the crash lands part-way through a judging pass that costs tens of minutes.
+    Filtering inside the query also keeps the arm from being charged a slot for a row that is not in the corpus under test.
+
     `exclude` drops rows inside the query rather than after the top-k cut, so an excluded row does not cost the arm a slot it could have filled.
     """
     conn = sqlite3.connect(corpus_uri(db_path), uri=True)
@@ -273,7 +278,10 @@ def fts_rank_ids(
         match = fts_match_expression(query)
         if not match:
             return []
-        sql = "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ?"
+        sql = (
+            "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? "
+            "AND memory_id IN (SELECT id FROM memories WHERE deleted = 0)"
+        )
         params: list[object] = [match]
         if agent_id:
             sql += " AND agent_id = ?"
@@ -660,6 +668,8 @@ class RunResult:
             "pairs_judged": self.pairs_judged,
             "noise_floor": self.noise_floor,
             "mean_ndcg": self.mean_ndcg(),
+            # The evidence behind every withholding decision, and the only way to see the borderline this harness deliberately still scores: an arm that answered some queries and not others.
+            "empty_rankings": self.empty_rankings,
             "withheld_arms": self.withheld_arms,
             "metadata": self.metadata,
         }
@@ -714,20 +724,16 @@ def render_markdown(result: RunResult, seed: int) -> str:
         )
         withheld.append("")
         withheld.extend(f"- `{arm}` — {reason}." for arm, reason in sorted(result.withheld_arms.items()))
-    if result.queries_counted <= 0:
-        # `run()` reaches this with every arm holding an empty score dict, so `mean_ndcg` reports 0.0000 for all of them, the alphabetically-first arm becomes the "leader", and the paired bootstrap has no difference to resample.
-        # Bootstrapping it raised `ValueError` out of the reporting layer as a traceback. An unusable run has to say it is unusable.
-        lines = [
-            f"**No queries counted** ({result.queries_dropped} dropped). "
-            "Every query lost its whole pool or one of its judged pairs, so no arm has a score and there is no paired difference to bootstrap."
-        ]
-        if withheld:
-            lines.append("")
-            lines.extend(withheld)
-        return "\n".join(lines) + "\n"
     means = result.mean_ndcg()
-    if not means:
-        lines = ["No arms scored."]
+    if not means or result.queries_counted <= 0:
+        # No counted query means no paired difference to bootstrap, and `bootstrap_paired_ci` raises on an empty input rather than inventing an interval.
+        # Rendering the refusal here is what makes `withhold_unscorable_arms`' "the report already says the run is unusable" true: without it a run whose every query was dropped — a judge outage part-way through a pass, or a corpus that matches nothing — died on an uncaught `ValueError` and wrote no report and no `--out` JSON at all.
+        lines = [
+            "**No arms scored, so this run is unusable.** "
+            f"{result.queries_counted} queries counted ({result.queries_dropped} dropped), "
+            f"{result.pairs_judged} judged pairs. "
+            "With no counted query there is no paired difference to bootstrap, so no score, no interval and no verdict are reported for anything."
+        ]
         if withheld:
             lines.append("")
             lines.extend(withheld)
@@ -787,7 +793,22 @@ def noise_floor_from_runs(run_a: dict, run_b: dict, stable_arms: Sequence[str]) 
     That movement is the resolution limit of the whole method, and every difference below it should be discounted, including differences the runs themselves report as significant.
 
     An arm either run withheld from scoring is refused outright rather than skipped, because "the lexical arm did not move between these runs" is trivially true of an arm that never issued a query, and a floor measured that way is 0.0000 — a licence to believe every difference.
+
+    That refusal has to survive an empty `stable_arms` too.
+    `withhold_unscorable_arms` strips a withheld arm out of the run's own `stable_arms`, so `--noise-floor A.json B.json` with no `--stable-arms` — which falls back to `run_a["stable_arms"]` — arrives here with nothing declared and never reaches the check below.
+    Saying "none of the declared stable arms appear in both runs" there names the wrong problem: nothing was declared, because the instrument was withheld.
     """
+    if not stable_arms:
+        withheld_names = sorted({**run_a.get("withheld_arms", {}), **run_b.get("withheld_arms", {})})
+        detail = (
+            f"; {', '.join(withheld_names)} was withheld from scoring, which is why the run declares none"
+            if withheld_names
+            else ""
+        )
+        raise SystemExit(
+            "no stable arms declared, so there is no instrument to measure pool churn with"
+            f"{detail}. Name an arm that ran in both runs with --stable-arms"
+        )
     withheld = {**run_a.get("withheld_arms", {}), **run_b.get("withheld_arms", {})}
     for arm in stable_arms:
         if arm in withheld:
@@ -961,16 +982,14 @@ def run(args: argparse.Namespace) -> int:
     by_id = {doc.id: doc for doc in docs}
     print(f"corpus: {len(docs)} rows, {sum(1 for d in docs if d.embedding)} with a stored vector", file=sys.stderr)
 
-    if args.reembed:
-        docs = reembed_corpus(docs, args)
-        by_id = {doc.id: doc for doc in docs}
-
     with open(args.queries, "r", encoding="utf-8") as handle:
         queries = parse_queries_file(handle)
     if not queries:
         raise SystemExit(f"no queries in {args.queries}")
     # The `memory_id<TAB>text` heuristic cannot be decided from one line, so it is decided here, against the corpus.
     # An id that names no row means either the file was built against a different database or a one-column query was truncated at its first tab; both change what is measured, and neither announces itself in the output.
+    # Refusing rather than warning, because the failure is silent by construction: the ranking is unchanged and the self-match the column exists to remove is still graded 3, so a warning on stderr would be the only trace of a number that is quietly wrong.
+    # It runs before `--reembed` so a bad queries file costs nothing at the embedding endpoint.
     for query in queries:
         unknown = sorted(query.exclude_ids - by_id.keys())
         if unknown:
@@ -994,15 +1013,16 @@ def run(args: argparse.Namespace) -> int:
             "(see the `memory_id<TAB>text` form in docs/development/memory-retrieval-eval.md)",
             file=sys.stderr,
         )
-
     requested = [name.strip() for name in args.arms.split(",") if name.strip()]
     for name in requested:
         if name not in ("cosine", "fts5", "rrf"):
             raise SystemExit(f"unknown arm: {name} (known: cosine, fts5, rrf)")
 
     # Answered once, before a single judge call is spent, because every downstream consumer of an empty ranking reads it as a loss.
+    # Ahead of `--reembed` as well as ahead of judging: re-embedding a production-sized corpus is a real spend against a real endpoint, and paying it only to abort with "no arms left to run" is the same avoidable cost one step earlier.
     lexical_wanted = any(name in ("fts5", "rrf") for name in requested)
     lexical_blocked = fts_unavailable_reason(args.corpus) if lexical_wanted else None
+    refused_reasons: dict[str, str] = {}
     if lexical_blocked:
         refused = [name for name in requested if name in ("fts5", "rrf")]
         requested = [name for name in requested if name not in ("fts5", "rrf")]
@@ -1019,15 +1039,36 @@ def run(args: argparse.Namespace) -> int:
                 f"v{FTS_MIGRATION_VERSION} (#7808), which this corpus does not have. "
                 "Copy a database from a release at or after that migration, or add the cosine arm."
             )
+        # Recorded as withheld, not merely printed, for the same reason the post-run withholding is: a stderr notice does not survive being pasted into an issue, and a run JSON that just omits the arm is indistinguishable from one where nobody asked for it.
+        # `--noise-floor` reads this too, so declaring a refused arm as the stable instrument now fails with the migration version instead of an arm-set mismatch.
+        refused_reasons = {
+            name: (
+                f"refused before judging — this corpus has no usable memories_fts index "
+                f"(migration v{FTS_MIGRATION_VERSION}, #7808): {lexical_blocked}"
+            )
+            for name in refused
+        }
+
+    if args.reembed:
+        docs = reembed_corpus(docs, args)
+        by_id = {doc.id: doc for doc in docs}
+
+    # One embedder and one cosine ranker, shared by every arm that needs them.
+    # Building a second pair for `rrf` meant `--arms cosine,rrf` embedded each query twice against the endpoint and scanned the whole corpus twice per query, for two rankings that are equal by construction.
+    # Built only when an arm asks for it, so `--arms fts5` still needs no embedding endpoint.
+    cosine_rank: Callable[[str, frozenset[str]], list[str]] = (
+        cosine_arm(docs, make_embedder(args), args.top_k)
+        if any(name in ("cosine", "rrf") for name in requested)
+        else lambda _query, _exclude: []
+    )
 
     arms: list[Arm] = []
     for name in requested:
         if name == "cosine":
-            arms.append(Arm("cosine", cosine_arm(docs, make_embedder(args), args.top_k)))
+            arms.append(Arm("cosine", cosine_rank))
         elif name == "fts5":
             arms.append(Arm("fts5", fts_arm(args.corpus, args.top_k, args.agent), stable_under_embedder_change=True))
         elif name == "rrf":
-            cosine_rank = cosine_arm(docs, make_embedder(args), args.top_k)
             lexical_rank = fts_arm(args.corpus, args.top_k, args.agent)
             weights = [args.rrf_weight, 1.0 - args.rrf_weight]
             rrf_name = f"rrf {args.rrf_weight:.1f}/{1.0 - args.rrf_weight:.1f}"
@@ -1050,6 +1091,7 @@ def run(args: argparse.Namespace) -> int:
         arms=[arm.name for arm in arms],
         stable_arms=[arm.name for arm in arms if arm.stable_under_embedder_change],
         noise_floor=args.noise_floor_value,
+        withheld_arms=dict(refused_reasons),
         metadata={
             "corpus": os.path.basename(args.corpus),
             "rows": len(docs),
@@ -1130,10 +1172,12 @@ SYNTHETIC_ROWS = (
 )
 
 
-def write_synthetic_corpus(path: str, *, with_fts: bool) -> None:
+def write_synthetic_corpus(path: str, *, with_fts: bool, with_soft_deleted: bool = False) -> None:
     """Build a throwaway corpus with the two columns the arms read, optionally carrying the v50 FTS5 index.
 
     `with_fts=False` is the corpus shape that produced the reported failure: a copy taken from a database below migration v50, where the lexical arm can issue no query at all.
+
+    `with_soft_deleted=True` reproduces the state every production copy is in: a row with `deleted = 1` that is nonetheless still in `memories_fts`, because a soft delete is an `UPDATE` and the v50 `memories_fts_au` trigger re-indexes the row instead of dropping it.
     """
     conn = sqlite3.connect(path)
     try:
@@ -1155,6 +1199,16 @@ def write_synthetic_corpus(path: str, *, with_fts: bool) -> None:
                 conn.execute(
                     "INSERT INTO memories_fts (memory_id, agent_id, content) VALUES (?, ?, ?)",
                     (row_id, agent_id, content),
+                )
+        if with_soft_deleted:
+            conn.execute(
+                "INSERT INTO memories (id, agent_id, content, source, scope, embedding, deleted) "
+                "VALUES ('m-gone', 'a', 'retry budget from a deleted turn', 'chat', 'episodic', NULL, 1)"
+            )
+            if with_fts:
+                conn.execute(
+                    "INSERT INTO memories_fts (memory_id, agent_id, content) "
+                    "VALUES ('m-gone', 'a', 'retry budget from a deleted turn')"
                 )
         conn.commit()
     finally:
@@ -1431,7 +1485,8 @@ class SelfTest(unittest.TestCase):
             queries_dropped=5,
         )
         report = render_markdown(result, seed=0)
-        self.assertIn("No queries counted", report)
+        self.assertIn("No arms scored", report)
+        self.assertIn("0 queries counted", report)
         self.assertIn("5 dropped", report)
         self.assertNotIn("significant", report)
 
@@ -1597,10 +1652,18 @@ class SelfTest(unittest.TestCase):
     # The arithmetic above was already covered; what was not was the layer that decides which arms get scored at all.
     # These drive `run()` end to end over a throwaway SQLite corpus with no network, because that is the only level at which "this arm was never scored" is a checkable claim.
 
-    def drive_run(self, tmp: str, *, with_fts: bool, arms: str, query_lines: Sequence[str]) -> tuple[dict, str, str, list[str]]:
+    def drive_run(
+        self,
+        tmp: str,
+        *,
+        with_fts: bool,
+        arms: str,
+        query_lines: Sequence[str],
+        with_soft_deleted: bool = False,
+    ) -> tuple[dict, str, str, list[str]]:
         """Run the harness over a synthetic corpus with a stubbed judge and embedder, and return (json, stdout, stderr, judged documents)."""
         corpus = os.path.join(tmp, "corpus.db")
-        write_synthetic_corpus(corpus, with_fts=with_fts)
+        write_synthetic_corpus(corpus, with_fts=with_fts, with_soft_deleted=with_soft_deleted)
         queries_path = os.path.join(tmp, "queries.txt")
         with open(queries_path, "w", encoding="utf-8") as handle:
             handle.write("".join(f"{line}\n" for line in query_lines))
@@ -1648,11 +1711,15 @@ class SelfTest(unittest.TestCase):
                 tmp, with_fts=False, arms="cosine,fts5,rrf", query_lines=["retry budget"]
             )
         self.assertEqual(payload["arms"], ["cosine"])
-        self.assertEqual(payload["withheld_arms"], {})
         self.assertNotIn("fts5", payload["mean_ndcg"])
-        self.assertNotIn("fts5", report)
+        self.assertNotIn("| fts5 |", report)
         self.assertNotIn("significant", report)
         self.assertIn(f"migration v{FTS_MIGRATION_VERSION}", notices)
+        # The refusal has to survive being pasted, and has to be in the JSON `--noise-floor` reads.
+        self.assertEqual(sorted(payload["withheld_arms"]), ["fts5", "rrf"])
+        self.assertIn(f"migration v{FTS_MIGRATION_VERSION}", payload["withheld_arms"]["fts5"])
+        self.assertIn("Withheld from scoring", report)
+        self.assertIn("`fts5` — refused before judging", report)
 
     def test_run_aborts_when_every_requested_arm_needs_the_missing_fts_index(self) -> None:
         """Dropping the unavailable arms must not silently leave a run with nothing in it."""
@@ -1676,6 +1743,35 @@ class SelfTest(unittest.TestCase):
         self.assertIn("Withheld from scoring", report)
         self.assertIn("`fts5` — returned nothing", report)
         self.assertNotIn("significant", report)
+
+    def test_run_probes_the_index_before_paying_for_the_reembed_pass(self) -> None:
+        """Ordering, pinned: `--reembed` re-embeds the whole corpus against a real endpoint, so an arm set that cannot run must be refused before that spend, not after it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = os.path.join(tmp, "corpus.db")
+            write_synthetic_corpus(corpus, with_fts=False)
+            queries_path = os.path.join(tmp, "queries.txt")
+            with open(queries_path, "w", encoding="utf-8") as handle:
+                handle.write("retry budget\n")
+            args = build_parser().parse_args(
+                ["run", "--corpus", corpus, "--queries", queries_path, "--arms", "fts5,rrf", "--reembed",
+                 "--judge-cache", os.path.join(tmp, "j.json"), "--embed-cache", os.path.join(tmp, "e.json")]
+            )
+            calls: list[int] = []
+
+            def counting_embed(_args: argparse.Namespace, texts: Sequence[str]) -> list[Sequence[float]]:
+                calls.append(len(texts))
+                return [(1.0, 0.0) for _ in texts]
+
+            global embed_texts
+            original = embed_texts
+            try:
+                embed_texts = counting_embed
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        run(args)
+            finally:
+                embed_texts = original
+        self.assertEqual(calls, [], "the corpus was re-embedded before the arm set was found unusable")
 
     def test_run_scores_all_three_arms_on_a_corpus_that_has_the_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1709,6 +1805,28 @@ class SelfTest(unittest.TestCase):
                 tmp, with_fts=True, arms="cosine", query_lines=["m1\tretry budget"]
             )
         self.assertEqual(sorted(payload["mean_ndcg"]), ["cosine"])
+
+    def test_run_survives_a_soft_deleted_row_the_lexical_index_still_carries(self) -> None:
+        """`memories_fts` indexes tombstones, and the corpus this harness loads does not.
+
+        A soft delete is an `UPDATE`, so the v50 `memories_fts_au` trigger re-indexes the row rather than dropping it — every production copy is in this state.
+        The lexical arm used to hand that id straight to `by_id[...]`, which is built with `deleted = 0`, so the run died on a `KeyError` part-way through a judging pass.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            payload, _, _, judged = self.drive_run(
+                tmp, with_fts=True, arms="cosine,fts5,rrf", query_lines=["retry budget"], with_soft_deleted=True
+            )
+        self.assertNotIn("retry budget from a deleted turn", judged)
+        self.assertEqual(payload["queries_dropped"], 0)
+        self.assertEqual(sorted(payload["mean_ndcg"]), ["cosine", "fts5", "rrf 0.5/0.5"])
+
+    def test_noise_floor_refuses_when_the_run_declares_no_stable_arm(self) -> None:
+        """`withhold_unscorable_arms` strips a withheld arm out of `stable_arms`, so the default `--noise-floor` invocation arrives here with nothing declared — and must say why rather than blame the arm sets."""
+        run_a = {"mean_ndcg": {"cosine": 0.87}, "withheld_arms": {"fts5": "returned nothing for all 30 counted queries"}}
+        with self.assertRaises(SystemExit) as caught:
+            noise_floor_from_runs(run_a, {"mean_ndcg": {"cosine": 0.79}}, [])
+        self.assertIn("no stable arms declared", str(caught.exception))
+        self.assertIn("fts5", str(caught.exception))
 
 
 def self_test() -> int:
