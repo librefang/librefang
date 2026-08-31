@@ -376,14 +376,10 @@ pub struct ModelPerformance {
     /// Nearest-rank 95th-percentile latency in milliseconds (#8062).
     ///
     /// This is the number a latency SLO is written against.
-    /// `avg_latency_ms` hides the tail an operator gets paged about, and
-    /// `max_latency_ms` is one outlier, so neither answers "is this model fast
-    /// enough on 95% of calls".
+    /// `avg_latency_ms` hides the tail an operator gets paged about, and `max_latency_ms` is one outlier, so neither answers "is this model fast enough on 95% of calls".
     ///
-    /// The definition matches `SessionStore::agent_stats_24h` so the two
-    /// P95 numbers the dashboard shows mean the same thing: the latency at
-    /// 1-based rank `ceil(0.95 * n)` of the window's latencies sorted
-    /// ascending. `0` when the model has no events in the window.
+    /// The definition matches `SessionStore::agent_stats_24h` so the two P95 numbers the dashboard shows mean the same thing: the latency at 1-based rank `ceil(0.95 * n)` of the window's latencies sorted ascending.
+    /// `0` when the model has no events in the window.
     pub p95_latency_ms: u64,
     /// Cost per call in USD.
     pub cost_per_call: f64,
@@ -1402,15 +1398,10 @@ impl UsageStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let (range_sql, range_binds) = range.sql_and_binds();
-        // The range predicate is applied once, inside `filtered`, so the bind
-        // list is the same length as it was before P95 was added — the CTEs
-        // below reference `filtered` rather than re-filtering `usage_events`.
+        // The range predicate is applied once, inside `filtered`, so the bind list is the same length as it was before P95 was added — the CTEs below reference `filtered` rather than re-filtering `usage_events`.
         //
-        // `rn >= (n * 95 + 99) / 100` is integer-division `ceil(0.95 * n)`
-        // (SQLite `/` truncates), and because `ranked` is ordered ascending the
-        // `MIN(latency_ms)` over the qualifying tail is exactly the value at
-        // that rank. n = 1 gives rank 1, n = 10 gives rank 10, n = 100 gives
-        // rank 95 — the same nearest-rank definition `agent_stats_24h` uses.
+        // `rn >= (n * 95 + 99) / 100` is integer-division `ceil(0.95 * n)` (SQLite `/` truncates), and because `ranked` is ordered ascending the `MIN(latency_ms)` over the qualifying tail is exactly the value at that rank.
+        // n = 1 gives rank 1, n = 10 gives rank 10, n = 100 gives rank 95 — the same nearest-rank definition `agent_stats_24h` uses.
         let sql = format!(
             "WITH filtered AS (
                  SELECT model, cost_usd, input_tokens, output_tokens, latency_ms

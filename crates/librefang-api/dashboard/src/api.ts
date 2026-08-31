@@ -986,8 +986,7 @@ export interface ModelPerformanceItem {
   /**
    * Nearest-rank 95th-percentile latency for the window (#8062).
    *
-   * The percentile an SLO is written against — `avg_latency_ms` hides the tail
-   * and `max_latency_ms` is a single outlier.
+   * The percentile an SLO is written against — `avg_latency_ms` hides the tail and `max_latency_ms` is a single outlier.
    */
   p95_latency_ms?: number;
   cost_per_call?: number;
@@ -1001,8 +1000,8 @@ export interface UsageByAgentItem {
   tool_calls?: number;
   cost?: number;
   /**
-   * Prompt / completion split, so a chatty agent is distinguishable from an
-   * expensive one. Both are served by `GET /api/usage`.
+   * Prompt / completion split, so a chatty agent is distinguishable from an expensive one.
+   * Both are served by `GET /api/usage`.
    */
   input_tokens?: number;
   output_tokens?: number;
@@ -1010,8 +1009,7 @@ export interface UsageByAgentItem {
   total_cost_usd?: number;
   call_count?: number;
   /**
-   * `true` for a hand rather than a top-level agent. A hand's spend is real
-   * money, so the page labels these rows instead of dropping them.
+   * `true` for a hand rather than a top-level agent. A hand's spend is real money, so the page labels these rows instead of dropping them.
    */
   is_hand?: boolean;
 }
@@ -1027,22 +1025,17 @@ export interface UsageDailyResponse {
   days?: UsageDailyItem[];
   today_cost_usd?: number;
   /**
-   * Timestamp of the oldest stored usage event, or `null` when the table is
-   * empty. Deliberately NOT filtered by the selected range — it answers "how
-   * far back does the stored data go".
+   * Timestamp of the oldest stored usage event, or `null` when the table is empty.
+   * Deliberately NOT filtered by the selected range — it answers "how far back does the stored data go".
    *
-   * Despite the `_date` suffix this is `MIN(timestamp)`, so it carries a full
-   * RFC 3339 instant rather than a bare `YYYY-MM-DD`. Render the first 10
-   * characters for a day.
+   * Despite the `_date` suffix this is `MIN(timestamp)`, so it carries a full RFC 3339 instant rather than a bare `YYYY-MM-DD`.
+   * Render the first 10 characters for a day.
    */
   first_event_date?: string | null;
   /**
-   * `usage.retention_days` from `config.toml` (#8062). `0` means the retention
-   * sweep is disabled and the table grows without bound.
+   * `usage.retention_days` from `config.toml` (#8062). `0` means the retention sweep is disabled and the table grows without bound.
    *
-   * Paired with `first_event_date` this distinguishes "this deployment is young"
-   * from "the sweep already pruned the rest", which a cost report needs before
-   * anyone reads a total as complete.
+   * Paired with `first_event_date` this distinguishes "this deployment is young" from "the sweep already pruned the rest", which a cost report needs before anyone reads a total as complete.
    */
   retention_days?: number;
 }
@@ -1050,10 +1043,8 @@ export interface UsageDailyResponse {
 /**
  * Inclusive reporting window accepted by every `/api/usage*` endpoint (#7891).
  *
- * Both bounds are `YYYY-MM-DD` **UTC calendar days** — see `lib/usageRange.ts`
- * for why the dashboard resolves its presets in UTC rather than local time. An
- * omitted bound means unbounded on that side; a malformed one is a `400`, so
- * callers normalize before passing values in.
+ * Both bounds are `YYYY-MM-DD` **UTC calendar days** — see `lib/usageRange.ts` for why the dashboard resolves its presets in UTC rather than local time.
+ * An omitted bound means unbounded on that side; a malformed one is a `400`, so callers normalize before passing values in.
  */
 export interface UsageRangeParams {
   start_date?: string;

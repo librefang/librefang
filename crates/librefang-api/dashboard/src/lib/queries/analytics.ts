@@ -21,10 +21,8 @@ const analyticsQueryPolicy = {
   refetchIntervalInBackground: false,
 } as const;
 
-// #8062 — every usage query takes the selected reporting window, and the window
-// is part of its key, so switching presets refetches instead of re-rendering
-// stale numbers under a new caption. The default `{}` is the unbounded window,
-// which reproduces the pre-#8062 request byte for byte.
+// #8062 — every usage query takes the selected reporting window, and the window is part of its key, so switching presets refetches instead of re-rendering stale numbers under a new caption.
+// The default `{}` is the unbounded window, which reproduces the pre-#8062 request byte for byte.
 export const usageQueries = {
   summary: (range: UsageRangeParams = {}) =>
     queryOptions({
@@ -44,8 +42,8 @@ export const usageQueries = {
       queryFn: () => listUsageByModel(range),
       ...analyticsQueryPolicy,
     }),
-  // `days` is only meaningful for the unbounded window — the endpoint answers
-  // 400 when it arrives alongside a range. See `dailyDaysFor`.
+  // `days` is only meaningful for the unbounded window — the endpoint answers 400 when it arrives alongside a range.
+  // See `dailyDaysFor`.
   daily: (range: UsageRangeParams = {}, days?: number) =>
     queryOptions({
       queryKey: usageKeys.daily(range, days),
@@ -71,10 +69,8 @@ export const budgetQueries = {
   // global budget query so the dashboard's two budget cards stay in
   // lock-step rather than ping-ponging slightly out of sync.
   //
-  // Deliberately NOT range-filtered: `/api/budget/providers` reports live
-  // hourly / daily / monthly rollups against the configured caps, which are
-  // "right now" facts. Scoping them to a historical window would render a cap
-  // bar that looks breached (or clear) for a month nobody is spending in.
+  // Deliberately NOT range-filtered: `/api/budget/providers` reports live hourly / daily / monthly rollups against the configured caps, which are "right now" facts.
+  // Scoping them to a historical window would render a cap bar that looks breached (or clear) for a month nobody is spending in.
   providers: () =>
     queryOptions({
       queryKey: budgetKeys.providers(),

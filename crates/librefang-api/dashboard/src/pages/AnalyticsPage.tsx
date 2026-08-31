@@ -18,11 +18,8 @@ import {
   type UsageRangePreset,
 } from "../lib/usageRange";
 
-// `is_hand`, `total_cost_usd`, `input_tokens` / `output_tokens` and
-// `call_count` are now declared on `UsageByAgentItem` in `api.ts` (#8062) —
-// the page reads them as real columns rather than as a local widening. `calls`
-// stays local: the handler does not emit it, and the fallback exists only so a
-// hand-written or proxied payload using that name still renders.
+// `is_hand`, `total_cost_usd`, `input_tokens` / `output_tokens` and `call_count` are now declared on `UsageByAgentItem` in `api.ts` (#8062) — the page reads them as real columns rather than as a local widening.
+// `calls` stays local: the handler does not emit it, and the fallback exists only so a hand-written or proxied payload using that name still renders.
 type AnalyticsAgentRow = UsageByAgentItem & {
   calls?: number;
 };
@@ -87,8 +84,7 @@ function parseNonNegative(raw: string, integer = false): number | null {
 /**
  * Filename fragment describing the exported window (#8062 item 11).
  *
- * Mirrors the naming `GET /api/usage/export` already uses server-side, so a
- * folder holding both kinds of export sorts and reads consistently.
+ * Mirrors the naming `GET /api/usage/export` already uses server-side, so a folder holding both kinds of export sorts and reads consistently.
  */
 export function rangeFileLabel(range: UsageRange): string {
   const { start_date: start, end_date: end } = range;
@@ -398,15 +394,10 @@ const PRESET_LABELS: Record<UsageRangePreset, string> = {
 /**
  * Reporting-window picker (#8062 item 1).
  *
- * Presets on the left, explicit from/to on the right. Picking a preset fills
- * the two inputs so the chosen window is always visible as concrete dates
- * rather than as a highlighted button whose meaning the reader has to infer,
- * and editing either input switches the selection to `custom`.
+ * Presets on the left, explicit from/to on the right. Picking a preset fills the two inputs so the chosen window is always visible as concrete dates rather than as a highlighted button whose meaning the reader has to infer, and editing either input switches the selection to `custom`.
  *
- * The "UTC" label is load-bearing, not decoration: the server filters on UTC
- * calendar days, so for a viewer east or west of Greenwich "today" here is not
- * their local today. Saying so is cheaper than silently reporting a window
- * shifted by the local offset.
+ * The "UTC" label is load-bearing, not decoration: the server filters on UTC calendar days, so for a viewer east or west of Greenwich "today" here is not their local today.
+ * Saying so is cheaper than silently reporting a window shifted by the local offset.
  */
 function UsageRangeBar({
   preset,
@@ -425,8 +416,7 @@ function UsageRangeBar({
 }) {
   const { t } = useTranslation();
   const inverted = isInvertedRange(range);
-  // `first_event_date` is MIN(timestamp), so it arrives as a full RFC 3339
-  // instant despite the field name — the day is the first 10 characters.
+  // `first_event_date` is MIN(timestamp), so it arrives as a full RFC 3339 instant despite the field name — the day is the first 10 characters.
   const firstDay = firstEventDate ? firstEventDate.slice(0, 10) : null;
 
   return (
@@ -523,17 +513,14 @@ export function AnalyticsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
 
-  // #8062 — one reporting window drives every usage query on the page. The
-  // default is `7d` rather than `all`, which is the window the page effectively
-  // showed before (the daily endpoint's own default) now stated explicitly and
-  // applied to the KPI tiles and tables too, not just the trend chart.
+  // #8062 — one reporting window drives every usage query on the page.
+  // The default is `7d` rather than `all`, which is the window the page effectively showed before (the daily endpoint's own default) now stated explicitly and applied to the KPI tiles and tables too, not just the trend chart.
   const [preset, setPreset] = useState<UsageRangePreset | "custom">("7d");
   const [rawRange, setRawRange] = useState<UsageRange>(() =>
     resolveUsageRange("7d"),
   );
 
-  // Only well-formed bounds reach the query key, so a half-typed custom date
-  // does not fire a request the server answers with 400.
+  // Only well-formed bounds reach the query key, so a half-typed custom date does not fire a request the server answers with 400.
   const range = useMemo(() => normalizeUsageRange(rawRange), [rawRange]);
   const dailyDays = useMemo(() => dailyDaysFor(range), [range]);
 
@@ -563,18 +550,14 @@ export function AnalyticsPage() {
   const providerBudgetMutation = useUpdateProviderBudget();
 
   const usage = usageQuery.data ?? null;
-  // Every registry entry, hands included, sorted by spend. `/api/usage` filters
-  // each row on `agent_id` (never `billed_agent_id`), so the rows partition the
-  // events disjointly and a hand's spend is NOT also counted on its parent —
-  // the detail table below can therefore show hands without double-counting.
+  // Every registry entry, hands included, sorted by spend. `/api/usage` filters each row on `agent_id` (never `billed_agent_id`), so the rows partition the events disjointly and a hand's spend is NOT also counted on its parent — the detail table below can therefore show hands without double-counting.
   const allAgentRows = useMemo<AnalyticsAgentRow[]>(
     () => [...((usageByAgentQuery.data ?? []) as AnalyticsAgentRow[])]
       .sort((a, b) => (b.total_cost_usd ?? b.cost ?? 0) - (a.total_cost_usd ?? a.cost ?? 0)),
     [usageByAgentQuery.data],
   );
-  // The cost-by-agent chart stays hands-free: a fleet has many short-lived
-  // hands and they crowd out the agents the chart exists to compare. The
-  // per-agent table (#8062 item 7) is where hands are surfaced, tagged.
+  // The cost-by-agent chart stays hands-free: a fleet has many short-lived hands and they crowd out the agents the chart exists to compare.
+  // The per-agent table (#8062 item 7) is where hands are surfaced, tagged.
   const usageByAgent = useMemo<AnalyticsAgentRow[]>(
     () => allAgentRows.filter(a => !a.is_hand),
     [allAgentRows],
@@ -591,11 +574,8 @@ export function AnalyticsPage() {
 
   const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
   const modelChartData = useMemo(() => usageByModel.map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
-  // No `.slice(-30)` any more (#8062): the window is now whatever the picker
-  // selected, and truncating the tail while the range caption above claims the
-  // full span is exactly the sort of quiet disagreement this page is being
-  // fixed for. `fullDate` is kept alongside the axis label because `MM-DD`
-  // repeats once a window crosses a year boundary.
+  // No `.slice(-30)` any more (#8062): the window is now whatever the picker selected, and truncating the tail while the range caption above claims the full span is exactly the sort of quiet disagreement this page is being fixed for.
+  // `fullDate` is kept alongside the axis label because `MM-DD` repeats once a window crosses a year boundary.
   const dailyChartData = useMemo(
     () => (daily?.days || []).map((d: UsageDailyItem) => ({
       ...d,
@@ -617,10 +597,8 @@ export function AnalyticsPage() {
     dailyQuery.isLoading ||
     modelPerformanceQuery.isLoading;
 
-  // Sum of the daily rows the chart draws (#8062 item 9). Distinct from the
-  // KPI row, which reads `/api/usage/summary` for the same window: agreement
-  // between the two is the reader's own check that the range is being applied
-  // consistently, so they are computed from different endpoints on purpose.
+  // Sum of the daily rows the chart draws (#8062 item 9).
+  // Distinct from the KPI row, which reads `/api/usage/summary` for the same window: agreement between the two is the reader's own check that the range is being applied consistently, so they are computed from different endpoints on purpose.
   const rangeTotals = useMemo(() => {
     const days = daily?.days ?? [];
     let cost = 0;
@@ -634,24 +612,20 @@ export function AnalyticsPage() {
     return { cost, tokens, calls, dayCount: days.length };
   }, [daily]);
 
-  // Inclusive width of the selected window; `null` for the unbounded `all`
-  // preset, where "N of M days" has no M to report.
+  // Inclusive width of the selected window; `null` for the unbounded `all` preset, where "N of M days" has no M to report.
   const spanDays = useMemo(() => rangeSpanDays(range), [range]);
 
   // Download combined per-agent + per-model usage as a CSV so operators
   // can hand it to their finance/FinOps pipeline without screenshotting.
   //
-  // Client-side from the JSON already fetched, so the export always matches the
-  // window on screen. `GET /api/usage/export` (#7891) is the other half of this
-  // story — it streams raw per-event rows for archival; this one exports the
-  // rollups the page is showing, which is the shape a monthly report wants.
+  // Client-side from the JSON already fetched, so the export always matches the window on screen.
+  // `GET /api/usage/export` (#7891) is the other half of this story — it streams raw per-event rows for archival; this one exports the rollups the page is showing, which is the shape a monthly report wants.
   const handleExportCsv = () => {
     const lines: string[] = [];
     lines.push(
       "scope,name,identifier,is_hand,total_cost_usd,input_tokens,output_tokens,total_tokens,calls,tool_calls",
     );
-    // Hands are included here even though the chart omits them — a finance
-    // export that silently drops part of the spend is worse than a busy one.
+    // Hands are included here even though the chart omits them — a finance export that silently drops part of the spend is worse than a busy one.
     for (const a of allAgentRows) {
       lines.push(
         [
@@ -690,8 +664,7 @@ export function AnalyticsPage() {
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    // Name the file after the window it covers, not the day it was downloaded —
-    // three exports of three different months used to land as one filename.
+    // Name the file after the window it covers, not the day it was downloaded — three exports of three different months used to land as one filename.
     a.href = url;
     a.download = `librefang-usage-${rangeFileLabel(range)}.csv`;
     document.body.appendChild(a);
@@ -709,12 +682,11 @@ export function AnalyticsPage() {
       { icon: Wrench, label: t("analytics.total_tool_calls", { defaultValue: "Tool Calls" }), value: formatCompact(usage?.total_tool_calls ?? 0), color: "text-blue-500", bg: "bg-blue-500/10" },
       { icon: Cpu, label: t("analytics.total_tokens_label"), value: formatCompact((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)), color: "text-purple-500", bg: "bg-purple-500/10" },
       { icon: DollarSign, label: t("analytics.total_cost"), value: formatCost(cost), color: "text-success", bg: "bg-success/10" },
-      // #8062 item 2 — derived, not served: the summary carries no per-call
-      // cost. Zero calls renders $0.0000 rather than NaN.
+      // #8062 item 2 — derived, not served: the summary carries no per-call cost.
+      // Zero calls renders $0.0000 rather than NaN.
       { icon: Coins, label: t("analytics.cost_per_call_kpi", { defaultValue: "Cost / Call" }), value: `$${(calls > 0 ? cost / calls : 0).toFixed(4)}`, color: "text-pink-500", bg: "bg-pink-500/10" },
-      // #8062 item 3. Deliberately NOT range-scoped — `today_cost_usd` is a
-      // fixed "since UTC midnight" rollup, so it stays put while the rest of
-      // the row follows the picker. The label says so.
+      // #8062 item 3. Deliberately NOT range-scoped — `today_cost_usd` is a fixed "since UTC midnight" rollup, so it stays put while the rest of the row follows the picker.
+      // The label says so.
       { icon: TrendingUp, label: t("analytics.today_cost"), value: formatCost(daily?.today_cost_usd ?? 0), color: "text-warning", bg: "bg-warning/10" },
     ];
   }, [usage, daily, t]);
@@ -734,10 +706,8 @@ export function AnalyticsPage() {
       if ((m.avg_latency_ms ?? Infinity) < (fastest.avg_latency_ms ?? Infinity)) {
         fastest = m;
       }
-      // #8062 item 8 — the worst per-model P95 in the window. Deliberately the
-      // max rather than a call-weighted mean: an SLO is breached by the slowest
-      // model in the chain, and averaging percentiles across models is not a
-      // percentile of anything.
+      // #8062 item 8 — the worst per-model P95 in the window.
+      // Deliberately the max rather than a call-weighted mean: an SLO is breached by the slowest model in the chain, and averaging percentiles across models is not a percentile of anything.
       if ((m.p95_latency_ms ?? 0) > worstP95) {
         worstP95 = m.p95_latency_ms ?? 0;
       }
@@ -892,9 +862,7 @@ export function AnalyticsPage() {
                   <Tooltip
                     contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
                     formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.total_cost")]}
-                    // The unambiguous full date, not the MM-DD axis label — a
-                    // window can span a year boundary now that it is up to 366
-                    // days wide.
+                    // The unambiguous full date, not the MM-DD axis label — a window can span a year boundary now that it is up to 366 days wide.
                     labelFormatter={(_l, payload) =>
                       payload?.[0]?.payload?.fullDate ?? String(_l)
                     }

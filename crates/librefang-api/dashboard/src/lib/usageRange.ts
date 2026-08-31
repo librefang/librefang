@@ -1,20 +1,13 @@
 /**
  * Date-range presets for the Analytics page (#8062).
  *
- * The `/api/usage/*` endpoints have accepted `start_date` / `end_date` since
- * #7891, but the page only ever asked for a fixed 7-day window, so an operator
- * who needed "what did we spend last month" had to query the API by hand.
+ * The `/api/usage/*` endpoints have accepted `start_date` / `end_date` since #7891, but the page only ever asked for a fixed 7-day window, so an operator who needed "what did we spend last month" had to query the API by hand.
  *
  * # Everything here is UTC, on purpose
  *
- * The server parses both bounds as **UTC calendar days**
- * (`librefang_memory::usage::DateRange`), and `usage_events.timestamp` is
- * written as `Utc::now()`. Resolving "today" against the viewer's local
- * midnight would therefore hand the server a window shifted by the local
- * offset — up to a full day of spend attributed to the wrong date, which is the
- * quiet kind of wrong a cost report never recovers from. So every helper below
- * works in UTC and the picker labels itself as UTC rather than pretending
- * otherwise.
+ * The server parses both bounds as **UTC calendar days** (`librefang_memory::usage::DateRange`), and `usage_events.timestamp` is written as `Utc::now()`.
+ * Resolving "today" against the viewer's local midnight would therefore hand the server a window shifted by the local offset — up to a full day of spend attributed to the wrong date, which is the quiet kind of wrong a cost report never recovers from.
+ * So every helper below works in UTC and the picker labels itself as UTC rather than pretending otherwise.
  */
 
 /** The preset buttons, in the order they render. */
