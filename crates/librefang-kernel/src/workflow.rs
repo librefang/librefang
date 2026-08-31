@@ -2217,16 +2217,13 @@ impl WorkflowEngine {
         }
     }
 
-    /// Write one workflow definition to `workflows_dir`.
+    /// Write one workflow definition to `workflows_dir`, reporting whether it landed.
     ///
     /// Persistence is atomic: serialise → write `<id>.workflow.json.tmp` →
     /// rename to `<id>.workflow.json`. A crash mid-write leaves the `.tmp`
     /// side-file (ignored by `load_from_dir_sync`'s extension filter) but
     /// never a half-written `<id>.workflow.json` that would later refuse to
     /// parse and stall startup.
-    ///
-    /// Every failure path is a `warn!` rather than an error return: refusing the registration because the disk write failed leaves the caller worse off than a workflow that is live now and does not survive a restart.
-    /// Write the definition to disk, reporting whether it landed.
     ///
     /// Returns `Ok(())` when there is no workflows directory configured: an
     /// in-memory engine is a deliberate configuration, not a failed write.
