@@ -16,6 +16,7 @@ use std::pin::Pin;
 struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
+    account_id: Option<String>,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
     overrides: Option<librefang_types::config::ChannelOverrides>,
 }
@@ -25,8 +26,20 @@ impl RecordingChannelAdapter {
         Self {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
+            account_id: None,
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             overrides: None,
+        }
+    }
+
+    /// A **named instance** of a channel type — the shape `[[sidecar_channels]]` produces as soon as `name` and `channel_type` differ (#8046 / #8055).
+    ///
+    /// The `account_id` mirrors the bridge exactly: `channel_bridge.rs` pushes `Some(sidecar_config.name.clone())` alongside each adapter, so a named instance's account id *is* its instance name.
+    fn named_instance(name: &str, channel_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            account_id: Some(name.to_string()),
+            ..Self::new(channel_type)
         }
     }
 
@@ -50,6 +63,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 
     fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
@@ -484,6 +501,184 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         1,
         "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
     );
+
+    // Case 3 (#8055 guard): an account the registry does not know must NOT fall back to the bare key.
+    // That fallback would deliver one tenant's reply into another tenant's chat — the leak the approval listener in `librefang_channels::bridge` documents.
+    // The #8055 channel-type scan added a second path into this resolution, so pin the behaviour explicitly.
+    let err = kernel
+        .send_channel_message(
+            "whatsapp",
+            "dm-2",
+            "approved — wrong account",
+            None,
+            Some("acct-unknown"),
+        )
+        .await
+        .expect_err("an unknown account_id must not resolve to any adapter");
+    assert!(
+        err.to_string().contains("acct-unknown"),
+        "the error must name the account that failed to resolve: {err}"
+    );
+    assert_eq!(
+        bare_sent.lock().unwrap().len(),
+        1,
+        "an unknown account_id must NOT fall back to the bare adapter (cross-tenant leak)"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_channel_message_resolves_named_instance_by_channel_type_8055() {
+    // #8055: a sidecar channel whose `name` differs from its `channel_type` was unreachable from every outbound send.
+    //
+    // The channel bridge registers each adapter under `adapter.name()` and `"<name>:<account_id>"`, where `account_id` is that same name — so a `[[sidecar_channels]]` entry `name = "slack-hr", channel_type = "slack"` produces exactly the two keys the bug report shows, `["slack-hr", "slack-hr:slack-hr"]`.
+    // Inbound turns, however, are stamped with the *channel type*, so the post-approval wake path called `send_channel_message("slack", …, Some("slack-hr"))` and missed both keys.
+    // The agent's reply was produced and persisted, and silently never delivered.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    // Register exactly as `channel_bridge::start_channel_bridge_with_config` does — both keys built from the instance name, neither from the type.
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    // The failing call from the bug report, verbatim.
+    kernel
+        .send_channel_message(
+            "slack",
+            "C0BN6UAQ75M",
+            "approved — file uploaded",
+            None,
+            Some("slack-hr"),
+        )
+        .await
+        .expect("a named instance must be reachable by its channel type + account_id");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C0BN6UAQ75M:approved — file uploaded".to_string()],
+        "the post-approval reply must reach the 'slack-hr' instance the turn arrived on"
+    );
+
+    // The instance name itself keeps working — that is how an explicit `channel_send({channel: "slack-hr"})` and the per-instance status reads in `routes/channels.rs` address the adapter.
+    kernel
+        .send_channel_message("slack-hr", "C0BN6UAQ75M", "by name", None, None)
+        .await
+        .expect("the instance name must remain a valid channel key");
+
+    // With a single instance of the type registered, a bare channel type is unambiguous and resolves too.
+    // This is what an out-of-band caller with no account context (`notify_owner`, a cron target written as `slack`) hands in.
+    kernel
+        .send_channel_message("slack", "C0BN6UAQ75M", "by bare type", None, None)
+        .await
+        .expect("a lone instance of a channel type must resolve from the bare type");
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        3,
+        "all three addressing forms must land on the same single instance"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
+    // The #8055 channel-type scan must never widen cross-tenant reach.
+    // Two named instances of one channel type are two different customers, so the scan resolves only when the `account_id` singles one out — and a bare channel type with two instances registered stays an error rather than picking whichever adapter `DashMap` iteration happened to yield first.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    let eng = Arc::new(RecordingChannelAdapter::named_instance(
+        "slack-eng",
+        "slack",
+    ));
+    let eng_sent = eng.sent.clone();
+    for (name, adapter) in [
+        ("slack-hr", hr.clone() as Arc<dyn ChannelAdapter>),
+        ("slack-eng", eng.clone() as Arc<dyn ChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    // Each account reaches its own instance and only its own instance.
+    kernel
+        .send_channel_message("slack", "C-HR", "hr only", None, Some("slack-hr"))
+        .await
+        .expect("account_id must single out the hr instance");
+    kernel
+        .send_channel_message("slack", "C-ENG", "eng only", None, Some("slack-eng"))
+        .await
+        .expect("account_id must single out the eng instance");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C-HR:hr only".to_string()]
+    );
+    assert_eq!(
+        eng_sent.lock().unwrap().clone(),
+        vec!["C-ENG:eng only".to_string()]
+    );
+
+    // An account that matches no instance is an error, not a guess.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "nobody", None, Some("slack-legal"))
+        .await
+        .expect_err("an unregistered account must not resolve");
+    assert!(
+        err.to_string().contains("slack-legal"),
+        "the error must name the unresolved account: {err}"
+    );
+
+    // A bare channel type with two instances is ambiguous; the error says so, and lists the registered keys in sorted order so two operator reports of the same daemon are comparable.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "which tenant?", None, None)
+        .await
+        .expect_err("a bare channel type must not pick a tenant at random");
+    let err = err.to_string();
+    assert!(
+        err.contains("ambiguous"),
+        "an ambiguous bare channel type must say so: {err}"
+    );
+    assert!(
+        err.contains(r#"["slack-eng", "slack-eng:slack-eng", "slack-hr", "slack-hr:slack-hr"]"#),
+        "the available-key list must be sorted for comparability: {err}"
+    );
+
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        1,
+        "neither the unresolved account nor the ambiguous type may deliver anything"
+    );
+    assert_eq!(eng_sent.lock().unwrap().len(), 1);
 
     kernel.shutdown();
 }

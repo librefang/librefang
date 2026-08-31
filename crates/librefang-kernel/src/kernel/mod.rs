@@ -1878,22 +1878,16 @@ impl LibreFangKernel {
             );
             return;
         }
-        // Route the reply through the canonical account-qualified outbound
-        // path (#6492 Bug 2). `send_channel_message` builds the adapter
-        // lookup key as `"<channel>:<account_id>"` when an account is present
-        // and falls back to the bare `<channel>` otherwise — matching how the
-        // channel bridge registers adapters under BOTH keys for multi-account
-        // installs. The previous bare `channel_adapters.get(channel)` ignored
-        // `deferred.account_id`, so on a multi-account daemon a post-approval
-        // reply for a non-first account was delivered to the wrong account's
-        // adapter (wrong bot/chat) or missed entirely. Reusing the canonical
-        // path also picks up the adapter's `output_format` override for free,
-        // exactly as a normal inbound reply would. `thread_id: None` — the wake
-        // path carries no thread context (mirrors the pre-fix `adapter.send()`,
-        // which never threaded). On an adapter-miss OR a send failure the call
-        // returns `Err`; we log WARN (it does not log itself) with the same
-        // information as before — the reply is still persisted in session
-        // history, so the next user turn surfaces it.
+        // Route the reply through the canonical account-qualified outbound path (#6492 Bug 2).
+        // `send_channel_message` delegates to `handles::channel_sender::resolve_channel_adapter`, whose precedence rules are documented there.
+        // The previous bare `channel_adapters.get(channel)` ignored `deferred.account_id`, so on a multi-account daemon a post-approval reply for a non-first account was delivered to the wrong account's adapter (wrong bot/chat) or missed entirely.
+        //
+        // `channel` here is the *channel type* the inbound turn was stamped with (`librefang_channels::bridge` uses `channel_type_str(adapter.channel_type())`), while the bridge keys the adapter registry by instance `name`.
+        // Resolving the two against each other is what #8055 fixed; keep that in mind before reintroducing any direct `channel_adapters` lookup on this path.
+        //
+        // Reusing the canonical path also picks up the adapter's `output_format` override for free, exactly as a normal inbound reply would.
+        // `thread_id: None` — the wake path carries no thread context (mirrors the pre-fix `adapter.send()`, which never threaded).
+        // On an adapter-miss OR a send failure the call returns `Err`; we log WARN (it does not log itself) — the reply is still persisted in session history, so the next user turn surfaces it.
         if let Err(e) = self
             .send_channel_message(
                 channel,
