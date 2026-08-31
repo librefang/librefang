@@ -334,7 +334,9 @@ def parse_queries_file(lines: Iterable[str]) -> list[Query]:
     Several ids may be given comma-separated with no spaces, for a turn stored across more than one row.
 
     A tab inside a real user message must not be read as a column separator, so the first field is only treated as an id list when it contains no whitespace at all — commas included, because `hello, world<TAB>…` is a message and not two ids.
-    That keeps the one-column form safe for arbitrary message text, which is what the file is documented to contain.
+    That rule is a heuristic and not a proof, and it has one hole: a message whose *first word* is followed by a tab (`TODO<TAB>fix the retry budget`) is still read as `TODO` plus a query that has silently lost its first word.
+    Nothing in a single line can distinguish that from a genuine id column, so the second half of the guard lives in `run()`, which checks every exclusion id against the corpus and refuses the run when one names no row.
+    A query the harness truncated measures something other than what the file says, and this is the same class of error as scoring an arm that never ran: wrong, quiet, and shaped exactly like a result (#7950).
 
     Duplicate query texts are refused rather than deduplicated: per-query scores are keyed by text, so a repeated line silently overwrites its twin and the run reports fewer paired differences than the file implies.
     """
@@ -712,6 +714,17 @@ def render_markdown(result: RunResult, seed: int) -> str:
         )
         withheld.append("")
         withheld.extend(f"- `{arm}` — {reason}." for arm, reason in sorted(result.withheld_arms.items()))
+    if result.queries_counted <= 0:
+        # `run()` reaches this with every arm holding an empty score dict, so `mean_ndcg` reports 0.0000 for all of them, the alphabetically-first arm becomes the "leader", and the paired bootstrap has no difference to resample.
+        # Bootstrapping it raised `ValueError` out of the reporting layer as a traceback. An unusable run has to say it is unusable.
+        lines = [
+            f"**No queries counted** ({result.queries_dropped} dropped). "
+            "Every query lost its whole pool or one of its judged pairs, so no arm has a score and there is no paired difference to bootstrap."
+        ]
+        if withheld:
+            lines.append("")
+            lines.extend(withheld)
+        return "\n".join(lines) + "\n"
     means = result.mean_ndcg()
     if not means:
         lines = ["No arms scored."]
@@ -738,6 +751,10 @@ def render_markdown(result: RunResult, seed: int) -> str:
             for query in sorted(result.per_query[leader])
             if query in result.per_query[arm]
         ]
+        if not diffs:
+            # No query scored both arms, so there is nothing to pair. Say that rather than bootstrap an empty sample.
+            lines.append(f"| {arm} | {score:.4f} | no query scored both arms |")
+            continue
         mean, low, high = bootstrap_paired_ci(diffs, seed=seed)
         lines.append(
             f"| {arm} | {score:.4f} | +{mean:.4f} [{low:+.4f}, {high:+.4f}] "
@@ -952,6 +969,18 @@ def run(args: argparse.Namespace) -> int:
         queries = parse_queries_file(handle)
     if not queries:
         raise SystemExit(f"no queries in {args.queries}")
+    # The `memory_id<TAB>text` heuristic cannot be decided from one line, so it is decided here, against the corpus.
+    # An id that names no row means either the file was built against a different database or a one-column query was truncated at its first tab; both change what is measured, and neither announces itself in the output.
+    for query in queries:
+        unknown = sorted(query.exclude_ids - by_id.keys())
+        if unknown:
+            raise SystemExit(
+                f"queries file names {', '.join(unknown)} as a row to exclude, but this corpus has no such row "
+                f"(query: {query.text[:60]!r}). "
+                "Either the file was built against a different database, or that line is a one-column query whose first word was followed by a tab and was read as an id list — "
+                "in which case the query has lost its first word. "
+                "Both measure something other than what the file says, so the run stops here instead of reporting it."
+            )
     excluded = sum(1 for query in queries if query.exclude_ids)
     if excluded:
         print(
@@ -1393,6 +1422,29 @@ class SelfTest(unittest.TestCase):
         self.assertIn("Leader: a", report)
         self.assertIn("| a | 0.8500 | — |", report)
 
+    def test_report_says_a_run_counted_nothing_instead_of_bootstrapping_an_empty_sample(self) -> None:
+        """Every query dropped leaves every arm with no score, so there is no paired difference; this used to raise `ValueError` as a traceback out of the report."""
+        result = RunResult(
+            arms=["cosine", "fts5"],
+            per_query={"cosine": {}, "fts5": {}},
+            queries_counted=0,
+            queries_dropped=5,
+        )
+        report = render_markdown(result, seed=0)
+        self.assertIn("No queries counted", report)
+        self.assertIn("5 dropped", report)
+        self.assertNotIn("significant", report)
+
+    def test_report_does_not_pair_two_arms_that_share_no_query(self) -> None:
+        """`run()` scores every arm on every counted query, so it cannot reach this today; the guard is here so that the day an arm can skip a query, the report degrades to a missing cell rather than a traceback."""
+        result = RunResult(
+            arms=["a", "b"],
+            per_query={"a": {"q1": 0.9}, "b": {"q2": 0.4}},
+            queries_counted=2,
+        )
+        report = render_markdown(result, seed=0)
+        self.assertIn("no query scored both arms", report)
+
     # ── An arm that never ran (#7950) ────────────────────────────────────────────────────────────────────
 
     def test_an_arm_that_returns_nothing_for_every_query_is_not_scored(self) -> None:
@@ -1510,6 +1562,16 @@ class SelfTest(unittest.TestCase):
         queries = parse_queries_file(["fix the\tindentation please\n"])
         self.assertEqual(queries[0].text, "fix the\tindentation please")
         self.assertEqual(queries[0].exclude_ids, frozenset())
+
+    def test_queries_file_reads_a_single_word_before_a_tab_as_an_id_list(self) -> None:
+        """The hole the whitespace rule does not close, pinned so it cannot be believed shut.
+
+        `fix the<TAB>…` is safe because the first field has a space in it; `TODO<TAB>…` is not, and the query loses its first word.
+        One line cannot tell this from a genuine id column, so `run()` catches it by checking the id against the corpus — see the test below.
+        """
+        queries = parse_queries_file(["TODO\tfix the retry budget before Friday\n"])
+        self.assertEqual(queries[0].text, "fix the retry budget before Friday")
+        self.assertEqual(queries[0].exclude_ids, frozenset({"TODO"}))
 
     def test_queries_file_refuses_a_duplicate_query(self) -> None:
         """Per-query scores are keyed by text, so a repeated line overwrites its twin and quietly shrinks the paired sample."""
@@ -1631,6 +1693,22 @@ class SelfTest(unittest.TestCase):
             )
         self.assertNotIn("retry budget is three attempts", judged)
         self.assertIn("retry policy for the alpha channel", judged)
+
+    def test_run_refuses_an_exclusion_id_that_names_no_corpus_row(self) -> None:
+        """The other half of the tab heuristic: `TODO<TAB>retry budget` parses as an id list, and the id is not in the corpus, so the run stops instead of scoring a query with its first word removed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as caught:
+                self.drive_run(tmp, with_fts=True, arms="cosine", query_lines=["TODO\tretry budget"])
+        self.assertIn("TODO", str(caught.exception))
+        self.assertIn("no such row", str(caught.exception))
+
+    def test_run_accepts_an_exclusion_id_that_does_name_a_corpus_row(self) -> None:
+        """The guard above must not reject the documented form it exists to protect."""
+        with tempfile.TemporaryDirectory() as tmp:
+            payload, _, _, _ = self.drive_run(
+                tmp, with_fts=True, arms="cosine", query_lines=["m1\tretry budget"]
+            )
+        self.assertEqual(sorted(payload["mean_ndcg"]), ["cosine"])
 
 
 def self_test() -> int:

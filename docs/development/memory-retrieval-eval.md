@@ -74,7 +74,10 @@ There are two ways to build a file that does not do this, and the first is the d
 A queries line may be `memory_id<TAB>text`, and that row is dropped from every arm for that query only — inside the ranking, so the arm is not also penalised for a short list.
 The id is the one the `SELECT` that produced the line already had in hand, so this costs nothing to adopt.
 Several ids may be given comma-separated with no spaces, for a turn stored across more than one row.
-A tab inside a real user message is safe: the first field is only read as an id list when it contains no whitespace at all.
+The first field is read as an id list only when it contains no whitespace at all, so a tab *inside* a message (`fix the<TAB>indentation`) stays query text.
+That rule is a heuristic rather than a proof, and it has one hole: a message whose *first word* is followed by a tab (`TODO<TAB>fix the retry budget`) reads as an id plus a query that has lost its first word.
+So the harness also checks every id against the corpus and refuses to run when one names no row, which catches both that truncation and a file built against a different database.
+If a run stops with `this corpus has no such row`, look at the line it names before assuming the id is stale.
 
 ```bash
 python3 - <<'PY' > queries.txt
