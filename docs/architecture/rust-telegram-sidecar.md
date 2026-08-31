@@ -118,7 +118,10 @@ Edit failures are silently tolerated for `message is not modified` (debounce tic
 ## Text-rendering pipeline
 
 ```
-raw text  ──▶ sanitize_rich_markdown  ──▶ sendRichMessage(rich_message.markdown)     ← primary path
+raw text  ──▶ markdown_to_blocks       ──▶ sendRichMessage(rich_message.blocks)      ← preferred path
+                │
+                └─ only if conversion yields nothing for non-empty text (a converter bug):
+                     sanitize_rich_markdown ──▶ sendRichMessage(rich_message.markdown)   ← guard, not a mode
                                                 │
                                                 └─ on a 4xx from Telegram (e.g. Bot API < 10.1):
                                                      markdown_to_telegram_html ──▶ sanitize_telegram_html ──▶ split_to_utf16_chunks ──▶ sendMessage(parse_mode=HTML)
@@ -129,10 +132,11 @@ raw text  ──▶ sanitize_rich_markdown  ──▶ sendRichMessage(rich_messa
 
 A 5xx or a transport failure is **not** a fallback trigger: Telegram may have created the message already, and re-sending through the legacy path would deliver the same answer twice.
 
-- **Rich Markdown (primary).** Telegram parses the GFM itself, so tables, task lists, `_italic_`, `~~strikethrough~~`, `||spoiler||` and nested emphasis all work, and the size limit is 32768 characters rather than 4096.
+- **Rich Markdown (guard only — see the blocks bullet below).** Telegram parses the GFM itself, so tables, task lists, `_italic_`, `~~strikethrough~~`, `||spoiler||` and nested emphasis all work, and the size limit is 32768 characters rather than 4096.
   `sanitize_rich_markdown` runs first because Rich Markdown may contain arbitrary HTML: **no `<` reaches Telegram as itself**, in any context, so quoted untrusted content cannot render itself a `<tg-button>` whose `callback_data` would come back as a genuine button press.
   Two character-local rules, no lookahead: `&` becomes `&amp;` and `<` becomes `&lt;`, and a `!` before `[` is escaped so `![](url)` stays inert text rather than a media fetch.
   The first version used a backslash instead of the entity and did not work — Telegram delivers `\<` as a character and parses the tag anyway, so a quoted button was live (#8127). It was found by sending the two forms to a real bot and reading back the parse `sendRichMessage` returns in its response; backslash *does* escape Markdown syntax, which is why the mistake survived review.
+  That history is why this path is now a guard rather than the primary one, and why the blocks path below is not simply a nicer rendering: escaping is a claim about someone else's parser that has to be re-verified whenever that parser changes, and a wrong claim here is a live button rather than a formatting glitch.
   There are no exemptions for code spans, fenced blocks or well-formed tags, and **link destinations are not filtered at all**.
   Both of those were tried: each needs to decide where a CommonMark construct ends, which means reimplementing part of the parser, and five rounds of review found a defect in that machinery every time — four of them introduced by the fix for the previous one.
   The legacy `sanitize_telegram_html` can filter schemes because it *constructs* the anchor and knows where the href is; here we would be guessing at someone else's parse, and the reference libraries for this problem parse with a real parser instead of scanning.
@@ -175,12 +179,14 @@ A 5xx or a transport failure is **not** a fallback trigger: Telegram may have cr
 
 ## Python-parity deltas
 
-The port is feature-parity by intent but has three documented deliberate divergences:
+The port is feature-parity by intent but has four documented deliberate divergences:
 
 1. **`parse_command` uses `MessageEntity.length` (UTF-16) instead of `txt.split(" ", 1)`.**
    `/help:foo` returns `("help", [":foo"])` in Rust (Bot-API-correct); Python returns `("help:foo", [])` (a long-standing parser bug).
 2. **`MediaGroup` with > 10 items is chunked into batches of 10.** Python raises `ValueError`.
-3. **`channel`-type chats are not treated as group.** Both adapters now use `is_group = chat_type in {group, supergroup}`; the original Rust draft included `channel`, the parity fix narrowed it.
+3. **Rust builds `rich_message.blocks`; Python still sends `rich_message.markdown`.**
+   The two adapters therefore have different properties on the rich path: Rust does not escape (nothing parses a block's text) and filters link schemes, while Python escapes every `<` and filters nothing. Both fall back to the same `sendMessage` + HTML pipeline. Porting blocks to Python is bounded by its stdlib-only rule — under `blocks` a partial converter is merely lower-fidelity rather than unsafe, which is the opposite of the situation on the Markdown path.
+4. **`channel`-type chats are not treated as group.** Both adapters now use `is_group = chat_type in {group, supergroup}`; the original Rust draft included `channel`, the parity fix narrowed it.
 
 Cross-language tests pin the rest of the wire shape (`media_placeholder_matches_python_labels` covers all eight placeholder variants byte-for-byte).
 

@@ -20,7 +20,15 @@
 //!
 //! What an agent actually writes: paragraphs, headings, lists, tables, code, emphasis,
 //! links, block quotes, dividers. Media blocks, collages, maps, `<details>`, math and
-//! footnotes are out of scope (#8015) and degrade to their text, never to nothing.
+//! footnotes are out of scope (#8015) and degrade to their text.
+//!
+//! "Degrade to their text" is the property to hold on to, and it is the one that broke:
+//! block-level HTML was routed through `push_inline`, which does nothing when no inline run
+//! is open, so `<details>` converted to nothing at all. The dangerous shape was not the
+//! all-HTML message — that produced no blocks and fell back — but the mixed one, where the
+//! surviving paragraphs kept the result non-empty and the message went out with its middle
+//! removed. One exception is deliberate: GFM specifies that table cells beyond the header
+//! count are ignored, so those are dropped to match every other GFM renderer.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use serde::Serialize;
@@ -189,6 +197,13 @@ struct Builder {
     style_starts: Vec<usize>,
     /// Set while inside a fenced or indented code block, holding its info string.
     code_language: Option<Option<String>>,
+    /// Consecutive block-level HTML lines, which arrive one event per line with no
+    /// paragraph around them. Held here so they become one paragraph instead of several.
+    html_block: String,
+    /// A task-list marker arrives *inside* the item, after `Tag::Item` has already pushed
+    /// the item's block frame — so the list frame is no longer on top and cannot be
+    /// reached from the marker's own event. Stashed here and applied when the item closes.
+    pending_checkbox: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +226,17 @@ impl Builder {
         unreachable!("the document frame is always a Frame::Blocks")
     }
 
+    /// Emit any buffered block-level HTML as its own paragraph.
+    fn flush_html_block(&mut self) {
+        if self.html_block.is_empty() {
+            return;
+        }
+        let html = std::mem::take(&mut self.html_block);
+        let text = RichText::Plain(html.trim_end_matches('\n').to_string());
+        let block = Block::Paragraph { text };
+        self.blocks_mut().push(block);
+    }
+
     fn start_inline(&mut self) {
         self.inlines.push(Vec::new());
     }
@@ -226,6 +252,10 @@ impl Builder {
     }
 
     fn push(&mut self, event: Event<'_>) {
+        // Any event other than more block HTML ends the run of it.
+        if !matches!(event, Event::Html(_)) {
+            self.flush_html_block();
+        }
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -240,23 +270,15 @@ impl Builder {
                 self.blocks_mut().push(block);
             }
             // Raw HTML is text, not markup: this is the whole point of `blocks`. A quoted
-            // `<tg-button …>` lands in a paragraph's string, where no parser will look at it.
-            Event::Html(html) | Event::InlineHtml(html) => {
-                self.push_inline(RichText::Plain(html.into_string()))
-            }
-            Event::TaskListMarker(checked) => {
-                if let Some(Frame::ListItems { items, .. }) = self.frames.last_mut() {
-                    // The marker arrives *inside* the item, so the item is not built yet;
-                    // stash the state on the list and apply it when the item closes.
-                    items.push(ListItem {
-                        blocks: Vec::new(),
-                        value: None,
-                        label_type: None,
-                        has_checkbox: Some(true),
-                        is_checked: checked.then_some(true),
-                    });
-                }
-            }
+            // `<tg-button …>` lands in a string, where no parser will look at it.
+            Event::InlineHtml(html) => self.push_inline(RichText::Plain(html.into_string())),
+            // `Event::Html` is the *block-level* variant and arrives with no surrounding
+            // paragraph, so there is no open inline run to push into. Routing it through
+            // `push_inline` dropped it silently: `<details>…</details>` converted to nothing,
+            // and a message mixing prose with an HTML block was sent with its middle
+            // missing. Buffered here and flushed as its own paragraph.
+            Event::Html(html) => self.html_block.push_str(&html),
+            Event::TaskListMarker(checked) => self.pending_checkbox = Some(checked),
             Event::FootnoteReference(name) => {
                 self.push_inline(RichText::Plain(format!("[^{name}]")))
             }
@@ -350,9 +372,14 @@ impl Builder {
             TagEnd::Item => {
                 let loose_text = self.take_inline();
                 if !loose_text.is_empty() {
+                    // *Before* whatever the item already collected, not after. A nested
+                    // list closes while its parent item is still open, so it lands in the
+                    // item's frame first; appending the item's own text then printed the
+                    // sub-points above the point they belong to.
                     let block = Block::Paragraph { text: loose_text };
-                    self.blocks_mut().push(block);
+                    self.blocks_mut().insert(0, block);
                 }
+                let checkbox = self.pending_checkbox.take();
                 let blocks = match self.frames.pop() {
                     Some(Frame::Blocks(blocks)) => blocks,
                     other => {
@@ -364,22 +391,15 @@ impl Builder {
                 };
                 if let Some(Frame::ListItems { items, next_value }) = self.frames.last_mut() {
                     let value = next_value.inspect(|v| *next_value = Some(v + 1));
-                    // A task-list marker pre-created the item; fill it in rather than
-                    // adding a second one.
-                    match items.last_mut() {
-                        Some(item) if item.blocks.is_empty() && item.has_checkbox.is_some() => {
-                            item.blocks = blocks;
-                            item.value = value;
-                            item.label_type = value.map(|_| "1".to_string());
-                        }
-                        _ => items.push(ListItem {
-                            blocks,
-                            value,
-                            label_type: value.map(|_| "1".to_string()),
-                            has_checkbox: None,
-                            is_checked: None,
-                        }),
-                    }
+                    items.push(ListItem {
+                        blocks,
+                        value,
+                        label_type: value.map(|_| "1".to_string()),
+                        has_checkbox: checkbox.map(|_| true),
+                        // Only ever `Some(true)`: the spec types the field as `True`, so an
+                        // unchecked box omits it rather than sending `false`.
+                        is_checked: checkbox.filter(|c| *c),
+                    });
                 }
             }
             TagEnd::BlockQuote(_) => {
@@ -483,6 +503,8 @@ impl Builder {
     }
 
     fn finish(mut self) -> Vec<Block> {
+        // A document ending in block HTML has nothing after it to trigger the flush.
+        self.flush_html_block();
         while self.frames.len() > 1 {
             self.frames.pop();
         }
@@ -746,6 +768,84 @@ mod tests {
         // Headings, quotes, list items and code all contribute; a divider does not.
         let mixed = markdown_to_blocks("# hi\n\n> q\n\n- x\n\n```\nc\n```\n\n---");
         assert_eq!(text_len(&mixed), 5);
+    }
+
+    /// `Event::Html` is the block-level variant and arrives with no paragraph around it,
+    /// so there is no open inline run to push into. Routing it through `push_inline` made
+    /// it vanish: a `<details>` block converted to nothing, and — worse — a message mixing
+    /// prose with an HTML block was *sent* with its middle missing, because the surviving
+    /// paragraphs kept the conversion non-empty and the guard never fired.
+    #[test]
+    fn block_level_html_is_kept_as_text() {
+        let details = "<details>\n<summary>why</summary>\n</details>";
+        assert_eq!(
+            json(details),
+            serde_json::json!([{"type": "paragraph", "text": details}])
+        );
+
+        // The dangerous shape: content on both sides keeps the result non-empty, so
+        // nothing would have reported the loss.
+        assert_eq!(
+            json("before\n\n<div>middle</div>\n\nafter"),
+            serde_json::json!([
+                {"type": "paragraph", "text": "before"},
+                {"type": "paragraph", "text": "<div>middle</div>"},
+                {"type": "paragraph", "text": "after"},
+            ])
+        );
+    }
+
+    /// A task-list marker arrives *inside* the item, after `Tag::Item` has pushed the item's
+    /// block frame — so the list frame is no longer on top. The original handler looked for
+    /// it there anyway, never matched, and both the marker and its companion branch in
+    /// `TagEnd::Item` were dead code: `- [ ] x` and `- [x] x` serialised identically, with
+    /// the `[ ]` / `[x]` characters consumed by the parser and never given back.
+    #[test]
+    fn task_list_checkboxes_survive() {
+        assert_eq!(
+            json("- [ ] todo\n- [x] done"),
+            serde_json::json!([{"type": "list", "items": [
+                {"blocks": [{"type": "paragraph", "text": "todo"}], "has_checkbox": true},
+                {"blocks": [{"type": "paragraph", "text": "done"}],
+                 "has_checkbox": true, "is_checked": true},
+            ]}])
+        );
+        // A plain item must not grow a checkbox from the previous item's marker.
+        let plain = json("- [x] done\n- plain");
+        assert!(
+            plain[0]["items"][1].get("has_checkbox").is_none(),
+            "{plain}"
+        );
+    }
+
+    /// A nested list closes while its parent item is still open, so it lands in the item's
+    /// frame before the item's own text is appended — which printed every sub-point above
+    /// the point it belongs to.
+    #[test]
+    fn nested_list_items_keep_source_order() {
+        assert_eq!(
+            json("- a\n  - b"),
+            serde_json::json!([{"type": "list", "items": [{"blocks": [
+                {"type": "paragraph", "text": "a"},
+                {"type": "list", "items": [
+                    {"blocks": [{"type": "paragraph", "text": "b"}]},
+                ]},
+            ]}]}])
+        );
+    }
+
+    /// GFM, "Tables (extension)": "If there are greater, the excess is ignored." Pinned so
+    /// the truncation reads as conformance rather than as the content loss it resembles.
+    #[test]
+    fn table_rows_follow_gfm_cell_counting() {
+        assert_eq!(
+            json("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |"),
+            serde_json::json!([{"type": "table", "cells": [
+                [{"text": "a", "is_header": true}, {"text": "b", "is_header": true}],
+                [{"text": "1"}, {"text": ""}],
+                [{"text": "1"}, {"text": "2"}],
+            ]}])
+        );
     }
 
     #[test]

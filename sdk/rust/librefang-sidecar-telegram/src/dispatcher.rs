@@ -146,16 +146,15 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
 
 /// Send a text message.
 ///
-/// Prefers `sendRichMessage` (Bot API 10.1+), which hands the text to Telegram's own
-/// GFM-compatible parser. That gets us tables, `_italic_`, `~~strikethrough~~` and
-/// nested emphasis — none of which `format::markdown` can express — and raises the
-/// size limit from 4096 to 32768, so ordinary replies stop being split mid-sentence.
-/// The text is passed through [`crate::format::prepare_rich_markdown`] first so quoted
-/// untrusted content cannot inject interactive elements.
+/// Prefers `sendRichMessage` (Bot API 10.1+) carrying structured blocks, built by
+/// [`crate::format::prepare_rich_blocks`]. Telegram runs no Markdown or HTML parser over a
+/// block's text, so quoted content arrives as a string value rather than as markup — the
+/// converter, not Telegram, does the parsing, and a bug in it costs formatting rather than
+/// letting quoted text turn itself into a button or a link.
 ///
-/// A definitive refusal by Telegram (see [`is_api_rejection`] for exactly which
-/// responses count) falls back to [`send_text_legacy_counting`], keeping pre-10.1 (typically
-/// self-hosted) Bot API servers working exactly as before.
+/// Falls back to a sanitised Markdown string only when conversion yields nothing for
+/// non-empty text, which would mean a converter bug, and then to the legacy `sendMessage` +
+/// HTML pipeline when Telegram itself refuses the rich call.
 pub async fn send_text(
     client: &BotClient,
     chat_id: i64,
