@@ -64,9 +64,7 @@ pub(super) async fn tool_code_search(
     let mut stack: Vec<PathBuf> = vec![root.clone()];
 
     'walk: while let Some(dir) = stack.pop() {
-        // #8050: an interrupted syscall here would silently drop a whole
-        // directory from the search rather than fail it, so the retry matters
-        // even though the error itself is swallowed by design below.
+        // #8050: an interrupted syscall here would silently drop a whole directory from the search rather than fail it, so the retry matters even though the error itself is swallowed by design below.
         let mut rd = match io_retry::read_dir(&dir).await {
             Ok(rd) => rd,
             // Unreadable directory: skip it rather than failing the whole search.

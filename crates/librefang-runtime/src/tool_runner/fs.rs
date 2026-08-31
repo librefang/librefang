@@ -394,9 +394,8 @@ pub(super) async fn tool_file_list(
         .as_u64()
         .map(|o| o as usize)
         .unwrap_or(DEFAULT_DIR_OFFSET);
-    // #8050: both directory calls go through the EINTR-retrying wrappers. On a
-    // cloud-synced mount an interrupted syscall is routine, and surfacing it
-    // failed the tool call with a message that reads like a filesystem outage.
+    // #8050: both directory calls go through the EINTR-retrying wrappers.
+    // On a cloud-synced mount an interrupted syscall is routine, and surfacing it failed the tool call with a message that reads like a filesystem outage.
     let mut entries = io_retry::read_dir(&resolved)
         .await
         .map_err(|e| ToolError::Upstream {

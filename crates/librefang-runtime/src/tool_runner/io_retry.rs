@@ -1,27 +1,17 @@
 //! Retry helpers for filesystem calls the OS can interrupt.
 //!
-//! `EINTR` (`io::ErrorKind::Interrupted`) means a syscall was interrupted by a
-//! signal *before it did anything* — the caller is expected to reissue it.
-//! Surfacing it is a bug rather than a filesystem fault, and the message the
-//! OS supplies ("Interrupted system call") reads like a mount outage, which
-//! sends operators looking in the wrong place (#8050).
+//! `EINTR` (`io::ErrorKind::Interrupted`) means a syscall was interrupted by a signal *before it did anything* — the caller is expected to reissue it.
+//! Surfacing it is a bug rather than a filesystem fault, and the message the OS supplies ("Interrupted system call") reads like a mount outage, which sends operators looking in the wrong place (#8050).
 //!
-//! It shows up in practice on slow, cloud-synced mounts (macOS FileProvider,
-//! iCloud-backed `~/Documents`): the directory read stays in the kernel long
-//! enough that a signal from a busy async runtime is likely to land mid-call.
-//! Before this module a single interruption ended the tool call, and the agent
-//! saw it 6/6 times on a directory a concurrent `os.listdir()` loop read
-//! successfully 160/160 times — Python retries `EINTR` transparently (PEP 475),
-//! which is the behaviour reproduced here.
+//! It shows up in practice on slow, cloud-synced mounts (macOS FileProvider, iCloud-backed `~/Documents`): the directory read stays in the kernel long enough that a signal from a busy async runtime is likely to land mid-call.
+//! Before this module a single interruption ended the tool call, and the agent saw it 6/6 times on a directory a concurrent `os.listdir()` loop read successfully 160/160 times — Python retries `EINTR` transparently (PEP 475), which is the behaviour reproduced here.
 
 use std::future::Future;
 use std::io;
 use std::path::Path;
 
-/// How many times an interrupted call is reissued before the error is
-/// surfaced. `EINTR` is transient by definition, so a small bound is enough to
-/// absorb a burst of signals while still terminating if something is wedged
-/// into delivering them continuously.
+/// How many times an interrupted call is reissued before the error is surfaced.
+/// `EINTR` is transient by definition, so a small bound is enough to absorb a burst of signals while still terminating if something is wedged into delivering them continuously.
 const MAX_INTERRUPT_RETRIES: usize = 5;
 
 fn is_interrupted(e: &io::Error) -> bool {
@@ -30,8 +20,7 @@ fn is_interrupted(e: &io::Error) -> bool {
 
 /// Run `op`, reissuing it while it reports `EINTR`.
 ///
-/// `op` is a closure rather than a future so each attempt starts a fresh call:
-/// a future that already returned `Err` cannot be polled again.
+/// `op` is a closure rather than a future so each attempt starts a fresh call: a future that already returned `Err` cannot be polled again.
 async fn retry_on_interrupt<T, F, Fut>(mut op: F) -> io::Result<T>
 where
     F: FnMut() -> Fut,
@@ -55,9 +44,7 @@ pub(super) async fn read_dir(path: &Path) -> io::Result<tokio::fs::ReadDir> {
 
 /// `ReadDir::next_entry` that survives an interrupted syscall.
 ///
-/// Written as a loop rather than through [`retry_on_interrupt`] because
-/// `next_entry` borrows the reader mutably, and a closure returning a future
-/// that holds a `&mut` borrow of its own captured state does not type-check.
+/// Written as a loop rather than through [`retry_on_interrupt`] because `next_entry` borrows the reader mutably, and a closure returning a future that holds a `&mut` borrow of its own captured state does not type-check.
 pub(super) async fn next_entry(
     rd: &mut tokio::fs::ReadDir,
 ) -> io::Result<Option<tokio::fs::DirEntry>> {
