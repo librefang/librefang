@@ -238,6 +238,21 @@ pub async fn execute_tool_raw(
         acting_principal,
     } = ctx;
 
+    // #8051: the kernel advertises every named workspace to the model as
+    // `@name` in TOOLS.md, so expand that form here — once, before any arm
+    // reads a path — into the mount it points at. Downstream everything sees
+    // an ordinary absolute path, which keeps the security checks and the
+    // resolver enforcing against the same string that will be opened.
+    let aliased_input;
+    let input = match expand_alias_in_tool_input(tool_name, input, *kernel, *caller_agent_id) {
+        Ok(None) => input,
+        Ok(Some(rewritten)) => {
+            aliased_input = rewritten;
+            &aliased_input
+        }
+        Err(reason) => return ToolResult::error(tool_use_id.to_string(), reason),
+    };
+
     // ACL-gated, `ToolError`-native tools (memory_* + wiki_*) are dispatched
     // here, before the stringly `match` below, through the typed boundary —
     // so a per-user `PermissionDenied` (from the shared `enforce_memory_acl`
