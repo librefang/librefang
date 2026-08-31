@@ -3126,10 +3126,14 @@ fn test_apply_thinking_override_none_leaves_manifest_untouched() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 4242,
             stream_thinking: true,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, None);
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Inherit,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 4242);
     assert!(cfg.stream_thinking);
@@ -3142,7 +3146,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
         thinking: Some(librefang_types::config::ThinkingConfig::default()),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(false));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Disable,
+    );
     assert!(manifest.thinking.is_none());
 }
 
@@ -3150,7 +3157,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
 fn test_apply_thinking_override_force_on_inserts_default() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking inserted");
     assert_eq!(
         cfg.budget_tokens,
@@ -3165,12 +3175,163 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 1234,
             stream_thinking: false,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 1234);
+}
+
+// ── Reasoning-mode resolution order (#7946) ────────────────────────
+//
+// Documented order: per-call > per-agent > global > compiled default.
+// The first two rungs are applied by `apply_thinking_override`; the third is
+// the global-backfill assignment in `messaging.rs` / `agent_execution.rs`,
+// which these tests reproduce literally (`if manifest.thinking.is_none() {
+// manifest.thinking = cfg.thinking.clone() }`) so a change to that line's
+// direction shows up here rather than in production.
+
+/// Rung 3: an agent that declares no `[thinking]` table inherits the global
+/// `reasoning_mode`.
+#[test]
+fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    // The global backfill, as the kernel performs it.
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("backfilled").reasoning_mode,
+        Some(ReasoningMode::High),
+    );
+}
+
+/// Rung 2 beats rung 3: a per-agent `[thinking]` table suppresses the global
+/// backfill entirely, so its `reasoning_mode` wins.
+#[test]
+fn test_reasoning_mode_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("per-agent kept").reasoning_mode,
+        Some(ReasoningMode::Low),
+        "the per-agent table must not be overwritten by the global backfill",
+    );
+}
+
+/// Rung 1 beats both: the per-call override is stamped on last.
+#[test]
+fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::Max));
+
+    let cfg = manifest.thinking.expect("thinking present");
+    assert_eq!(cfg.reasoning_mode, Some(ReasoningMode::Max));
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "a mode override must not disturb the agent's configured budget",
+    );
+}
+
+/// A per-call mode on an agent with no `[thinking]` table at all must still
+/// land. Creating the config lazily is the difference between the feature
+/// working and silently doing nothing.
+#[test]
+fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
+    use librefang_types::config::{ReasoningMode, ThinkingOverride};
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::None));
+
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("thinking config created for the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
+}
+
+/// `Mode(None)` and `Disable` are deliberately different. `Disable` clears the
+/// thinking config, which only *omits* the reasoning opt-in — a model that
+/// reasons by default keeps reasoning. `Mode(None)` keeps a config carrying the
+/// mode, which is what lets the driver send the provider's explicit non-think
+/// toggle. Collapsing the two would re-open exactly the gap #7946 closes.
+#[test]
+fn test_disable_and_mode_none_are_not_the_same_thing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let base = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig::default()),
+        ..Default::default()
+    };
+
+    let mut disabled = base.clone();
+    apply_thinking_override(&mut disabled, ThinkingOverride::Disable);
+    assert!(
+        disabled.thinking.is_none(),
+        "Disable keeps its pre-#7946 meaning: drop the thinking config",
+    );
+
+    let mut non_think = base.clone();
+    apply_thinking_override(&mut non_think, ThinkingOverride::Mode(ReasoningMode::None));
+    assert_eq!(
+        non_think
+            .thinking
+            .expect("Mode(None) must keep a thinking config to carry the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
 }
 
 // ── JSON extraction tests ──────────────────────────────────────────

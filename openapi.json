@@ -15511,6 +15511,14 @@
           "message": {
             "type": "string"
           },
+          "reasoning_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Per-task reasoning mode: `\"none\"` | `\"low\"` | `\"high\"` | `\"max\"` (#7946).\n\nTop rung of the resolution order — per-call > per-agent (`agent.toml`\n`[thinking] reasoning_mode`) > global (`config.toml` `[thinking]\nreasoning_mode`) > compiled default (the `budget_tokens` bucket).\n\nAdded alongside [`Self::thinking`] rather than widening it, because the\nboolean is in the wire contract of every existing client and a JSON\n`true` cannot grow a third value without breaking them. The two are not\nredundant either: `thinking: false` merely omits the reasoning opt-in,\nwhile `reasoning_mode: \"none\"` sends the provider's explicit non-think\ntoggle — the difference between \"we did not ask it to think\" and \"we\nasked it not to\", which is the whole point on a model that reasons by\ndefault.",
+            "example": "high"
+          },
           "sender_id": {
             "type": [
               "string",
@@ -15544,7 +15552,7 @@
               "boolean",
               "null"
             ],
-            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default"
+            "description": "Per-call deep-thinking override.\n\n- `Some(true)`: force thinking on (even if the manifest has it off)\n- `Some(false)`: force thinking off (even if the manifest has it on)\n- `None`: use the manifest/global default\n\nKept as a boolean for backward compatibility. Prefer\n[`Self::reasoning_mode`], which is strictly more expressive and wins\nwhen both are present (#7946)."
           },
           "was_mentioned": {
             "type": "boolean",

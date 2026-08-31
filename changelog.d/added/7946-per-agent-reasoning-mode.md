@@ -1,0 +1,7 @@
+`reasoning_mode` — `none` / `low` / `high` / `max` — settable per agent (`agent.toml` `[thinking]`), globally (`config.toml` `[thinking]`), and per task (the `reasoning_mode` key on both message endpoints), resolved per-call > per-agent > global > compiled default.
+  Telling a model "answer fast, don't overthink" in the prompt is not a substitute for a wire-level toggle: the reasoning tokens are still generated, still consumed from the output budget, and still billed, so a prompt-level workaround costs exactly as much as the reasoning it was meant to avoid.
+  There was previously no way to express the choice at all — and for DeepSeek V4, direct or via OpenRouter, LibreFang sent no reasoning fields whatsoever, so every request ran at the provider default of thinking-on at `high` no matter what any agent was configured to want.
+  The mode is now translated per provider: DeepSeek V4 gets `thinking: {"type": "disabled"}` for `none` and `thinking: {"type": "enabled"}` plus `reasoning_effort` otherwise, OpenRouter-routed models get the nested `reasoning: {effort}` form with `max` as `xhigh`, and other OpenAI-compatible endpoints keep the top-level `reasoning_effort`.
+  The two spellings are mutually exclusive per request because OpenRouter answers HTTP 400 to a payload carrying both.
+  Leaving `reasoning_mode` unset preserves the previous wire shape byte for byte, including the `budget_tokens` bucket fallback, so nothing changes for anyone who does not opt in.
+  (#PR) (@houko)

@@ -160,7 +160,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
