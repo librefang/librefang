@@ -489,6 +489,129 @@ async fn add_custom_model_then_get_then_delete_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// #7957 — a custom model's vision support is reported as declared or unknown,
+// never as a guess presented as a fact
+// ---------------------------------------------------------------------------
+
+/// An operator who declares `supports_vision` gets that declaration back, and the API says the
+/// answer is *known* — so the request-build gate may act on it in either direction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_supports_vision_on_a_custom_model_is_reported_as_known() {
+    let h = boot();
+    for (declared, expected) in [(true, "supported"), (false, "unsupported")] {
+        let id = format!("custom-vision-7957-{declared}");
+        let (status, _body) = json_request(
+            &h,
+            Method::POST,
+            "/api/models/custom",
+            Some(serde_json::json!({
+                "id": id,
+                "provider": "openai",
+                "context_window": 64_000,
+                "max_output_tokens": 4_096,
+                "supports_vision": declared,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, body) =
+            json_request(&h, Method::GET, &format!("/api/models/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["supports_vision"].as_bool(), Some(declared));
+        assert_eq!(
+            body["vision_support"].as_str(),
+            Some(expected),
+            "a field the operator filled in is a declaration, in both directions: {body}"
+        );
+    }
+}
+
+/// The #7957 case, reached through the API rather than through gateway discovery: a custom model
+/// added without the `supports_vision` field must be reported as **unknown**, not as text-only.
+///
+/// `supports_vision` still serialises as `false` (the catalog's storage encoding), which is exactly
+/// why `vision_support` has to exist: the boolean cannot distinguish "the operator said no" from
+/// "the operator did not say", and only the first of those may cost a user their image.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_omitted_supports_vision_on_a_custom_model_is_reported_as_unknown() {
+    let h = boot();
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "custom-silent-7957",
+            "provider": "openai",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models/custom-silent-7957", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["vision_support"].as_str(),
+        Some("unknown"),
+        "silence must not be recorded as a declared absence of vision support: {body}"
+    );
+
+    // The same model in the list view — the surface the model picker reads.
+    let (status, body) = json_request(&h, Method::GET, "/api/models", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|m| m["id"].as_str() == Some("custom-silent-7957"))
+        .expect("the custom model must appear in the listing");
+    assert_eq!(listed["vision_support"].as_str(), Some("unknown"));
+}
+
+/// An operator override is a human declaration and outranks the catalog, so it flips
+/// `vision_support` to a decided answer even for a model the catalog only guessed at (#4745, #7957).
+/// This is the escape hatch the redaction `WARN` in the agent loop points at.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_override_makes_an_unknown_vision_capability_known() {
+    let h = boot();
+    let (status, _body) = json_request(
+        &h,
+        Method::POST,
+        "/api/models/custom",
+        Some(serde_json::json!({
+            "id": "custom-override-7957",
+            "provider": "openai",
+            "context_window": 64_000,
+            "max_output_tokens": 4_096,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _body) = json_request(
+        &h,
+        Method::PUT,
+        // The override map is keyed `provider:id`, which is the same key `vision_support` reads.
+        "/api/models/overrides/openai:custom-override-7957",
+        Some(serde_json::json!({ "supports_vision": true })),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "setting the override must succeed, got {status}"
+    );
+
+    let (status, body) =
+        json_request(&h, Method::GET, "/api/models/custom-override-7957", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["supports_vision"].as_bool(), Some(true));
+    assert_eq!(body["vision_support"].as_str(), Some("supported"));
+}
+
+// ---------------------------------------------------------------------------
 // Per-model overrides — GET / PUT / DELETE /api/models/overrides/{id}
 // ---------------------------------------------------------------------------
 
@@ -1736,6 +1859,7 @@ fn boot_with_provider(provider: ProviderInfo) -> Harness {
         image_output_cost_per_m: None,
         supports_tools: false,
         supports_vision: false,
+        vision_known: true,
         supports_streaming: false,
         supports_thinking: false,
         aliases: Vec::new(),

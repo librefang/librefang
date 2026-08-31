@@ -46,6 +46,19 @@ pub struct DiscoveredModelInfo {
     /// `None` carries the same meaning as for [`Self::context_window`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
+    /// Image-input support **as declared by the listing endpoint**, when it declares it at all (#7957).
+    ///
+    /// Distinct from [`Self::capabilities`] above, which is Ollama's `/api/tags` string array.
+    /// This is the OpenAI-compatible-gateway shape: LiteLLM and its kin expose a per-model `supports_vision` boolean and OpenRouter an `architecture.input_modalities` list, and until #7957 the `/v1/models` parser threw all of it away — leaving the model's *name* as the only signal anyone downstream had.
+    ///
+    /// `None` means the endpoint said nothing, and it MUST stay `None`: [`crate::model_catalog::ModelCatalog::merge_discovered_models`] records the absence as `vision_known: false`, which the request-build gate reads as unknown and keeps sending images for.
+    /// Collapsing it to `Some(false)` here would assert that a gateway declared its model blind when it merely declined to answer, and that assertion is the silent image drop #7957 reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    /// Tool/function-calling support as declared by the listing endpoint (LiteLLM's `supports_function_calling`).
+    /// `None` carries the same meaning as for [`Self::supports_vision`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_function_calling: Option<bool>,
 }
 
 impl DiscoveredModelInfo {
@@ -64,6 +77,8 @@ impl DiscoveredModelInfo {
             capabilities: Vec::new(),
             context_window: None,
             max_output_tokens: None,
+            supports_vision: None,
+            supports_function_calling: None,
         }
     }
 }
@@ -601,14 +616,25 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
             // Ollama ≥0.7 exposes a top-level `capabilities` array per
             // model in /api/tags. Older versions omit it — we fall back
             // to heuristic detection from the model name and family.
-            let capabilities: Vec<String> =
-                if let Some(caps) = m.get("capabilities").and_then(|v| v.as_array()) {
-                    caps.iter()
-                        .filter_map(|c| c.as_str().map(String::from))
-                        .collect()
-                } else {
-                    infer_ollama_capabilities(&name, family.as_deref())
-                };
+            let declared = m.get("capabilities").and_then(|v| v.as_array());
+            let capabilities: Vec<String> = match declared {
+                Some(caps) => caps
+                    .iter()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect(),
+                None => infer_ollama_capabilities(&name, family.as_deref()),
+            };
+            // Only a `capabilities` array the *server* sent is a statement about the model (#7957).
+            // The synthesized fallback above is `infer_ollama_capabilities` reading the model's
+            // name, and it stays in `capabilities` because the dashboard surfaces that list — but it
+            // must not reach the catalog as a declared capability, or an Ollama < 0.7 daemon serving
+            // a vision model under a name the heuristic misses records it as blind and the agent
+            // loop strips the images with nothing to show for it.
+            let supports_vision = declared.map(|_| {
+                capabilities
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case("vision"))
+            });
 
             Some(DiscoveredModelInfo {
                 name,
@@ -628,6 +654,11 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
                 // Report it as unknown rather than guessing from the family name.
                 context_window: None,
                 max_output_tokens: None,
+                supports_vision,
+                // Ollama's `capabilities` array is the only capability channel `/api/tags` has, and
+                // `resolve_discovered_capabilities` reads tool support out of it directly. There is
+                // no separate OpenAI-style boolean to report here.
+                supports_function_calling: None,
             })
         })
         .collect();
@@ -641,10 +672,11 @@ fn parse_ollama_tags(body: &serde_json::Value) -> EndpointOutcome {
 /// Parse an OpenAI-compatible `/v1/models` response into discovered model IDs
 /// plus whatever token capacity the entries happen to report.
 ///
-/// `data[].id` is the only field required by spec. We don't try to derive
-/// capabilities from this shape because OpenAI-format `/v1/models` doesn't
-/// expose vision/tools flags — capability inference is left to whatever
-/// downstream consumer cares (e.g. `merge_discovered_models`).
+/// `data[].id` is the only field required by spec.
+///
+/// Capabilities used to be skipped here on the grounds that "OpenAI-format `/v1/models` doesn't expose vision/tools flags", which left the model's *name* as the only signal `merge_discovered_models` had.
+/// That is wrong for the deployments where it matters most: an operator-run gateway (LiteLLM, a vLLM / llama.cpp proxy) names its models `team-default` or `fast` or an internal ticket id, so a name heuristic guesses — and those same gateways do publish `supports_vision` / `supports_function_calling` per model.
+/// The flags are read here when present and propagated as `Option<bool>`, so an absent flag stays "it did not say" rather than becoming a declared `false` (#7957).
 ///
 /// Capacity is different: gateways and self-hosted servers *do* put it here, under a handful of non-standard keys (vLLM `max_model_len`, LM Studio and llama.cpp `context_length`, LiteLLM `max_input_tokens` / `max_output_tokens`, OpenRouter `context_length` and `top_provider.max_completion_tokens`).
 /// It used to be discarded, so every gateway-discovered catalog entry was built from a literal even when the gateway had answered the question.
@@ -666,17 +698,20 @@ fn parse_openai_models(body: &serde_json::Value) -> EndpointOutcome {
         .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
         .collect();
 
-    let info: Vec<DiscoveredModelInfo> = arr
-        .iter()
-        .filter_map(|m| {
-            let name = m.get("id").and_then(|n| n.as_str())?;
-            Some(DiscoveredModelInfo {
-                context_window: crate::model_metadata::parse_openai_model(m),
-                max_output_tokens: crate::model_metadata::parse_openai_model_max_output(m),
-                ..DiscoveredModelInfo::bare(name)
+    let info: Vec<DiscoveredModelInfo> =
+        arr.iter()
+            .filter_map(|m| {
+                let name = m.get("id").and_then(|n| n.as_str())?;
+                Some(DiscoveredModelInfo {
+                    context_window: crate::model_metadata::parse_openai_model(m),
+                    max_output_tokens: crate::model_metadata::parse_openai_model_max_output(m),
+                    supports_vision: crate::model_metadata::parse_openai_model_supports_vision(m),
+                    supports_function_calling:
+                        crate::model_metadata::parse_openai_model_supports_tools(m),
+                    ..DiscoveredModelInfo::bare(name)
+                })
             })
-        })
-        .collect();
+            .collect();
 
     EndpointOutcome::Ok {
         models: names,
@@ -1039,6 +1074,8 @@ mod tests {
             capabilities: vec!["completion".to_string()],
             context_window: None,
             max_output_tokens: None,
+            supports_vision: None,
+            supports_function_calling: None,
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["name"], "llama3.2:latest");
@@ -1132,6 +1169,42 @@ mod tests {
         assert_eq!(info[0].name, "llama3.2:latest");
         assert_eq!(info[0].family.as_deref(), Some("llama"));
         assert_eq!(info[0].capabilities, vec!["completion", "tools"]);
+        // The server sent the array, so it is a declaration: no `vision` in it means this model
+        // genuinely has none, and the catalog may act on that.
+        assert_eq!(info[0].supports_vision, Some(false));
+    }
+
+    /// #7957: an Ollama daemon that omits `capabilities` (< 0.7) still gets a synthesized array for
+    /// the dashboard, but that array is `infer_ollama_capabilities` reading the model's *name*, and
+    /// it must not be reported as the server's declaration.
+    ///
+    /// `supports_vision: None` is what keeps the catalog honest: the entry is stamped
+    /// `vision_known: false`, so a vision model whose name misses the heuristic keeps its images
+    /// instead of being silently recorded as blind.
+    #[test]
+    fn test_parse_ollama_tags_does_not_declare_inferred_capabilities() {
+        let body = serde_json::json!({
+            "models": [
+                {
+                    "name": "llava:latest",
+                    "details": {"family": "llama", "families": ["llama", "clip"]}
+                },
+                {
+                    "name": "Gemma-4-26B-A4B-it-GGUF:latest",
+                    "details": {"family": "gemma", "families": ["gemma"]}
+                }
+            ]
+        });
+        let (_models, info) = ok_or_panic(parse_ollama_tags(&body));
+        // The synthesized array is still populated — the dashboard reads it.
+        assert!(info
+            .iter()
+            .all(|i| i.capabilities.contains(&"completion".to_string())));
+        // …but nothing here is a declaration, for the guessed-vision model or the guessed-text one.
+        assert!(
+            info.iter().all(|i| i.supports_vision.is_none()),
+            "an inferred capability array must not be reported as the server's own flag"
+        );
     }
 
     #[test]
@@ -1159,12 +1232,52 @@ mod tests {
             models,
             vec!["Gemma-4-26B-A4B-it-GGUF", "nomic-embed-text-v2-moe-GGUF"]
         );
-        // One info row per model, name only: the OpenAI shape carries no capability metadata, and this body carries no capacity either, so both capacity fields stay `None` rather than acquiring a default.
+        // One info row per model, name only: this body declares neither capacity nor capability, so every optional field stays `None` rather than acquiring a default (#7780, #7957).
         assert_eq!(info.len(), 2);
         assert!(info.iter().all(|i| i.family.is_none()
             && i.capabilities.is_empty()
             && i.context_window.is_none()
-            && i.max_output_tokens.is_none()));
+            && i.max_output_tokens.is_none()
+            && i.supports_vision.is_none()
+            && i.supports_function_calling.is_none()));
+    }
+
+    /// #7957: a gateway that declares its models' capabilities must have them reach
+    /// `DiscoveredModelInfo`, and a gateway that declares nothing must leave them `None`.
+    ///
+    /// The model ids here are the point of the issue: `team-default`, `fast` and an internal ticket
+    /// id are what operators actually call their LiteLLM / vLLM deployments, and no name heuristic
+    /// can read a capability out of any of them. Before this the parser discarded the flags, so the
+    /// name was the only signal left.
+    #[test]
+    fn test_parse_openai_models_reads_declared_capability_flags() {
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "team-default", "supports_vision": true, "supports_function_calling": true},
+                {"id": "fast", "supports_vision": false},
+                {"id": "internal-4412", "model_info": {"supports_vision": true}},
+                {"id": "vendor/multimodal", "architecture": {"input_modalities": ["text", "image"]}},
+                {"id": "says-nothing"}
+            ]
+        });
+        let (_models, info) = ok_or_panic(parse_openai_models(&body));
+        let by_name = |n: &str| {
+            info.iter()
+                .find(|i| i.name == n)
+                .unwrap_or_else(|| panic!("missing {n}"))
+        };
+        assert_eq!(by_name("team-default").supports_vision, Some(true));
+        assert_eq!(
+            by_name("team-default").supports_function_calling,
+            Some(true)
+        );
+        assert_eq!(by_name("fast").supports_vision, Some(false));
+        assert_eq!(by_name("internal-4412").supports_vision, Some(true));
+        assert_eq!(by_name("vendor/multimodal").supports_vision, Some(true));
+        // Silence stays silence. This is the field that must never be `Some(false)` by default.
+        assert_eq!(by_name("says-nothing").supports_vision, None);
+        assert_eq!(by_name("says-nothing").supports_function_calling, None);
     }
 
     #[test]

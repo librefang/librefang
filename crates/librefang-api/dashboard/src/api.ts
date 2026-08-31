@@ -1965,6 +1965,12 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
+  // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
+  // inferred from the model's name, and the agent loop then keeps sending images rather than
+  // stripping them on a guess. Surface it wherever a text-only model is presented as a fact, so an
+  // operator can tell "this model cannot see" from "nobody has told us".
+  vision_support?: "supported" | "unsupported" | "unknown";
   // Raw catalog defaults — use for "Auto = revert target" in override editors.
   capabilities_catalog?: {
     supports_tools?: boolean;

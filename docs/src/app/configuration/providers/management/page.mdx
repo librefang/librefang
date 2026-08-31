@@ -73,6 +73,27 @@ The write is durable for a provider you created — nothing else owns its file.
 For a **registry-shipped** provider it is not: the boot-time registry sync rewrites any file whose content differs from the upstream copy, so a `discover_models` edit to e.g. `providers/openai.toml` applies immediately and is reverted on the next daemon start.
 That is only a limitation on paper for the built-in local ids, whose discovery is decided by the id rather than the flag; if you need a registry-shipped remote provider polled permanently, register it under your own id instead of editing the shipped file.
 
+### Discovered Capabilities, and What "No Vision" Means
+
+A discovered model's `supports_vision` decides whether image attachments reach the model at all: a model recorded as text-only has every image block replaced by a placeholder before the request is built, because a text-only OpenAI-compatible endpoint rejects `image_url` content parts with HTTP 400.
+
+LibreFang reads that flag from the gateway when the gateway states it.
+LiteLLM and similar proxies expose a per-model `supports_vision` / `supports_function_calling` on `/v1/models` (top level or under `model_info`), and OpenRouter-shaped listings expose `architecture.input_modalities`; an explicit flag is believed in both directions, because the gateway is the authority on its own models.
+
+When nothing states it, the flag is **inferred from the model's name** — and a name you chose (`team-default`, `fast`, an internal ticket id) carries no capability information.
+So an inferred value is recorded as a guess rather than a fact, and a guess never costs you an image: the request is sent with the pictures intact, and if the model really is text-only the provider answers with an error you can act on.
+`GET /api/models` reports which of the two you have per model, as `vision_support`:
+
+| `vision_support` | Where it came from | What happens to an attached image |
+|---|---|---|
+| `supported` | The gateway, the registry, or your own override said yes | Sent |
+| `unsupported` | One of those said no | Replaced by a placeholder naming the model and the file path, and a `WARN` is logged |
+| `unknown` | Nobody said; the value shown in `supports_vision` is inferred from the name | Sent |
+
+If a model of yours lands on `unknown` and you know the answer, state it — `PUT /api/models/overrides/{provider}:{model}` with `{"supports_vision": true}`, or the capability toggles in the Dashboard's model drawer.
+An override is a declaration and outranks everything else.
+The same applies to a model you add by hand via `POST /api/models/custom`: include `supports_vision` and it is taken as declared, omit it and the model is `unknown` rather than assumed blind.
+
 ### API Keys for Keyless Providers
 
 `key_required = false` means a key is *not mandatory*, not that one is refused.
