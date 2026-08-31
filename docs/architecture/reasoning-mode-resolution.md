@@ -104,7 +104,7 @@ Top-level form only:
 | Family | Behaviour |
 |---|---|
 | Kimi / Moonshot (`ReasoningEchoPolicy::EmptyString`) | `"thinking": {"type": "disabled"}` regardless of mode. Thinking is disabled wire-side so multi-turn `tool_calls` work without round-tripping `reasoning_content` — a correctness requirement, not a preference. |
-| DeepSeek R1 (`ReasoningEchoPolicy::Strip`) | Nothing sent. R1 reasons unconditionally and exposes no wire toggle. |
+| DeepSeek R1 (`ReasoningEchoPolicy::Strip`) | Nothing sent, in **either** dialect — the `Strip` check short-circuits ahead of the OpenRouter branch, so an R1 route through OpenRouter is not handed a budget-derived `reasoning.effort` it never received before #7946. R1 reasons unconditionally and exposes no wire toggle, so the field would change the payload without changing the model. Pinned by `deepseek_r1_gets_no_reasoning_control_in_either_dialect`. |
 | Anthropic, Gemini, Ollama drivers | Continue to read `budget_tokens`. Their wire control *is* a token budget rather than an effort enum, and remapping an existing Claude user's configured budget into a four-rung bucket would silently change what they are already paying for. |
 
 ## Interaction with the #7769 negative cache

@@ -807,7 +807,9 @@ fn generic_reasoning_effort(mode: ReasoningMode) -> Option<&'static str> {
 ///   fallback when no mode is set.
 ///
 /// DeepSeek R1 ([`ReasoningEchoPolicy::Strip`]) reasons unconditionally and
-/// exposes no wire toggle, so it gets nothing either way.
+/// exposes no wire toggle, so it gets nothing in either dialect — including
+/// when routed through OpenRouter, which is why it short-circuits ahead of the
+/// family branch.
 ///
 /// `effort_rejected` is the #7769 negative cache: an endpoint that has already
 /// answered 400 to a reasoning control for this model is not asked again.
@@ -824,6 +826,14 @@ fn reasoning_wire_fields(
 
     if echo_policy == ReasoningEchoPolicy::EmptyString {
         out.thinking = Some(serde_json::json!({"type": "disabled"}));
+        return out;
+    }
+
+    // DeepSeek R1 reasons unconditionally and exposes no wire toggle, in either
+    // dialect. This returns before the family branch below so an R1 route
+    // through OpenRouter is not handed a budget-derived `reasoning.effort` it
+    // never received before #7946 — the model has nothing to do with it.
+    if echo_policy == ReasoningEchoPolicy::Strip {
         return out;
     }
 
@@ -859,7 +869,7 @@ fn reasoning_wire_fields(
                 None => budget_tokens.and_then(reasoning_effort_for_budget),
             };
         }
-        // `Strip` (DeepSeek R1) has no toggle; `EmptyString` returned above.
+        // `Strip` and `EmptyString` both returned above.
         _ => {}
     }
 
@@ -4099,6 +4109,45 @@ mod tests {
             let oai = driver.build_request(&req).expect("build_request");
             assert_eq!(oai.reasoning_effort, None, "{base_url}");
             assert_eq!(oai.reasoning, None, "{base_url}");
+        }
+    }
+
+    /// DeepSeek R1 has no wire toggle, so it must receive nothing in either
+    /// dialect — including through OpenRouter, where the budget bucket would
+    /// otherwise have started emitting a `reasoning.effort` it never got before
+    /// #7946. R1 always reasons; the field would change the payload without
+    /// changing the model.
+    #[test]
+    fn deepseek_r1_gets_no_reasoning_control_in_either_dialect() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        for base_url in [
+            "https://openrouter.ai/api/v1",
+            "https://api.deepseek.com/v1",
+        ] {
+            let driver = OpenAIDriver::new(String::new(), base_url.to_string());
+            for mode in [None, Some(ReasoningMode::None), Some(ReasoningMode::Max)] {
+                let mut req =
+                    build_catalog_policy_test_request("deepseek-r1", ReasoningEchoPolicy::Strip);
+                req.thinking = Some(ThinkingConfig {
+                    reasoning_mode: mode,
+                    ..Default::default()
+                });
+                let oai = driver.build_request(&req).expect("build_request");
+                let wire = serde_json::to_value(&oai).expect("serialize");
+                assert!(
+                    wire.get("thinking").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+                assert!(
+                    wire.get("reasoning_effort").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+                assert!(
+                    wire.get("reasoning").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+            }
         }
     }
 

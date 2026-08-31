@@ -590,6 +590,11 @@ fn redacted_config_json(
             Some(t) => serde_json::json!({
                 "budget_tokens": t.budget_tokens,
                 "stream_thinking": t.stream_thinking,
+                // #7946. Serialized through `ReasoningMode`'s serde form, not
+                // `Debug`, so the dashboard receives one of the values its
+                // dropdown offers — see
+                // `enum_valued_fields_use_the_serde_encoding_not_debug`.
+                "reasoning_mode": t.reasoning_mode,
             }),
             None => serde_json::json!(null),
         },

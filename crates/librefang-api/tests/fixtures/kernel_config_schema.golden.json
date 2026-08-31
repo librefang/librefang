@@ -6126,6 +6126,39 @@
         }
       }
     },
+    "ReasoningMode": {
+      "description": "How hard the model should reason on a turn (#7946).\n\n`budget_tokens` cannot express two things operators need. It cannot say \"do not reason at all\" — a sub-1024 budget merely omits the opt-in, which leaves a model that reasons by default (every DeepSeek V4 id) reasoning anyway — and it cannot reach the top rung of providers that have one (`max` / `xhigh`), because the bucket mapping in the OpenAI-compatible driver tops out at `high`. This enum is the direct control: it names the intent and each driver translates it into whatever its wire actually accepts.\n\nDeliberately four rungs rather than the union of every provider's vocabulary. `medium` is reachable only as the `budget_tokens` fallback bucket, because a fifth rung whose only distinct meaning is \"DeepSeek folds it into `high`\" is a knob that does nothing on the provider that motivated it.",
+      "oneOf": [
+        {
+          "description": "Do not reason — the wire-level \"non-think\" toggle.",
+          "type": "string",
+          "enum": [
+            "none"
+          ]
+        },
+        {
+          "description": "Reason briefly.",
+          "type": "string",
+          "enum": [
+            "low"
+          ]
+        },
+        {
+          "description": "Reason at the provider's normal full effort.",
+          "type": "string",
+          "enum": [
+            "high"
+          ]
+        },
+        {
+          "description": "Reason at the provider's highest available effort.",
+          "type": "string",
+          "enum": [
+            "max"
+          ]
+        }
+      ]
+    },
     "RegistryConfig": {
       "description": "Registry sync configuration.\n\nConfigure in config.toml: ```toml [registry] cache_ttl_secs = 86400 # Optional: proxy/mirror prefix for users behind the GFW. # All GitHub URLs are prefixed with this value, e.g. #   registry_mirror = \"https://ghproxy.cn\" # turns \"https://github.com/...\" into \"https://ghproxy.cn/https://github.com/...\" registry_mirror = \"\" # Optional: full base URL of the forge that hosts the registry repo. # Default unset = GitHub. Set to consume a Codeberg-hosted registry, e.g. #   registry_host = \"https://codeberg.org\" ```",
       "type": "object",
@@ -7327,6 +7360,18 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        "reasoning_mode": {
+          "description": "Explicit reasoning mode (#7946).\n\nWhen set it wins over the [`Self::budget_tokens`] bucket mapping for drivers that honour it; when `None` the budget bucket is used, which is the pre-#7946 behaviour.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "stream_thinking": {
           "description": "Whether to stream thinking tokens to the client.",
