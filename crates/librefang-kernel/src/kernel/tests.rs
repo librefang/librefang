@@ -86,12 +86,22 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
 struct EnvVarGuard {
     key: &'static str,
+    /// What the variable held before this guard overwrote it, so drop can put it back.
+    ///
+    /// Restoring the previous value — rather than unconditionally removing the variable — is what keeps one test from silently reconfiguring the rest of the process.
+    /// CI sets `LIBREFANG_REGISTRY_OFFLINE=1` for the whole `Test / macOS` job, and that lane's Mach-port guard step runs every kernel unit test as threads in ONE process, so a guard that removed the variable handed every later `boot_with_config` a live network registry sync.
+    /// That sync's fan-out writes `agent-types/<type>.toml` into the test's own home, which is the first candidate `load_agent_template` consults — shadowing the templates the step-agent tests seed under `workspaces/agents/`.
+    /// Nextest cannot observe the leak at all (one process per test), which is why it was macOS-guard-step-only.
+    previous: Option<String>,
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: see set_test_env comment above.
-        unsafe { std::env::remove_var(self.key) };
+        match &self.previous {
+            Some(value) => unsafe { std::env::set_var(self.key, value) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
     }
 }
 
@@ -99,11 +109,37 @@ fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
     // SAFETY: every caller is annotated `#[serial_test::serial(librefang_vault_key)]`,
     // so no two env-mutating tests in this file run concurrently — process-global
     // `set_var`/`remove_var` cannot race a `getenv` on another test thread. The
-    // guard removes the variable on drop so it never persists across tests.
+    // guard restores whatever the variable held before, so it neither persists across tests nor erases a value the surrounding environment set.
     // (The earlier claim that the default test runner is single-threaded was
     // incorrect: `cargo test` runs tests across multiple threads in one process.)
+    let previous = std::env::var(key).ok();
     unsafe { std::env::set_var(key, value) };
-    EnvVarGuard { key }
+    EnvVarGuard { key, previous }
+}
+
+/// `set_test_env` must put back whatever the variable held, not erase it.
+///
+/// The guard used to `remove_var` unconditionally, which is indistinguishable from "restore" only when the variable was unset to begin with.
+/// CI sets `LIBREFANG_REGISTRY_OFFLINE=1` for the whole `Test / macOS` job, so the first test to guard that variable disarmed the offline switch for every kernel boot that ran after it in the same process — see the `previous` field above.
+#[test]
+#[serial_test::serial(librefang_vault_key)]
+fn set_test_env_restores_the_previous_value_instead_of_removing_it() {
+    const KEY: &str = "LIBREFANG_TEST_ENV_GUARD_RESTORE";
+    let outer = set_test_env(KEY, "ambient");
+    {
+        let _inner = set_test_env(KEY, "overridden");
+        assert_eq!(std::env::var(KEY).as_deref(), Ok("overridden"));
+    }
+    assert_eq!(
+        std::env::var(KEY).as_deref(),
+        Ok("ambient"),
+        "the inner guard erased a value the surrounding scope had set"
+    );
+    drop(outer);
+    assert!(
+        std::env::var(KEY).is_err(),
+        "a guard over a variable that started out unset must leave it unset"
+    );
 }
 
 #[test]
@@ -16236,11 +16272,15 @@ fn boot_kernel_for_step_agent_tests(label: &str) -> (tempfile::TempDir, LibreFan
     let tmp = tempfile::tempdir().unwrap();
     let home_dir = tmp.path().join(label);
     std::fs::create_dir_all(home_dir.join("data")).unwrap();
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: home_dir.clone(),
         data_dir: home_dir.join("data"),
         ..KernelConfig::default()
     };
+    // These tests seed their own templates under `workspaces/agents/` and assert on which one `load_agent_template` picks.
+    // The boot registry sync fans registry content out into `agent-types/<type>.toml`, which is the *first* candidate that search consults — so a synced `researcher` (the registry ships one) shadows the seeded template and turns "malformed", "name_mismatch" and "spawn_failed" into a perfectly successful spawn.
+    // Freezing the sync per-config keeps the fixture hermetic without depending on `LIBREFANG_REGISTRY_OFFLINE` being set in the ambient environment.
+    config.registry.auto_sync = false;
     let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
     (tmp, kernel)
 }
