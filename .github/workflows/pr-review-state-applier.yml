@@ -72,8 +72,13 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # Both are required, and `pull-requests: write` is the one that
+      # actually authorizes the writes here: the labels endpoint is under
+      # `/issues/{n}/labels`, but when `{n}` resolves to a pull request
+      # GitHub gates it on the pull_requests scope, so `issues: write`
+      # alone 403s with "Resource not accessible by integration".
       issues: write
-      pull-requests: read
+      pull-requests: write
     # `workflow_run.pull_requests` is empty for pull_request_review runs in
     # practice. Resolve the PR from the trusted collector artifact first, then
     # serialize the mutating job on that exact PR number.
