@@ -1434,10 +1434,15 @@ pub async fn execute_tool_raw(
                                 server = server_name,
                                 "Dispatching to MCP server"
                             );
-                            match conn
+                            // #7963: report the outcome of every MCP tool call to the kernel's health monitor through the connection's health reporter.
+                            // This is the only path that observes a server which completed its handshake and later wedged; without it `should_reconnect` was structurally unreachable, so a dead server stayed dead until the daemon restarted while `/api/mcp/health` reported it healthy.
+                            //
+                            // `report_call_outcome` reports only transport-level failures — an application error (bad arguments, file not found) leaves health untouched, because the server answered.
+                            let result = conn
                                 .call_tool_with_caller(other, input, caller_ctx.as_ref())
-                                .await
-                            {
+                                .await;
+                            conn.report_call_outcome(result.as_ref().map(|_| ()));
+                            match result {
                                 Ok(content) => Ok(content),
                                 Err(e) => Err(ToolError::upstream_msg(format!(
                                     "MCP tool call failed: {e}"

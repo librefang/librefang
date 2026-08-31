@@ -791,6 +791,17 @@ health_check_interval_secs = 60
 | `reconnect_max_backoff_secs` | u64 | `300` | Maximum backoff duration in seconds between reconnect attempts. |
 | `health_check_interval_secs` | u64 | `60` | Interval in seconds between health checks for connected extensions. |
 
+**What triggers a reconnect.** Two things mark a server as errored and hand it to the health loop.
+A failed connect or reconnect handshake does so on the first failure — there is no live connection to preserve.
+A server that handshook successfully and *later* broke at the transport level — a tool call that times out, a closed transport, a dead stdio pipe to the child process — is marked errored as soon as the first such failure is observed, but is only torn down and rebuilt after **three consecutive** transport failures with no successful call in between.
+One timeout is indistinguishable from a genuinely slow tool, and a reconnect drops the server process along with any state it holds, so a single failure deliberately does not cause one.
+A truly wedged server fails every call, so the three arrive as fast as the agent retries.
+
+A tool that returns a normal error — bad arguments, file not found, anything the server answers with a well-formed JSON-RPC error — never counts toward this.
+The transport carried that reply, so reconnecting would drop a healthy server.
+
+Both kinds of failure are reflected in `GET /api/mcp/health` (`status`, `last_error`, `consecutive_failures`), and a successful tool call resets the counter and refreshes `last_ok`.
+
 ---
 
 ### `[vault]`
