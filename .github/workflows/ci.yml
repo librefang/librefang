@@ -489,6 +489,18 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
           cargo build --release
+      # The MSRV job runs `cargo check --workspace --lib`, and this crate is not a workspace
+      # member — the root `members` list is `crates/*` plus `xtask` — so nothing else in CI
+      # ever compiles it at its declared `rust-version`. Without this step the floor is
+      # decorative: a dependency raising its own MSRV lands green and only breaks whoever
+      # builds the sidecar with the toolchain the crate claims to support.
+      - name: Sidecar — check at its own MSRV
+        working-directory: sdk/rust/librefang-sidecar-telegram
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "checking at $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" check --all-targets
       - name: Install cross
         run: cargo install cross --locked
       - name: Sidecar — cross build (aarch64-musl, sibling path dep)

@@ -468,6 +468,16 @@ impl Builder {
             StyleKind::Bold => Styled::Bold { text },
             StyleKind::Italic => Styled::Italic { text },
             StyleKind::Strikethrough => Styled::Strikethrough { text },
+            // A link is the one interactive element this converter builds out of model
+            // output, so its destination is the one place quoted content could still steer
+            // something. Unlike #8003's sanitiser — which was guessing where a link *might*
+            // be inside someone else's parse — we hold the destination here, exactly the
+            // position `sanitize_telegram_html` is in when it filters an `<a href>` it built
+            // itself. Filtering is cheap and correct rather than a guess.
+            //
+            // A rejected scheme drops the *link*, not the text: the reader still sees what
+            // was written, the same way an out-of-scope image degrades to its alt text.
+            StyleKind::Url(url) if !scheme_is_allowed(&url) => return run.push(*text),
             StyleKind::Url(url) => Styled::Url { text, url },
         }));
     }
@@ -480,6 +490,70 @@ impl Builder {
             Some(Frame::Blocks(blocks)) => blocks,
             _ => Vec::new(),
         }
+    }
+}
+
+/// Characters of visible text a block tree carries, which is what Telegram's 32768-character
+/// rich-message limit counts.
+///
+/// Measuring the *source* Markdown instead over-counts by every syntax character the
+/// converter consumes — a table's `|`, `-` and `:` are a large share of its source and none
+/// of them survive — so text whose block form fits comfortably could be turned away.
+pub fn text_len(blocks: &[Block]) -> usize {
+    blocks.iter().map(block_text_len).sum()
+}
+
+fn block_text_len(block: &Block) -> usize {
+    match block {
+        Block::Paragraph { text } | Block::Heading { text, .. } | Block::Pre { text, .. } => {
+            rich_text_len(text)
+        }
+        Block::List { items } => items.iter().map(|i| text_len(&i.blocks)).sum(),
+        Block::Quote { blocks } => text_len(blocks),
+        Block::Table { cells } => cells
+            .iter()
+            .flatten()
+            .map(|c| c.text.as_ref().map_or(0, rich_text_len))
+            .sum(),
+        Block::Divider => 0,
+    }
+}
+
+fn rich_text_len(text: &RichText) -> usize {
+    match text {
+        RichText::Plain(s) => s.chars().count(),
+        RichText::Seq(parts) => parts.iter().map(rich_text_len).sum(),
+        RichText::Styled(styled) => rich_text_len(match styled {
+            Styled::Bold { text }
+            | Styled::Italic { text }
+            | Styled::Strikethrough { text }
+            | Styled::Code { text }
+            | Styled::Url { text, .. } => text,
+        }),
+    }
+}
+
+/// Schemes a converted link may carry.
+///
+/// Matches the allowlist `sanitize::sanitize_telegram_html` enforces on the fallback path,
+/// minus `tg:`. The two paths should not disagree about what is a safe destination, and
+/// `tg:` is the one scheme where a tap has an in-app consequence rather than opening a page
+/// behind the client's "Open this link?" confirmation — a deep link can join a channel or
+/// open a bot, which is not something quoted content should be able to offer.
+const ALLOWED_LINK_SCHEMES: [&str; 3] = ["https", "http", "mailto"];
+
+/// Whether a link destination may be kept.
+///
+/// A destination with no scheme at all is rejected: Telegram resolves such a link against
+/// its own base, and what that resolves to is not ours to reason about.
+fn scheme_is_allowed(url: &str) -> bool {
+    match url.split_once(':') {
+        // A `/` or `?` before the colon means the colon belongs to the path or query, not to
+        // a scheme — `foo/bar:baz` is relative, not a `foo/bar` scheme.
+        Some((scheme, _)) if !scheme.contains('/') && !scheme.contains('?') => ALLOWED_LINK_SCHEMES
+            .iter()
+            .any(|allowed| scheme.eq_ignore_ascii_case(allowed)),
+        _ => false,
     }
 }
 
@@ -631,6 +705,47 @@ mod tests {
                 "{markdown:?} lost {needle:?}: {rendered}"
             );
         }
+    }
+
+    /// A link is the one interactive element built from model output, so a quoted
+    /// `[Tap here](tg://resolve?domain=x)` would otherwise become a tappable deep link —
+    /// quoted content turning itself into something interactive, which is what this module
+    /// exists to prevent. The link goes; the text stays.
+    #[test]
+    fn only_safe_link_schemes_survive() {
+        assert_eq!(
+            json("[ok](https://example.com)"),
+            serde_json::json!([{"type": "paragraph", "text":
+                {"type": "url", "text": "ok", "url": "https://example.com"}}])
+        );
+        // Schemes are case-insensitive, so an uppercase one must still be kept.
+        assert_eq!(json("[u](HTTPS://e.com)")[0]["text"]["type"], "url");
+        assert_eq!(json("[m](mailto:a@b.c)")[0]["text"]["type"], "url");
+
+        for markdown in [
+            "[Tap here](tg://resolve?domain=evil)",
+            "[Tap here](javascript:alert(1))",
+            "[Tap here](data:text/html,<script>)",
+            "[Tap here](/relative/path)",
+            "[Tap here](#anchor)",
+        ] {
+            let value = json(markdown);
+            assert_eq!(
+                value[0]["text"],
+                serde_json::json!("Tap here"),
+                "{markdown} kept its destination: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_len_counts_only_delivered_text() {
+        let blocks = markdown_to_blocks("| a | b |\n|:--|--:|\n| 1 | 2 |");
+        assert_eq!(text_len(&blocks), 4, "only the four cell characters count");
+
+        // Headings, quotes, list items and code all contribute; a divider does not.
+        let mixed = markdown_to_blocks("# hi\n\n> q\n\n- x\n\n```\nc\n```\n\n---");
+        assert_eq!(text_len(&mixed), 5);
     }
 
     #[test]

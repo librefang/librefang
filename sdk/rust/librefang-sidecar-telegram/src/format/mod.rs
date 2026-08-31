@@ -43,14 +43,14 @@ pub fn prepare_rich_markdown(text: &str) -> Option<String> {
 /// should not happen; it is a guard, because losing the whole message to a converter bug is
 /// far worse than falling back to a lower-fidelity path.
 pub fn prepare_rich_blocks(text: &str) -> Option<Vec<Block>> {
-    if text.chars().count() > RICH_MSG_LIMIT {
-        return None;
-    }
     let blocks = markdown_to_blocks(text);
     if blocks.is_empty() && !text.trim().is_empty() {
         return None;
     }
-    Some(blocks)
+    // Measured on the blocks, not on the source Markdown: the syntax characters the
+    // converter consumes never reach Telegram, and for a table they are a large share of
+    // the source — exactly the input this path exists for.
+    (rich_blocks::text_len(&blocks) <= RICH_MSG_LIMIT).then_some(blocks)
 }
 
 /// Two-stage Markdown → sanitized Telegram HTML.
@@ -83,5 +83,44 @@ mod tests {
         assert_eq!(chunks.concat(), format_and_sanitize(&input));
 
         assert_eq!(format_sanitize_and_chunk("**bold**"), ["<b>bold</b>\n"]);
+    }
+}
+
+#[cfg(test)]
+mod rich_path_tests {
+    use super::*;
+
+    /// The guard belongs to `prepare_rich_blocks`, not to `text_len`: a unit test on the
+    /// helper passes whichever value the caller measures. This one drives the decision
+    /// function with a table whose *source* is over the limit while its delivered text is
+    /// far under it — measuring the source turns it away, and a Markdown-heavy table is
+    /// exactly the input the rich path exists for.
+    #[test]
+    fn a_table_is_measured_on_its_cells_not_its_syntax() {
+        let row = "| aaaa | bbbb |\n";
+        let mut table = String::from("| a | b |\n|:--|--:|\n");
+        while table.chars().count() + row.chars().count() <= RICH_MSG_LIMIT {
+            table.push_str(row);
+        }
+        table.push_str(row); // now the source is over the limit
+        assert!(table.chars().count() > RICH_MSG_LIMIT);
+
+        let blocks = prepare_rich_blocks(&table).expect("a table this size still fits");
+        assert!(rich_blocks::text_len(&blocks) <= RICH_MSG_LIMIT);
+    }
+
+    /// The limit still has to bite when the *text* is genuinely too long.
+    #[test]
+    fn text_over_the_limit_is_still_turned_away() {
+        let long = "x".repeat(RICH_MSG_LIMIT + 1);
+        assert!(prepare_rich_blocks(&long).is_none());
+    }
+
+    /// Losing the whole message to a converter bug is the worst outcome available, so an
+    /// empty conversion of non-empty input must fall through rather than send nothing.
+    #[test]
+    fn an_empty_conversion_of_non_empty_text_is_refused() {
+        assert!(prepare_rich_blocks("hello").is_some());
+        assert_eq!(prepare_rich_blocks("   "), Some(Vec::new()));
     }
 }
