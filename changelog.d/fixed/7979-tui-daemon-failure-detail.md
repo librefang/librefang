@@ -1,0 +1,5 @@
+A failed operation in the TUI now says what the daemon reported, everywhere the TUI talks to the daemon.
+Twenty-one `spawn_*` helpers collapsed every non-success outcome into a single `_ =>` arm and printed a generic line of their own, discarding the `error` field the daemon puts in the response body — `YAML parse error at line 3` for a broken marketplace skill, `skill not found on registry` for a slug that no longer exists.
+A generic failure line costs the operator a whole debugging round trip: it reads like the daemon fell over, so they go looking for a fault in their own installation while the daemon has already named a fault somewhere else, and the answer was sitting in the response the screen threw away.
+That arm also erased the difference between *the daemon rejected this* and *the request never reached the daemon* — two problems with two different next steps, reported identically.
+One shared `daemon_response` helper now sits in front of all of them: it reports the daemon's `error`, falls back to the status code when the body carries none rather than inventing a cause, and reports the transport error when the request never left (#8086) (@houko)

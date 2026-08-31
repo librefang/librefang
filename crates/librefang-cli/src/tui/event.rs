@@ -1201,18 +1201,23 @@ pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::S
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
 
-            match client
-                .delete(format!("{base_url}/api/triggers/{trigger_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::TriggerDeleted(trigger_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/triggers/{trigger_id}"))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-trigger-delete-failed",
                         &[("trigger_id", &trigger_id)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::TriggerDeleted(trigger_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1230,18 +1235,18 @@ pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
 
-            match client
-                .delete(format!("{base_url}/api/agents/{agent_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/agents/{agent_id}"))
+                    .send(),
+                || crate::i18n::t_args("tui-event-agent-kill-failed", &[("agent_id", &agent_id)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::AgentKilled { id: agent_id });
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::AgentKillError(crate::i18n::t_args(
-                        "tui-event-agent-kill-failed",
-                        &[("agent_id", &agent_id)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::AgentKillError(message));
                 }
             }
         }
@@ -1413,18 +1418,19 @@ pub fn spawn_update_agent_skills(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/agents/{agent_id}/skills"))
-                .json(&serde_json::json!({"skills": skills}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/agents/{agent_id}/skills"))
+                    .json(&serde_json::json!({"skills": skills}))
+                    .send(),
+                || crate::i18n::t("tui-event-skills-update-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::AgentSkillsUpdated(agent_id));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-skills-update-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1457,18 +1463,19 @@ pub fn spawn_update_agent_mcp_servers(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
-                .json(&serde_json::json!({"mcp_servers": servers}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
+                    .json(&serde_json::json!({"mcp_servers": servers}))
+                    .send(),
+                || crate::i18n::t("tui-event-mcp-update-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::AgentMcpServersUpdated(agent_id));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-mcp-update-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1574,18 +1581,19 @@ pub fn spawn_update_agent_channels(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/agents/{agent_id}/channels"))
-                .json(&serde_json::json!({"channels": channels}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/agents/{agent_id}/channels"))
+                    .json(&serde_json::json!({"channels": channels}))
+                    .send(),
+                || crate::i18n::t("tui-event-channels-update-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::AgentChannelsUpdated(agent_id));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-channels-update-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1639,6 +1647,58 @@ fn make_daemon_client_with_timeout(
         .unwrap_or_else(|_| crate::http_client::new_client())
 }
 
+/// The reason a non-success daemon response gives, as a line for the operator.
+///
+/// The daemon answers a rejected request with a JSON body carrying an `error` field, and that field is the whole diagnosis — `YAML parse error at line 3` for a broken marketplace skill, `skill not found on registry` for a slug that no longer exists.
+/// A screen that discards it and prints its own generic line spends the operator a debugging round trip: the message reads like the daemon fell over, so they go looking for a fault in their own installation when the daemon already named a fault in someone else's artefact.
+///
+/// When the body carries no usable `error`, the status code is the only thing actually known, so that is what gets reported rather than an invented cause.
+fn daemon_error_detail(status: reqwest::StatusCode, body: Option<&serde_json::Value>) -> String {
+    body.and_then(|b| b.get("error").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::i18n::t_args(
+                "tui-event-daemon-http-status",
+                &[("status", status.as_str())],
+            )
+        })
+}
+
+/// Join an operation's generic summary line to the reason behind it.
+fn with_detail(summary: String, detail: String) -> String {
+    crate::i18n::t_args(
+        "tui-event-daemon-failure-detail",
+        &[("summary", &summary), ("detail", &detail)],
+    )
+}
+
+/// Collapse a daemon call into either its response or the line to show the operator.
+///
+/// Every caller used to write `Ok(resp) if resp.status().is_success() => … , _ => <generic line>`, which threw away two different things at once: the `error` field the daemon put in the body, and the distinction between *the daemon rejected this* and *the request never reached the daemon* — two problems with two different next steps, reported identically.
+///
+/// `summary` is called only on failure, so the localized generic line is built only when it is going to be shown.
+fn daemon_response(
+    outcome: Result<reqwest::blocking::Response, reqwest::Error>,
+    summary: impl FnOnce() -> String,
+) -> Result<reqwest::blocking::Response, String> {
+    match outcome {
+        Ok(resp) if resp.status().is_success() => Ok(resp),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.json::<serde_json::Value>().ok();
+            Err(with_detail(
+                summary(),
+                daemon_error_detail(status, body.as_ref()),
+            ))
+        }
+        // The request never left, so there is no daemon verdict to report; the
+        // transport error is the actionable part.
+        Err(e) => Err(with_detail(summary(), e.to_string())),
+    }
+}
+
 /// Fetch sessions list.
 pub fn spawn_fetch_sessions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
@@ -1675,18 +1735,23 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/sessions/{session_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::SessionDeleted(session_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/sessions/{session_id}"))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-session-delete-failed",
                         &[("session_id", &session_id)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::SessionDeleted(session_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1814,18 +1879,19 @@ pub fn spawn_save_memory_kv(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .put(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
-                .json(&serde_json::json!({"value": value}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .json(&serde_json::json!({"value": value}))
+                    .send(),
+                || crate::i18n::t("tui-event-kv-save-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::MemoryKvSaved { key });
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-kv-save-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1847,17 +1913,18 @@ pub fn spawn_delete_memory_kv(
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
+                    .send(),
+                || crate::i18n::t("tui-event-kv-delete-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::MemoryKvDeleted(key));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-kv-delete-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -1988,48 +2055,19 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/clawhub/install"))
-                .json(&serde_json::json!({"slug": slug}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/clawhub/install"))
+                    .json(&serde_json::json!({"slug": slug}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-skill-install-failed", &[("slug", &slug)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::SkillInstalled(slug));
                 }
-                Ok(resp) => {
-                    // Report what the daemon actually said. A broken
-                    // marketplace skill fails validation and comes back as a
-                    // 4xx carrying the reason ("YAML parse error at line 3");
-                    // collapsing that into a generic line reads like the
-                    // daemon fell over, and sends the operator looking in the
-                    // wrong place for a fault in someone else's skill.
-                    let http_status = resp.status();
-                    let detail = resp
-                        .json::<serde_json::Value>()
-                        .ok()
-                        .and_then(|b| b.get("error").and_then(|v| v.as_str()).map(String::from))
-                        // No body, or one without `error`: the status code is
-                        // the only thing known, so say that rather than
-                        // inventing a cause.
-                        .unwrap_or_else(|| {
-                            crate::i18n::t_args(
-                                "tui-event-skill-install-http-fallback",
-                                &[("status", http_status.as_str())],
-                            )
-                        });
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed-detail",
-                        &[("slug", &slug), ("detail", &detail)],
-                    )));
-                }
-                Err(e) => {
-                    // The request never reached the daemon at all — a
-                    // different failure from a rejected install, and the
-                    // transport error is the actionable part.
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-install-failed-detail",
-                        &[("slug", &slug), ("detail", &e.to_string())],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2046,19 +2084,19 @@ pub fn spawn_uninstall_skill(backend: BackendRef, name: String, tx: mpsc::Sender
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/skills/uninstall"))
-                .json(&serde_json::json!({"name": name}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/skills/uninstall"))
+                    .json(&serde_json::json!({"name": name}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-skill-uninstall-failed", &[("name", &name)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::SkillUninstalled(name));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-skill-uninstall-failed",
-                        &[("name", &name)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2691,19 +2729,19 @@ pub fn spawn_save_model_limits(
             let mut doc = read_model_overrides(&client, &base_url, &key);
             set_or_clear(&mut doc, "context_window", context_window);
             set_or_clear(&mut doc, "max_output_tokens", max_output_tokens);
-            match client
-                .put(format!("{base_url}/api/models/overrides/{key}"))
-                .json(&doc)
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .put(format!("{base_url}/api/models/overrides/{key}"))
+                    .json(&doc)
+                    .send(),
+                || crate::i18n::t_args("tui-event-model-limits-save-failed", &[("model", &key)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ModelLimitsSaved(key));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-model-limits-save-failed",
-                        &[("model", &key)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2739,15 +2777,15 @@ pub fn spawn_reset_model_limits(backend: BackendRef, key: String, tx: mpsc::Send
                     .json(&doc)
                     .send()
             };
+            let outcome = daemon_response(outcome, || {
+                crate::i18n::t_args("tui-event-model-limits-reset-failed", &[("model", &key)])
+            });
             match outcome {
-                Ok(resp) if resp.status().is_success() => {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ModelLimitsReset(key));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-model-limits-reset-failed",
-                        &[("model", &key)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2822,19 +2860,19 @@ pub fn spawn_save_provider_key(
             api_key: daemon_api_key,
         } => {
             let client = make_daemon_client(daemon_api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/providers/{name}/key"))
-                .json(&serde_json::json!({"key": api_key}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/providers/{name}/key"))
+                    .json(&serde_json::json!({"key": api_key}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-provider-save-key-failed", &[("name", &name)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ProviderKeySaved(name));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-provider-save-key-failed",
-                        &[("name", &name)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2851,18 +2889,18 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/providers/{name}/key"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/providers/{name}/key"))
+                    .send(),
+                || crate::i18n::t_args("tui-event-provider-delete-key-failed", &[("name", &name)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ProviderKeyDeleted(name));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-provider-delete-key-failed",
-                        &[("name", &name)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2879,15 +2917,17 @@ pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client.get(format!("{base_url}/api/backups")).send() {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome =
+                daemon_response(client.get(format!("{base_url}/api/backups")).send(), || {
+                    crate::i18n::t("tui-event-backups-list-failed")
+                });
+            match outcome {
+                Ok(resp) => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
                     let _ = tx.send(AppEvent::BackupsLoaded(parse_backup_list(&body)));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-backups-list-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2940,16 +2980,18 @@ pub fn spawn_create_backup(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             // default client timeout on any non-trivial install.
             let client =
                 make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
-            match client.post(format!("{base_url}/api/backup")).send() {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome =
+                daemon_response(client.post(format!("{base_url}/api/backup")).send(), || {
+                    crate::i18n::t("tui-event-backup-create-failed")
+                });
+            match outcome {
+                Ok(resp) => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
                     let filename = body["filename"].as_str().unwrap_or_default().to_string();
                     let _ = tx.send(AppEvent::BackupCreated(filename));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
-                        "tui-event-backup-create-failed",
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -2966,18 +3008,23 @@ pub fn spawn_delete_backup(backend: BackendRef, filename: String, tx: mpsc::Send
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/backups/{filename}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::BackupDeleted(filename));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/backups/{filename}"))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-backup-delete-failed",
                         &[("filename", &filename)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::BackupDeleted(filename));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3350,27 +3397,19 @@ pub fn spawn_activate_hand(backend: BackendRef, hand_id: String, tx: mpsc::Sende
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/hands/{hand_id}/activate"))
-                .json(&serde_json::json!({}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/hands/{hand_id}/activate"))
+                    .json(&serde_json::json!({}))
+                    .send(),
+                || crate::i18n::t("tui-event-hand-activation-failed"),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::HandActivated(hand_id));
                 }
-                Ok(resp) => {
-                    let msg = resp
-                        .json::<serde_json::Value>()
-                        .ok()
-                        .and_then(|b| b["error"].as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| crate::i18n::t("tui-event-hand-activation-failed"));
-                    let _ = tx.send(AppEvent::FetchError(msg));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-hand-activate-failed-error",
-                        &[("error", &e.to_string())],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3395,18 +3434,23 @@ pub fn spawn_deactivate_hand(backend: BackendRef, instance_id: String, tx: mpsc:
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .delete(format!("{base_url}/api/hands/instances/{instance_id}"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::HandDeactivated(instance_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .delete(format!("{base_url}/api/hands/instances/{instance_id}"))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-hand-deactivate-failed",
                         &[("instance_id", &instance_id)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::HandDeactivated(instance_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3437,20 +3481,25 @@ pub fn spawn_pause_hand(backend: BackendRef, instance_id: String, tx: mpsc::Send
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!(
-                    "{base_url}/api/hands/instances/{instance_id}/pause"
-                ))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::HandPaused(instance_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .post(format!(
+                        "{base_url}/api/hands/instances/{instance_id}/pause"
+                    ))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-hand-pause-failed",
                         &[("instance_id", &instance_id)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::HandPaused(instance_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3481,20 +3530,25 @@ pub fn spawn_resume_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sen
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!(
-                    "{base_url}/api/hands/instances/{instance_id}/resume"
-                ))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let _ = tx.send(AppEvent::HandResumed(instance_id));
-                }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+            let outcome = daemon_response(
+                client
+                    .post(format!(
+                        "{base_url}/api/hands/instances/{instance_id}/resume"
+                    ))
+                    .send(),
+                || {
+                    crate::i18n::t_args(
                         "tui-event-hand-resume-failed",
                         &[("instance_id", &instance_id)],
-                    )));
+                    )
+                },
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::HandResumed(instance_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3666,31 +3720,19 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/mcp/servers"))
-                .json(&serde_json::json!({"template_id": id}))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/mcp/servers"))
+                    .json(&serde_json::json!({"template_id": id}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-extension-install-failed", &[("id", &id)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ExtensionInstalled(id));
                 }
-                Ok(resp) => {
-                    let body = resp.json::<serde_json::Value>().ok();
-                    let err = body
-                        .and_then(|b| b["error"].as_str().map(String::from))
-                        .unwrap_or_else(|| {
-                            crate::i18n::t_args(
-                                "tui-event-extension-install-failed",
-                                &[("id", &id)],
-                            )
-                        });
-                    let _ = tx.send(AppEvent::FetchError(err));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-extension-install-failed-error",
-                        &[("error", &e.to_string())],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3714,19 +3756,19 @@ pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/extensions/uninstall"))
-                .json(&serde_json::json!({ "name": id }))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/extensions/uninstall"))
+                    .json(&serde_json::json!({ "name": id }))
+                    .send(),
+                || crate::i18n::t_args("tui-event-extension-remove-failed", &[("id", &id)]),
+            );
+            match outcome {
+                Ok(_) => {
                     let _ = tx.send(AppEvent::ExtensionRemoved(id));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-extension-remove-failed",
-                        &[("id", &id)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -3743,11 +3785,14 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            match client
-                .post(format!("{base_url}/api/mcp/servers/{id}/reconnect"))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/mcp/servers/{id}/reconnect"))
+                    .send(),
+                || crate::i18n::t_args("tui-event-extension-reconnect-failed", &[("id", &id)]),
+            );
+            match outcome {
+                Ok(resp) => {
                     let tool_count = resp
                         .json::<serde_json::Value>()
                         .ok()
@@ -3755,11 +3800,8 @@ pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Send
                         .unwrap_or(0) as usize;
                     let _ = tx.send(AppEvent::ExtensionReconnected(id, tool_count));
                 }
-                _ => {
-                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
-                        "tui-event-extension-reconnect-failed",
-                        &[("id", &id)],
-                    )));
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
                 }
             }
         }
@@ -4300,5 +4342,76 @@ mod tests {
         ]);
 
         assert_eq!(parse_clawhub_results(&body).len(), 1);
+    }
+
+    /// A rejected ClawHub install comes back as a 4xx whose body names the real
+    /// fault, and that name is the whole diagnosis. Discarding it costs the
+    /// operator a debugging round trip against their own installation for a
+    /// fault the daemon already located in someone else's skill.
+    #[test]
+    fn a_rejected_install_reports_the_reason_the_daemon_gave() {
+        let detail = daemon_error_detail(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            Some(&serde_json::json!({"error": "YAML parse error at line 3"})),
+        );
+
+        assert_eq!(detail, "YAML parse error at line 3");
+    }
+
+    /// With no `error` field the status code is the only thing actually known,
+    /// so it has to be reported rather than replaced by an invented cause.
+    #[test]
+    fn a_body_without_an_error_field_falls_back_to_the_status() {
+        let detail = daemon_error_detail(
+            reqwest::StatusCode::BAD_GATEWAY,
+            Some(&serde_json::json!({"message": "upstream unavailable"})),
+        );
+
+        assert!(
+            detail.contains("502"),
+            "the status is all that is known and must survive: {detail}"
+        );
+        assert!(
+            !detail.contains("upstream unavailable"),
+            "only the `error` field is the daemon's verdict; nothing else may be read as one: {detail}"
+        );
+    }
+
+    /// An empty or blank `error` is worse than no field at all — it renders as
+    /// a failure line that trails off — so it takes the status fallback too.
+    #[test]
+    fn a_blank_error_field_falls_back_to_the_status() {
+        assert!(daemon_error_detail(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some(&serde_json::json!({"error": "   "})),
+        )
+        .contains("400"));
+    }
+
+    /// A body that is not JSON at all (an HTML error page from a proxy, an
+    /// empty 404) parses to nothing, and the status still has to reach the
+    /// screen.
+    #[test]
+    fn an_unparseable_body_falls_back_to_the_status() {
+        assert!(daemon_error_detail(reqwest::StatusCode::NOT_FOUND, None).contains("404"));
+    }
+
+    /// The failure line has to keep both halves: which operation failed, and
+    /// why. Either alone leaves the operator guessing.
+    #[test]
+    fn the_failure_line_names_the_operation_and_the_reason() {
+        let message = with_detail(
+            crate::i18n::t_args("tui-event-skill-install-failed", &[("slug", "prd")]),
+            daemon_error_detail(
+                reqwest::StatusCode::NOT_FOUND,
+                Some(&serde_json::json!({"error": "skill not found on registry"})),
+            ),
+        );
+
+        assert!(message.contains("prd"), "which install failed: {message}");
+        assert!(
+            message.contains("skill not found on registry"),
+            "why it failed: {message}"
+        );
     }
 }
