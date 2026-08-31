@@ -19,8 +19,10 @@
 //! # Scope
 //!
 //! What an agent actually writes: paragraphs, headings, lists, tables, code, emphasis,
-//! links, block quotes, dividers. Media blocks, collages, maps, `<details>`, math and
-//! footnotes are out of scope (#8015) and degrade to their text.
+//! links, block quotes, dividers. Media blocks, collages, maps and `<details>` are out of
+//! scope (#8015) and degrade to their text. Footnotes and math are not parsed at all —
+//! their `pulldown-cmark` options are off — so `[^1]` is an ordinary shortcut reference and
+//! `$x$` is ordinary text; neither is "degraded", both are simply never recognised.
 //!
 //! "Degrade to their text" is the property to hold on to, and it is the one that broke:
 //! block-level HTML was routed through `push_inline`, which does nothing when no inline run
@@ -146,13 +148,22 @@ impl RichText {
 /// Convert an agent's Markdown into rich blocks.
 ///
 /// Never fails. Anything the converter does not model becomes the text it was written as,
-/// so a gap in coverage costs formatting rather than information — with one deliberate
-/// exception: GFM specifies that table cells beyond the header count are ignored, and this
-/// follows it.
+/// so a gap in coverage costs formatting rather than information — except where CommonMark
+/// itself says the text is not content:
 ///
-/// The unqualified "never drops content" that stood here was false while the exception was
-/// documented two screens above, and three separate content-loss defects were found under
-/// it. Treat any absolute in this module as a claim that owes a test.
+/// * table cells past the header count ("If there are greater, the excess is ignored");
+/// * link reference definitions, which "do not correspond to a structural element of a
+///   document" — `[1]: https://example.com` on its own renders as nothing here, in GitHub,
+///   and in any conformant renderer. A definition that *is* referenced still produces its
+///   link, which is the case that carries the URL to the reader.
+///
+/// The legacy `sendMessage` path disagrees on both, because its converter is four regexes
+/// rather than a parser, and it shows the raw line. That is a divergence from this path,
+/// not a bug in it.
+///
+/// The unqualified "never drops content" that stood here was false, and four separate
+/// content-loss defects were found under it. Treat any absolute in this module as a claim
+/// that owes a test — including this one.
 pub fn markdown_to_blocks(markdown: &str) -> Vec<Block> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -330,12 +341,11 @@ impl Builder {
                     *slot = Some(checked);
                 }
             }
-            Event::FootnoteReference(name) => {
-                self.push_inline(RichText::Plain(format!("[^{name}]")))
-            }
-            Event::InlineMath(text) | Event::DisplayMath(text) => {
-                self.push_inline(RichText::Plain(text.into_string()))
-            }
+            // `FootnoteReference` needs `ENABLE_FOOTNOTES`, and the math events need
+            // `ENABLE_MATH`; neither is on, so neither event can arrive. Handling them
+            // anyway was worse than dead weight — it read as evidence that footnotes were
+            // covered, and that belief reached the module docs and the changelog.
+            Event::FootnoteReference(_) | Event::InlineMath(_) | Event::DisplayMath(_) => {}
         }
     }
 
@@ -344,10 +354,10 @@ impl Builder {
         // before a nested list belongs to the item that owns it, not to the first child.
         // Without this, `- a\n  - b` collected "a" and "b" into one run and delivered "ab"
         // inside the nested item, with the parent's own text gone.
-        if matches!(
-            tag,
-            Tag::List(_) | Tag::Item | Tag::BlockQuote(_) | Tag::Table(_)
-        ) {
+        // Only containers that push a *new* `Frame::Blocks` matter, because that is what
+        // `flush_implicit_run` writes into. `Tag::List` and `Tag::Table` push other frame
+        // kinds, which `blocks_mut` walks straight past, so listing them changed nothing.
+        if matches!(tag, Tag::Item | Tag::BlockQuote(_)) {
             self.flush_implicit_run();
         }
         match tag {
@@ -523,10 +533,14 @@ impl Builder {
         let Some(kind) = self.styles.pop() else {
             return;
         };
+        // Both stacks are popped together, before the run check can bail out. A span with
+        // no text inside it — `- ![](x)` as a tight item's whole content — closes without
+        // any run open, and popping only `styles` left the two stacks different lengths.
+        let start = self.style_starts.pop().unwrap_or(0);
         let Some(run) = self.inlines.last_mut() else {
             return;
         };
-        let start = self.style_starts.pop().unwrap_or(0).min(run.len());
+        let start = start.min(run.len());
         let inner = RichText::from_parts(run.split_off(start));
         let text = Box::new(inner);
         run.push(RichText::Styled(match kind {
@@ -947,6 +961,68 @@ mod tests {
         assert!(
             inner.get("is_checked").is_none(),
             "unchecked must be absent: {value}"
+        );
+    }
+
+    /// `Tag::BlockQuote` is the one container start that has to close a loose run, and
+    /// nothing pinned it: removing it passed all 144 tests. The damage is not loss or
+    /// reordering — it is attribution. The item's own sentence is delivered *inside* the
+    /// quotation, so on a change whose whole purpose is keeping quoted material
+    /// distinguishable from the agent's own words, the agent's words become quoted.
+    #[test]
+    fn an_items_own_text_stays_outside_a_quote_it_contains() {
+        assert_eq!(
+            json("- mine\n  > theirs"),
+            serde_json::json!([{"type": "list", "items": [{"blocks": [
+                {"type": "paragraph", "text": "mine"},
+                {"type": "blockquote", "blocks": [{"type": "paragraph", "text": "theirs"}]},
+            ]}]}])
+        );
+    }
+
+    /// A definition that is referenced still carries its URL to the reader; only an
+    /// unreferenced one renders as nothing, which is what CommonMark specifies for it.
+    #[test]
+    fn reference_style_links_resolve_and_are_filtered() {
+        assert_eq!(
+            json("See [the spec][1].\n\n[1]: https://example.com/a"),
+            serde_json::json!([{"type": "paragraph", "text": [
+                "See ",
+                {"type": "url", "text": "the spec", "url": "https://example.com/a"},
+                ".",
+            ]}])
+        );
+        // The scheme allowlist has to hold on this path too, where no `[text](url)` is
+        // written anywhere in the source.
+        assert_eq!(
+            json("See [this][1].\n\n[1]: tg://resolve?domain=evil"),
+            // The rejected link's text is plain, so it merges with its neighbours.
+            serde_json::json!([{"type": "paragraph", "text": "See this."}])
+        );
+        // An unreferenced definition is not a structural element — CommonMark, and so
+        // every conformant renderer, produces nothing for it.
+        assert_eq!(
+            json("Sources:\n\n[1]: https://example.com/a"),
+            serde_json::json!([{"type": "paragraph", "text": "Sources:"}])
+        );
+    }
+
+    /// A span carrying no text closes with no inline run open. Popping only `styles` there
+    /// left `styles` and `style_starts` at different depths — harmless today because the
+    /// stray entry sits at the bottom and never resurfaces, but the invariant is what the
+    /// next change in this area would rely on.
+    #[test]
+    fn an_empty_span_leaves_the_style_stacks_balanced() {
+        for input in ["- ![](x)", "- [](https://e.com)", "![]()", "*[]()*"] {
+            let _ = markdown_to_blocks(input);
+        }
+        // Observable proxy for the invariant: a later span must still wrap the right text.
+        assert_eq!(
+            json("- ![](x)\n- **bold**"),
+            serde_json::json!([{"type": "list", "items": [
+                {"blocks": []},
+                {"blocks": [{"type": "paragraph", "text": {"type": "bold", "text": "bold"}}]},
+            ]}])
         );
     }
 
