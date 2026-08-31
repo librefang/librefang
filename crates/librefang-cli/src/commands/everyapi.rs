@@ -355,6 +355,9 @@ pub(crate) struct ModelMetadata {
     pub(crate) pricing_known: bool,
     pub(crate) supports_tools: bool,
     pub(crate) supports_vision: bool,
+    /// Whether [`Self::supports_vision`] is a statement or a placeholder (refs #7957).
+    /// It is only ever the snapshot's word, so it is `true` only when a snapshot entry was found *and* that entry's own `vision_known` was set; a snapshot miss yields `false` above and must not be written to disk as a declared denial.
+    pub(crate) vision_known: bool,
     pub(crate) supports_thinking: bool,
     /// True when either token limit had to come from the OpenRouter snapshot because neither gateway endpoint published one.
     /// Surfaced in the command's report so the operator knows which numbers are the gateway's own and which are borrowed.
@@ -470,6 +473,10 @@ pub(crate) fn resolve_metadata(
         pricing_known: pricing.is_some_and(|p| p.per_token),
         supports_tools: snapshot.is_some_and(|s| s.supports_tools),
         supports_vision: snapshot.is_some_and(|s| s.supports_vision),
+        // A snapshot miss makes `supports_vision` above a `false` nobody asserted, and this gateway's own listing publishes no capability flags at all, so there is no second source to fall back on.
+        // Carrying it forward as a declaration is what #7957 is about: the entry is written to `providers/everyapi.toml`, reloaded at boot, and read by the request-build gate, which would then strip every image from a turn against a model it knows nothing about.
+        // A snapshot *hit* contributes its own provenance rather than an unconditional `true`, so a snapshot entry that is itself a guess stays one.
+        vision_known: snapshot.is_some_and(|s| s.vision_known),
         supports_thinking: snapshot.is_some_and(|s| s.supports_thinking),
         token_limits_borrowed: borrowed_context || borrowed_max_output,
     }
@@ -591,6 +598,10 @@ pub(crate) fn synthesize_catalog(
             pricing_known: metadata.pricing_known,
             supports_tools: metadata.supports_tools,
             supports_vision: metadata.supports_vision,
+            // Must be written explicitly: `ModelCatalogEntry::default()` says `true`, because a
+            // curated registry file that omits the key is a declaration — and a gateway model
+            // resolved through a snapshot lookup that missed is not (refs #7957).
+            vision_known: metadata.vision_known,
             // Every OpenAI-shaped endpoint on this gateway streams; the
             // `openai-response` family *requires* it.
             supports_streaming: true,
@@ -1127,6 +1138,7 @@ fn provider_request_body(file: &ModelCatalogFile) -> serde_json::Value {
 ///
 /// Written by hand rather than via `serde_json::to_value` because the CLI has no `serde` dependency to reach `Serialize` through — and because the endpoint's `json_to_toml_value` drops empty strings/arrays anyway, so only the fields that must survive are sent.
 /// `pricing_known` is always included: it defaults to `true` on deserialize, so omitting it on an unpriced model would silently claim the model is free.
+/// `vision_known` is included for exactly the same reason (refs #7957): it also defaults to `true` on deserialize, so omitting it on a model whose vision flag came from a snapshot lookup that missed would write "declared text-only" into the provider file the daemon then reloads — and the request-build gate strips images on that answer alone.
 fn model_request_value(model: &ModelCatalogEntry) -> serde_json::Value {
     serde_json::json!({
         "id": model.id,
@@ -1141,6 +1153,7 @@ fn model_request_value(model: &ModelCatalogEntry) -> serde_json::Value {
         "pricing_known": model.pricing_known,
         "supports_tools": model.supports_tools,
         "supports_vision": model.supports_vision,
+        "vision_known": model.vision_known,
         "supports_streaming": model.supports_streaming,
         "supports_thinking": model.supports_thinking,
     })
@@ -1843,6 +1856,71 @@ mod tests {
         assert!(
             !meta.token_limits_borrowed,
             "nothing was borrowed — there was nothing to borrow"
+        );
+    }
+
+    #[test]
+    fn a_gateway_model_the_snapshot_does_not_carry_is_not_declared_blind() {
+        // refs #7957. `supports_vision` here is `snapshot.is_some_and(...)`, so a snapshot miss
+        // produces `false` — and this gateway publishes no capability flags of its own, so nothing
+        // ever stated it. `ModelCatalogEntry::default()` says `vision_known: true`, which would turn
+        // that placeholder into a declaration the moment the entry reached `providers/everyapi.toml`
+        // and the request-build gate would strip every image from the turn.
+        let catalog = snapshot_catalog();
+        let meta = resolve_metadata(
+            &catalog,
+            &gateway_model("team-default", "operator", &["openai"]),
+            None,
+        );
+        assert!(!meta.supports_vision, "the snapshot has no such model");
+        assert!(
+            !meta.vision_known,
+            "a snapshot miss is silence, not a declaration of blindness"
+        );
+
+        // A snapshot *hit* does carry a declaration, and it must survive to the entry.
+        let hit = resolve_metadata(
+            &catalog,
+            &gateway_model("claude-sonnet-5", "anthropic", &["openai"]),
+            None,
+        );
+        assert!(hit.vision_known, "the snapshot entry states the capability");
+    }
+
+    #[test]
+    fn a_synthesized_entry_carries_its_vision_provenance_to_disk_and_to_the_daemon() {
+        // Both write paths have to agree: the direct `providers/everyapi.toml` write serializes the
+        // entry, and the daemon route gets a hand-built JSON body. `vision_known` defaults to `true`
+        // on deserialize, so omitting it from either one re-launders the guess (refs #7957) — the
+        // same trap `pricing_known` is spelled out for on `model_request_value`.
+        let catalog = snapshot_catalog();
+        let mut model = gateway_model("team-default", "operator", &["openai"]);
+        model.context_window = Some(128_000);
+        model.max_output_tokens = Some(8_192);
+        let result = synthesize_catalog(
+            &catalog,
+            "https://api.everyapi.ai/v1",
+            std::slice::from_ref(&model),
+            &pricing_index(vec![priced("team-default", 1.0, 5.0)]),
+        );
+        let entry = result
+            .file
+            .models
+            .iter()
+            .find(|m| m.id == "team-default")
+            .expect("the model has both limits, so it must be registered");
+        assert!(!entry.vision_known);
+        assert_eq!(
+            model_request_value(entry).get("vision_known"),
+            Some(&serde_json::json!(false)),
+            "the daemon route must be told, or the provider file it writes claims a declaration"
+        );
+
+        // And the TOML actually written by the no-daemon path must carry the key.
+        let toml_body = toml::to_string_pretty(&result.file).expect("serialize");
+        assert!(
+            toml_body.contains("vision_known = false"),
+            "provider TOML must record the provenance:\n{toml_body}"
         );
     }
 

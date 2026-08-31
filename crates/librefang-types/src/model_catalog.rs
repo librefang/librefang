@@ -244,6 +244,12 @@ pub struct ModelCatalogEntry {
     /// So a guess resolves to [`VisionSupport::Unknown`] and fails open, exactly as a catalog miss already did.
     ///
     /// Older registry entries predate this field and are curated declarations, so a missing value defaults to true — the same convention [`Self::limits_known`] and [`Self::pricing_known`] use.
+    ///
+    /// That default is right for every shape this type is *read* from, because all of them are curated or hand-authored: the registry's and the operator's `providers/*.toml`, and `data/custom_models.json`.
+    /// Gateway-discovered entries — the ones #7957 is about — are `ModelTier::Local`, are never persisted, and are rebuilt with an explicit flag on every probe, so no on-disk artefact carries an inferred value forward.
+    /// The default cannot be inverted: the field is absent from every curated catalog file in the registry, so `false` there would make the entire shipped catalog `Unknown` and start sending images to models genuinely known to be text-only.
+    /// The one residual is an artefact a *pre-#7957* build wrote from a defaulted `false` — a `POST /api/models/custom` that omitted `supports_vision`, or a `providers/everyapi.toml` from an older `librefang everyapi connect`.
+    /// Those read back as a declared denial, which is exactly the behaviour that build had; nothing on disk distinguishes them from an operator who meant `false`, so they are left alone and an override resolves them.
     #[serde(default = "default_true")]
     pub vision_known: bool,
     /// Whether the model supports streaming responses.
