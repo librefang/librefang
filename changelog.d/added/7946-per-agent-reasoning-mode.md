@@ -4,4 +4,4 @@
   The mode is now translated per provider: DeepSeek V4 gets `thinking: {"type": "disabled"}` for `none` and `thinking: {"type": "enabled"}` plus `reasoning_effort` otherwise, OpenRouter-routed models get the nested `reasoning: {effort}` form with `max` as `xhigh`, and other OpenAI-compatible endpoints keep the top-level `reasoning_effort`.
   The two spellings are mutually exclusive per request because OpenRouter answers HTTP 400 to a payload carrying both.
   Leaving `reasoning_mode` unset preserves the previous wire shape byte for byte, including the `budget_tokens` bucket fallback, so nothing changes for anyone who does not opt in.
-  (#PR) (@houko)
+  (#8083) (@houko)
