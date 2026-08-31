@@ -378,8 +378,14 @@ pub struct ModelPerformance {
     /// This is the number a latency SLO is written against.
     /// `avg_latency_ms` hides the tail an operator gets paged about, and `max_latency_ms` is one outlier, so neither answers "is this model fast enough on 95% of calls".
     ///
-    /// The definition matches `SessionStore::agent_stats_24h` so the two P95 numbers the dashboard shows mean the same thing: the latency at 1-based rank `ceil(0.95 * n)` of the window's latencies sorted ascending.
-    /// `0` when the model has no events in the window.
+    /// The definition matches `SessionStore::agent_stats_24h` so the two P95 numbers the dashboard shows mean the same thing: the latency at 1-based rank `ceil(0.95 * n)` of the window's latencies sorted ascending, over the events that **have** a recorded latency (`latency_ms > 0`).
+    ///
+    /// That population matters, and it is narrower than the one behind `avg_latency_ms` / `min_latency_ms` / `max_latency_ms` on this same row.
+    /// `latency_ms` was added to `usage_events` by migration v14 as `INTEGER NOT NULL DEFAULT 0`, so every row written before that upgrade reports `0` — not "instant", but "never measured".
+    /// Ranking those alongside real samples inflates `n` while parking the zeros at the bottom of the sort, which drags the reported percentile down towards the median: ten samples of 100…1000 ms behind ninety legacy rows rank out at 500 ms rather than 1000 ms.
+    /// The three long-standing aggregates keep their whole-window population because their shape is already shipped and read by external dashboards; the percentile is new, so it starts out with the population `agent_stats_24h` has always used.
+    ///
+    /// `0` when the model has no events in the window, and also when it has events but none carries a measured latency.
     pub p95_latency_ms: u64,
     /// Cost per call in USD.
     pub cost_per_call: f64,
@@ -1402,6 +1408,9 @@ impl UsageStore {
         //
         // `rn >= (n * 95 + 99) / 100` is integer-division `ceil(0.95 * n)` (SQLite `/` truncates), and because `ranked` is ordered ascending the `MIN(latency_ms)` over the qualifying tail is exactly the value at that rank.
         // n = 1 gives rank 1, n = 10 gives rank 10, n = 100 gives rank 95 — the same nearest-rank definition `agent_stats_24h` uses.
+        //
+        // `ranked` also repeats that function's `latency_ms > 0` guard, and it is load-bearing rather than tidiness: migration v14 backfilled the column with its `DEFAULT 0`, so on any upgraded database the pre-v14 rows are unmeasured, not instant, and ranking them would pull the percentile towards the median of the rows that were measured.
+        // Excluding them is what makes the `LEFT JOIN` below load-bearing too — a model whose every event predates v14 drops out of `p95` entirely and lands on the `COALESCE` default of 0.
         let sql = format!(
             "WITH filtered AS (
                  SELECT model, cost_usd, input_tokens, output_tokens, latency_ms
@@ -1412,7 +1421,7 @@ impl UsageStore {
                         latency_ms,
                         ROW_NUMBER() OVER (PARTITION BY model ORDER BY latency_ms) AS rn,
                         COUNT(*) OVER (PARTITION BY model) AS n
-                 FROM filtered
+                 FROM filtered WHERE latency_ms > 0
              ),
              p95 AS (
                  SELECT model, MIN(latency_ms) AS p95_latency_ms

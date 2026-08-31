@@ -134,8 +134,12 @@ export function normalizeUsageRange(range: UsageRange): UsageRange {
   if (range.end_date && isUtcDay(range.end_date)) {
     out.end_date = range.end_date;
   }
-  // An inverted range is a 400 from every endpoint. The picker shows the
-  // validation message; the queries stay on the last good window.
+  // An inverted range is a 400 from every endpoint, so it never reaches one:
+  // the picker keeps rendering the raw bounds and says they are inverted, while
+  // the queries fall back to the unbounded window. Not to the last valid one —
+  // this function is pure and holds no history — which is why the picker's
+  // message says "showing the unfiltered window" rather than implying the
+  // previous numbers are still on screen.
   if (out.start_date && out.end_date && out.end_date < out.start_date) {
     return {};
   }

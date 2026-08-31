@@ -378,6 +378,38 @@ describe("AnalyticsPage", () => {
     expect(screen.getByText("analytics.range.summary_span")).toBeInTheDocument();
   });
 
+  it("plots and totals every day of a year-wide window, with no residual 30-day cap", () => {
+    setLoadedEmptyState();
+    // 366 rows, the widest window `/api/usage/daily` will answer with.
+    // `.slice(-30)` used to sit between this payload and the chart: a no-op at
+    // the old fixed 7-day window, but a silent 92% truncation now that the
+    // picker can ask for a year. The reader would have seen a caption claiming
+    // 366 days above a chart drawing 30.
+    //
+    // recharts renders nothing in jsdom (its ResponsiveContainer is stubbed and
+    // the chart surface never mounts), so chart geometry is not assertable
+    // here. What is assertable is the range summary, which sums
+    // `dailyChartData` — the very array handed to `<AreaChart data=…>` — so a
+    // cap reintroduced anywhere upstream of the chart shows up here as a day
+    // count that is not 366. Verified by putting `.slice(-30)` back: this test
+    // fails with `expected '30' to be '366'`.
+    const days = Array.from({ length: 366 }, (_, i) => ({
+      date: new Date(Date.UTC(2025, 2, 1) + i * 86_400_000)
+        .toISOString()
+        .slice(0, 10),
+      cost_usd: 0.5,
+      tokens: 10,
+      calls: 1,
+    }));
+    useUsageDailyMock.mockReturnValue(makeQuery({ days, today_cost_usd: 0 }));
+    renderPage();
+
+    expect(summaryValue("analytics.range.summary_days")).toBe("366");
+    expect(summaryValue("analytics.range.summary_calls")).toBe("366");
+    // 366 × $0.50. A 30-row truncation would report $15.
+    expect(summaryValue("analytics.range.summary_cost")).toContain("183");
+  });
+
   it("captions the stored window from first_event_date and retention_days", () => {
     setLoadedEmptyState();
     useUsageDailyMock.mockReturnValue(

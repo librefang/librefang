@@ -68,6 +68,17 @@ const GLOBAL_BUDGET_FIELDS: readonly {
   },
 ];
 
+/**
+ * Widest daily window that still gets a dot per point (#8062).
+ *
+ * Dropping `.slice(-30)` was right — the chart must plot the window the caption claims — but the per-point dot it inherited was sized for a 30-point series.
+ * At 366 points on a 200px-tall chart the dots are roughly a radius apart, so their 2px white strokes merge into an opaque band that hides the area fill and the trend underneath it, and the series costs 366 extra SVG nodes to draw.
+ * `activeDot` is unaffected, so hovering any day still marks it; only the always-on dots go away.
+ *
+ * 31 is the cutoff because the longest calendar-month preset is 31 days: every preset the picker offers up to `last_month` keeps its dots, and only the genuinely wide windows lose them.
+ */
+export const DAILY_CHART_DOT_LIMIT = 31;
+
 function providerCapTone(pct: number, alertThreshold: number): string {
   if (pct >= alertThreshold) return "bg-error shadow-[0_0_6px_rgba(239,68,68,0.45)]";
   if (pct >= alertThreshold * 0.6) return "bg-warning";
@@ -598,19 +609,21 @@ export function AnalyticsPage() {
     modelPerformanceQuery.isLoading;
 
   // Sum of the daily rows the chart draws (#8062 item 9).
+  // Summed over `dailyChartData` — the array the chart is handed — rather than over `daily.days` a second time, so the caption cannot describe a different set of rows than the ones plotted above it.
+  // That is not hypothetical: the `.slice(-30)` this page carried until #8062 sat between the payload and the chart but not between the payload and any caption, which is exactly how a 366-day window would have been captioned over a 30-day picture.
+  //
   // Distinct from the KPI row, which reads `/api/usage/summary` for the same window: agreement between the two is the reader's own check that the range is being applied consistently, so they are computed from different endpoints on purpose.
   const rangeTotals = useMemo(() => {
-    const days = daily?.days ?? [];
     let cost = 0;
     let tokens = 0;
     let calls = 0;
-    for (const d of days) {
+    for (const d of dailyChartData) {
       cost += d.cost_usd ?? 0;
       tokens += d.tokens ?? 0;
       calls += d.calls ?? 0;
     }
-    return { cost, tokens, calls, dayCount: days.length };
-  }, [daily]);
+    return { cost, tokens, calls, dayCount: dailyChartData.length };
+  }, [dailyChartData]);
 
   // Inclusive width of the selected window; `null` for the unbounded `all` preset, where "N of M days" has no M to report.
   const spanDays = useMemo(() => rangeSpanDays(range), [range]);
@@ -868,7 +881,7 @@ export function AnalyticsPage() {
                     }
                   />
                   {/* Single series, so no legend — the card title names it. */}
-                  <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={{ r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" }} activeDot={{ r: 5 }} />
+                  <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={dailyChartData.length <= DAILY_CHART_DOT_LIMIT ? { r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" } : false} activeDot={{ r: 5 }} />
                 </AreaChart>
               </ResponsiveContainer>
             )}

@@ -258,6 +258,91 @@ async fn p95_latency_is_computed_within_the_selected_date_range() {
     assert_eq!(model_row(&all, "gpt-ranged")["p95_latency_ms"], 9000);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn p95_latency_ignores_events_with_no_measured_latency() {
+    let h = boot().await;
+    let agent = register_agent(&h.state, "upgraded", false);
+    // Ten measured samples, 100 … 1000 ms.
+    for i in 1..=10 {
+        insert_event(
+            &h.state,
+            agent,
+            "2026-03-15T10:00:00+00:00",
+            "gpt-upgraded",
+            0.1,
+            10,
+            10,
+            0,
+            i * 100,
+        );
+    }
+    // Ninety rows as they exist on any database upgraded across migration v14,
+    // which added `latency_ms INTEGER NOT NULL DEFAULT 0` and so backfilled
+    // every pre-existing event with `0`. Those rows never had a latency
+    // measured; `0` is the column default, not a real observation.
+    for _ in 0..90 {
+        insert_event(
+            &h.state,
+            agent,
+            "2026-03-15T10:00:00+00:00",
+            "gpt-upgraded",
+            0.1,
+            10,
+            10,
+            0,
+            0,
+        );
+    }
+
+    let (status, body) = get(&h, "/api/usage/by-model/performance").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = model_row(&body, "gpt-upgraded");
+    // n = 10 measured samples, rank ceil(9.5) = 10, so the P95 is 1000 —
+    // exactly what `SessionStore::agent_stats_24h` reports for the same data,
+    // because it applies the same `latency_ms > 0` guard.
+    //
+    // Ranking the ninety unmeasured rows instead makes n = 100 and rank 95,
+    // and since the zeros occupy ranks 1..90 that rank lands on the fifth
+    // measured sample: 500 ms, the median of the real latencies dressed up as
+    // a 95th percentile. Halving a latency SLO's input is the quiet kind of
+    // wrong this whole file exists to catch.
+    assert_eq!(row["p95_latency_ms"], 1000);
+    // The three long-standing aggregates deliberately keep counting every row:
+    // their shape is already shipped and read by external dashboards, so the
+    // fix is scoped to the new percentile rather than silently redefining them.
+    assert_eq!(row["min_latency_ms"], 0);
+    assert_eq!(row["max_latency_ms"], 1000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p95_latency_is_zero_when_no_event_carries_a_latency() {
+    let h = boot().await;
+    let agent = register_agent(&h.state, "unmeasured", false);
+    for _ in 0..5 {
+        insert_event(
+            &h.state,
+            agent,
+            "2026-03-15T10:00:00+00:00",
+            "gpt-unmeasured",
+            0.1,
+            10,
+            10,
+            0,
+            0,
+        );
+    }
+
+    let (status, body) = get(&h, "/api/usage/by-model/performance").await;
+    assert_eq!(status, StatusCode::OK);
+    let row = model_row(&body, "gpt-unmeasured");
+    // The model still has spend, so it must still appear in the table — the
+    // `LEFT JOIN` onto the percentile CTE is what keeps the row alive when
+    // that CTE has nothing to contribute, and the percentile reads 0 rather
+    // than dropping the model's cost off the report.
+    assert_eq!(row["p95_latency_ms"], 0);
+    assert_eq!(row["call_count"], 5);
+}
+
 // ---------------------------------------------------------------------------
 // Retention horizon (#8062 item 10)
 // ---------------------------------------------------------------------------
