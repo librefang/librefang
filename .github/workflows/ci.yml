@@ -149,7 +149,7 @@ jobs:
           # `openapi-drift` job still gates direct edits.
           RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
-          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$|scripts/check-error-shape\.sh$|scripts/tests/check-error-shape\.sh$|scripts/codegen-sdks\.py$|scripts/tests/test_codegen_sdks\.py$|scripts/tests/test_pr_status_labels_workflow\.py$)' && CI=true
+          CI=false;      has '^(\.github/workflows/|\.devcontainer/|scripts/check-no-empty-string-sentinels\.sh$|scripts/tests/check-no-empty-string-sentinels\.sh$|scripts/tests/test_release_tag_workflow_safety\.py$|scripts/tests/test_issue_labels_workflow\.py$|scripts/run-xtask\.sh$|scripts/tests/run-xtask\.sh$|scripts/workers/|scripts/tests/install-redirect-workers\.mjs$|scripts/check-error-shape\.sh$|scripts/tests/check-error-shape\.sh$|scripts/codegen-sdks\.py$|scripts/tests/test_codegen_sdks\.py$|scripts/tests/test_pr_status_labels_workflow\.py$|scripts/tests/test_pr_review_label_workflows\.py$|scripts/tests/test_workflow_report_hardening\.py$)' && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
           # The WASM-skill guest SDK and its example are independent
           # workspaces (own `[workspace]` roots), so the main RUST lane —
@@ -347,6 +347,8 @@ jobs:
           python3 -O scripts/tests/test_codegen_sdks.py
       - name: Check PR status-label reconciliation
         run: python3 scripts/tests/test_pr_status_labels_workflow.py
+      - name: Check PR review-label pipeline
+        run: python3 scripts/tests/test_pr_review_label_workflows.py
       - name: Test Docker xtask wrapper
         run: bash scripts/tests/run-xtask.sh
       - name: Test installer redirect workers
