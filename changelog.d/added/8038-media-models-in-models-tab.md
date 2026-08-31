@@ -1,0 +1,6 @@
+Surface the four custom media endpoints — STT, TTS, image and video — in the dashboard's Models tab, alongside the LLM catalogue, with a type chip on every row.
+An operator pointing LibreFang at a self-hosted Whisper for transcription or a local Stable Diffusion for images previously had to know that those endpoints live in `[media.custom_stt]` / `[media.custom_image]` / `[media.custom_video]` / `[tts.custom]` and edit `config.toml` — a different place from where every other model is managed, and one where an unconfigured modality was invisible because nothing rendered it.
+All four rows now render whether configured or not, each showing the endpoint URL, the model id and the config path that owns it, and each editable in place through the config API that already served them.
+The provider selector that arms a custom endpoint (`media.audio_provider`, `tts.provider`, …) is part of the same form, because an endpoint edited without it stays inert.
+Nothing moves in `config.toml`: this is a surface over the existing sections, not a config migration.
+The API-key environment-variable *name* is shown but read-only — the key itself never enters `config.toml`, and repointing a credential variable stays an on-disk edit so it leaves a file trail (#8079) (@houko)

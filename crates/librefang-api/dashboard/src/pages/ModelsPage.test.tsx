@@ -16,7 +16,9 @@ import {
   useUpdateModelOverrides,
   useDeleteModelOverrides,
 } from "../lib/mutations/models";
-import type { ModelItem } from "../api";
+import { useMediaModelEndpoints } from "../lib/queries/config";
+import { useSaveMediaModelEndpoint } from "../lib/mutations/config";
+import type { MediaModelEndpoint, ModelItem } from "../api";
 import { useUIStore } from "../lib/store";
 
 vi.mock("../lib/queries/models", () => ({
@@ -29,6 +31,14 @@ vi.mock("../lib/mutations/models", () => ({
   useRemoveCustomModel: vi.fn(),
   useUpdateModelOverrides: vi.fn(),
   useDeleteModelOverrides: vi.fn(),
+}));
+
+vi.mock("../lib/queries/config", () => ({
+  useMediaModelEndpoints: vi.fn(),
+}));
+
+vi.mock("../lib/mutations/config", () => ({
+  useSaveMediaModelEndpoint: vi.fn(),
 }));
 
 // DrawerPanel pushes its children into a global slot via Zustand instead of
@@ -60,6 +70,8 @@ const useAddCustomModelMock = useAddCustomModel as unknown as ReturnType<typeof 
 const useRemoveCustomModelMock = useRemoveCustomModel as unknown as ReturnType<typeof vi.fn>;
 const useUpdateModelOverridesMock = useUpdateModelOverrides as unknown as ReturnType<typeof vi.fn>;
 const useDeleteModelOverridesMock = useDeleteModelOverrides as unknown as ReturnType<typeof vi.fn>;
+const useMediaModelEndpointsMock = useMediaModelEndpoints as unknown as ReturnType<typeof vi.fn>;
+const useSaveMediaModelEndpointMock = useSaveMediaModelEndpoint as unknown as ReturnType<typeof vi.fn>;
 
 interface QueryShape<T> {
   data: T;
@@ -134,6 +146,67 @@ const sampleModels: ModelItem[] = [
   },
 ];
 
+// Mirrors `selectMediaModelEndpoints` output for a config with a self-hosted
+// Whisper for STT and a local Stable Diffusion for images (refs #8038, #8011).
+const sampleMediaEndpoints: MediaModelEndpoint[] = [
+  {
+    kind: "stt",
+    config_path: "media.custom_stt",
+    provider_path: "media.audio_provider",
+    provider: "local-whisper",
+    config: {
+      base_url: "http://localhost:8080/v1/audio/transcriptions",
+      api_key_env: "MY_LOCAL_WHISPER_KEY",
+      key_required: false,
+      model: "large-v3",
+    },
+    configured: true,
+  },
+  {
+    kind: "tts",
+    config_path: "tts.custom",
+    provider_path: "tts.provider",
+    provider: "local-piper",
+    config: {
+      base_url: "http://localhost:5000/v1/audio/speech",
+      api_key_env: "",
+      key_required: false,
+      model: "tts-1",
+      voice: "en_US-lessac-medium",
+      format: "mp3",
+    },
+    configured: true,
+  },
+  {
+    kind: "image",
+    config_path: "media.custom_image",
+    provider_path: "media.image_provider",
+    provider: "local-sd",
+    config: {
+      base_url: "http://localhost:7860/v1/chat/completions",
+      api_key_env: "",
+      key_required: false,
+      model: "sdxl",
+    },
+    configured: true,
+  },
+  {
+    kind: "video",
+    config_path: "media.custom_video",
+    provider_path: "media.video_provider",
+    provider: "",
+    config: { base_url: "", api_key_env: "", key_required: false, model: null },
+    configured: false,
+  },
+];
+
+function setMediaEndpoints(
+  endpoints: MediaModelEndpoint[] = sampleMediaEndpoints,
+  overrides: Partial<QueryShape<MediaModelEndpoint[]>> = {},
+): void {
+  useMediaModelEndpointsMock.mockReturnValue(makeQuery(endpoints, overrides));
+}
+
 function setLoaded(models: ModelItem[] = sampleModels): void {
   useModelsMock.mockReturnValue(
     makeQuery({ models, total: models.length, available: models.filter(m => m.available).length }),
@@ -179,6 +252,8 @@ describe("ModelsPage", () => {
     });
     useModelOverridesMock.mockReturnValue(makeQuery({}));
     setMutationDefaults();
+    setMediaEndpoints([]);
+    useSaveMediaModelEndpointMock.mockReturnValue(makeMut());
   });
 
   it("shows the load-error banner when the models query errors", () => {
@@ -227,8 +302,11 @@ describe("ModelsPage", () => {
     setLoaded();
     renderPage();
     // First select after search input is providerFilter.
-    const selects = screen.getAllByRole("combobox");
-    fireEvent.change(selects[0], { target: { value: "anthropic" } });
+    // Addressed by label, not by index: the filter bar gained a model-type
+    // select in #8038 and an index would silently retarget.
+    fireEvent.change(screen.getByLabelText("models.filter_provider"), {
+      target: { value: "anthropic" },
+    });
     expect(screen.getByText("Claude Haiku")).toBeInTheDocument();
     expect(screen.queryByText("GPT-4o")).not.toBeInTheDocument();
   });
@@ -500,6 +578,154 @@ describe("ModelsPage", () => {
     // hidden-toggle chip with count appears.
     expect(useUIStore.getState().hiddenModelKeys.length).toBe(1);
     expect(screen.getByTitle("models.show_hidden")).toBeInTheDocument();
+  });
+
+  // ── Media endpoints in the Models tab (refs #8038, #8011) ────────
+
+  it("renders media endpoints alongside LLM models, each with a type label", () => {
+    setLoaded();
+    setMediaEndpoints();
+    renderPage();
+
+    // The LLM catalogue is still there …
+    expect(screen.getByText("GPT-4o")).toBeInTheDocument();
+    // … and every media modality is now a row in the same tab.
+    expect(screen.getByText("models.media_endpoints")).toBeInTheDocument();
+    // One chip per model card, plus the entry in the type filter's option list.
+    expect(screen.getAllByText("models.kind_llm").length).toBe(sampleModels.length + 1);
+    for (const kind of ["stt", "tts", "image", "video"]) {
+      expect(screen.getAllByText(`models.kind_${kind}`).length).toBeGreaterThan(0);
+    }
+    // Each card shows the endpoint it points at and the config path that owns it.
+    expect(
+      screen.getByText("http://localhost:8080/v1/audio/transcriptions"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("media.custom_stt")).toBeInTheDocument();
+    expect(screen.getByText("tts.custom")).toBeInTheDocument();
+    // An unconfigured modality is still listed — that discoverability is the ask.
+    expect(screen.getByText("models.media_not_configured")).toBeInTheDocument();
+    expect(screen.getByText("models.media_provider_unset")).toBeInTheDocument();
+  });
+
+  it("filters the tab down to one modality via the type select", () => {
+    setLoaded();
+    setMediaEndpoints();
+    renderPage();
+
+    fireEvent.change(screen.getByLabelText("models.filter_kind"), {
+      target: { value: "stt" },
+    });
+
+    expect(screen.getByText("media.custom_stt")).toBeInTheDocument();
+    expect(screen.queryByText("tts.custom")).toBeNull();
+    // LLM cards are gone, and the "no models" empty state must not take over.
+    expect(screen.queryByText("GPT-4o")).toBeNull();
+    expect(screen.queryByText("models.no_results")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("models.filter_kind"), {
+      target: { value: "llm" },
+    });
+    expect(screen.getByText("GPT-4o")).toBeInTheDocument();
+    expect(screen.queryByText("models.media_endpoints")).toBeNull();
+  });
+
+  it("matches media endpoints against the shared search box", () => {
+    setLoaded();
+    setMediaEndpoints();
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText("models.search_placeholder"), {
+      target: { value: "whisper" },
+    });
+
+    expect(screen.getByText("media.custom_stt")).toBeInTheDocument();
+    expect(screen.queryByText("media.custom_image")).toBeNull();
+  });
+
+  it("saves an edited media endpoint with the whole table and the provider name", async () => {
+    const save = makeMut();
+    useSaveMediaModelEndpointMock.mockReturnValue(save);
+    setLoaded([]);
+    setMediaEndpoints([sampleMediaEndpoints[0]]);
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "models.kind_stt" }));
+    fireEvent.change(screen.getByLabelText("models.media_base_url"), {
+      target: { value: "http://whisper.internal/v1/audio/transcriptions" },
+    });
+    fireEvent.change(screen.getByLabelText("models.media_model"), {
+      target: { value: "medium.en" },
+    });
+    fireEvent.change(screen.getByLabelText("models.media_provider"), {
+      target: { value: "my-whisper" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(save.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(save.mutateAsync).toHaveBeenCalledWith({
+      endpoint: sampleMediaEndpoints[0],
+      draft: {
+        base_url: "http://whisper.internal/v1/audio/transcriptions",
+        key_required: false,
+        model: "medium.en",
+      },
+      provider: "my-whisper",
+    });
+    await waitFor(() =>
+      expect(useUIStore.getState().toasts.map((toast) => toast.message)).toContain(
+        "models.media_saved",
+      ),
+    );
+  });
+
+  it("exposes voice and format for TTS only", () => {
+    setLoaded([]);
+    setMediaEndpoints([sampleMediaEndpoints[1]]);
+    const { unmount } = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "models.kind_tts" }));
+    expect(screen.getByLabelText("models.media_voice")).toBeInTheDocument();
+    expect(screen.getByLabelText("models.media_format")).toBeInTheDocument();
+    unmount();
+
+    setMediaEndpoints([sampleMediaEndpoints[2]]);
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "models.kind_image" }));
+    expect(screen.queryByLabelText("models.media_voice")).toBeNull();
+    expect(screen.queryByLabelText("models.media_format")).toBeNull();
+  });
+
+  it("shows the API key env var read-only and never sends it from the form", () => {
+    setLoaded([]);
+    setMediaEndpoints([sampleMediaEndpoints[0]]);
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "models.kind_stt" }));
+
+    const envInput = screen.getByLabelText("models.media_api_key_env") as HTMLInputElement;
+    // The env-var *name* is shown (never a key value), and it cannot be
+    // repointed from here — that write stays an on-disk edit.
+    expect(envInput.value).toBe("MY_LOCAL_WHISPER_KEY");
+    expect(envInput.readOnly).toBe(true);
+    expect(envInput.disabled).toBe(true);
+  });
+
+  it("surfaces a rejected media save as an error toast and keeps the drawer open", async () => {
+    const save = makeMut({
+      mutateAsync: vi.fn().mockRejectedValue(new Error("not user-tunable")),
+    });
+    useSaveMediaModelEndpointMock.mockReturnValue(save);
+    setLoaded([]);
+    setMediaEndpoints([sampleMediaEndpoints[0]]);
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "models.kind_stt" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(useUIStore.getState().toasts.map((toast) => toast.message)).toContain(
+        "not user-tunable",
+      ),
+    );
+    expect(screen.getByLabelText("models.media_base_url")).toBeInTheDocument();
   });
 });
 
