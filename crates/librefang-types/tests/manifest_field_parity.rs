@@ -10,7 +10,7 @@
 //! Every field, set to a value distinct from its default, comes back unchanged through
 //! serialize-then-parse.
 //! And a manifest whose optional free-form JSON is absent still serializes at all — the failure
-//! mode is not one lost field but a `to_string_pretty` error that aborts the write for all 59.
+//! mode is not one lost field but a `to_string_pretty` error that aborts the write for every other field.
 
 use librefang_types::agent::{
     AgentManifest, AsyncTasksConfig, AutonomousConfig, CompactionOverrides, FallbackModel,
