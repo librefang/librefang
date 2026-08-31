@@ -137,6 +137,12 @@ fn sidecar_channel_rows(
     }
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut rows = Vec::new();
+    // Both describe caches are read once for the whole loop rather than per
+    // row. `std::sync::RwLock` gives no re-entrancy guarantee, so taking a
+    // second read guard inside the loop while one is already held here can
+    // deadlock against a waiting writer.
+    let schema_guard = read_cache_recover(schema_cache(), "schema");
+    let schema_err_guard = read_cache_recover(schema_error_cache(), "schema error");
     for sc in sidecar {
         let name = sc.name.as_str();
         // One card per distinct sidecar name.
@@ -144,6 +150,7 @@ fn sidecar_channel_rows(
             continue;
         }
         let channel_type = sc.channel_type.as_deref().unwrap_or(name);
+        let schema = schema_guard.get(channel_type);
         let mut row = serde_json::json!({
             "name": name,
             "display_name": name,
@@ -167,7 +174,7 @@ fn sidecar_channel_rows(
             // `configured_instance_fields`. Empty only when no schema is
             // cached for `channel_type` (SDK missing and no static
             // fallback), same as an unconfigured discovery row.
-            "fields": configured_instance_fields(channel_type, sc, secrets_env_keys),
+            "fields": configured_instance_fields(schema, channel_type, sc, secrets_env_keys),
             "setup_steps": [
                 "Runs as an out-of-process sidecar adapter",
                 "Configured via [[sidecar_channels]] in config.toml \
@@ -184,6 +191,19 @@ fn sidecar_channel_rows(
             // `null` when this instance has no default agent configured.
             "agent": sc.agent,
         });
+        // The two schema-provenance keys a discovery row has always carried.
+        // A configured row omitted both, and the missing `schema_error` is the
+        // whole of #8063: with no cached schema `fields` is empty, so the gear
+        // icon opened a drawer with nothing to edit, no explanation of why, and
+        // a live Save button whose request could only ever 503. The dashboard
+        // can only distinguish "this adapter has no form" from "this adapter's
+        // form could not be loaded, here is the fix" if the row says so.
+        if let Some(version) = schema.and_then(|s| s.sdk_version.as_deref()) {
+            row["sdk_version"] = serde_json::json!(version);
+        }
+        if let Some(reason) = schema_err_guard.get(channel_type) {
+            row["schema_error"] = serde_json::json!(reason);
+        }
         // Per-instance liveness from the sidecar supervisor.
         // Adapters are registered under the instance `name` (the qualified `name:account_id` alias points at the same adapter), which is the same key this loop iterates, so the lookup is per-bot.
         // `json!` of an `Option` yields `null` for `None`, so the three nullable fields keep a stable shape whether or not an adapter is registered — a consumer never has to distinguish "absent" from "unknown".
@@ -233,16 +253,21 @@ fn sidecar_channel_rows(
 /// global one, mirroring the precedence `write_sidecar_configuration` writes
 /// under and `librefang_channels::sidecar::build_spawn_env` reads back.
 ///
-/// Returns an empty vec when no schema is cached for `channel_type` — same
-/// "nothing to render" outcome as an unconfigured discovery row with no
-/// schema and no static fallback.
+/// `schema` is the caller's already-held lookup of `channel_type` in
+/// [`schema_cache`] — the lock is taken once for the whole row loop rather
+/// than re-entered here, because `std::sync::RwLock` promises nothing about a
+/// nested read guard.
+///
+/// Returns an empty vec when no schema is cached for `channel_type`. The row
+/// then carries `schema_error` instead, which is what lets the dashboard
+/// explain the empty form rather than rendering a dead one (#8063).
 fn configured_instance_fields(
+    schema: Option<&SidecarSchema>,
     channel_type: &str,
     sc: &librefang_types::config::SidecarChannelConfig,
     secrets_env_keys: &std::collections::HashSet<String>,
 ) -> Vec<serde_json::Value> {
-    let cache_guard = read_cache_recover(schema_cache(), "schema");
-    let Some(schema) = cache_guard.get(channel_type) else {
+    let Some(schema) = schema else {
         return Vec::new();
     };
     let namespace = if sc.name == channel_type {
@@ -1058,6 +1083,13 @@ enum ConfigureSidecarWriteError {
     /// not a conflict — it is the update path (`upsert_sidecar_block`
     /// matches by name and edits in place).
     NameConflict(String),
+    /// A `required` secret field carries no value: the payload omitted it (or
+    /// sent whitespace) and nothing is stored for this instance either.
+    /// Carries the field key so the 400 body can name it. Checked inside the
+    /// write step rather than in the handler because deciding it needs the
+    /// same `secrets.env` snapshot the write uses — reading it earlier, outside
+    /// `config_write_lock`, would be a TOCTOU against a concurrent save.
+    MissingRequiredSecret(String),
 }
 
 /// Look for an existing `[[sidecar_channels]]` entry named `instance_name`
@@ -1262,6 +1294,49 @@ fn write_sidecar_configuration(
         .into_iter()
         .map(|(key, _)| key)
         .collect();
+
+    // Required-secret validation, deliberately "has a value after this save"
+    // rather than "is present in this payload" (#8063).
+    //
+    // The configure drawer never echoes a stored secret back as plaintext, so
+    // editing one non-secret field on a configured instance submits a payload
+    // with no token in it — and the write path below already treats that as
+    // "leave the stored secret alone" (an absent key never reaches
+    // `upsert_secret`). Rejecting it here anyway made every edit of a
+    // configured Slack instance 400 with `required field SLACK_APP_TOKEN is
+    // missing or empty` unless the operator re-pasted both workspace tokens
+    // from scratch, which is the failure the issue reproduced.
+    //
+    // The guarantee the check exists for is unchanged: after a successful save
+    // the instance has a value for every required secret. The sources are the
+    // ones `librefang_channels::sidecar::build_spawn_env` actually reads, in
+    // its precedence order — this request's payload, then this instance's
+    // `secrets.env` key (namespaced for a secondary instance, bare for the one
+    // named after its catalog type), then the daemon's own environment, which
+    // `build_spawn_env` consults for bare keys only.
+    //
+    // Required non-secret fields stay strict in the handler's earlier pass:
+    // their current values *are* echoed into the form, so the form always
+    // resubmits them, and `write_form_managed` deletes a managed env key that
+    // a save omits. Accepting an omission here would green-light a save that
+    // then removes the very key it was told was satisfied.
+    for field in &schema.fields {
+        if !field.required || field.field_type != "secret" {
+            continue;
+        }
+        let submitted = values
+            .get(&field.key)
+            .is_some_and(|value| !value.trim().is_empty());
+        let stored = secrets_env_keys.contains(&secret_key(&field.key));
+        let inherited = secret_namespace.is_none()
+            && std::env::var(&field.key).is_ok_and(|value| !value.trim().is_empty());
+        if !submitted && !stored && !inherited {
+            return Err(ConfigureSidecarWriteError::MissingRequiredSecret(
+                field.key.clone(),
+            ));
+        }
+    }
+
     // Namespaced per-instance secrets always win over the parent process env
     // (`build_spawn_env` never consults it for them), so the shadow warning
     // — "a shell-exported var will out-rank what this save just wrote" — is
@@ -1404,9 +1479,18 @@ pub async fn configure_sidecar_channel(
             .into_json_tuple()
         })?;
 
-    // 3. Validate required fields: present in payload AND non-empty after trim.
+    // 3. Validate required NON-SECRET fields: present in payload AND non-empty
+    //    after trim. The form renders these with their current values, so a
+    //    save always resubmits them, and `write_form_managed` removes a managed
+    //    env key that a save omits — an omission here really is a request to
+    //    end up with no value.
+    //
+    //    Required *secret* fields are validated in `write_sidecar_configuration`
+    //    instead, against the `secrets.env` snapshot the write itself uses: a
+    //    stored secret is never echoed into the form, so "absent from the
+    //    payload" means "keep what is stored", not "clear it" (#8063).
     for f in &schema.fields {
-        if f.required {
+        if f.required && f.field_type != "secret" {
             let v = body.values.get(&f.key).map(|s| s.trim()).unwrap_or("");
             if v.is_empty() {
                 return Err(ApiErrorResponse::bad_request(format!(
@@ -1490,6 +1574,12 @@ pub async fn configure_sidecar_channel(
             ConfigureSidecarWriteError::NameConflict(conflicting_type) => {
                 ApiErrorResponse::conflict(format!(
                     "instance name `{instance_name}` is already used by a configured `{conflicting_type}` channel. Pick a different instance name."
+                ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::MissingRequiredSecret(key) => {
+                ApiErrorResponse::bad_request(format!(
+                    "required field `{key}` is missing or empty"
                 ))
                 .into_json_tuple()
             }

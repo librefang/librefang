@@ -593,9 +593,12 @@ function SidecarForm({
   const advanced = allFields.filter((f) => f.advanced);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const visible = showAdvanced ? [...fields, ...advanced] : fields;
-  // `--describe` failed at boot and there's no static fallback, so the schema is empty.
-  // Show the actionable reason (typically: install the Python sidecar SDK) instead of a blank drawer + dead Save button.
-  const schemaUnavailable = allFields.length === 0 && !!channel.schema_error;
+  // No schema reached this row, so the drawer has nothing to edit and Save has nothing to submit.
+  // `POST /api/channels/sidecar/{adapter}/configure` needs the daemon's cached `--describe` schema to validate required fields and split secrets from non-secrets, so it answers 503 when there is none — an enabled Save here can only ever fail.
+  // Gate it on the absence of fields alone, not on `channel.schema_error` too (#8063): the reason is best-effort — a daemon predating the fix omits it on configured rows, and it is absent whenever `--describe` failed only after a schema had already been cached — so requiring it let the exact case the guard exists for fall through to a live button, which is what the issue reported as an inert Save.
+  const noEditableFields = allFields.length === 0;
+  // The reason itself, when the daemon sent one (typically: install the Python sidecar SDK).
+  const schemaUnavailable = noEditableFields && !!channel.schema_error;
 
   // Pre-populate from the schema:
   //  - non-secret fields with a `value` get their value
@@ -816,7 +819,7 @@ function SidecarForm({
         <Button
           variant="primary"
           onClick={handleSubmit}
-          disabled={saveMut.isPending || schemaUnavailable || !instanceNameTrimmed}
+          disabled={saveMut.isPending || noEditableFields || !instanceNameTrimmed}
         >
           {saveMut.isPending
             ? t("common.saving", { defaultValue: "Saving..." })
