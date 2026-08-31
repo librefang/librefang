@@ -1,8 +1,12 @@
 //! Text formatting pipeline for outbound Telegram messages.
 //!
-//! The preferred path is `rich_sanitize` → `sendRichMessage`: Telegram's own
-//! GFM-compatible parser handles the text, so tables, `_italic_` and nested emphasis
-//! work, and the limit is 32768 characters rather than 4096.
+//! The preferred path is `rich_blocks` → `sendRichMessage`: the agent's Markdown is
+//! parsed here into `InputRichBlock` values, so Telegram runs no parser over our text at
+//! all and quoted content cannot become markup. The limit is 32768 characters rather
+//! than 4096.
+//!
+//! `rich_sanitize` → `rich_message.markdown` remains only as a guard for the case where
+//! conversion yields nothing for non-empty text, which would mean a converter bug.
 //!
 //! The stages below are the fallback for Bot API servers older than 10.1, and mirror
 //! the Python adapter's three-stage pipeline:

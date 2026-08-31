@@ -145,8 +145,14 @@ impl RichText {
 
 /// Convert an agent's Markdown into rich blocks.
 ///
-/// Never fails and never drops content: anything the converter does not model becomes the
-/// text it was written as, so a gap in coverage costs formatting, not information.
+/// Never fails. Anything the converter does not model becomes the text it was written as,
+/// so a gap in coverage costs formatting rather than information — with one deliberate
+/// exception: GFM specifies that table cells beyond the header count are ignored, and this
+/// follows it.
+///
+/// The unqualified "never drops content" that stood here was false while the exception was
+/// documented two screens above, and three separate content-loss defects were found under
+/// it. Treat any absolute in this module as a claim that owes a test.
 pub fn markdown_to_blocks(markdown: &str) -> Vec<Block> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -200,10 +206,15 @@ struct Builder {
     /// Consecutive block-level HTML lines, which arrive one event per line with no
     /// paragraph around them. Held here so they become one paragraph instead of several.
     html_block: String,
-    /// A task-list marker arrives *inside* the item, after `Tag::Item` has already pushed
-    /// the item's block frame — so the list frame is no longer on top and cannot be
-    /// reached from the marker's own event. Stashed here and applied when the item closes.
-    pending_checkbox: Option<bool>,
+    /// Task-list state, one entry per open list item. A marker arrives *inside* its item,
+    /// after `Tag::Item` pushed the item's block frame, so the list frame is no longer on
+    /// top and the marker cannot reach it. A single cell is not enough either: a nested
+    /// item closes before its parent and would take the parent's value with it, moving a
+    /// "done" tick onto a sub-point.
+    item_checkboxes: Vec<Option<bool>>,
+    /// True while the open inline run was started by loose text rather than by a
+    /// `Tag::Paragraph`, so it has to be closed by hand at the next block boundary.
+    implicit_run: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -238,8 +249,7 @@ impl Builder {
         }
         let html = std::mem::take(&mut self.html_block);
         let text = RichText::Plain(html.trim_end_matches('\n').to_string());
-        let block = Block::Paragraph { text };
-        self.blocks_mut().push(block);
+        self.push_block(Block::Paragraph { text });
     }
 
     fn start_inline(&mut self) {
@@ -250,9 +260,44 @@ impl Builder {
         RichText::from_parts(self.inlines.pop().unwrap_or_default())
     }
 
+    /// Add to the open inline run, opening one if there is none.
+    ///
+    /// A *tight* list item emits its text with no `Tag::Paragraph` around it, so without
+    /// this there is no run to add to and the text is dropped. Opening it lazily — rather
+    /// than at `Tag::Item` — is what lets `push_block` close it at the right place: the
+    /// text before a nested block and the text after it end up in separate paragraphs,
+    /// in source order, instead of being concatenated into one.
     fn push_inline(&mut self, text: RichText) {
+        if self.inlines.is_empty() {
+            self.inlines.push(Vec::new());
+            self.implicit_run = true;
+        }
         if let Some(run) = self.inlines.last_mut() {
             run.push(text);
+        }
+    }
+
+    /// Append a block, closing any loose text that came before it first.
+    ///
+    /// Every block push goes through here so source order is preserved by construction.
+    /// The two obvious alternatives are both wrong: appending the item's text after its
+    /// children puts sub-points above the point they belong to, and inserting it at the
+    /// front does the same to a heading or a code fence the text followed.
+    fn push_block(&mut self, block: Block) {
+        self.flush_implicit_run();
+        self.blocks_mut().push(block);
+    }
+
+    /// Close a loose-text run as its own paragraph.
+    fn flush_implicit_run(&mut self) {
+        if !self.implicit_run {
+            return;
+        }
+        self.implicit_run = false;
+        let text = RichText::from_parts(self.inlines.pop().unwrap_or_default());
+        if !text.is_empty() {
+            let block = Block::Paragraph { text };
+            self.blocks_mut().push(block);
         }
     }
 
@@ -270,10 +315,7 @@ impl Builder {
             })),
             Event::SoftBreak => self.push_inline(RichText::Plain(" ".into())),
             Event::HardBreak => self.push_inline(RichText::Plain("\n".into())),
-            Event::Rule => {
-                let block = Block::Divider;
-                self.blocks_mut().push(block);
-            }
+            Event::Rule => self.push_block(Block::Divider),
             // Raw HTML is text, not markup: this is the whole point of `blocks`. A quoted
             // `<tg-button …>` lands in a string, where no parser will look at it.
             Event::InlineHtml(html) => self.push_inline(RichText::Plain(html.into_string())),
@@ -283,7 +325,11 @@ impl Builder {
             // and a message mixing prose with an HTML block was sent with its middle
             // missing. Buffered here and flushed as its own paragraph.
             Event::Html(html) => self.html_block.push_str(&html),
-            Event::TaskListMarker(checked) => self.pending_checkbox = Some(checked),
+            Event::TaskListMarker(checked) => {
+                if let Some(slot) = self.item_checkboxes.last_mut() {
+                    *slot = Some(checked);
+                }
+            }
             Event::FootnoteReference(name) => {
                 self.push_inline(RichText::Plain(format!("[^{name}]")))
             }
@@ -294,6 +340,16 @@ impl Builder {
     }
 
     fn start(&mut self, tag: Tag<'_>) {
+        // Opening a container is a block boundary just like emitting one: the loose text
+        // before a nested list belongs to the item that owns it, not to the first child.
+        // Without this, `- a\n  - b` collected "a" and "b" into one run and delivered "ab"
+        // inside the nested item, with the parent's own text gone.
+        if matches!(
+            tag,
+            Tag::List(_) | Tag::Item | Tag::BlockQuote(_) | Tag::Table(_)
+        ) {
+            self.flush_implicit_run();
+        }
         match tag {
             Tag::Paragraph | Tag::Heading { .. } => self.start_inline(),
             Tag::CodeBlock(kind) => {
@@ -313,11 +369,7 @@ impl Builder {
             }),
             Tag::Item => {
                 self.frames.push(Frame::Blocks(Vec::new()));
-                // A *tight* list emits its item text with no surrounding paragraph, so
-                // without a run open here that text has nowhere to land and is silently
-                // dropped. A loose item pushes its own run on top of this one and leaves
-                // this one empty, which `TagEnd::Item` discards.
-                self.start_inline();
+                self.item_checkboxes.push(None);
             }
             Tag::BlockQuote(_) => self.frames.push(Frame::Blocks(Vec::new())),
             Tag::Table(alignments) => self.frames.push(Frame::TableRows {
@@ -348,43 +400,33 @@ impl Builder {
         match tag {
             TagEnd::Paragraph => {
                 let text = self.take_inline();
-                let block = Block::Paragraph { text };
-                self.blocks_mut().push(block);
+                self.push_block(Block::Paragraph { text });
             }
             TagEnd::Heading(level) => {
                 let text = self.take_inline();
-                let block = Block::Heading {
+                self.push_block(Block::Heading {
                     text,
                     size: heading_size(level),
-                };
-                self.blocks_mut().push(block);
+                });
             }
             TagEnd::CodeBlock => {
                 let text = self.take_inline();
                 let language = self.code_language.take().flatten();
-                let block = Block::Pre {
+                self.push_block(Block::Pre {
                     text: trim_trailing_newline(text),
                     language,
-                };
-                self.blocks_mut().push(block);
+                });
             }
             TagEnd::List(_) => {
                 if let Some(Frame::ListItems { items, .. }) = self.frames.pop() {
-                    let block = Block::List { items };
-                    self.blocks_mut().push(block);
+                    self.push_block(Block::List { items });
                 }
             }
             TagEnd::Item => {
-                let loose_text = self.take_inline();
-                if !loose_text.is_empty() {
-                    // *Before* whatever the item already collected, not after. A nested
-                    // list closes while its parent item is still open, so it lands in the
-                    // item's frame first; appending the item's own text then printed the
-                    // sub-points above the point they belong to.
-                    let block = Block::Paragraph { text: loose_text };
-                    self.blocks_mut().insert(0, block);
-                }
-                let checkbox = self.pending_checkbox.take();
+                // Trailing loose text closes here; anything earlier was already closed at
+                // the block that followed it.
+                self.flush_implicit_run();
+                let checkbox = self.item_checkboxes.pop().flatten();
                 let blocks = match self.frames.pop() {
                     Some(Frame::Blocks(blocks)) => blocks,
                     other => {
@@ -409,14 +451,12 @@ impl Builder {
             }
             TagEnd::BlockQuote(_) => {
                 if let Some(Frame::Blocks(blocks)) = self.frames.pop() {
-                    let block = Block::Quote { blocks };
-                    self.blocks_mut().push(block);
+                    self.push_block(Block::Quote { blocks });
                 }
             }
             TagEnd::Table => {
                 if let Some(Frame::TableRows { rows, .. }) = self.frames.pop() {
-                    let block = Block::Table { cells: rows };
-                    self.blocks_mut().push(block);
+                    self.push_block(Block::Table { cells: rows });
                 }
             }
             TagEnd::TableHead | TagEnd::TableRow => {
@@ -848,6 +888,65 @@ mod tests {
                 [{"text": "1"}, {"text": ""}],
                 [{"text": "1"}, {"text": "2"}],
             ]}])
+        );
+    }
+
+    /// A tight item emits its text with no paragraph events, so all of it landed in one
+    /// run — text before a nested block and text after it were concatenated with no
+    /// separator at all. `- alpha\n  ***\n  beta` delivered `alphabeta`: the characters
+    /// were gone from the message, not merely styled differently.
+    #[test]
+    fn loose_text_around_a_block_stays_separate_and_ordered() {
+        assert_eq!(
+            json("- alpha\n  ***\n  beta"),
+            serde_json::json!([{"type": "list", "items": [{"blocks": [
+                {"type": "paragraph", "text": "alpha"},
+                {"type": "divider"},
+                {"type": "paragraph", "text": "beta"},
+            ]}]}])
+        );
+        // A heading the text follows must stay above it. Appending the item's text put
+        // sub-points above their parent; inserting it at the front did this instead.
+        assert_eq!(
+            json("- # h\n  text"),
+            serde_json::json!([{"type": "list", "items": [{"blocks": [
+                {"type": "heading", "text": "h", "size": 1},
+                {"type": "paragraph", "text": "text"},
+            ]}]}])
+        );
+    }
+
+    /// The shape an agent actually writes: a step, the command, then what to do next.
+    #[test]
+    fn a_checklist_step_around_a_code_fence_survives_intact() {
+        assert_eq!(
+            json("- [ ] Install deps\n  ```sh\n  npm i\n  ```\n  Then run it"),
+            serde_json::json!([{"type": "list", "items": [{
+                "blocks": [
+                    {"type": "paragraph", "text": "Install deps"},
+                    {"type": "pre", "text": "npm i", "language": "sh"},
+                    {"type": "paragraph", "text": "Then run it"},
+                ],
+                "has_checkbox": true,
+            }]}])
+        );
+    }
+
+    /// One cell of checkbox state is not enough: a nested item closes before its parent and
+    /// took the parent's tick with it, so `- [x] a\n  - b` marked `b` done and left `a`
+    /// a plain bullet. One slot per open item.
+    #[test]
+    fn a_checkbox_belongs_to_its_own_item_not_a_nested_one() {
+        let value = json("- [x] Ship it\n  - [ ] write tests");
+        let outer = &value[0]["items"][0];
+        assert_eq!(outer["is_checked"], serde_json::json!(true), "{value}");
+        assert_eq!(outer["blocks"][0]["text"], "Ship it", "{value}");
+
+        let inner = &outer["blocks"][1]["items"][0];
+        assert_eq!(inner["has_checkbox"], serde_json::json!(true), "{value}");
+        assert!(
+            inner.get("is_checked").is_none(),
+            "unchecked must be absent: {value}"
         );
     }
 
