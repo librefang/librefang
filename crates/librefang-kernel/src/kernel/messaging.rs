@@ -628,11 +628,21 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                // This ephemeral (`/btw`) path never runs through
-                // `agent_loop::prepare_llm_messages`, so there is no per-turn
-                // message tail to deliver `current_time_msg` through — same
-                // reasoning as `canonical_context: None` above (#8131).
-                current_time_precise: None,
+                // Minute-resolution counterpart to `current_date` above,
+                // delivered via `current_time_msg` metadata (see below)
+                // instead of the cached system prompt (#8131). This
+                // ephemeral (`/btw`) path DOES run through
+                // `agent_loop::prepare_llm_messages` (via `run_agent_loop`
+                // below), same as the other two call sites — an earlier
+                // version of this comment claimed otherwise and left the
+                // field populated but never wired to `current_time_msg`,
+                // silently leaving `/btw` turns without precise time
+                // (caught by adversarial review round 2 on #8132).
+                current_time_precise: Some(
+                    chrono::Local::now()
+                        .format("%A, %B %d, %Y %H:%M %Z")
+                        .to_string(),
+                ),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
@@ -641,6 +651,14 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            if let Some(time_msg) =
+                librefang_runtime::prompt_builder::build_current_time_message(&prompt_ctx)
+            {
+                manifest.metadata.insert(
+                    "current_time_msg".to_string(),
+                    serde_json::Value::String(time_msg),
+                );
+            }
         }
 
         // #5980: pre-dispatch per-provider budget gate on the ephemeral
