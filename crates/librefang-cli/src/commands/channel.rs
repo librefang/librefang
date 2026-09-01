@@ -162,6 +162,51 @@ pub(crate) fn cmd_channel_reload() {
     );
 }
 
+/// The adapter, instance name and current agent binding a `channel setup`
+/// target implies.
+///
+/// `GET /api/channels` mixes two row shapes under one `items` array and reuses
+/// `name` for two different things: on a configured row it is the
+/// `[[sidecar_channels]].name` the operator chose, on a catalog row it is the
+/// adapter key. `POST /api/channels/sidecar/{name}/configure` accepts only the
+/// **adapter** in its path — it looks the segment up in the daemon's sidecar
+/// catalog — so passing a configured row's name there 404s for every instance
+/// whose name is not also an adapter key (`librefang channel setup slack-hr`).
+/// That is the same identifier mix-up reported in #8055 / #8063.
+///
+/// The third element is the row's existing `agent`. It has to be sent back
+/// because the endpoint treats an absent `agent` as "clear the binding"
+/// (`write_form_managed` calls `block.remove("agent")` for `None`), so a setup
+/// that omitted it would silently unbind an instance's default agent.
+///
+/// Returns `(adapter, instance_name, agent)`, where `instance_name` is `None`
+/// when it coincides with the adapter — a first instance named after its own
+/// adapter — matching the endpoint's own default for the field.
+pub(crate) fn setup_target_identifiers(
+    row: &serde_json::Value,
+) -> (String, Option<String>, Option<String>) {
+    let name = row
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // A catalog row carries no `channel_type`, and a configured entry that
+    // omits the key is treated by the daemon as having its name for a type.
+    let adapter = row
+        .get("channel_type")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let instance_name = if adapter == name { None } else { Some(name) };
+    let agent = row
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
+    (adapter, instance_name, agent)
+}
+
 pub(crate) fn cmd_channel_setup(name: Option<&str>) {
     let base = require_daemon("channel setup");
     let client = daemon_client();
@@ -249,6 +294,9 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // `chan_name` stays the operator-facing label; the request needs the
+    // adapter for its path and the instance name for its body.
+    let (adapter, instance_name, current_agent) = setup_target_identifiers(&target);
     let fields: Vec<serde_json::Value> = target
         .get("fields")
         .and_then(|v| v.as_array())
@@ -278,9 +326,18 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
             .unwrap_or(false);
         let current = f.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-        // Secret-typed + has_value=true: blank means "keep existing".
-        // Non-secret + has current value: show as default-in-brackets.
-        let prompt = if ftype == "secret" && has_value {
+        // Secret-typed + has_value=true: blank means "keep existing" — but
+        // only for an optional field. The endpoint validates every `required`
+        // schema field against the payload it receives and cannot read a
+        // stored secret back, so omitting a required one is a 400, not a
+        // no-op. Prompt for it as required instead of promising a keep that
+        // the daemon will reject.
+        let prompt = if ftype == "secret" && has_value && required {
+            i18n::t_args(
+                "channel-prompt-secret-retype",
+                &[("label", label), ("key", key)],
+            )
+        } else if ftype == "secret" && has_value {
             i18n::t_args(
                 "channel-prompt-secret-keep",
                 &[("label", label), ("key", key)],
@@ -298,16 +355,34 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         let entered = prompt_input(&prompt);
         let val = entered.trim();
         if val.is_empty() {
+            // `channel-prompt-default` shows the stored value in brackets, so a
+            // bare Enter reads as "keep it" — but an omitted key is a removal,
+            // not a no-op: `write_form_managed` drops every managed env key
+            // absent from `values`. Resend the current value so accepting the
+            // default keeps it instead of deleting it (and, for a required
+            // field, instead of taking a 400 the operator did nothing to earn).
+            // Secrets carry no readable current value, so there is nothing to
+            // resend and blank keeps meaning "leave secrets.env alone".
+            if ftype != "secret" && !current.is_empty() {
+                values.insert(
+                    key.to_string(),
+                    serde_json::Value::String(current.to_string()),
+                );
+            }
             continue;
         }
         values.insert(key.to_string(), serde_json::Value::String(val.to_string()));
     }
 
-    // Sidecar names come from `SIDECAR_CATALOG` keys — short
+    // Sidecar adapter names come from `SIDECAR_CATALOG` keys — short
     // alphanumeric (`telegram`, `ntfy`, …), URL-safe as-is. No need
     // for percent-encoding.
-    let url = format!("{base}/api/channels/sidecar/{chan_name}/configure");
-    let payload = serde_json::json!({ "values": values });
+    let url = format!("{base}/api/channels/sidecar/{adapter}/configure");
+    let payload = serde_json::json!({
+        "values": values,
+        "instance_name": instance_name,
+        "agent": current_agent,
+    });
     let body = daemon_json(client.post(&url).json(&payload).send());
     // `daemon_json` only logs 5xx; 4xx silently returns the error body.
     // Surface those by checking for the SidecarSaveResult shape. The
@@ -487,5 +562,71 @@ pub(crate) fn cmd_channel_rm(name: &str) {
         None => {
             println!("{}", i18n::t("channel-reload-daemon-offline"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setup_target_identifiers;
+    use serde_json::json;
+
+    /// A catalog row's `name` *is* the adapter, so nothing is redirected.
+    #[test]
+    fn a_catalog_row_configures_its_own_adapter() {
+        let row = json!({ "name": "telegram", "configured": false });
+        let (adapter, instance, agent) = setup_target_identifiers(&row);
+        assert_eq!(adapter, "telegram");
+        assert_eq!(
+            instance, None,
+            "the default instance needs no explicit name"
+        );
+        assert_eq!(agent, None);
+    }
+
+    /// The regression this helper exists for: a second instance's name is not
+    /// a catalog key, so it must not reach the configure path.
+    #[test]
+    fn a_named_instance_sends_its_adapter_in_the_path() {
+        let row = json!({
+            "name": "slack-hr",
+            "channel_type": "slack",
+            "configured": true,
+            "agent": "hr-bot",
+        });
+        let (adapter, instance, agent) = setup_target_identifiers(&row);
+        assert_eq!(
+            adapter, "slack",
+            "the path segment is looked up in the sidecar catalog"
+        );
+        assert_eq!(instance.as_deref(), Some("slack-hr"));
+        assert_eq!(
+            agent.as_deref(),
+            Some("hr-bot"),
+            "an omitted agent would clear the binding, so it is sent back"
+        );
+    }
+
+    /// A configured entry may omit `channel_type`; the daemon then reads its
+    /// name as the type, and so must we.
+    #[test]
+    fn a_configured_entry_without_a_channel_type_falls_back_to_its_name() {
+        let row = json!({ "name": "ntfy", "configured": true });
+        let (adapter, instance, _) = setup_target_identifiers(&row);
+        assert_eq!(adapter, "ntfy");
+        assert_eq!(instance, None);
+    }
+
+    #[test]
+    fn a_blank_channel_type_is_treated_as_absent() {
+        let row = json!({ "name": "ntfy", "channel_type": "", "configured": true });
+        let (adapter, _, _) = setup_target_identifiers(&row);
+        assert_eq!(adapter, "ntfy");
+    }
+
+    #[test]
+    fn a_blank_agent_is_reported_as_no_binding() {
+        let row = json!({ "name": "telegram", "agent": "" });
+        let (_, _, agent) = setup_target_identifiers(&row);
+        assert_eq!(agent, None);
     }
 }

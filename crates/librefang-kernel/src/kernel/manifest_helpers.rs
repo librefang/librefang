@@ -167,27 +167,62 @@ pub(super) fn resolve_context_window(
         })
 }
 
-/// Apply a per-call deep-thinking override to a manifest clone.
+/// Apply a per-call reasoning override to a manifest clone.
 ///
-/// - `Some(true)` — ensure the manifest has a `ThinkingConfig` (inserting the
-///   default one if previously empty) so the driver enables reasoning.
-/// - `Some(false)` — clear `manifest.thinking` so the driver does not request
-///   thinking regardless of the manifest/global default.
-/// - `None` — leave the manifest untouched.
+/// This is the top rung of the #7946 resolution order — per-call > per-agent >
+/// global > compiled default. The two rungs below it have already been applied
+/// by the caller: the manifest carries the per-agent `[thinking]` table, and
+/// the global `[thinking]` section was backfilled into it a few lines earlier
+/// when the agent declared none. So this function only has to overwrite, and
+/// whatever it leaves behind is the effective configuration for the turn.
+///
+/// - [`ThinkingOverride::Enable`] (legacy `thinking: true`) — ensure the
+///   manifest has a `ThinkingConfig`, inserting the default one if previously
+///   empty, so the driver enables reasoning. No mode is pinned: the caller
+///   asked for reasoning, not for a particular amount of it. An inherited
+///   `reasoning_mode = "none"` *is* cleared, though: the boolean documents
+///   itself as "force thinking on even if the manifest has it off", and a
+///   non-think mode is exactly that off-state, so leaving it in place would
+///   make `thinking: true` a silent no-op.
+/// - [`ThinkingOverride::Disable`] (legacy `thinking: false`) — clear
+///   `manifest.thinking` so the driver does not request thinking regardless of
+///   the manifest/global default.
+/// - [`ThinkingOverride::Mode`] — stamp the mode onto the manifest's thinking
+///   config, creating it if absent. Note that `Mode(ReasoningMode::None)` is
+///   *not* the same as `Disable`: it keeps a thinking config so the driver can
+///   send the provider's explicit non-think toggle, which is the whole point
+///   of #7946. `Disable` merely omits the opt-in, which leaves a model that
+///   reasons by default reasoning.
+/// - [`ThinkingOverride::Inherit`] — leave the manifest untouched.
 pub(super) fn apply_thinking_override(
     manifest: &mut librefang_types::agent::AgentManifest,
-    thinking_override: Option<bool>,
+    thinking_override: librefang_types::config::ThinkingOverride,
 ) {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     match thinking_override {
-        Some(true) if manifest.thinking.is_none() => {
-            manifest.thinking = Some(librefang_types::config::ThinkingConfig::default());
+        ThinkingOverride::Enable if manifest.thinking.is_none() => {
+            manifest.thinking = Some(ThinkingConfig::default());
         }
-        Some(false) => {
+        // Enable when thinking is already set — keep the existing budget, but
+        // drop an inherited non-think mode so the caller's "on" is not silently
+        // overruled by the agent's (or the global) `reasoning_mode = "none"`.
+        ThinkingOverride::Enable => {
+            if let Some(tc) = manifest.thinking.as_mut() {
+                if tc.reasoning_mode == Some(ReasoningMode::None) {
+                    tc.reasoning_mode = None;
+                }
+            }
+        }
+        ThinkingOverride::Disable => {
             manifest.thinking = None;
         }
-        // Some(true) when thinking is already set — keep the existing budget
-        // — and None when no override is requested are both no-ops.
-        _ => {}
+        ThinkingOverride::Mode(mode) => {
+            manifest
+                .thinking
+                .get_or_insert_with(ThinkingConfig::default)
+                .reasoning_mode = Some(mode);
+        }
+        ThinkingOverride::Inherit => {}
     }
 }
 
