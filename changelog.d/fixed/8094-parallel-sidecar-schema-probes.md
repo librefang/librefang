@@ -1,0 +1,4 @@
+Cold start no longer pays every channel adapter's Python startup one after another.
+`populate_sidecar_schema_cache` probes each of the 20-plus catalog adapters with `--describe`, and it is awaited from `build_router` *before* the listener binds — so a serial loop meant the API port stayed closed for the sum of every interpreter spawn, reported as a 30-second boot on an Orange Pi 5 Plus.
+The probes now run concurrently, capped between 2 and 8 in flight: a cap rather than an unbounded fan-out because each probe is a `python3` process, and starting one per adapter at once would trade a slow boot on a small ARM board for a thrashing one.
+Nothing about the cached result changes — both caches are keyed by adapter name, so the same set lands whatever order the probes finish in; only the `adapter=` log lines now interleave (#8094) (@houko)
