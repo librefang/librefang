@@ -123,9 +123,8 @@ function GoalStatusIcon({ status }: { status: string }) {
   return <Clock className="h-4 w-4 text-text-dim/40" />;
 }
 
-// `phase` is typed from the wire contract rather than `string` so a caller
-// cannot pass a typo'd literal. The `default` arm stays regardless: `phase`
-// crosses the network, so an unrecognised value has to render as something.
+// `phase` is typed from the wire contract rather than `string` so a caller cannot pass a typo'd literal.
+// The `default` arm stays regardless: `phase` crosses the network, so an unrecognised value has to render as something.
 const goalRunPhaseBadge = (
   phase?: GoalRunState["phase"],
 ): { bg: string; text: string; dot: string } => {
@@ -622,17 +621,9 @@ export function GoalsPage() {
                               </div>
                             </div>
                           )}
-                          {/* Run state — phase, iterations and last error, like
-                              workflow runs. Deliberately not gated on status:
-                              `GoalRunPhase::Finished` is documented as "the goal
-                              reached Completed/Cancelled", so a `status !==
-                              "completed"` gate made the `finished` badge — and
-                              its five translations — unreachable, and hid the
-                              outcome exactly when it is most worth reading (did
-                              the run finish on its own, or stop at the iteration
-                              cap?). `GoalRunInfo` already renders nothing when
-                              the goal has no run, so a completed goal that never
-                              ran stays as quiet as before. */}
+                          {/* Run state — phase, iterations and last error, like workflow runs.
+                              Deliberately not gated on status: `GoalRunPhase::Finished` is documented as "the goal reached Completed/Cancelled", so a `status !== "completed"` gate made the `finished` badge — and its five translations — unreachable, and hid the outcome exactly when it is most worth reading (did the run finish on its own, or stop at the iteration cap?).
+                              `GoalRunInfo` already renders nothing when the goal has no run, so a completed goal that never ran stays as quiet as before. */}
                           <GoalRunInfo goal={r.goal} />
                         </div>
                       )}
