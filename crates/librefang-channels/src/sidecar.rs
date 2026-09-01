@@ -785,20 +785,13 @@ fn secret_prefix_collisions(names: &[String]) -> Vec<(String, Vec<String>)> {
 
 /// Which of `existing` would share `candidate`'s per-instance secret namespace.
 ///
-/// [`warn_secret_prefix_collisions`] reports this after the fact, from the boot
-/// and config-reload loop, which is the right place for a config an operator
-/// hand-edited. It is the wrong place for a config the dashboard just wrote:
-/// by the time the WARN appears the save has already happened, the first
-/// instance's `<PREFIX>__KEY` has already been overwritten with the second
-/// one's token, and the only signal is a log line on the next boot.
+/// [`warn_secret_prefix_collisions`] reports this after the fact, from the boot and config-reload loop, which is the right place for a config an operator hand-edited.
+/// It is the wrong place for a config the dashboard just wrote: by the time the WARN appears the save has already happened, the first instance's `<PREFIX>__KEY` has already been overwritten with the second one's token, and the only signal is a log line on the next boot.
 ///
-/// This is the same normalization asked as a question instead of an
-/// observation, so a writing surface can refuse before it clobbers anything.
-/// An exact name match is excluded: that is the same instance being
-/// reconfigured, which `upsert_sidecar_block` edits in place.
+/// This is the same normalization asked as a question instead of an observation, so a writing surface can refuse before it clobbers anything.
+/// An exact name match is excluded: that is the same instance being reconfigured, which `upsert_sidecar_block` edits in place.
 ///
-/// Returns the colliding names sorted, so a caller's error message is
-/// deterministic.
+/// Returns the colliding names sorted, so a caller's error message is deterministic.
 pub fn secret_prefix_conflict(existing: &[String], candidate: &str) -> Vec<String> {
     let wanted = instance_secret_prefix(candidate);
     let mut hits: Vec<String> = existing
@@ -4255,8 +4248,7 @@ mod tests {
             "BOT+1".to_string(),
             "telegram".to_string(),
         ];
-        // `bot.1` normalizes to `BOT_1`, which is where `bot-1` and `BOT+1`
-        // already keep their `<PREFIX>__KEY` secrets.
+        // `bot.1` normalizes to `BOT_1`, which is where `bot-1` and `BOT+1` already keep their `<PREFIX>__KEY` secrets.
         assert_eq!(
             secret_prefix_conflict(&existing, "bot.1"),
             vec!["BOT+1".to_string(), "bot-1".to_string()],
@@ -4268,8 +4260,7 @@ mod tests {
 
     #[test]
     fn secret_prefix_conflict_excludes_the_instance_being_reconfigured() {
-        // Saving `bot-1` again is `upsert_sidecar_block` editing it in place,
-        // not a second instance moving into its namespace.
+        // Saving `bot-1` again is `upsert_sidecar_block` editing it in place, not a second instance moving into its namespace.
         let existing = vec!["bot-1".to_string(), "telegram".to_string()];
         assert!(
             secret_prefix_conflict(&existing, "bot-1").is_empty(),

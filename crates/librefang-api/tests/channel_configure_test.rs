@@ -370,16 +370,11 @@ async fn configure_still_rejects_a_required_secret_that_was_never_stored() {
         "a rejected save must not have written the instance block: {config}"
     );
 }
-
-/// `instance_secret_prefix` uppercases and maps every non-alphanumeric byte to
-/// `_`, so it is many-to-one. Two instances that collapse onto the same prefix
-/// share one `<PREFIX>__KEY` namespace in secrets.env, and the second save
-/// would overwrite the first one's token — which is the opposite of the
-/// isolation multi-instance support is for, and what the feature's own
-/// changelog promises ("so two bots never share a token").
+/// `instance_secret_prefix` uppercases and maps every non-alphanumeric byte to `_`, so it is many-to-one.
+/// Two instances that collapse onto the same prefix share one `<PREFIX>__KEY` namespace in secrets.env, and the second save would overwrite the first one's token — which is the opposite of the isolation multi-instance support is for, and what the feature's own changelog promises ("so two bots never share a token").
 ///
-/// `warn_secret_prefix_collisions` only reports this from the boot / reload
-/// loop, after the damage. The write path has to refuse it.
+/// `warn_secret_prefix_collisions` only reports this from the boot / reload loop, after the damage.
+/// The write path has to refuse it.
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_refuses_an_instance_name_that_shares_a_secret_namespace() {
     let harness = boot_router().await;
@@ -408,8 +403,7 @@ async fn configure_refuses_an_instance_name_that_shares_a_secret_namespace() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "sidecar_secret_prefix_conflict", "{body}");
 
-    // The refusal must land before the first mutation: the original token is
-    // still there and no second instance was created.
+    // The refusal must land before the first mutation: the original token is still there and no second instance was created.
     let secrets = std::fs::read_to_string(harness.home.join("secrets.env")).unwrap_or_default();
     assert!(
         secrets.contains("BOT_1__TELEGRAM_BOT_TOKEN=first-token"),
@@ -426,8 +420,7 @@ async fn configure_refuses_an_instance_name_that_shares_a_secret_namespace() {
     );
 }
 
-/// Re-saving the same instance is `upsert_sidecar_block` editing it in place,
-/// not a second instance moving into its namespace, so it must still work.
+/// Re-saving the same instance is `upsert_sidecar_block` editing it in place, not a second instance moving into its namespace, so it must still work.
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_still_allows_reconfiguring_the_same_named_instance() {
     let harness = boot_router().await;
