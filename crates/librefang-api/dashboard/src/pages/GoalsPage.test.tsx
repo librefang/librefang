@@ -398,6 +398,38 @@ describe("GoalsPage", () => {
       data: expect.objectContaining({ title: "Renamed parent" }),
     });
   });
+
+  // #8108: GoalRunInfo used to be gated on `status !== "completed"`, but
+  // `GoalRunPhase::Finished` only occurs once the goal is already completed —
+  // so the finished badge could never render.
+  it("shows the finished run badge on a completed goal (#8108)", () => {
+    const completedWithRun: GoalItem = { ...COMPLETED_GOAL, agent_id: "a1" };
+    useGoalsMock.mockReturnValue(makeQuery([completedWithRun]));
+    useGoalTemplatesMock.mockReturnValue(makeQuery<GoalTemplate[]>([]));
+    useGoalRunMock.mockReturnValue(
+      makeQuery({
+        running: false,
+        run: {
+          goal_id: completedWithRun.id,
+          agent_id: "a1",
+          phase: "finished",
+          iteration: 3,
+          max_iterations: 10,
+          last_progress: 100,
+          started_at: "",
+          updated_at: "",
+        },
+      }),
+    );
+    renderPage();
+
+    expect(
+      screen.getByText(
+        'goals.run_phase_finished:{"defaultValue":"finished"}',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("3/10")).toBeInTheDocument();
+  });
 });
 
 describe("GoalsPage helpers", () => {
