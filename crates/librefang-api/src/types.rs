@@ -463,8 +463,29 @@ pub struct MessageRequest {
     /// - `Some(true)`: force thinking on (even if the manifest has it off)
     /// - `Some(false)`: force thinking off (even if the manifest has it on)
     /// - `None`: use the manifest/global default
+    ///
+    /// Kept as a boolean for backward compatibility. Prefer
+    /// [`Self::reasoning_mode`], which is strictly more expressive and wins
+    /// when both are present (#7946).
     #[serde(default)]
     pub thinking: Option<bool>,
+    /// Per-task reasoning mode: `"none"` | `"low"` | `"high"` | `"max"` (#7946).
+    ///
+    /// Top rung of the resolution order — per-call > per-agent (`agent.toml`
+    /// `[thinking] reasoning_mode`) > global (`config.toml` `[thinking]
+    /// reasoning_mode`) > compiled default (the `budget_tokens` bucket).
+    ///
+    /// Added alongside [`Self::thinking`] rather than widening it, because the
+    /// boolean is in the wire contract of every existing client and a JSON
+    /// `true` cannot grow a third value without breaking them. The two are not
+    /// redundant either: `thinking: false` merely omits the reasoning opt-in,
+    /// while `reasoning_mode: "none"` sends the provider's explicit non-think
+    /// toggle — the difference between "we did not ask it to think" and "we
+    /// asked it not to", which is the whole point on a model that reasons by
+    /// default.
+    #[serde(default)]
+    #[schema(value_type = Option<String>, example = "high")]
+    pub reasoning_mode: Option<librefang_types::config::ReasoningMode>,
     /// Whether the response should include the model's thinking/reasoning trace.
     ///
     /// `None` defaults to `true` when thinking content is available.

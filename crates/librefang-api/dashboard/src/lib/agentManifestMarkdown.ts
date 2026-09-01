@@ -7,6 +7,7 @@
 // at the end under an "Advanced configuration" appendix so reviewers can
 // see them without having to read raw TOML.
 
+import { emptyManifestExtras } from "./agentManifest";
 import type { ManifestExtras, ManifestFormState } from "./agentManifest";
 
 const escapeTableCell = (value: string): string =>
@@ -53,12 +54,7 @@ const compactBlankLineElements = (lines: string[]): string[] => {
 
 export const generateManifestMarkdown = (
   form: ManifestFormState,
-  extras: ManifestExtras = {
-    topLevel: {},
-    model: {},
-    resources: {},
-    capabilities: {},
-  },
+  extras: ManifestExtras = emptyManifestExtras(),
 ): string => {
   const lines: string[] = [];
   const name = form.name.trim() || "(unnamed agent)";

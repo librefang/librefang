@@ -14,6 +14,7 @@
 use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
 use crate::MeteringSubsystemApi;
+use librefang_skills::SkillError;
 
 /// The agent a call's cost rolls up to (#7714).
 ///
@@ -360,7 +361,7 @@ impl LibreFangKernel {
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
@@ -1090,11 +1091,17 @@ impl LibreFangKernel {
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
 
-        // Load workspace-scoped skills (override global skills with same name)
+        // Load workspace-scoped skills (override global skills with same name).
+        // No `.exists()` guard: `load_workspace_skills` returns `Ok(0)` for a missing directory, and gating on existence made the log volume depend on whether an empty directory happened to be there (#7964).
         if let Some(ref workspace) = manifest.workspace {
-            let ws_skills = workspace.join("skills");
-            if ws_skills.exists() {
-                if let Err(e) = skill_snapshot.load_workspace_skills(&ws_skills) {
+            match skill_snapshot.load_workspace_skills(&workspace.join("skills")) {
+                Ok(_) => {}
+                // A frozen registry is a configured steady state (Stable mode),
+                // not a fault — debug, not warn, or it fires every turn forever.
+                Err(SkillError::RegistryFrozen(detail)) => {
+                    debug!(agent_id = %agent_id, "Stable mode: {detail}");
+                }
+                Err(e) => {
                     warn!(agent_id = %agent_id, "Failed to load workspace skills: {e}");
                 }
             }
