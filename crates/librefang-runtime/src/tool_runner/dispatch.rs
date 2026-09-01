@@ -238,6 +238,21 @@ pub async fn execute_tool_raw(
         acting_principal,
     } = ctx;
 
+    // #8051: the kernel advertises every named workspace to the model as
+    // `@name` in TOOLS.md, so expand that form here — once, before any arm
+    // reads a path — into the mount it points at. Downstream everything sees
+    // an ordinary absolute path, which keeps the security checks and the
+    // resolver enforcing against the same string that will be opened.
+    let aliased_input;
+    let input = match expand_alias_in_tool_input(tool_name, input, *kernel, *caller_agent_id) {
+        Ok(None) => input,
+        Ok(Some(rewritten)) => {
+            aliased_input = rewritten;
+            &aliased_input
+        }
+        Err(reason) => return ToolResult::error(tool_use_id.to_string(), reason),
+    };
+
     // ACL-gated, `ToolError`-native tools (memory_* + wiki_*) are dispatched
     // here, before the stringly `match` below, through the typed boundary —
     // so a per-user `PermissionDenied` (from the shared `enforce_memory_acl`
@@ -1434,10 +1449,15 @@ pub async fn execute_tool_raw(
                                 server = server_name,
                                 "Dispatching to MCP server"
                             );
-                            match conn
+                            // #7963: report the outcome of every MCP tool call to the kernel's health monitor through the connection's health reporter.
+                            // This is the only path that observes a server which completed its handshake and later wedged; without it `should_reconnect` was structurally unreachable, so a dead server stayed dead until the daemon restarted while `/api/mcp/health` reported it healthy.
+                            //
+                            // `report_call_outcome` reports only transport-level failures — an application error (bad arguments, file not found) leaves health untouched, because the server answered.
+                            let result = conn
                                 .call_tool_with_caller(other, input, caller_ctx.as_ref())
-                                .await
-                            {
+                                .await;
+                            conn.report_call_outcome(result.as_ref().map(|_| ()));
+                            match result {
                                 Ok(content) => Ok(content),
                                 Err(e) => Err(ToolError::upstream_msg(format!(
                                     "MCP tool call failed: {e}"

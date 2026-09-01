@@ -431,12 +431,41 @@ max_cost_per_month_usd = 50.0
 [thinking]
 budget_tokens = 10000
 stream_thinking = false
+reasoning_mode = "high"        # 可选：none | low | high | max
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `budget_tokens` | u32 | `10000` | 分配给思维/推理阶段的最大 Token 数。 |
 | `stream_thinking` | bool | `false` | 是否将思维 Token 流式传输给客户端（在 API 响应流中可见）。 |
+| `reasoning_mode` | string | 未设置 | 显式推理强度：`"none"`、`"low"`、`"high"`、`"max"`。未设置时按 `budget_tokens` 推导。 |
+
+#### `reasoning_mode`（#7946）
+
+`budget_tokens` 无法表达"完全不推理"——低于 1024 只是省略推理开关，而默认开启推理的模型（所有 DeepSeek V4 型号）依然会推理。
+它也无法达到某些提供商的最高档，因为推导出的档位最高只到 `high`。
+`reasoning_mode` 是直接的开关，各驱动会把它翻译成自己线路上真正接受的形式。
+
+可在三处设置，解析顺序为**按调用 > 按 Agent > 全局 > 编译默认值**：
+
+- 按调用——`POST /api/agents/{id}/message`（以及 `/message/stream`）请求体中的 `reasoning_mode`。同时传入旧的布尔 `thinking` 字段时，以 `reasoning_mode` 为准。
+- 按 Agent——该 Agent 的 `agent.toml` 中的 `[thinking] reasoning_mode`。按 Agent 的设置在 `config.toml` 中无效。
+- 全局——此处的 `[thinking] reasoning_mode`。
+
+各提供商的线路映射：
+
+| 模式 | DeepSeek V4（直连） | 经 OpenRouter | 其他 OpenAI 兼容端点 |
+|------|---------------------|---------------|----------------------|
+| `none` | `thinking: {"type":"disabled"}` | `reasoning: {"effort":"none"}` | 省略该字段 |
+| `low` | `thinking: enabled` + `reasoning_effort: "low"` | `reasoning: {"effort":"low"}` | `reasoning_effort: "low"` |
+| `high` | `thinking: enabled` + `reasoning_effort: "high"` | `reasoning: {"effort":"high"}` | `reasoning_effort: "high"` |
+| `max` | `thinking: enabled` + `reasoning_effort: "max"` | `reasoning: {"effort":"xhigh"}` | `reasoning_effort: "high"` |
+
+请求体永远不会同时携带 `reasoning_effort` 和 `reasoning.effort`——OpenRouter 会对这种组合返回 HTTP 400。
+Kimi/Moonshot 模型始终发送 `thinking: disabled`（这是多轮工具调用的正确性要求，而非偏好设置），DeepSeek R1 没有线路开关。
+Anthropic 与 Ollama 驱动在分级档位上仍读取 `budget_tokens`——它们的线路开关本就是 token 预算而非强度枚举——但它们会遵循 `none`：该模式必须依附于一份实例化的 thinking 配置传递，若把这份配置当作纯预算读取，就会在明确要求不推理的回合上反而开启推理。
+Gemini 完全不读取 thinking 配置。
+完整细节（包括为何 `medium` 不是可设置的模式）见 `docs/architecture/reasoning-mode-resolution.md`。
 
 ---
 
@@ -790,6 +819,17 @@ health_check_interval_secs = 60
 | `reconnect_max_attempts` | u32 | `10` | 放弃前的最大重连尝试次数。 |
 | `reconnect_max_backoff_secs` | u64 | `300` | 重连尝试之间的最大退避时间（秒）。 |
 | `health_check_interval_secs` | u64 | `60` | 已连接扩展的健康检查间隔（秒）。 |
+
+**何时触发重连。** 有两类失败会把服务器标记为错误状态并交给健康检查循环处理。
+连接或重连握手失败时会在第一次失败就立即触发——此时并不存在需要保留的活动连接。
+握手成功、之后才在传输层出问题的服务器（工具调用超时、传输通道关闭、与子进程之间的 stdio 管道断开），在观察到第一次这类失败时就会被标记为错误状态，但只有在连续 **三次** 传输层失败且期间没有任何一次调用成功之后，才会真正被拆除并重建。
+单次超时与一个确实很慢的工具无法区分，而重连会连带丢弃服务器进程及其持有的状态，因此这里有意不让单次失败触发重连。
+真正卡死的服务器会让每一次调用都失败，所以这三次会随着 agent 的重试很快累积。
+
+工具返回的普通错误——参数不正确、文件不存在，以及任何由服务器以格式正确的 JSON-RPC 错误答复的情况——都不计入其中。
+这类答复是由传输通道正常送达的，因此重连只会丢弃一个健康的服务器。
+
+两类失败都会体现在 `GET /api/mcp/health` 中（`status`、`last_error`、`consecutive_failures`），而一次成功的工具调用会重置计数并刷新 `last_ok`。
 
 ---
 

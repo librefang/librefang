@@ -169,10 +169,18 @@ async fn http_compat_call_tool_unknown_name_errors() {
         .call_tool("mcp_test-server_does_not_exist", &json!({}))
         .await
         .expect_err("unknown tool must error");
+    let message = err.message().to_lowercase();
     assert!(
-        err.to_lowercase().contains("not found")
-            || err.to_lowercase().contains("unknown")
-            || err.to_lowercase().contains("does not exist"),
+        message.contains("not found")
+            || message.contains("unknown")
+            || message.contains("does not exist"),
         "error should mention the missing tool name, got {err}"
+    );
+    // #7963: an unknown tool is an application error — HttpCompat holds no
+    // persistent connection, so nothing here may be classified as a transport
+    // failure that would trigger a reconnect.
+    assert!(
+        !err.is_transport(),
+        "an unknown tool name must not be reported as a transport failure"
     );
 }

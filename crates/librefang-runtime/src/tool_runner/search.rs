@@ -2,6 +2,7 @@
 
 use super::error::{ToolError, ToolResult};
 use super::fs::resolve_file_path_ext;
+use super::io_retry;
 use regex::RegexBuilder;
 use std::path::{Path, PathBuf};
 
@@ -63,13 +64,14 @@ pub(super) async fn tool_code_search(
     let mut stack: Vec<PathBuf> = vec![root.clone()];
 
     'walk: while let Some(dir) = stack.pop() {
-        let mut rd = match tokio::fs::read_dir(&dir).await {
+        // #8050: an interrupted syscall here would silently drop a whole directory from the search rather than fail it, so the retry matters even though the error itself is swallowed by design below.
+        let mut rd = match io_retry::read_dir(&dir).await {
             Ok(rd) => rd,
             // Unreadable directory: skip it rather than failing the whole search.
             Err(_) => continue,
         };
         let mut entries: Vec<PathBuf> = Vec::new();
-        while let Ok(Some(e)) = rd.next_entry().await {
+        while let Ok(Some(e)) = io_retry::next_entry(&mut rd).await {
             entries.push(e.path());
         }
         entries.sort();

@@ -264,6 +264,11 @@ library = { path = "shared/library", mode = "r" }   # 只读
 
 **访问模式**：`rw`（读写，默认）或 `r`（只读）。路径相对于 `workspaces_dir`，不能是绝对路径或包含 `..`。
 
+**使用别名**：文件工具接受两种写法 — `@library/notes/today.md`，或它所指向的绝对路径。
+别名在沙箱校验之前展开，因此它不会授予绝对路径本身没有的任何权限：未声明的别名会被拒绝，并附上该 Agent 实际拥有的别名列表；剩余部分中的 `..` 会被拒绝；通过 `mode = "r"` 的别名写入，与直接写入其绝对路径一样被拒绝。
+展开发生在 `file_read`、`file_write`、`file_list`、`code_search`、`image_analyze`、`media_describe`、`media_transcribe` 的 `path` 参数，`channel_send` 的 `file_path`，以及 `web_fetch_to_file` 的 `dest_path`。
+`apply_patch` 是例外：它的目标路径写在 patch 文本里而不是路径参数中，请在那里使用绝对路径。
+
 #### 外部挂载（`mount`）
 
 用 `mount` 替代 `path`，可以挂载 `workspaces_dir` 外已经存在的目录——比如 Obsidian vault 或某个项目树：
