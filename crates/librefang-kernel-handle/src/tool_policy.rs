@@ -48,10 +48,37 @@ pub trait ToolPolicy: Send + Sync {
     ///
     /// Default: no named workspaces — read-side resolution falls back to the
     /// primary workspace root only.
+    ///
+    /// Derived from [`Self::named_workspace_aliases`] so the two cannot drift:
+    /// override that one and this follows.
     fn named_workspace_prefixes(
         &self,
-        _agent_id: &str,
+        agent_id: &str,
     ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
+        self.named_workspace_aliases(agent_id)
+            .into_iter()
+            .map(|(_, path, mode)| (path, mode))
+            .collect()
+    }
+
+    /// Like [`Self::named_workspace_prefixes`], but keeps the declared name of
+    /// each named workspace alongside its resolved path.
+    ///
+    /// The name is what the kernel writes into the agent-facing `TOOLS.md` as
+    /// `@name`, so the runtime needs it to expand a path the agent wrote in
+    /// that form back into the mount it points at (#8051). Resolution order
+    /// and validity rules are identical to `named_workspace_prefixes` — this
+    /// is the same list with the key retained.
+    ///
+    /// Default: no named workspaces.
+    fn named_workspace_aliases(
+        &self,
+        _agent_id: &str,
+    ) -> Vec<(
+        String,
+        std::path::PathBuf,
+        librefang_types::agent::WorkspaceMode,
+    )> {
         Vec::new()
     }
 

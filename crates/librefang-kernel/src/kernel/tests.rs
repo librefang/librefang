@@ -16,6 +16,7 @@ use std::pin::Pin;
 struct RecordingChannelAdapter {
     name: String,
     channel_type: ChannelType,
+    account_id: Option<String>,
     sent: Arc<std::sync::Mutex<Vec<String>>>,
     overrides: Option<librefang_types::config::ChannelOverrides>,
 }
@@ -25,8 +26,20 @@ impl RecordingChannelAdapter {
         Self {
             name: channel_type.to_string(),
             channel_type: ChannelType::Custom(channel_type.to_string()),
+            account_id: None,
             sent: Arc::new(std::sync::Mutex::new(Vec::new())),
             overrides: None,
+        }
+    }
+
+    /// A **named instance** of a channel type — the shape `[[sidecar_channels]]` produces as soon as `name` and `channel_type` differ (#8046 / #8055).
+    ///
+    /// The `account_id` mirrors the bridge exactly: `channel_bridge.rs` pushes `Some(sidecar_config.name.clone())` alongside each adapter, so a named instance's account id *is* its instance name.
+    fn named_instance(name: &str, channel_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            account_id: Some(name.to_string()),
+            ..Self::new(channel_type)
         }
     }
 
@@ -50,6 +63,10 @@ impl ChannelAdapter for RecordingChannelAdapter {
 
     fn channel_type(&self) -> ChannelType {
         self.channel_type.clone()
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 
     fn channel_overrides(&self) -> Option<librefang_types::config::ChannelOverrides> {
@@ -484,6 +501,238 @@ async fn test_post_approval_reply_routes_to_account_qualified_adapter_6492() {
         1,
         "bare-account reply must NOT reach the account-qualified adapter (still only the case-1 send)"
     );
+
+    // Case 3 (#8055 guard): an account the registry does not know must NOT fall back to the bare key.
+    // That fallback would deliver one tenant's reply into another tenant's chat — the leak the approval listener in `librefang_channels::bridge` documents.
+    // The #8055 channel-type scan added a second path into this resolution, so pin the behaviour explicitly.
+    let err = kernel
+        .send_channel_message(
+            "whatsapp",
+            "dm-2",
+            "approved — wrong account",
+            None,
+            Some("acct-unknown"),
+        )
+        .await
+        .expect_err("an unknown account_id must not resolve to any adapter");
+    assert!(
+        err.to_string().contains("acct-unknown"),
+        "the error must name the account that failed to resolve: {err}"
+    );
+    assert_eq!(
+        bare_sent.lock().unwrap().len(),
+        1,
+        "an unknown account_id must NOT fall back to the bare adapter (cross-tenant leak)"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_channel_message_resolves_named_instance_by_channel_type_8055() {
+    // #8055: a sidecar channel whose `name` differs from its `channel_type` was unreachable from every outbound send.
+    //
+    // The channel bridge registers each adapter under `adapter.name()` and `"<name>:<account_id>"`, where `account_id` is that same name — so a `[[sidecar_channels]]` entry `name = "slack-hr", channel_type = "slack"` produces exactly the two keys the bug report shows, `["slack-hr", "slack-hr:slack-hr"]`.
+    // Inbound turns, however, are stamped with the *channel type*, so the post-approval wake path called `send_channel_message("slack", …, Some("slack-hr"))` and missed both keys.
+    // The agent's reply was produced and persisted, and silently never delivered.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    // Register exactly as `channel_bridge::start_channel_bridge_with_config` does — both keys built from the instance name, neither from the type.
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    // The failing call from the bug report, verbatim.
+    kernel
+        .send_channel_message(
+            "slack",
+            "C0BN6UAQ75M",
+            "approved — file uploaded",
+            None,
+            Some("slack-hr"),
+        )
+        .await
+        .expect("a named instance must be reachable by its channel type + account_id");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C0BN6UAQ75M:approved — file uploaded".to_string()],
+        "the post-approval reply must reach the 'slack-hr' instance the turn arrived on"
+    );
+
+    // The instance name itself keeps working — that is how an explicit `channel_send({channel: "slack-hr"})` and the per-instance status reads in `routes/channels.rs` address the adapter.
+    kernel
+        .send_channel_message("slack-hr", "C0BN6UAQ75M", "by name", None, None)
+        .await
+        .expect("the instance name must remain a valid channel key");
+
+    // With a single instance of the type registered, a bare channel type is unambiguous and resolves too.
+    // This is what an out-of-band caller with no account context (`notify_owner`, a cron target written as `slack`) hands in.
+    kernel
+        .send_channel_message("slack", "C0BN6UAQ75M", "by bare type", None, None)
+        .await
+        .expect("a lone instance of a channel type must resolve from the bare type");
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        3,
+        "all three addressing forms must land on the same single instance"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_reaches_a_named_instance_8055() {
+    // The interactive approval notification is the *other* half of #8055, and it fails in a way no error surfaces.
+    // `NotificationTarget.channel_type` is documented as a channel type ("telegram", "slack", "email") and that is what an operator writes in `[notification] approval_channels`, but the channel bridge keys the adapter registry by `[[sidecar_channels]] name`.
+    // A bare `channel_adapters.get(&target.channel_type)` therefore missed on every named instance and dropped silently to the plain-text fallback, so the approver got the escalation text with no Approve / Reject buttons — on the one notification whose entire purpose is those buttons — while the fallback's own `send_channel_message` resolved the same pair fine.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                // A channel TYPE, exactly as the field's own doc comment and every config example write it.
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    // `ChannelAdapter::send_interactive`'s default renders each button label as `[Label]` and forwards to `send`, so the recorded text is what distinguishes the interactive path from the plain-text fallback.
+    let sent = hr_sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must reach the named instance exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
+        "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
+    // The #8055 channel-type scan must never widen cross-tenant reach.
+    // Two named instances of one channel type are two different customers, so the scan resolves only when the `account_id` singles one out — and a bare channel type with two instances registered stays an error rather than picking whichever adapter `DashMap` iteration happened to yield first.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    let eng = Arc::new(RecordingChannelAdapter::named_instance(
+        "slack-eng",
+        "slack",
+    ));
+    let eng_sent = eng.sent.clone();
+    for (name, adapter) in [
+        ("slack-hr", hr.clone() as Arc<dyn ChannelAdapter>),
+        ("slack-eng", eng.clone() as Arc<dyn ChannelAdapter>),
+    ] {
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(name.to_string(), adapter.clone());
+        kernel
+            .mesh
+            .channel_adapters
+            .insert(format!("{name}:{name}"), adapter);
+    }
+
+    // Each account reaches its own instance and only its own instance.
+    kernel
+        .send_channel_message("slack", "C-HR", "hr only", None, Some("slack-hr"))
+        .await
+        .expect("account_id must single out the hr instance");
+    kernel
+        .send_channel_message("slack", "C-ENG", "eng only", None, Some("slack-eng"))
+        .await
+        .expect("account_id must single out the eng instance");
+    assert_eq!(
+        hr_sent.lock().unwrap().clone(),
+        vec!["C-HR:hr only".to_string()]
+    );
+    assert_eq!(
+        eng_sent.lock().unwrap().clone(),
+        vec!["C-ENG:eng only".to_string()]
+    );
+
+    // An account that matches no instance is an error, not a guess.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "nobody", None, Some("slack-legal"))
+        .await
+        .expect_err("an unregistered account must not resolve");
+    assert!(
+        err.to_string().contains("slack-legal"),
+        "the error must name the unresolved account: {err}"
+    );
+
+    // A bare channel type with two instances is ambiguous; the error says so, and lists the registered keys in sorted order so two operator reports of the same daemon are comparable.
+    let err = kernel
+        .send_channel_message("slack", "C-HR", "which tenant?", None, None)
+        .await
+        .expect_err("a bare channel type must not pick a tenant at random");
+    let err = err.to_string();
+    assert!(
+        err.contains("ambiguous"),
+        "an ambiguous bare channel type must say so: {err}"
+    );
+    assert!(
+        err.contains(r#"["slack-eng", "slack-eng:slack-eng", "slack-hr", "slack-hr:slack-hr"]"#),
+        "the available-key list must be sorted for comparability: {err}"
+    );
+
+    assert_eq!(
+        hr_sent.lock().unwrap().len(),
+        1,
+        "neither the unresolved account nor the ambiguous type may deliver anything"
+    );
+    assert_eq!(eng_sent.lock().unwrap().len(), 1);
 
     kernel.shutdown();
 }
@@ -3126,10 +3375,14 @@ fn test_apply_thinking_override_none_leaves_manifest_untouched() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 4242,
             stream_thinking: true,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, None);
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Inherit,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 4242);
     assert!(cfg.stream_thinking);
@@ -3142,7 +3395,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
         thinking: Some(librefang_types::config::ThinkingConfig::default()),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(false));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Disable,
+    );
     assert!(manifest.thinking.is_none());
 }
 
@@ -3150,7 +3406,10 @@ fn test_apply_thinking_override_force_off_clears_thinking() {
 fn test_apply_thinking_override_force_on_inserts_default() {
     let mut manifest = librefang_types::agent::AgentManifest::default();
     assert!(manifest.thinking.is_none());
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking inserted");
     assert_eq!(
         cfg.budget_tokens,
@@ -3165,12 +3424,220 @@ fn test_apply_thinking_override_force_on_keeps_existing_budget() {
         thinking: Some(librefang_types::config::ThinkingConfig {
             budget_tokens: 1234,
             stream_thinking: false,
+            ..Default::default()
         }),
         ..Default::default()
     };
-    apply_thinking_override(&mut manifest, Some(true));
+    apply_thinking_override(
+        &mut manifest,
+        librefang_types::config::ThinkingOverride::Enable,
+    );
     let cfg = manifest.thinking.as_ref().expect("thinking preserved");
     assert_eq!(cfg.budget_tokens, 1234);
+}
+
+// ── Reasoning-mode resolution order (#7946) ────────────────────────
+//
+// Documented order: per-call > per-agent > global > compiled default.
+// The first two rungs are applied by `apply_thinking_override`; the third is
+// the global-backfill assignment in `messaging.rs` / `agent_execution.rs`,
+// which these tests reproduce literally (`if manifest.thinking.is_none() {
+// manifest.thinking = cfg.thinking.clone() }`) so a change to that line's
+// direction shows up here rather than in production.
+
+/// Rung 3: an agent that declares no `[thinking]` table inherits the global
+/// `reasoning_mode`.
+#[test]
+fn test_reasoning_mode_global_reaches_an_agent_that_declares_nothing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    // The global backfill, as the kernel performs it.
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("backfilled").reasoning_mode,
+        Some(ReasoningMode::High),
+    );
+}
+
+/// Rung 2 beats rung 3: a per-agent `[thinking]` table suppresses the global
+/// backfill entirely, so its `reasoning_mode` wins.
+#[test]
+fn test_reasoning_mode_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Inherit);
+
+    assert_eq!(
+        manifest.thinking.expect("per-agent kept").reasoning_mode,
+        Some(ReasoningMode::Low),
+        "the per-agent table must not be overwritten by the global backfill",
+    );
+}
+
+/// Rung 1 beats both: the per-call override is stamped on last.
+#[test]
+fn test_reasoning_mode_per_call_beats_per_agent_beats_global() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+    let global = ThinkingConfig {
+        reasoning_mode: Some(ReasoningMode::High),
+        ..Default::default()
+    };
+    let mut manifest = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::Low),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    if manifest.thinking.is_none() {
+        manifest.thinking = Some(global.clone());
+    }
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::Max));
+
+    let cfg = manifest.thinking.expect("thinking present");
+    assert_eq!(cfg.reasoning_mode, Some(ReasoningMode::Max));
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "a mode override must not disturb the agent's configured budget",
+    );
+}
+
+/// A per-call mode on an agent with no `[thinking]` table at all must still
+/// land. Creating the config lazily is the difference between the feature
+/// working and silently doing nothing.
+#[test]
+fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
+    use librefang_types::config::{ReasoningMode, ThinkingOverride};
+    let mut manifest = librefang_types::agent::AgentManifest::default();
+    assert!(manifest.thinking.is_none());
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Mode(ReasoningMode::None));
+
+    assert_eq!(
+        manifest
+            .thinking
+            .expect("thinking config created for the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
+}
+
+/// The legacy boolean documents itself as "force thinking on even if the
+/// manifest has it off". A manifest (or backfilled global) `reasoning_mode =
+/// "none"` is exactly that off-state, so `thinking: true` has to clear it —
+/// otherwise the override deserializes, resolves to `Enable`, reaches the
+/// manifest, and the driver still sends the provider's non-think toggle.
+#[test]
+fn test_enable_clears_an_inherited_non_think_mode() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::None),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+
+    let cfg = manifest
+        .thinking
+        .expect("Enable must keep a thinking config");
+    assert_eq!(
+        cfg.reasoning_mode, None,
+        "`thinking: true` must not be silently overruled by an inherited non-think mode",
+    );
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "Enable still keeps the configured budget",
+    );
+}
+
+/// Enable must not disturb a *graded* mode — the caller asked for reasoning,
+/// not for a particular amount of it, so an agent pinned to `max` stays at
+/// `max`.
+#[test]
+fn test_enable_leaves_a_graded_mode_alone() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    for mode in [ReasoningMode::Low, ReasoningMode::High, ReasoningMode::Max] {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+        assert_eq!(
+            manifest.thinking.expect("kept").reasoning_mode,
+            Some(mode),
+            "Enable must not downgrade a graded mode",
+        );
+    }
+}
+
+/// `Mode(None)` and `Disable` are deliberately different. `Disable` clears the
+/// thinking config, which only *omits* the reasoning opt-in — a model that
+/// reasons by default keeps reasoning. `Mode(None)` keeps a config carrying the
+/// mode, which is what lets the driver send the provider's explicit non-think
+/// toggle. Collapsing the two would re-open exactly the gap #7946 closes.
+#[test]
+fn test_disable_and_mode_none_are_not_the_same_thing() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let base = librefang_types::agent::AgentManifest {
+        source_template: None,
+        thinking: Some(ThinkingConfig::default()),
+        ..Default::default()
+    };
+
+    let mut disabled = base.clone();
+    apply_thinking_override(&mut disabled, ThinkingOverride::Disable);
+    assert!(
+        disabled.thinking.is_none(),
+        "Disable keeps its pre-#7946 meaning: drop the thinking config",
+    );
+
+    let mut non_think = base.clone();
+    apply_thinking_override(&mut non_think, ThinkingOverride::Mode(ReasoningMode::None));
+    assert_eq!(
+        non_think
+            .thinking
+            .expect("Mode(None) must keep a thinking config to carry the mode")
+            .reasoning_mode,
+        Some(ReasoningMode::None),
+    );
 }
 
 // ── JSON extraction tests ──────────────────────────────────────────

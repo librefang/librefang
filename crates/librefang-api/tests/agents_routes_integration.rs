@@ -27,6 +27,11 @@
 //!   PUT   /api/agents/{id}/skills  (an on-disk-but-unloaded skill saves under
 //!                                   its `[skill].name`, not its directory name
 //!                                   — #7772)
+//!   POST  /api/agents/{id}/message  (`reasoning_mode` deserializes into the real
+//!                                   enum on both the buffered and streaming
+//!                                   routes, an invalid mode is rejected rather
+//!                                   than silently ignored, and the legacy
+//!                                   `thinking` boolean keeps working — #7946)
 //!
 //! Run: cargo test -p librefang-api --test agents_routes_integration
 
@@ -1321,6 +1326,179 @@ async fn test_incognito_defaults_to_false_when_omitted() {
     .await;
     // Must not be 422 — the field absence defaults to false via #[serde(default)].
     assert_ne!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ---------------------------------------------------------------------------
+// Per-task reasoning mode — refs #7946
+// ---------------------------------------------------------------------------
+
+/// `reasoning_mode` on the POST /api/agents/{id}/message body must deserialize
+/// into the real enum, not be silently ignored.
+///
+/// The positive half of this test proves little on its own: `MessageRequest`
+/// does not deny unknown fields, so a *typo'd* key is accepted with the same
+/// status. The conclusive assertion is the negative one below it — an invalid
+/// mode string can only be rejected if serde is actually parsing the field into
+/// `ReasoningMode`, which is exactly the "field added to the struct but never
+/// deserialized" failure this suite exists to catch.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reasoning_mode_field_accepted_by_message_endpoint() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "reasoning-mode-agent");
+
+    for mode in ["none", "low", "high", "max"] {
+        let (status, body) = send(
+            h.app.clone(),
+            post_json(
+                &format!("/api/agents/{id}/message"),
+                serde_json::json!({"message": "hello", "reasoning_mode": mode}),
+            ),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reasoning_mode={mode:?} must deserialize cleanly — body={body:?}",
+        );
+        // Provider is unconfigured → 412 or 500, NOT 422.
+        assert!(
+            status == StatusCode::PRECONDITION_FAILED || status.is_server_error(),
+            "reasoning_mode={mode:?}: expected provider-auth 412 or server error, got {status} — body={body:?}",
+        );
+    }
+}
+
+/// An unrecognised mode must be rejected rather than quietly falling back to the
+/// agent default — a silent fallback is how a typo'd `reasoning_mode` in a
+/// caller's config ends up billing reasoning tokens nobody asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_invalid_reasoning_mode_is_rejected() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "reasoning-mode-invalid-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message"),
+            serde_json::json!({"message": "hello", "reasoning_mode": "banana"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an invalid reasoning_mode must be a deserialize error — body={body:?}",
+    );
+}
+
+/// Omitting `reasoning_mode` must keep working: every existing client sends a
+/// body without it, and `thinking: bool` remains its own supported override.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reasoning_mode_omitted_and_legacy_thinking_boolean_still_work() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "reasoning-mode-compat-agent");
+
+    for body_json in [
+        serde_json::json!({"message": "hello"}),
+        serde_json::json!({"message": "hello", "thinking": true}),
+        serde_json::json!({"message": "hello", "thinking": false}),
+        // Both keys at once: documented precedence is reasoning_mode wins.
+        serde_json::json!({"message": "hello", "thinking": false, "reasoning_mode": "max"}),
+    ] {
+        let (status, body) = send(
+            h.app.clone(),
+            post_json(&format!("/api/agents/{id}/message"), body_json.clone()),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "body {body_json} must deserialize cleanly — response={body:?}",
+        );
+    }
+}
+
+/// The streaming twin deserializes the same `MessageRequest`, so it must accept
+/// the same key. Before #7946 this handler dropped the per-call thinking
+/// override on the floor entirely — it passed a hardcoded `None` into the
+/// kernel — so a per-task mode that only worked on the non-streaming route
+/// would be invisible to any UI that streams.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_reasoning_mode_accepted_by_streaming_message_endpoint() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "reasoning-mode-stream-agent");
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message/stream"),
+            serde_json::json!({"message": "hello", "reasoning_mode": "low"}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "reasoning_mode must deserialize on the streaming route too — body={body:?}",
+    );
+
+    let (status, body) = send(
+        h.app.clone(),
+        post_json(
+            &format!("/api/agents/{id}/message/stream"),
+            serde_json::json!({"message": "hello", "reasoning_mode": "banana"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "an invalid reasoning_mode must be rejected on the streaming route — body={body:?}",
+    );
+}
+
+/// The per-call override the handler builds from the request body — the
+/// injection site, not the implementation site. A `reasoning_mode` field that
+/// exists on `MessageRequest` but is never folded into a `ThinkingOverride`
+/// compiles and deserializes while doing nothing, which is the #7946 shape of
+/// CLAUDE.md's "`Option::None` defaults compile silently but disable the
+/// feature" warning.
+#[test]
+fn test_per_call_reasoning_mode_wins_over_the_legacy_boolean() {
+    use librefang_types::config::{ReasoningMode, ThinkingOverride};
+
+    // Exactly the expression both message handlers use.
+    let resolve = |json: serde_json::Value| {
+        let req: librefang_api::types::MessageRequest =
+            serde_json::from_value(json).expect("deserialize MessageRequest");
+        ThinkingOverride::resolve(req.thinking, req.reasoning_mode)
+    };
+
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x"})),
+        ThinkingOverride::Inherit,
+    );
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x", "thinking": true})),
+        ThinkingOverride::Enable,
+    );
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x", "thinking": false})),
+        ThinkingOverride::Disable,
+    );
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x", "reasoning_mode": "max"})),
+        ThinkingOverride::Mode(ReasoningMode::Max),
+    );
+    // Both present: the more specific key wins.
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x", "thinking": true, "reasoning_mode": "none"})),
+        ThinkingOverride::Mode(ReasoningMode::None),
+    );
+    assert_eq!(
+        resolve(serde_json::json!({"message": "x", "thinking": false, "reasoning_mode": "high"})),
+        ThinkingOverride::Mode(ReasoningMode::High),
+    );
 }
 
 // The actual persistence-guard assertion lives in
