@@ -4327,6 +4327,60 @@ fn test_set_agent_skills_rejects_name_unknown_everywhere_as_invalid_input() {
     kernel.shutdown();
 }
 
+/// #8093: with no `[llm.auxiliary]` entry, a side task must run on the agent's
+/// own driver, not on `AuxClient`'s primary.
+///
+/// Every kernel caller pairs the driver this returns with the *agent's* model.
+/// `AuxClient::primary` is the process-wide `default_driver`, so for an agent
+/// overriding provider/model the request went to the default provider carrying
+/// a model only the agent's provider can serve — a LiteLLM
+/// `403 team_model_access_denied` naming the agent's model, after which
+/// compaction silently degraded to its fallback stub.
+#[test]
+fn test_side_task_driver_prefers_the_agents_own_chain_over_aux_primary() {
+    use librefang_types::config::AuxTask;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+
+    // A default config carries no `[llm.auxiliary]`, so the resolution reports
+    // `used_primary` — the branch this test pins.
+    let aux = kernel.llm.aux_client.load();
+    assert!(
+        aux.resolve(AuxTask::Compression).used_primary,
+        "test premise: an unconfigured Compression task resolves to the primary driver"
+    );
+    let aux_primary = aux.driver_for(AuxTask::Compression);
+    drop(aux);
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "side-task-driver-agent");
+    let manifest = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent exists")
+        .manifest
+        .clone();
+
+    let chosen = kernel.side_task_driver(&manifest, AuxTask::Compression);
+    assert!(
+        !std::sync::Arc::ptr_eq(&chosen, &aux_primary),
+        "an unconfigured side task must not run on AuxClient's primary — that is the driver \
+         that cannot serve the agent's model"
+    );
+
+    // And the agent's own chain is resolvable, so the branch taken above is the
+    // real one rather than the logged `resolve_driver` failure fallback — which
+    // would have handed back the aux primary and passed the assertion above for
+    // the wrong reason.
+    kernel
+        .resolve_driver(&manifest)
+        .expect("the agent's own driver must resolve, or this test proves nothing");
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
     // The reported bug: `fetch` is in the local MCP catalog but was never configured, so it never connected, so the old accept-set (built from connected tools) rejected it.
