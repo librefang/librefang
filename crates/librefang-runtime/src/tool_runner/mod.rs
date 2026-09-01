@@ -20,6 +20,7 @@ mod fs;
 mod goal;
 mod hand;
 mod image;
+mod io_retry;
 mod knowledge;
 #[cfg(feature = "media")]
 mod media;
@@ -63,9 +64,9 @@ pub use self::dispatch::{
 pub(super) use self::error::{ToolError, ToolResult as TypedToolResult};
 use self::event::tool_event_publish;
 use self::fs::{
-    check_absolute_path_inside_workspace, maybe_dedup_file_read, maybe_snapshot, named_ws_prefixes,
-    named_ws_prefixes_readonly, named_ws_prefixes_writable, resolve_file_path_ext,
-    tool_apply_patch, tool_file_list, tool_file_read, tool_file_write,
+    check_absolute_path_inside_workspace, expand_alias_in_tool_input, maybe_dedup_file_read,
+    maybe_snapshot, named_ws_prefixes, named_ws_prefixes_readonly, named_ws_prefixes_writable,
+    resolve_file_path_ext, tool_apply_patch, tool_file_list, tool_file_read, tool_file_write,
 };
 use self::goal::tool_goal_update;
 use self::hand::{tool_hand_activate, tool_hand_deactivate, tool_hand_list, tool_hand_status};

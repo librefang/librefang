@@ -786,12 +786,18 @@ pub fn is_unsupported_parameter_error(message: &str) -> bool {
     matches_any(&message.to_lowercase(), UNSUPPORTED_PARAM_PATTERNS)
 }
 
-/// Whether an unsupported-parameter rejection names `reasoning_effort` specifically.
+/// Whether an unsupported-parameter rejection names a reasoning control.
 ///
-/// Used by the OpenAI-compatible driver to decide it can strip that one field and retry, the way it already strips `temperature` and swaps `max_tokens` for `max_completion_tokens`.
+/// Used by the OpenAI-compatible driver to decide it can strip that field and retry, the way it already strips `temperature` and swaps `max_tokens` for `max_completion_tokens`.
+///
+/// Both spellings count (#7946): the top-level `reasoning_effort` and OpenRouter's nested `reasoning: {"effort": …}` object, since an OpenRouter-routed body carries the latter and a gateway in front of it rejects that name instead.
+/// Matching only `reasoning_effort` left the nested spelling with no strip-and-retry and no negative-cache entry at all, so a gateway that answered `unsupported parameter: reasoning` failed the same way on every turn forever.
+/// `reasoning_content` is deliberately excluded — DeepSeek's demand that it be echoed back on `tool_calls` turns is a *content* requirement, not a rejected parameter, and stripping a reasoning control would not address it.
 pub fn is_unsupported_reasoning_effort_error(message: &str) -> bool {
     let lower = message.to_lowercase();
-    lower.contains("reasoning_effort") && matches_any(&lower, UNSUPPORTED_PARAM_PATTERNS)
+    let names_a_reasoning_control = lower.contains("reasoning_effort")
+        || (lower.contains("reasoning") && !lower.contains("reasoning_content"));
+    names_a_reasoning_control && matches_any(&lower, UNSUPPORTED_PARAM_PATTERNS)
 }
 
 // ---------------------------------------------------------------------------
@@ -1528,6 +1534,29 @@ mod tests {
     fn unsupported_reasoning_effort_error_is_narrower_than_the_class() {
         let body = r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model","code":"unsupported_parameter"}}"#;
         assert!(is_unsupported_parameter_error(body));
+        assert!(!is_unsupported_reasoning_effort_error(body));
+    }
+
+    /// OpenRouter-routed bodies carry the nested `reasoning: {"effort": …}` object rather than the top-level field (#7946), so a gateway rejects the name `reasoning`.
+    /// Matching only `reasoning_effort` left that case with no strip-and-retry and no negative-cache entry, so every turn re-sent the field and 400'd again.
+    #[test]
+    fn unsupported_reasoning_effort_error_covers_the_nested_openrouter_spelling() {
+        for body in [
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning'","code":"unsupported_parameter"}}"#,
+            "litellm.UnsupportedParamsError: openai does not support parameters: ['reasoning'], for model=gpt-4o",
+            "TypeError: create() got an unexpected keyword argument 'reasoning'",
+        ] {
+            assert!(
+                is_unsupported_reasoning_effort_error(body),
+                "the nested reasoning control must be recognised: {body}"
+            );
+        }
+    }
+
+    /// DeepSeek's `reasoning_content` demand is a *content* round-trip requirement, not a rejected parameter — stripping a reasoning control would not answer it, so it must stay out of the class even when a proxy wraps it in unsupported-parameter wording.
+    #[test]
+    fn unsupported_reasoning_effort_error_excludes_reasoning_content() {
+        let body = r#"{"error":{"message":"Unsupported parameter: 'reasoning_content' in the thinking mode must be passed back","code":"unsupported_parameter"}}"#;
         assert!(!is_unsupported_reasoning_effort_error(body));
     }
 }

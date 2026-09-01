@@ -431,12 +431,41 @@ Configures extended thinking (chain-of-thought reasoning) for models that suppor
 [thinking]
 budget_tokens = 10000
 stream_thinking = false
+reasoning_mode = "high"        # optional: none | low | high | max
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `budget_tokens` | u32 | `10000` | Maximum tokens allocated for the thinking/reasoning phase. |
 | `stream_thinking` | bool | `false` | Whether to stream thinking tokens to the client (visible in the API response stream). |
+| `reasoning_mode` | string | unset | Explicit reasoning effort: `"none"`, `"low"`, `"high"`, or `"max"`. When unset, the effort is derived from `budget_tokens`. |
+
+#### `reasoning_mode` (#7946)
+
+`budget_tokens` cannot say *do not reason at all* — a sub-1024 budget merely omits the reasoning opt-in, and a model that reasons by default (every DeepSeek V4 id) keeps reasoning.
+It also cannot reach the top rung of providers that have one, because the derived bucket stops at `high`.
+`reasoning_mode` is the direct control, and each driver translates it into whatever its wire actually accepts.
+
+Set it in three places, resolved **per-call > per-agent > global > compiled default**:
+
+- per call — `reasoning_mode` on the body of `POST /api/agents/{id}/message` (and `/message/stream`). Wins over the older boolean `thinking` field when both are sent.
+- per agent — `[thinking] reasoning_mode` in that agent's `agent.toml`. Per-agent settings do not work from `config.toml`.
+- globally — `[thinking] reasoning_mode` here.
+
+Per-provider wire mapping:
+
+| Mode | DeepSeek V4 (direct) | OpenRouter-routed | Other OpenAI-compatible |
+|------|----------------------|-------------------|-------------------------|
+| `none` | `thinking: {"type":"disabled"}` | `reasoning: {"effort":"none"}` | field omitted |
+| `low` | `thinking: enabled` + `reasoning_effort: "low"` | `reasoning: {"effort":"low"}` | `reasoning_effort: "low"` |
+| `high` | `thinking: enabled` + `reasoning_effort: "high"` | `reasoning: {"effort":"high"}` | `reasoning_effort: "high"` |
+| `max` | `thinking: enabled` + `reasoning_effort: "max"` | `reasoning: {"effort":"xhigh"}` | `reasoning_effort: "high"` |
+
+A payload never carries both `reasoning_effort` and `reasoning.effort` — OpenRouter rejects that combination with HTTP 400.
+Kimi/Moonshot models always send `thinking: disabled` (a multi-turn tool-call requirement, not a preference), and DeepSeek R1 has no wire toggle.
+The Anthropic and Ollama drivers keep reading `budget_tokens` for the graded rungs — their wire control is a token budget, not an effort enum — but they do honour `none`, because the mode has to travel on a materialised thinking config and reading that config as a bare budget would enable reasoning on a turn that asked for the opposite.
+Gemini does not read the thinking config at all.
+Full detail, including why `medium` is not a settable mode: `docs/architecture/reasoning-mode-resolution.md`.
 
 ---
 
@@ -790,6 +819,17 @@ health_check_interval_secs = 60
 | `reconnect_max_attempts` | u32 | `10` | Maximum reconnect attempts before giving up permanently. |
 | `reconnect_max_backoff_secs` | u64 | `300` | Maximum backoff duration in seconds between reconnect attempts. |
 | `health_check_interval_secs` | u64 | `60` | Interval in seconds between health checks for connected extensions. |
+
+**What triggers a reconnect.** Two things mark a server as errored and hand it to the health loop.
+A failed connect or reconnect handshake does so on the first failure — there is no live connection to preserve.
+A server that handshook successfully and *later* broke at the transport level — a tool call that times out, a closed transport, a dead stdio pipe to the child process — is marked errored as soon as the first such failure is observed, but is only torn down and rebuilt after **three consecutive** transport failures with no successful call in between.
+One timeout is indistinguishable from a genuinely slow tool, and a reconnect drops the server process along with any state it holds, so a single failure deliberately does not cause one.
+A truly wedged server fails every call, so the three arrive as fast as the agent retries.
+
+A tool that returns a normal error — bad arguments, file not found, anything the server answers with a well-formed JSON-RPC error — never counts toward this.
+The transport carried that reply, so reconnecting would drop a healthy server.
+
+Both kinds of failure are reflected in `GET /api/mcp/health` (`status`, `last_error`, `consecutive_failures`), and a successful tool call resets the counter and refreshes `last_ok`.
 
 ---
 

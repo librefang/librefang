@@ -210,7 +210,11 @@ pub async fn send_message(
         (req.message.clone(), false)
     };
 
-    let thinking_override = req.thinking;
+    // Per-call rung of the #7946 resolution order. `reasoning_mode` wins over
+    // the legacy boolean when a caller sends both; the kernel applies the
+    // per-agent and global rungs below this one.
+    let thinking_override =
+        librefang_types::config::ThinkingOverride::resolve(req.thinking, req.reasoning_mode);
     let show_thinking = req.show_thinking.unwrap_or(true);
 
     let result = if is_ephemeral {
@@ -596,6 +600,11 @@ pub async fn send_message_stream(
             &req.message,
             Some(kernel_handle),
             sender_context,
+            // #7946: the streaming endpoint deserializes the same
+            // `MessageRequest` as its non-streaming twin, so it honours the
+            // same two override keys. Before #7946 it dropped both on the
+            // floor and always ran at the manifest/global default.
+            librefang_types::config::ThinkingOverride::resolve(req.thinking, req.reasoning_mode),
             session_override,
             incognito,
             owner,

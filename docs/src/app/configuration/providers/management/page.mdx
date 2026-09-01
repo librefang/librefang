@@ -326,10 +326,12 @@ LibreFang can automatically select the cheapest model capable of handling each q
 | Signal | Weight | Logic |
 |--------|--------|-------|
 | Total message length | 1 point per ~4 chars | Rough token proxy |
-| Tool availability | +20 per tool defined | Tools imply multi-step work |
 | Code markers | +30 per marker found | Backticks, `fn`, `def`, `class`, `import`, `function`, `async`, `await`, `struct`, `impl`, `return` |
 | Conversation depth | +15 per message > 10 | Deep context = harder reasoning |
-| System prompt length | +1 per 10 chars > 500 | Long system prompts imply complex tasks |
+
+Every signal is a property of the request. Tool count and system-prompt length were scored until #7952 and are not any more: they are the same on every turn of a given agent, so they shifted the whole distribution instead of separating easy turns from hard ones.
+An agent with ~50 MCP tools scored +1000 from tool count before a single character of the message was read, past any usable `complex_threshold`, so routing degenerated into pinned-complex and saved nothing.
+If your agent's turns now score lower than they used to, lower `simple_threshold` / `complex_threshold` — the scores are no longer inflated by a constant.
 
 ### Thresholds
 

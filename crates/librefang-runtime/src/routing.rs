@@ -1,8 +1,12 @@
 //! Model routing — auto-selects cheap/mid/expensive models by query complexity.
 //!
 //! The router scores each `CompletionRequest` based on heuristics (token count,
-//! tool availability, code markers, conversation depth) and picks the cheapest
-//! model that can handle the task.
+//! code markers, conversation depth) and picks the cheapest model that can
+//! handle the task.
+//!
+//! Every input is a property of the *request*.
+//! Properties of the agent — how many tools it exposes, how long its system prompt is — were scored here until #7952 and are not any more: they are identical on every turn, so they shifted the whole distribution instead of separating easy turns from hard ones.
+//! An agent with ~50 MCP tools scored +1000 from tool count alone, past any usable `complex_threshold`, so routing degenerated into pinned-complex and saved nothing.
 
 use crate::llm_driver::CompletionRequest;
 use librefang_types::agent::ModelRoutingConfig;
@@ -52,10 +56,11 @@ impl ModelRouter {
     ///
     /// Heuristics:
     /// - **Token count**: total characters in messages as a proxy for tokens
-    /// - **Tool availability**: having tools suggests potential multi-step work
     /// - **Code markers**: backticks, `fn`, `def`, `class`, etc.
     /// - **Conversation depth**: more messages = more context = harder reasoning
-    /// - **System prompt length**: longer prompts often imply complex tasks
+    ///
+    /// Tool count and system-prompt length are deliberately not scored — see the module docs (#7952).
+    /// The decision is invariant under both.
     pub fn score(&self, request: &CompletionRequest) -> TaskComplexity {
         // 1. Total message content length (rough token proxy: ~4 chars per token)
         let total_chars = request.messages.iter().fold(0u64, |total, message| {
@@ -63,13 +68,7 @@ impl ModelRouter {
         });
         let mut score = total_chars / 4;
 
-        // 2. Tool availability adds complexity
-        let tool_count = usize_to_u64_saturating(request.tools.len());
-        if tool_count > 0 {
-            score = add_weighted_score(score, tool_count, 20);
-        }
-
-        // 3. Code markers in the last user message
+        // 2. Code markers in the last user message
         if let Some(last_msg) = request.messages.last() {
             let text = last_msg.content.text_content();
             let text_lower = text.to_lowercase();
@@ -95,18 +94,10 @@ impl ModelRouter {
             score = add_weighted_score(score, code_score, 30);
         }
 
-        // 4. Conversation depth
+        // 3. Conversation depth
         let msg_count = usize_to_u64_saturating(request.messages.len());
         if msg_count > 10 {
             score = add_weighted_score(score, msg_count - 10, 15);
-        }
-
-        // 5. System prompt complexity
-        if let Some(ref system) = request.system {
-            let sys_len = usize_to_u64_saturating(system.len());
-            if sys_len > 500 {
-                score = add_weighted_score(score, (sys_len - 500) / 10, 1);
-            }
         }
 
         // Classify
@@ -250,28 +241,51 @@ mod tests {
         assert_ne!(complexity, TaskComplexity::Simple);
     }
 
-    #[test]
-    fn test_tools_increase_complexity() {
-        let router = ModelRouter::new(default_config());
-        let tools: Vec<ToolDefinition> = (0..15)
+    fn n_tools(n: usize) -> Vec<ToolDefinition> {
+        (0..n)
             .map(|i| ToolDefinition {
                 name: format!("tool_{i}"),
                 description: "A test tool".to_string(),
                 input_schema: serde_json::json!({}),
             })
-            .collect();
+            .collect()
+    }
+
+    /// #7952: the routing decision must be a property of the request, not of the agent's shape.
+    /// A tool-rich agent (50 MCP tools was the reported case) scored +20 per tool, so every turn — including "hi" — landed above `complex_threshold` and the router degenerated into pinned-complex.
+    #[test]
+    fn tool_count_does_not_change_the_tier() {
+        let router = ModelRouter::new(default_config());
+        let message = Message {
+            role: Role::User,
+            content: MessageContent::text("Use the available tools to solve this problem."),
+            pinned: false,
+            timestamp: None,
+        };
+
+        let none = router.score(&make_request(vec![message.clone()], vec![]));
+        let some = router.score(&make_request(vec![message.clone()], n_tools(15)));
+        let many = router.score(&make_request(vec![message], n_tools(200)));
+
+        assert_eq!(none, some, "15 tools must not move the tier");
+        assert_eq!(none, many, "200 tools must not move the tier");
+    }
+
+    /// The same turn on a tool-rich agent must still be routed cheaply.
+    /// Asserting invariance alone would pass if every tier collapsed to Complex, which is the bug.
+    #[test]
+    fn a_trivial_message_stays_simple_on_a_tool_rich_agent() {
+        let router = ModelRouter::new(default_config());
         let request = make_request(
             vec![Message {
                 role: Role::User,
-                content: MessageContent::text("Use the available tools to solve this problem."),
+                content: MessageContent::text("hi"),
                 pinned: false,
                 timestamp: None,
             }],
-            tools,
+            n_tools(200),
         );
-        let complexity = router.score(&request);
-        // 15 tools * 20 = 300 — should be at least Medium
-        assert_ne!(complexity, TaskComplexity::Simple);
+        assert_eq!(router.score(&request), TaskComplexity::Simple);
     }
 
     #[test]
@@ -385,34 +399,25 @@ mod tests {
         );
     }
 
+    /// #7952: system-prompt length is the same on every turn of an agent, so scoring it moved the whole distribution rather than separating turns.
+    /// A long SOUL.md must not make "Hi" a complex request.
     #[test]
-    fn test_system_prompt_adds_complexity() {
+    fn system_prompt_length_does_not_change_the_tier() {
         let router = ModelRouter::new(default_config());
-        let mut request = make_request(
-            vec![Message {
-                role: Role::User,
-                content: MessageContent::text("Hi"),
-                pinned: false,
-                timestamp: None,
-            }],
-            vec![],
-        );
-        request.system = Some("A".repeat(2000)); // Long system prompt
-        let complexity_with_long_system = router.score(&request);
+        let message = Message {
+            role: Role::User,
+            content: MessageContent::text("Hi"),
+            pinned: false,
+            timestamp: None,
+        };
 
-        let mut request2 = make_request(
-            vec![Message {
-                role: Role::User,
-                content: MessageContent::text("Hi"),
-                pinned: false,
-                timestamp: None,
-            }],
-            vec![],
-        );
-        request2.system = Some("Be helpful.".to_string());
-        let complexity_short = router.score(&request2);
+        let mut long = make_request(vec![message.clone()], vec![]);
+        long.system = Some("A".repeat(20_000));
 
-        // Long system prompt should score higher or equal
-        assert!(complexity_with_long_system as u32 >= complexity_short as u32);
+        let mut short = make_request(vec![message], vec![]);
+        short.system = Some("Be helpful.".to_string());
+
+        assert_eq!(router.score(&long), router.score(&short));
+        assert_eq!(router.score(&long), TaskComplexity::Simple);
     }
 }
