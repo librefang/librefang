@@ -67,7 +67,13 @@ pub struct McpSubsystem {
     /// registry. Lock-free reads via `ArcSwap`; writes use `rcu()`.
     pub(crate) mcp_catalog: ArcSwap<McpCatalog>,
     /// MCP server health monitor.
-    pub(crate) mcp_health: HealthMonitor,
+    ///
+    /// `Arc` (not owned by value) so the tool-call dispatch path can hold a
+    /// reporter into it: every live `McpConnection` carries an
+    /// `McpTransportHealthReporter` built from a clone of this handle, which is
+    /// how a transport wedge discovered mid-tool-call reaches auto-reconnect
+    /// (#7963). No cycle — the monitor holds nothing back.
+    pub(crate) mcp_health: Arc<HealthMonitor>,
     /// Effective MCP server list — mirrors `config.mcp_servers`. Kept as
     /// its own field so hot-reload and tests can snapshot the list
     /// atomically.
@@ -82,7 +88,7 @@ impl McpSubsystem {
     pub(crate) fn new(
         mcp_oauth_provider: Arc<dyn McpOAuthProvider + Send + Sync>,
         mcp_catalog: McpCatalog,
-        mcp_health: HealthMonitor,
+        mcp_health: Arc<HealthMonitor>,
         effective_mcp_servers: Vec<McpServerConfigEntry>,
     ) -> Self {
         Self {

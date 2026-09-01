@@ -306,7 +306,7 @@ impl LibreFangKernel {
         &self,
         agent_workspace: Option<&std::path::Path>,
     ) -> Option<tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>> {
-        use librefang_runtime::mcp::{McpConnection, McpServerConfig, McpTransport};
+        use librefang_runtime::mcp::{McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
         let servers = self
@@ -406,7 +406,12 @@ impl LibreFangKernel {
                 roots: server_roots,
             };
 
-            match McpConnection::connect(mcp_config).await {
+            // Through the wiring helper, not a bare `connect` (#7963): these connections
+            // serve the same agent tool calls the daemon-global pool does, so a transport
+            // wedge observed on one has to reach the health monitor too. A bare connect
+            // compiles and dispatches fine while silently reporting nothing, which is
+            // exactly the invisible hole #7963 was.
+            match self.connect_mcp_wired(mcp_config).await {
                 Ok(conn) => connections.push(conn),
                 Err(e) => warn!(
                     server = %server_config.name,
