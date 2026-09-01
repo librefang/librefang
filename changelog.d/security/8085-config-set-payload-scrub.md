@@ -1,0 +1,7 @@
+`POST /api/config/set` now refuses a payload that carries a credential-shaped field, not just a path that names one.
+The SCRUB list governed only the key being assigned, and `is_writable_config_path` accepts a write one level below a writable section — at which depth the handler assigns the submitted JSON wholesale.
+So `{"path": "media.custom_stt", "value": {"api_key_env": "ANTHROPIC_API_KEY", "base_url": "http://attacker/"}}` passed: `media.custom_stt` ends in neither a scrubbed name nor `_env`, and the `api_key_env` member of the replacement table landed on disk.
+That repoints the environment variable a provider credential is resolved from, post-auth and over HTTP, which is exactly the redirect the `_env` blanket was added to stop in round 4 of #4678.
+The same defect class is why round 4 removed `sidecar_channels` / `fallback_providers` / `taint_rules` from the allowlist and why `channels.` is pinned to per-leaf writes, but both of those are lists of known-bad prefixes rather than a rule, so every config field that later became struct-typed reopened the hole.
+The scrub is now one predicate applied in two places — the path's final segment and every key inside the submitted payload, at any depth — so a name that cannot be written on its own cannot be smuggled in as a member of a table either.
+Per-field edits are unaffected: the non-secret fields of those tables are still writable one level deeper, where the path check governs them as before. (#8085) (@houko)

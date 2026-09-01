@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
+use librefang_skills::SkillError;
 use librefang_types::agent::{AgentId, AgentState, SessionId};
 use librefang_types::error::LibreFangError;
 use tracing::info;
@@ -3050,11 +3051,15 @@ impl LibreFangKernel {
                 .unwrap_or_else(|e| e.into_inner())
                 .snapshot();
 
-            // Load workspace-scoped skills (override global skills with same name)
+            // Load workspace-scoped skills (override global skills with same name).
+            // See the non-streaming path in `agent_execution.rs` for why there is no `.exists()` guard and why a frozen registry is debug rather than warn (#7964).
             if let Some(ref workspace) = manifest.workspace {
-                let ws_skills = workspace.join("skills");
-                if ws_skills.exists() {
-                    if let Err(e) = skill_snapshot.load_workspace_skills(&ws_skills) {
+                match skill_snapshot.load_workspace_skills(&workspace.join("skills")) {
+                    Ok(_) => {}
+                    Err(SkillError::RegistryFrozen(detail)) => {
+                        tracing::debug!(agent_id = %agent_id, "Stable mode (streaming): {detail}");
+                    }
+                    Err(e) => {
                         warn!(agent_id = %agent_id, "Failed to load workspace skills (streaming): {e}");
                     }
                 }
