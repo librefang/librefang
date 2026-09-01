@@ -569,17 +569,11 @@ impl MediaEngine {
             .or_else(|| custom_video_model_ref(provider, &self.config.custom_video))
             .unwrap_or("gemini-2.5-flash");
 
-        // Neither branch has a real implementation yet, and both must say so
-        // rather than answer `Ok`. `MediaUnderstanding.description` is fed to
-        // an agent as what the media contained, so a placeholder string
-        // returned as success reaches the model as though it were a real
-        // description of the video and gets reasoned from. An `Err` is the
-        // honest answer to "describe this video" when nothing described it,
-        // and `process_attachments` already collects a per-attachment
-        // `Result`, so the error path is fully supported by the only caller.
+        // Neither branch has a real implementation yet, and both must say so rather than answer `Ok`.
+        // `MediaUnderstanding.description` is fed to an agent as what the media contained, so a placeholder string returned as success reaches the model as though it were a real description of the video and gets reasoned from.
+        // An `Err` is the honest answer to "describe this video" when nothing described it, and `process_attachments` already collects a per-attachment `Result`, so the error path is fully supported by the only caller.
         //
-        // TODO: implement Gemini video description and the custom
-        // OpenAI-compatible dispatch, then replace these with real calls.
+        // TODO(#8105): implement Gemini video description and the custom OpenAI-compatible dispatch, then replace these with real calls.
         match provider {
             "gemini" => {
                 if std::env::var("GEMINI_API_KEY").is_err()
@@ -594,10 +588,7 @@ impl MediaEngine {
                 ))
             }
             custom => {
-                // Still resolved so a misconfigured `[media.custom_video]`
-                // reports the configuration error rather than the generic
-                // not-implemented one — the config plumbing is real even
-                // though the dispatch is not.
+                // Still resolved so a misconfigured `[media.custom_video]` reports the configuration error rather than the generic not-implemented one — the config plumbing is real even though the dispatch is not.
                 let (_api_url, _api_key) = custom_video_config(custom, &self.config.custom_video)?;
                 Err(format!(
                     "Video description via custom provider '{custom}' is not implemented yet \
@@ -950,17 +941,12 @@ fn whisper_provider_config(provider: &str) -> Result<(String, String), String> {
 
 /// Resolve the API key for a custom endpoint from the env var it names.
 ///
-/// The three `custom_*_config` resolvers below differ only in the wording of
-/// their error messages; this — the part that decides whether a missing key is
-/// fatal — was three byte-identical copies. A later change to it (a second
-/// accepted env var, a trim rule, a keyless-server special case) would
-/// otherwise land in one copy and quietly not in the others.
+/// The three `custom_*_config` resolvers below differ only in the wording of their error messages; this — the part that decides whether a missing key is fatal — was three byte-identical copies.
+/// A later change to it (a second accepted env var, a trim rule, a keyless-server special case) would otherwise land in one copy and quietly not in the others.
 ///
-/// An empty `api_key_env` means "send no `Authorization` header". A named var
-/// that is unset or blank is fatal only when `key_required`; otherwise it also
-/// resolves to no header, which is what a keyless local server wants.
-/// `missing_key_error` is called only on the fatal path so each caller keeps
-/// its own wording.
+/// An empty `api_key_env` means "send no `Authorization` header".
+/// A named var that is unset or blank is fatal only when `key_required`; otherwise it also resolves to no header, which is what a keyless local server wants.
+/// `missing_key_error` is called only on the fatal path so each caller keeps its own wording.
 fn custom_endpoint_api_key(
     api_key_env: &str,
     key_required: bool,
@@ -2665,9 +2651,7 @@ mod tests {
         assert!(result.unwrap_err().contains("disabled"));
     }
 
-    /// `MediaUnderstanding.description` reaches an agent as what the media
-    /// contained, so an unimplemented path must fail rather than hand back a
-    /// placeholder that reads like a real description.
+    /// `MediaUnderstanding.description` reaches an agent as what the media contained, so an unimplemented path must fail rather than hand back a placeholder that reads like a real description.
     #[tokio::test]
     async fn video_description_is_an_error_not_a_placeholder_success() {
         let config = MediaConfig {
@@ -2701,8 +2685,7 @@ mod tests {
         );
     }
 
-    /// A misconfigured `[media.custom_video]` must still report the
-    /// configuration problem, not the generic not-implemented message.
+    /// A misconfigured `[media.custom_video]` must still report the configuration problem, not the generic not-implemented message.
     #[tokio::test]
     async fn custom_video_without_a_base_url_reports_the_config_error() {
         let config = MediaConfig {
