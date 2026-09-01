@@ -1096,6 +1096,43 @@ enum ConfigureSidecarWriteError {
     /// same `secrets.env` snapshot the write uses — reading it earlier, outside
     /// `config_write_lock`, would be a TOCTOU against a concurrent save.
     MissingRequiredSecret(String),
+    /// `instance_name` normalizes to the same `<PREFIX>__` secret namespace as
+    /// one or more already-configured instances, so saving it would overwrite
+    /// their secrets. Carries the shared prefix and the colliding names.
+    SecretPrefixConflict {
+        prefix: String,
+        names: Vec<String>,
+    },
+}
+
+/// Names of the configured `[[sidecar_channels]]` entries that keep their
+/// secrets in a `<PREFIX>__` namespace — that is, every entry whose `name`
+/// differs from its `channel_type`. The instance sharing the catalog's own
+/// name writes bare keys and so cannot collide through the prefix.
+fn namespaced_instance_names(config_content: &str) -> Result<Vec<String>, String> {
+    if config_content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let document: toml_edit::DocumentMut = config_content
+        .parse()
+        .map_err(|error| format!("parse config.toml: {error}"))?;
+    let Some(array) = document
+        .get("sidecar_channels")
+        .and_then(|item| item.as_array_of_tables())
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(array
+        .iter()
+        .filter_map(|table| {
+            let name = table.get("name").and_then(|item| item.as_str())?;
+            let channel_type = table
+                .get("channel_type")
+                .and_then(|item| item.as_str())
+                .unwrap_or(name);
+            (name != channel_type).then(|| name.to_string())
+        })
+        .collect())
 }
 
 /// Look for an existing `[[sidecar_channels]]` entry named `instance_name`
@@ -1270,6 +1307,33 @@ fn write_sidecar_configuration(
     .map_err(ConfigureSidecarWriteError::Write)?
     {
         return Err(ConfigureSidecarWriteError::NameConflict(conflicting_type));
+    }
+
+    // `instance_secret_prefix` uppercases and maps every non-alphanumeric
+    // character to `_`, so it is many-to-one: `bot-1`, `bot.1` and `BOT+1` all
+    // land on `BOT_1`. Two instances that collapse together share one
+    // `<PREFIX>__KEY` namespace in secrets.env, and the second save silently
+    // overwrites the first one's token — the opposite of the isolation this
+    // endpoint exists to provide.
+    //
+    // `warn_secret_prefix_collisions` reports that from the boot / reload loop,
+    // which was enough while a second instance meant hand-editing config.toml
+    // in front of the existing entries. It is not enough for a two-field form:
+    // by the time the WARN appears the token is already gone. Refuse here, on
+    // the same "fail before the first mutation" contract as the checks above.
+    //
+    // Only namespaced instances can collide this way — the one sharing the
+    // catalog's own name writes bare keys — so a default-named save skips it.
+    if instance_name != entry.name {
+        let existing = namespaced_instance_names(original_config.as_deref().unwrap_or_default())
+            .map_err(ConfigureSidecarWriteError::Write)?;
+        let names = librefang_channels::sidecar::secret_prefix_conflict(&existing, instance_name);
+        if !names.is_empty() {
+            return Err(ConfigureSidecarWriteError::SecretPrefixConflict {
+                prefix: librefang_channels::sidecar::instance_secret_prefix(instance_name),
+                names,
+            });
+        }
     }
 
     // A second (third, …) named instance of the same catalog type must not
@@ -1608,6 +1672,18 @@ pub async fn configure_sidecar_channel(
                 ApiErrorResponse::bad_request(format!(
                     "required field `{key}` is missing or empty"
                 ))
+                .into_json_tuple()
+            }
+            ConfigureSidecarWriteError::SecretPrefixConflict { prefix, names } => {
+                ApiErrorResponse::conflict(format!(
+                    "instance name `{instance_name}` normalizes to the same secret namespace `{prefix}__` as the configured instance(s) {}. Saving it would overwrite their `{prefix}__<KEY>` secrets in secrets.env. Pick a name that differs by more than punctuation or case.",
+                    names
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .with_code("sidecar_secret_prefix_conflict")
                 .into_json_tuple()
             }
             ConfigureSidecarWriteError::Write(error) => {
