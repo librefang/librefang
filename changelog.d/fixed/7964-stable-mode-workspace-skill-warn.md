@@ -1,0 +1,6 @@
+Stable mode no longer logs a per-turn `WARN` for workspace skills when there is nothing to load, and no longer describes a frozen registry as a missing skill.
+`load_workspace_skills` checked the freeze before checking whether the call had any work to do, so an **empty** `<workspace>/skills` directory returned `Ok(0)` in normal mode and an error in Stable mode — for an outcome that is identical either way: zero skills loaded.
+Both call sites logged that at `WARN`, once per turn per agent, which produced 39-100 lines a day on one deployment, all of it describing a no-op that was skipped rather than a failure.
+The wording made it worse: the error reused `SkillError::NotFound`, so `Skill not found: Skill registry is frozen` read like a broken skill and invited exactly the wrong investigation — the reporter went looking for a skill that did not exist.
+A frozen registry is now its own `SkillError::RegistryFrozen`, reported only when a skill really would have been loaded, and logged at `debug` because a configured steady state is not a fault.
+So that a genuinely skipped workspace skill is not simply dropped in silence instead, spawn now warns once per agent naming the directories Stable mode will not pick up — the #6540 reload report covers the global `skills_dir` only, never per-agent workspaces. (#8076) (@houko)

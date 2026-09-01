@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use super::screens::{
     audit::AuditEntry,
+    channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
     groups::GroupInfo,
@@ -96,8 +97,28 @@ pub enum AppEvent {
         enabled: bool,
         rows: Vec<crate::tui::screens::dashboard::DreamRow>,
     },
-    // `ChannelListLoaded` + `ChannelTestResult` removed alongside the
-    // TUI Channels tab.
+    /// Channel instances and the sidecar catalog loaded together — both come
+    /// from the single `GET /api/channels` listing, split by `configured`.
+    ChannelListLoaded {
+        instances: Vec<ChannelInstance>,
+        adapters: Vec<ChannelAdapterInfo>,
+    },
+    /// A `[[sidecar_channels]]` instance was written. Carries the instance
+    /// name, not the adapter, because that is what the operator named.
+    ChannelInstanceSaved {
+        instance_name: String,
+        restart_required: bool,
+        /// Secret field keys already exported in the daemon's own process
+        /// environment. `build_spawn_env` resolves those ahead of the
+        /// `secrets.env` line this save just wrote, so the value the operator
+        /// typed does not take effect until the variable is unset and the
+        /// daemon restarted — a "saved" with no warning would be a lie.
+        shadowed_secrets: Vec<String>,
+    },
+    /// A `[[sidecar_channels]]` instance was removed.
+    ChannelInstanceDeleted(String),
+    /// A manual channel reload finished, with the number of adapters started.
+    ChannelsReloaded(u64),
     /// Workflow list loaded.
     WorkflowListLoaded(Vec<WorkflowInfo>),
     /// Workflow runs loaded for a specific workflow.
@@ -862,8 +883,312 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-// `spawn_fetch_channels` + `spawn_test_channel` retired alongside
-// the TUI Channels tab.
+/// Split a `GET /api/channels` listing into configured instances and the
+/// catalog of adapters an operator can add.
+///
+/// The listing mixes two row shapes under one `items` array and `configured`
+/// is the only discriminator. It matters which one a row is, because `name`
+/// means different things in each: on a configured row it is the
+/// `[[sidecar_channels]].name` the operator chose, on a catalog row it is the
+/// adapter key. Reading a configured row's `name` as an adapter is the #8055 /
+/// #8063 bug, so the split happens here, once, and the two shapes land in
+/// separate types that cannot be confused downstream.
+///
+/// Pure so it can be tested without a daemon.
+pub fn parse_channel_list(
+    body: &serde_json::Value,
+) -> (Vec<ChannelInstance>, Vec<ChannelAdapterInfo>) {
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut instances = Vec::new();
+    let mut adapters = Vec::new();
+    for row in &items {
+        let name = row["name"].as_str().unwrap_or_default().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let fields = parse_channel_fields(&row["fields"]);
+        if row["configured"].as_bool() == Some(true) {
+            instances.push(ChannelInstance {
+                // `channel_type` is absent on entries that never set it, and
+                // the daemon then treats the name as the type — mirror that
+                // fallback rather than leaving the adapter blank.
+                adapter: row["channel_type"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                name,
+                agent: row["agent"].as_str().map(str::to_string),
+                supervised: row["supervised"].as_bool().unwrap_or(false),
+                connected: row["connected"].as_bool().unwrap_or(false),
+                last_error: row["last_error"].as_str().map(str::to_string),
+                messages_received: row["messages_received"].as_u64().unwrap_or(0),
+                messages_sent: row["messages_sent"].as_u64().unwrap_or(0),
+                fields,
+            });
+        } else {
+            adapters.push(ChannelAdapterInfo {
+                display_name: row["display_name"]
+                    .as_str()
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or(name.as_str())
+                    .to_string(),
+                name,
+                fields,
+                schema_error: row["schema_error"].as_str().map(str::to_string),
+            });
+        }
+    }
+    // The catalog is served in declaration order; sort it so the picker is
+    // stable and alphabetical regardless of how the daemon listed it.
+    adapters.sort_by(|a, b| a.name.cmp(&b.name));
+    (instances, adapters)
+}
+
+fn parse_channel_fields(fields: &serde_json::Value) -> Vec<ChannelFieldInfo> {
+    fields
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|f| {
+                    let key = f["key"].as_str().unwrap_or_default().to_string();
+                    ChannelFieldInfo {
+                        label: f["label"]
+                            .as_str()
+                            .filter(|l| !l.is_empty())
+                            .unwrap_or(key.as_str())
+                            .to_string(),
+                        key,
+                        field_type: f["type"].as_str().unwrap_or("text").to_string(),
+                        required: f["required"].as_bool().unwrap_or(false),
+                        placeholder: f["placeholder"].as_str().unwrap_or_default().to_string(),
+                        advanced: f["advanced"].as_bool().unwrap_or(false),
+                        options: f["options"]
+                            .as_array()
+                            .map(|o| {
+                                o.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        // Secrets come back with `has_value` and no `value`;
+                        // the daemon never echoes a stored secret.
+                        value: f["value"].as_str().unwrap_or_default().to_string(),
+                        has_value: f["has_value"].as_bool().unwrap_or(false),
+                    }
+                })
+                .filter(|f: &ChannelFieldInfo| !f.key.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch configured channel instances + the sidecar catalog in background.
+pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            match client.get(format!("{base_url}/api/channels")).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap_or_default();
+                    let (instances, adapters) = parse_channel_list(&body);
+                    let _ = tx.send(AppEvent::ChannelListLoaded {
+                        instances,
+                        adapters,
+                    });
+                }
+                // A 401 / 423 / 500 body carries no `items`, so parsing it
+                // anyway would render as "No channel instances configured" —
+                // an empty daemon and a rejected request must not look alike.
+                Ok(resp) => {
+                    let status = resp.status();
+                    let payload: serde_json::Value = resp.json().unwrap_or_default();
+                    let message = payload
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload["message"].as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| status.to_string());
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-instances-fetch-failed",
+                        &[("error", &message)],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-instances-fetch-failed",
+                        &[("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Write one `[[sidecar_channels]]` instance in background.
+///
+/// The adapter goes in the path and the instance name in the body — see
+/// [`ConfigureRequest`], which is the only thing that decides either.
+pub fn spawn_save_channel_instance(
+    backend: BackendRef,
+    request: ConfigureRequest,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            // The write touches secrets.env, config.toml and then restarts the
+            // sidecar children, so it gets the longer timeout.
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(20));
+            let url = format!("{base_url}{}", request.path());
+            match client.post(&url).json(&request.body()).send() {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let payload: serde_json::Value = resp.json().unwrap_or_default();
+                    if status.is_success() && payload["status"].as_str() == Some("saved") {
+                        let _ = tx.send(AppEvent::ChannelInstanceSaved {
+                            instance_name: request.instance_name,
+                            restart_required: payload["restart_required"]
+                                .as_bool()
+                                .unwrap_or(false),
+                            shadowed_secrets: payload["shadowed_secrets"]
+                                .as_array()
+                                .map(|keys| {
+                                    keys.iter()
+                                        .filter_map(|k| k.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        });
+                    } else {
+                        // The daemon's own message names the offending field
+                        // or the 409 conflict; it is far more useful than a
+                        // status code. `ApiErrorResponse` publishes it nested
+                        // and flat, so try both.
+                        let message = payload
+                            .pointer("/error/message")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| payload["message"].as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| status.to_string());
+                        let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                            "tui-event-channel-save-failed",
+                            &[("name", &request.instance_name), ("error", &message)],
+                        )));
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-save-failed",
+                        &[("name", &request.instance_name), ("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Remove one `[[sidecar_channels]]` instance in background.
+///
+/// Keyed by the instance name: `DELETE /api/channels/sidecar/{name}` matches
+/// the `name` key of the block it deletes, so passing an adapter here would
+/// delete whichever instance happens to carry the adapter's name — or 404.
+pub fn spawn_delete_channel_instance(
+    backend: BackendRef,
+    instance_name: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(20));
+            let url = format!("{base_url}/api/channels/sidecar/{instance_name}");
+            match client.delete(&url).send() {
+                Ok(resp) if resp.status().is_success() => {
+                    let _ = tx.send(AppEvent::ChannelInstanceDeleted(instance_name));
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let payload: serde_json::Value = resp.json().unwrap_or_default();
+                    let message = payload
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload["message"].as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| status.to_string());
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-delete-failed",
+                        &[("name", &instance_name), ("error", &message)],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-delete-failed",
+                        &[("name", &instance_name), ("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Re-read `[[sidecar_channels]]` and restart the sidecar children.
+pub fn spawn_reload_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
+            match client
+                .post(format!("{base_url}/api/channels/reload"))
+                .json(&serde_json::json!({}))
+                .send()
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    let payload: serde_json::Value = resp.json().unwrap_or_default();
+                    let started = payload["started"].as_u64().unwrap_or(0);
+                    let _ = tx.send(AppEvent::ChannelsReloaded(started));
+                }
+                Ok(resp) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channels-reload-failed",
+                        &[("error", &resp.status().to_string())],
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channels-reload-failed",
+                        &[("error", &e.to_string())],
+                    )));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-channels-not-available-in-process",
+            )));
+        }
+    });
+}
 
 /// Fetch workflow list in background.
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
@@ -4045,6 +4370,148 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// `GET /api/channels` mixes configured instances and catalog adapters in
+    /// one array, and `name` means a different thing in each. Getting the
+    /// split wrong is the #8055 / #8063 identifier mix-up, so it is pinned
+    /// here rather than left to the caller.
+    #[test]
+    fn the_channel_listing_splits_instances_from_catalog_adapters() {
+        let body = serde_json::json!({
+            "items": [
+                {
+                    "name": "telegram-support",
+                    "channel_type": "telegram",
+                    "configured": true,
+                    "agent": "support-bot",
+                    "supervised": true,
+                    "connected": true,
+                    "messages_received": 12,
+                    "messages_sent": 7,
+                    "last_error": "circuit break at 03:12",
+                    "fields": [
+                        {
+                            "key": "TELEGRAM_BOT_TOKEN",
+                            "label": "Bot Token",
+                            "type": "secret",
+                            "required": true,
+                            "has_value": true
+                        },
+                        {
+                            "key": "ALLOWED_USERS",
+                            "label": "Allowed users",
+                            "type": "list",
+                            "advanced": true,
+                            "value": "1,2"
+                        }
+                    ]
+                },
+                {
+                    "name": "ntfy",
+                    "display_name": "ntfy",
+                    "configured": false,
+                    "fields": [],
+                    "schema_error": "librefang-sdk not installed"
+                },
+                {
+                    "name": "feishu",
+                    "display_name": "Feishu / Lark",
+                    "configured": false,
+                    "fields": [{
+                        "key": "FEISHU_REGION",
+                        "label": "Region",
+                        "type": "select",
+                        "options": ["cn", "intl"]
+                    }]
+                }
+            ],
+            "total": 3
+        });
+
+        let (instances, adapters) = parse_channel_list(&body);
+
+        assert_eq!(instances.len(), 1);
+        let instance = &instances[0];
+        assert_eq!(instance.name, "telegram-support");
+        assert_eq!(
+            instance.adapter, "telegram",
+            "the adapter comes from channel_type, never from the instance name"
+        );
+        assert_eq!(instance.agent.as_deref(), Some("support-bot"));
+        assert_eq!(instance.messages_received, 12);
+        assert_eq!(instance.messages_sent, 7);
+        assert_eq!(
+            instance.health(),
+            crate::tui::screens::channels::InstanceHealth::Degraded,
+            "a connected instance with a sticky error is degraded, not dead"
+        );
+        // The secret is flagged as set but never carries a value.
+        assert!(instance.fields[0].has_value);
+        assert!(instance.fields[0].value.is_empty());
+        assert_eq!(instance.fields[1].value, "1,2");
+        assert!(instance.fields[1].advanced);
+
+        // Catalog rows are sorted, so the picker order does not depend on the
+        // daemon's declaration order.
+        let names: Vec<&str> = adapters.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["feishu", "ntfy"]);
+        assert_eq!(adapters[0].display_name, "Feishu / Lark");
+        assert_eq!(adapters[0].fields[0].options, vec!["cn", "intl"]);
+        assert_eq!(
+            adapters[1].schema_error.as_deref(),
+            Some("librefang-sdk not installed")
+        );
+    }
+
+    /// A configured entry may omit `channel_type`, and the daemon then reads
+    /// its name as the type — the TUI has to agree or the configure path for
+    /// that instance would be empty.
+    #[test]
+    fn a_configured_row_without_a_channel_type_uses_its_name_as_the_adapter() {
+        let body = serde_json::json!({
+            "items": [{ "name": "ntfy", "configured": true, "fields": [] }]
+        });
+        let (instances, adapters) = parse_channel_list(&body);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].adapter, "ntfy");
+        assert!(adapters.is_empty());
+    }
+
+    /// A row the daemon could not name is unusable in either direction: it
+    /// cannot be deleted and it cannot be configured. Dropping it beats
+    /// rendering a blank line the cursor can land on.
+    #[test]
+    fn nameless_and_shapeless_rows_are_dropped() {
+        let body = serde_json::json!({
+            "items": [
+                { "configured": true, "fields": [] },
+                { "name": "", "configured": false },
+                {
+                    "name": "telegram",
+                    "configured": true,
+                    "fields": [{ "label": "no key here", "type": "text" }]
+                }
+            ]
+        });
+        let (instances, adapters) = parse_channel_list(&body);
+        assert_eq!(instances.len(), 1, "only the named row survives");
+        assert_eq!(instances[0].name, "telegram");
+        assert!(
+            instances[0].fields.is_empty(),
+            "a schema field with no key cannot be sent, so it is not offered"
+        );
+        assert!(adapters.is_empty());
+        // Absent liveness keys read as "not supervised" rather than panicking.
+        assert!(!instances[0].supervised);
+    }
+
+    /// An empty or malformed body must not panic the render loop.
+    #[test]
+    fn a_missing_items_array_yields_two_empty_lists() {
+        let (instances, adapters) = parse_channel_list(&serde_json::json!({}));
+        assert!(instances.is_empty());
+        assert!(adapters.is_empty());
+    }
 
     /// `GET /api/backups` nests its rows under `backups`, and the settings
     /// screen reads `created_at` and `components` straight out of each one.
