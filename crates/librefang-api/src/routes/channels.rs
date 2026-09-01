@@ -752,17 +752,9 @@ fn write_cache_recover<'a, T>(
 
 /// How many `--describe` probes may be in flight at once.
 ///
-/// The catalog is 20-plus adapters and every probe spawns a `python3`
-/// interpreter, so this is a subprocess-count cap rather than a throughput
-/// knob: unbounded fan-out would start one interpreter per catalog entry
-/// simultaneously, which on the small ARM boards LibreFang is deployed to
-/// (the report in #8094 came from an Orange Pi 5 Plus) trades a slow boot for
-/// a thrashing one.
+/// The catalog is 20-plus adapters and every probe spawns a `python3` interpreter, so this is a subprocess-count cap rather than a throughput knob: unbounded fan-out would start one interpreter per catalog entry simultaneously, which on the small ARM boards LibreFang is deployed to (the report in #8094 came from an Orange Pi 5 Plus) trades a slow boot for a thrashing one.
 ///
-/// Derived from the host's parallelism and clamped: at least 2, so a
-/// single-core container still overlaps process spawn with interpreter
-/// startup, and at most 8, because the work is dominated by Python's import
-/// time rather than by anything that scales past a handful of cores.
+/// Derived from the host's parallelism and clamped: at least 2, so a single-core container still overlaps process spawn with interpreter startup, and at most 8, because the work is dominated by Python's import time rather than by anything that scales past a handful of cores.
 fn sidecar_probe_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -772,10 +764,7 @@ fn sidecar_probe_concurrency() -> usize {
 
 /// Record one adapter's probe outcome in the schema / schema-error caches.
 ///
-/// Split out of [`populate_sidecar_schema_cache`] so the probes can run
-/// concurrently while every cache write stays synchronous and short — no lock
-/// is ever held across an `.await` — and so the three outcomes are unit
-/// testable without a working Python installation.
+/// Split out of [`populate_sidecar_schema_cache`] so the probes can run concurrently while every cache write stays synchronous and short — no lock is ever held across an `.await` — and so the three outcomes are unit testable without a working Python installation.
 fn apply_sidecar_probe_outcome(
     entry: &'static SidecarCatalogEntry,
     result: Result<SidecarSchema, super::sidecar_describe::DescribeSidecarError>,
@@ -848,16 +837,11 @@ fn apply_sidecar_probe_outcome(
 /// `home_dir` must be the kernel's `KernelConfig.home_dir`
 /// (`KernelApi::home_dir()`); it locates the embedded-SDK extraction dir.
 ///
-/// The probes run concurrently, capped at [`sidecar_probe_concurrency`]. They
-/// used to run one at a time, and because this is awaited from
-/// `server::build_router` *before* the listener binds, every adapter's Python
-/// startup was paid serially on the boot path — 20-plus sequential
-/// interpreter spawns, which is the 30-second cold start reported in #8094.
+/// The probes run concurrently, capped at [`sidecar_probe_concurrency`].
+/// They used to run one at a time, and because this is awaited from `server::build_router` *before* the listener binds, every adapter's Python startup was paid serially on the boot path — 20-plus sequential interpreter spawns, which is the 30-second cold start reported in #8094.
 ///
-/// Order is not load-bearing: both caches are keyed by
-/// `SidecarCatalogEntry::name`, so the completed set is identical whatever
-/// order the probes finish in. The `adapter=` log lines interleave now, which
-/// is the one observable difference.
+/// Order is not load-bearing: both caches are keyed by `SidecarCatalogEntry::name`, so the completed set is identical whatever order the probes finish in.
+/// The `adapter=` log lines interleave now, which is the one observable difference.
 pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
     use futures::StreamExt;
 
@@ -2843,9 +2827,7 @@ mod sidecar_probe_outcome_tests {
             .unwrap_or_else(|| panic!("catalog must contain `{name}`"))
     }
 
-    /// The cap is a subprocess-count bound, so what matters is that it never
-    /// degenerates to 1 (which is the serial boot #8094 reports) and never
-    /// grows with core count past the point where Python startup dominates.
+    /// The cap is a subprocess-count bound, so what matters is that it never degenerates to 1 (which is the serial boot #8094 reports) and never grows with core count past the point where Python startup dominates.
     #[test]
     fn probe_concurrency_stays_within_its_bounds() {
         let n = sidecar_probe_concurrency();
@@ -2855,10 +2837,7 @@ mod sidecar_probe_outcome_tests {
         );
     }
 
-    // All three outcomes in ONE test: the schema / error caches are
-    // process-wide and the seeders clear-then-set, so splitting these into
-    // parallel tests would race on the shared maps — same reason
-    // `schema_error_discovery_tests` keeps its halves together.
+    // All three outcomes in ONE test: the schema / error caches are process-wide and the seeders clear-then-set, so splitting these into parallel tests would race on the shared maps — same reason `schema_error_discovery_tests` keeps its halves together.
     #[test]
     fn each_probe_outcome_lands_in_exactly_one_cache() {
         __test_seed_sidecar_schema_cache(&[]);
@@ -2874,8 +2853,7 @@ mod sidecar_probe_outcome_tests {
         };
         apply_sidecar_probe_outcome(entry("gotify"), Ok(live));
 
-        // --- describe failed WITH a compile-time fallback: schema cache gets
-        // the static fields, and no version, because nothing reported one ---
+        // --- describe failed WITH a compile-time fallback: schema cache gets the static fields, and no version, because nothing reported one ---
         apply_sidecar_probe_outcome(
             entry("telegram"),
             Err(DescribeSidecarError::SdkMissing(
@@ -2883,8 +2861,7 @@ mod sidecar_probe_outcome_tests {
             )),
         );
 
-        // --- describe failed WITHOUT a fallback: the reason is cached so the
-        // row can explain the empty form instead of just being empty ---
+        // --- describe failed WITHOUT a fallback: the reason is cached so the row can explain the empty form instead of just being empty ---
         apply_sidecar_probe_outcome(
             entry("ntfy"),
             Err(DescribeSidecarError::SdkMissing(
