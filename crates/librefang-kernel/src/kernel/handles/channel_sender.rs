@@ -1,16 +1,124 @@
-//! [`kernel_handle::ChannelSender`] — send text / media / file / poll content
-//! to a registered channel adapter, plus roster CRUD. Adapter lookup keys
-//! by `"<channel>:<account_id>"` first then falls back to `<channel>` so
-//! multi-account installs don't collide.
+//! [`kernel_handle::ChannelSender`] — send text / media / file / poll content to a registered channel adapter, plus roster CRUD.
+//! Every outbound send resolves its adapter through the single [`resolve_channel_adapter`] helper, whose precedence rules are the security-relevant part of this module.
+//! [`resolve_channel_adapter`] is `pub(in crate::kernel)` because two callers outside this trait impl must resolve identically or they silently diverge from the send they guard: the interactive approval notification in `kernel::mod` and the owner-notification gate in `kernel::assistant_routing`.
 //!
 //! Every channel runs out-of-process as a sidecar; the per-channel
 //! `default_agent` lookup is therefore single-pass over
 //! `cfg.sidecar_channels` via [`sidecar_default_agent`].
 
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use librefang_channels::types::ChannelAdapter;
 use librefang_runtime::kernel_handle;
 use tracing::debug;
 
 use super::super::LibreFangKernel;
+
+/// Resolve the channel adapter an outbound send must route through, given the `(channel, account_id)` pair the originating turn was stamped with.
+///
+/// Resolution order, most specific first:
+///
+/// 1. `"<channel>:<account_id>"`, when an `account_id` is known — the account-qualified registration key.
+/// 2. `"<channel>"`, **only** when no `account_id` is known — the bare key, which the bridge fills with an adapter's instance name.
+/// 3. A scan for the one registered adapter whose `channel_type()` equals `channel`, disambiguated by `account_id`.
+///
+/// Step 3 is what makes a channel instance whose **name differs from its adapter type** reachable at all (#8055).
+/// The bridge registers every adapter under `adapter.name()` — the `[[sidecar_channels]] name`, e.g. `"slack-hr"` — plus `"<name>:<account_id>"`, and it sources that `account_id` from the same `name`.
+/// Inbound turns, meanwhile, are stamped with the *channel type* (`"slack"`, via `channel_type_str(adapter.channel_type())` in `librefang_channels::bridge`).
+/// Under the common `<adapter>-<team>` naming convention the two never meet, so steps 1 and 2 both missed and the post-approval reply path, `channel_dm`, and every auto-filled `channel_send` failed with `Channel 'slack' with account_id 'slack-hr' not found. Available: ["slack-hr", "slack-hr:slack-hr"]` — the agent's reply was produced, persisted, and never delivered.
+///
+/// Two adapters of one channel type are two different tenants, so ambiguity is an error rather than an arbitrary pick:
+///
+/// * With an `account_id`, a candidate must actually carry it — as its own `account_id()`, or as its registration `name`, which is where the bridge reads the value from (`channel_bridge.rs`: `Some(sidecar_config.name.clone())`) and which is populated even before a sidecar's `ready` event has filled the `account_id()` `OnceLock`.
+/// * Without one, the scan resolves only when exactly one adapter of that channel type is registered.
+///   A bare `"slack"` on a two-workspace daemon keeps erroring instead of choosing a tenant at random.
+///
+/// A known-but-unmatched `account_id` never falls back to the bare key.
+/// That fallback is the leak the approval listener in `librefang_channels::bridge` documents at length: in a mixed config (one single-bot adapter and one multi-bot adapter on the same channel type) it would point a qualified miss at the *other* tenant's adapter and deliver into that tenant's chat.
+///
+/// This widens no authorization.
+/// The cross-chat (#6117) and cross-account (#6443) dispatch guards live upstream in `librefang_runtime::tool_runner::channel` and run before any of this; every pair that resolves here is one that already names a specific registered instance.
+pub(in crate::kernel) fn resolve_channel_adapter(
+    adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
+    channel: &str,
+    account_id: Option<&str>,
+) -> Result<Arc<dyn ChannelAdapter>, String> {
+    // An empty `account_id` is "unknown", not "an account named the empty string" — every caller filtered it this way before the helper existed.
+    let account_id = account_id.filter(|s| !s.is_empty());
+
+    match account_id {
+        Some(aid) => {
+            if let Some(hit) = adapters.get(&format!("{channel}:{aid}")) {
+                return Ok(hit.clone());
+            }
+        }
+        None => {
+            if let Some(hit) = adapters.get(channel) {
+                return Ok(hit.clone());
+            }
+        }
+    }
+
+    let mut candidates: Vec<Arc<dyn ChannelAdapter>> = Vec::new();
+    for entry in adapters.iter() {
+        let adapter = entry.value();
+        if librefang_channels::router::channel_type_to_str(&adapter.channel_type()) != channel {
+            continue;
+        }
+        if let Some(aid) = account_id {
+            if adapter.account_id() != Some(aid) && adapter.name() != aid {
+                continue;
+            }
+        }
+        // One adapter is registered under both its bare and its qualified key, so identity — not name — is what distinguishes "seen twice" from "two instances that happen to share a name".
+        if candidates.iter().any(|c| Arc::ptr_eq(c, adapter)) {
+            continue;
+        }
+        candidates.push(Arc::clone(adapter));
+    }
+
+    if candidates.len() == 1 {
+        return Ok(candidates.swap_remove(0));
+    }
+    Err(adapter_lookup_error(
+        adapters,
+        channel,
+        account_id,
+        candidates.len(),
+    ))
+}
+
+/// Render the miss from [`resolve_channel_adapter`] as an operator-readable message.
+///
+/// The registered keys are **sorted** before rendering.
+/// `DashMap` iteration order varies per process, and this list is the only place an operator sees how the daemon actually keyed its adapters — an unstable order made the #8055 reports hard to compare against each other.
+fn adapter_lookup_error(
+    adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
+    channel: &str,
+    account_id: Option<&str>,
+    ambiguous: usize,
+) -> String {
+    let mut available: Vec<String> = adapters.iter().map(|e| e.key().clone()).collect();
+    available.sort();
+    if ambiguous > 1 {
+        // Naming the account is already the caller's most specific option, so telling it to pass one is only useful when it did not.
+        return match account_id {
+            Some(aid) => format!(
+                "Channel '{channel}' with account_id '{aid}' is ambiguous: {ambiguous} registered adapters of that channel type answer to that account, so routing could reach the wrong one. Address the instance by its registered name instead. Available: {available:?}"
+            ),
+            None => format!(
+                "Channel '{channel}' is ambiguous: {ambiguous} registered adapters share that channel type, so routing by type alone could reach the wrong account. Name the instance directly, or pass the account_id of the instance to send through. Available: {available:?}"
+            ),
+        };
+    }
+    match account_id {
+        Some(aid) => format!(
+            "Channel '{channel}' with account_id '{aid}' not found. Available: {available:?}"
+        ),
+        None => format!("Channel '{channel}' not found. Available channels: {available:?}"),
+    }
+}
 
 /// Resolve the `default_agent` name for a sidecar channel matching `channel`.
 ///
@@ -60,33 +168,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         // wecom-specific output-format override; removed in the
         // wecom-sidecar migration (the sidecar handles its own
         // formatting via `msgtype: "markdown"` frames).
-        let lookup_key = account_id
-            .filter(|s| !s.is_empty())
-            .map(|aid| format!("{channel}:{aid}"))
-            .unwrap_or_else(|| channel.to_string());
-        let adapter = self
-            .mesh
-            .channel_adapters
-            .get(&lookup_key)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .mesh
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                match account_id.filter(|s| !s.is_empty()) {
-                    Some(aid) => format!(
-                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
-                        channel, aid, available
-                    ),
-                    None => format!(
-                        "Channel '{}' not found. Available channels: {:?}",
-                        channel, available
-                    ),
-                }
-            })?
-            .clone();
+        let adapter = resolve_channel_adapter(&self.mesh.channel_adapters, channel, account_id)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -139,33 +221,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
-        let lookup_key = account_id
-            .filter(|s| !s.is_empty())
-            .map(|aid| format!("{channel}:{aid}"))
-            .unwrap_or_else(|| channel.to_string());
-        let adapter = self
-            .mesh
-            .channel_adapters
-            .get(&lookup_key)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .mesh
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                match account_id.filter(|s| !s.is_empty()) {
-                    Some(aid) => format!(
-                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
-                        channel, aid, available
-                    ),
-                    None => format!(
-                        "Channel '{}' not found. Available channels: {:?}",
-                        channel, available
-                    ),
-                }
-            })?
-            .clone();
+        let adapter = resolve_channel_adapter(&self.mesh.channel_adapters, channel, account_id)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -219,33 +275,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<String, kernel_handle::KernelOpError> {
-        let lookup_key = account_id
-            .filter(|s| !s.is_empty())
-            .map(|aid| format!("{channel}:{aid}"))
-            .unwrap_or_else(|| channel.to_string());
-        let adapter = self
-            .mesh
-            .channel_adapters
-            .get(&lookup_key)
-            .ok_or_else(|| {
-                let available: Vec<String> = self
-                    .mesh
-                    .channel_adapters
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .collect();
-                match account_id.filter(|s| !s.is_empty()) {
-                    Some(aid) => format!(
-                        "Channel '{}' with account_id '{}' not found. Available: {:?}",
-                        channel, aid, available
-                    ),
-                    None => format!(
-                        "Channel '{}' not found. Available channels: {:?}",
-                        channel, available
-                    ),
-                }
-            })?
-            .clone();
+        let adapter = resolve_channel_adapter(&self.mesh.channel_adapters, channel, account_id)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),
@@ -295,21 +325,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         thread_id: Option<&str>,
         account_id: Option<&str>,
     ) -> Result<(), kernel_handle::KernelOpError> {
-        let lookup_key = account_id
-            .filter(|s| !s.is_empty())
-            .map(|aid| format!("{channel}:{aid}"))
-            .unwrap_or_else(|| channel.to_string());
-        let adapter = self
-            .mesh
-            .channel_adapters
-            .get(&lookup_key)
-            .ok_or_else(|| match account_id.filter(|s| !s.is_empty()) {
-                Some(aid) => {
-                    format!("Channel adapter '{channel}' with account_id '{aid}' not found")
-                }
-                None => format!("Channel adapter '{channel}' not found"),
-            })?
-            .clone();
+        let adapter = resolve_channel_adapter(&self.mesh.channel_adapters, channel, account_id)?;
 
         let user = librefang_channels::types::ChannelUser {
             platform_id: recipient.to_string(),

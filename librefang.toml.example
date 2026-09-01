@@ -143,6 +143,8 @@ debounce_ms = 500
 # [thinking]
 # budget_tokens = 10000                   # Max tokens the model can use for thinking
 # stream_thinking = false                 # Stream thinking tokens to the client
+# reasoning_mode = "high"                 # none | low | high | max — explicit effort, wins over budget_tokens (#7946)
+#                                         # Per-agent override goes in that agent's agent.toml, not here.
 # Structured output — constrain agent responses to JSON or a JSON Schema.
 # Set per-agent in [[agents]] tables. Values: "text" (default), "json", or json_schema.
 #
@@ -195,6 +197,7 @@ debounce_ms = 500
 # [thinking]
 # budget_tokens = 10000
 # stream_thinking = false
+# reasoning_mode = "high"      # none | low | high | max (#7946)
 
 # ── Session Retention ────────────────────────────────────────
 # [session]

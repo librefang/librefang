@@ -3270,6 +3270,7 @@ model = "llama-3.3-70b-versatile"
             thinking: Some(crate::config::ThinkingConfig {
                 budget_tokens: 5000,
                 stream_thinking: true,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -3280,15 +3281,56 @@ model = "llama-3.3-70b-versatile"
         assert!(tc.stream_thinking);
     }
 
+    /// Per-agent knobs live in `agent.toml`, not `config.toml` (CLAUDE.md #5476),
+    /// so `reasoning_mode` has to survive a manifest TOML round trip inside the
+    /// existing `[thinking]` table (#7946).
+    #[test]
+    fn test_manifest_thinking_reasoning_mode_round_trips_through_toml() {
+        let toml_str = r#"
+            name = "researcher"
+            [thinking]
+            budget_tokens = 4096
+            reasoning_mode = "max"
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        let tc = manifest.thinking.as_ref().expect("thinking table parsed");
+        assert_eq!(tc.reasoning_mode, Some(crate::config::ReasoningMode::Max));
+        assert_eq!(tc.budget_tokens, 4096);
+
+        // And back out again, so an API round trip (PATCH → agent.toml → boot
+        // reconciliation) cannot drop it.
+        let back: AgentManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            back.thinking.unwrap().reasoning_mode,
+            Some(crate::config::ReasoningMode::Max),
+        );
+    }
+
+    /// An agent that omits `reasoning_mode` keeps the pre-#7946 shape: absent,
+    /// not defaulted to a mode.
+    #[test]
+    fn test_manifest_thinking_without_reasoning_mode_stays_absent() {
+        let toml_str = r#"
+            name = "plain"
+            [thinking]
+            budget_tokens = 4096
+        "#;
+        let manifest: AgentManifest = toml::from_str(toml_str).expect("parse agent.toml");
+        assert_eq!(manifest.thinking.unwrap().reasoning_mode, None);
+    }
+
     #[test]
     fn test_per_agent_thinking_overrides_global() {
         let global = crate::config::ThinkingConfig {
             budget_tokens: 10_000,
             stream_thinking: false,
+            ..Default::default()
         };
         let per_agent = crate::config::ThinkingConfig {
             budget_tokens: 5_000,
             stream_thinking: true,
+            ..Default::default()
         };
 
         let mut manifest = AgentManifest::default();
