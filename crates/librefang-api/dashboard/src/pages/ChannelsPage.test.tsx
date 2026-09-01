@@ -383,6 +383,15 @@ describe("ChannelsPage", () => {
     expect(
       within(drawer).getByText("channels.schema_unavailable_title"),
     ).toBeInTheDocument();
+    // The reason-carrying copy, not the no-reason variant: the two hints differ
+    // in what they tell the operator to do (fix the error below vs. edit
+    // config.toml by hand), so the branch has to be pinned from both sides.
+    expect(
+      within(drawer).getByText("channels.schema_unavailable_hint"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).queryByText("channels.schema_unavailable_hint_no_reason"),
+    ).not.toBeInTheDocument();
     // Save is dead — there is nothing to submit.
     expect(
       within(drawer).getByRole("button", { name: /common\.save/ }),
@@ -727,6 +736,16 @@ describe("ChannelsPage", () => {
     expect(saveButton).toBeDisabled();
     fireEvent.click(saveButton);
     expect(save.mutate).not.toHaveBeenCalled();
+    // A disabled button with no explanation is the same dead end the issue
+    // reported, just quieter. `schema_error` is keyed per catalog adapter, so
+    // a custom `[[sidecar_channels]]` type never has one — the drawer must
+    // still say why it is empty and where to configure the instance instead.
+    expect(
+      within(drawer).getByText("channels.schema_unavailable_title"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByText("channels.schema_unavailable_hint_no_reason"),
+    ).toBeInTheDocument();
   });
 
   it("closes the configure drawer on Cancel without saving", async () => {

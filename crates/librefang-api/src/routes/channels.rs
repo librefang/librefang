@@ -101,10 +101,15 @@ use crate::types::ApiErrorResponse;
 /// are still channels — surface the configured ones here so the
 /// operator view stays consistent regardless of whether an adapter
 /// runs in-process or as a sidecar. These rows are config.toml-managed
-/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels), so
-/// they carry no editable `fields`; the page renders them as
-/// configured/online cards (it conditionally hides empty
-/// `fields`/`setup_steps`).
+/// (`[[sidecar_channels]]`, also under Config -> Sidecar Channels) and are
+/// also editable in place: each one carries the `fields` its adapter's
+/// cached `--describe` schema declares, merged with this instance's stored
+/// values (see `configured_instance_fields`), plus the same
+/// `schema_error` / `sdk_version` provenance a discovery row carries so the
+/// dashboard can explain an empty `fields` list instead of rendering a
+/// drawer with a dead Save button (#8063). The page renders them as
+/// configured/online cards and conditionally hides an empty
+/// `fields`/`setup_steps`.
 ///
 /// # Liveness (#6606)
 ///
@@ -805,9 +810,9 @@ pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
                     tracing::warn!(
                         adapter = entry.name,
                         error = %e,
-                        "sidecar --describe failed; discovery card will have no form fields"
+                        "sidecar --describe failed; channel cards will have no form fields"
                     );
-                    // Stash the failure reason so the discovery row can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
+                    // Stash the failure reason so every row for this adapter — the discovery card and each configured `[[sidecar_channels]]` instance of the type (#8063) — can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
                     write_cache_recover(schema_error_cache(), "schema error")
                         .insert(entry.name, e.to_string());
                 }
@@ -1084,7 +1089,8 @@ enum ConfigureSidecarWriteError {
     /// matches by name and edits in place).
     NameConflict(String),
     /// A `required` secret field carries no value: the payload omitted it (or
-    /// sent whitespace) and nothing is stored for this instance either.
+    /// sent whitespace) and this instance has no non-empty value stored for it
+    /// either (a bare `KEY=` line in secrets.env is a key, not a value).
     /// Carries the field key so the 400 body can name it. Checked inside the
     /// write step rather than in the handler because deciding it needs the
     /// same `secrets.env` snapshot the write uses — reading it earlier, outside
@@ -1287,11 +1293,24 @@ fn write_sidecar_configuration(
         None => field_key.to_string(),
     };
 
-    let secrets_env_keys: std::collections::HashSet<String> =
-        librefang_channels::sidecar::parse_secrets_env_contents(
-            original_secrets.as_deref().unwrap_or_default(),
-        )
+    let secrets_env_entries = librefang_channels::sidecar::parse_secrets_env_contents(
+        original_secrets.as_deref().unwrap_or_default(),
+    );
+    // Every key present in the file, regardless of whether it holds a value —
+    // what the shadow-warning check below wants ("was this key already in
+    // secrets.env before this save?").
+    let secrets_env_keys: std::collections::HashSet<String> = secrets_env_entries
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect();
+    // Keys that actually hold a value. This is the set the required-secret
+    // check below reads, and it applies the same filter `read_secrets_env_keys`
+    // applies when it computes the row's `has_value` — so a save is accepted on
+    // exactly the secrets the drawer showed as set, and a hand-edited `KEY=`
+    // line (a key with no value) cannot satisfy a required field.
+    let secrets_env_values: std::collections::HashSet<String> = secrets_env_entries
         .into_iter()
+        .filter(|(_, value)| !value.is_empty())
         .map(|(key, _)| key)
         .collect();
 
@@ -1308,12 +1327,20 @@ fn write_sidecar_configuration(
     // from scratch, which is the failure the issue reproduced.
     //
     // The guarantee the check exists for is unchanged: after a successful save
-    // the instance has a value for every required secret. The sources are the
-    // ones `librefang_channels::sidecar::build_spawn_env` actually reads, in
-    // its precedence order — this request's payload, then this instance's
-    // `secrets.env` key (namespaced for a secondary instance, bare for the one
-    // named after its catalog type), then the daemon's own environment, which
-    // `build_spawn_env` consults for bare keys only.
+    // the instance has a value for every required secret. Accepted sources, in
+    // the order `librefang_channels::sidecar::build_spawn_env` resolves them —
+    // this request's payload, then this instance's `secrets.env` key
+    // (namespaced `<INSTANCE>__<KEY>` for a secondary instance, bare for the
+    // one named after its catalog type), then the daemon's own environment.
+    //
+    // The daemon-environment source is deliberately accepted for the bare-key
+    // path only, and that is narrower than what the child actually sees: the
+    // supervisor never calls `Command::env_clear` (see the precedence notes on
+    // `build_spawn_env`), so an exported bare key is inherited by *every*
+    // sidecar child, namespaced instances included. Widening it here would
+    // undo the point of per-instance namespacing — a second instance would be
+    // allowed to save with no secret of its own and silently run on the first
+    // one's token — so a namespaced instance must name its own secret.
     //
     // Required non-secret fields stay strict in the handler's earlier pass:
     // their current values *are* echoed into the form, so the form always
@@ -1327,7 +1354,7 @@ fn write_sidecar_configuration(
         let submitted = values
             .get(&field.key)
             .is_some_and(|value| !value.trim().is_empty());
-        let stored = secrets_env_keys.contains(&secret_key(&field.key));
+        let stored = secrets_env_values.contains(&secret_key(&field.key));
         let inherited = secret_namespace.is_none()
             && std::env::var(&field.key).is_ok_and(|value| !value.trim().is_empty());
         if !submitted && !stored && !inherited {
@@ -2313,6 +2340,80 @@ mod sidecar_configuration_write_tests {
         assert!(config.contains("name = \"test-sidecar\""));
         assert!(config.contains("ROOM = \"alerts\""));
         assert!(!config.contains("TEST_TOKEN"));
+    }
+
+    /// An omitted required secret is satisfied by a *stored value*, not by a
+    /// bare key sitting in secrets.env.
+    ///
+    /// `parse_secrets_env_contents` yields `("TEST_TOKEN", "")` for a
+    /// hand-edited `TEST_TOKEN=` line, and `read_secrets_env_keys` — the GET
+    /// path that computes the row's `has_value` — filters exactly that out. If
+    /// the required-secret check keyed on key presence instead, the drawer would
+    /// show the field as empty and required while the save it rejects came back
+    /// 200, and the adapter would then spawn with an empty token.
+    #[test]
+    fn empty_stored_secret_does_not_satisfy_a_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=\nKEEP_ME=unchanged\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        let result = write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigureSidecarWriteError::MissingRequiredSecret(key)) if key == "TEST_TOKEN"
+            ),
+            "{result:?}"
+        );
+        // Rejected before the first mutation, same contract as every other
+        // pre-write refusal in this function.
+        assert!(!config_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=\nKEEP_ME=unchanged\n"
+        );
+    }
+
+    /// The other half: a required secret that really is stored needs no
+    /// re-paste, which is the #8063 relaxation itself.
+    #[test]
+    fn stored_secret_satisfies_an_omitted_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let secrets_path = dir.path().join("secrets.env");
+        std::fs::write(&secrets_path, "TEST_TOKEN=already-stored\n").unwrap();
+        let values = HashMap::from([("ROOM".to_string(), "alerts".to_string())]);
+
+        write_sidecar_configuration(
+            &config_path,
+            &secrets_path,
+            TEST_ENTRY.name,
+            &TEST_ENTRY,
+            &schema(),
+            &values,
+            None,
+        )
+        .expect("an omitted-but-stored required secret must not block the save");
+
+        assert_eq!(
+            std::fs::read_to_string(&secrets_path).unwrap(),
+            "TEST_TOKEN=already-stored\n",
+            "the omitted secret must be left exactly as it was"
+        );
+        assert!(std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("ROOM = \"alerts\""));
     }
 
     #[test]

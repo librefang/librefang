@@ -597,8 +597,6 @@ function SidecarForm({
   // `POST /api/channels/sidecar/{adapter}/configure` needs the daemon's cached `--describe` schema to validate required fields and split secrets from non-secrets, so it answers 503 when there is none — an enabled Save here can only ever fail.
   // Gate it on the absence of fields alone, not on `channel.schema_error` too (#8063): the reason is best-effort — a daemon predating the fix omits it on configured rows, and it is absent whenever `--describe` failed only after a schema had already been cached — so requiring it let the exact case the guard exists for fall through to a live button, which is what the issue reported as an inert Save.
   const noEditableFields = allFields.length === 0;
-  // The reason itself, when the daemon sent one (typically: install the Python sidecar SDK).
-  const schemaUnavailable = noEditableFields && !!channel.schema_error;
 
   // Pre-populate from the schema:
   //  - non-secret fields with a `value` get their value
@@ -717,7 +715,13 @@ function SidecarForm({
             })}
           </p>
         </div>
-        {schemaUnavailable && (
+        {/* Explain the empty form whenever there is one, not only when the daemon
+            attached a reason. `schema_error` is populated per *catalog* adapter, so
+            a `[[sidecar_channels]]` entry whose `channel_type` is not a catalog
+            entry at all — any third-party or custom adapter — has no schema and no
+            reason, and gating the panel on the reason left that operator with a
+            greyed-out Save and nothing at all to read (#8063). */}
+        {noEditableFields && (
           <div className="flex gap-2 p-3 rounded-lg border border-warning/30 bg-warning/5">
             <AlertCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
             <div className="space-y-1">
@@ -727,14 +731,21 @@ function SidecarForm({
                 })}
               </p>
               <p className="text-[11px] text-text-dim leading-relaxed">
-                {t("channels.schema_unavailable_hint", {
-                  defaultValue:
-                    "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
-                })}
+                {channel.schema_error
+                  ? t("channels.schema_unavailable_hint", {
+                      defaultValue:
+                        "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
+                    })
+                  : t("channels.schema_unavailable_hint_no_reason", {
+                      defaultValue:
+                        "This channel runs as an out-of-process sidecar and the daemon has no setup form for its adapter type, so there is nothing to edit here. Configure this instance directly in config.toml, then restart the daemon to retry schema discovery.",
+                    })}
               </p>
-              <p className="text-[11px] font-mono text-text-dim/90 leading-relaxed break-words">
-                {channel.schema_error}
-              </p>
+              {channel.schema_error && (
+                <p className="text-[11px] font-mono text-text-dim/90 leading-relaxed break-words">
+                  {channel.schema_error}
+                </p>
+              )}
             </div>
           </div>
         )}

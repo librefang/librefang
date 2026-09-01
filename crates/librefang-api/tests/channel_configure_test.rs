@@ -339,10 +339,9 @@ async fn configure_keeps_a_stored_secret_when_the_form_omits_it() {
 /// are optional now": a first save for an instance with nothing stored is still
 /// a 400, and still writes neither file.
 ///
-/// Uses a named second instance so the outcome is decided by `secrets.env`
-/// alone — `build_spawn_env` never resolves a namespaced instance's secret from
-/// the daemon's own environment, so a `TELEGRAM_BOT_TOKEN` exported into the
-/// test process cannot make this pass for the wrong reason.
+/// Uses a named second instance so the outcome is decided by `secrets.env` alone.
+/// The required-secret check accepts the daemon's own environment as a source for the bare-key path only, so a `TELEGRAM_BOT_TOKEN` exported into the test process cannot make this pass for the wrong reason.
+/// (That gate is deliberately narrower than what the child actually sees — the supervisor never calls `Command::env_clear`, so an exported bare key reaches every sidecar child — because a namespaced instance must name its own secret rather than silently running on the first instance's token.)
 #[tokio::test(flavor = "multi_thread")]
 async fn configure_still_rejects_a_required_secret_that_was_never_stored() {
     let harness = boot_router().await;
