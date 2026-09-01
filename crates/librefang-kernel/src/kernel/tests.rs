@@ -596,6 +596,60 @@ async fn test_send_channel_message_resolves_named_instance_by_channel_type_8055(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_interactive_approval_notification_reaches_a_named_instance_8055() {
+    // The interactive approval notification is the *other* half of #8055, and it fails in a way no error surfaces.
+    // `NotificationTarget.channel_type` is documented as a channel type ("telegram", "slack", "email") and that is what an operator writes in `[notification] approval_channels`, but the channel bridge keys the adapter registry by `[[sidecar_channels]] name`.
+    // A bare `channel_adapters.get(&target.channel_type)` therefore missed on every named instance and dropped silently to the plain-text fallback, so the approver got the escalation text with no Approve / Reject buttons — on the one notification whose entire purpose is those buttons — while the fallback's own `send_channel_message` resolved the same pair fine.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let hr = Arc::new(RecordingChannelAdapter::named_instance("slack-hr", "slack"));
+    let hr_sent = hr.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr".to_string(), hr.clone());
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("slack-hr:slack-hr".to_string(), hr);
+
+    kernel
+        .push_approval_interactive(
+            &NotificationTarget {
+                // A channel TYPE, exactly as the field's own doc comment and every config example write it.
+                channel_type: "slack".to_string(),
+                recipient: "C0BN6UAQ75M".to_string(),
+                thread_id: None,
+            },
+            "agent wants to run `file_write`",
+            "abcdef1234",
+        )
+        .await;
+
+    // `ChannelAdapter::send_interactive`'s default renders each button label as `[Label]` and forwards to `send`, so the recorded text is what distinguishes the interactive path from the plain-text fallback.
+    let sent = hr_sent.lock().unwrap().clone();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the notification must reach the named instance exactly once: {sent:?}"
+    );
+    assert!(
+        sent[0].contains("[Approve]") && sent[0].contains("[Reject]"),
+        "the interactive path must be taken, not the buttonless plain-text fallback: {sent:?}"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_channel_type_resolution_refuses_to_guess_between_tenants_8055() {
     // The #8055 channel-type scan must never widen cross-tenant reach.
     // Two named instances of one channel type are two different customers, so the scan resolves only when the `account_id` singles one out — and a bare channel type with two instances registered stays an error rather than picking whichever adapter `DashMap` iteration happened to yield first.

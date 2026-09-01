@@ -1412,24 +1412,39 @@ impl LibreFangKernel {
             buttons,
         };
 
-        if let Some(adapter) = self.mesh.channel_adapters.get(&target.channel_type) {
-            let user = librefang_channels::types::ChannelUser {
-                platform_id: target.recipient.clone(),
-                display_name: target.recipient.clone(),
-                librefang_user: None,
-            };
-            if let Err(e) = adapter.send_interactive(&user, &interactive).await {
-                warn!(
+        // Resolve through the same helper every outbound send uses (#8055).
+        // `NotificationTarget.channel_type` is a channel *type* (`"slack"`) while the bridge keys the registry by instance `name` (`"slack-hr"`), so the bare `channel_adapters.get(&target.channel_type)` that used to sit here missed on every named instance and dropped straight to the plain-text fallback below — silently costing the approver the Approve / Reject buttons on the one notification whose entire point is those buttons.
+        // Resolving to an owned `Arc` also stops a `DashMap` shard guard from being held across the `send_interactive` await.
+        match handles::channel_sender::resolve_channel_adapter(
+            &self.mesh.channel_adapters,
+            &target.channel_type,
+            None,
+        ) {
+            Ok(adapter) => {
+                let user = librefang_channels::types::ChannelUser {
+                    platform_id: target.recipient.clone(),
+                    display_name: target.recipient.clone(),
+                    librefang_user: None,
+                };
+                if let Err(e) = adapter.send_interactive(&user, &interactive).await {
+                    warn!(
+                        channel = %target.channel_type,
+                        error = %e,
+                        "Failed to send interactive approval notification, falling back to text"
+                    );
+                    // Fallback to plain text
+                    self.push_to_target(target, &display_message).await;
+                }
+            }
+            Err(e) => {
+                // No adapter resolved — fall back to send_channel_message, which reports its own failure.
+                debug!(
                     channel = %target.channel_type,
                     error = %e,
-                    "Failed to send interactive approval notification, falling back to text"
+                    "No adapter resolved for interactive approval notification, falling back to text"
                 );
-                // Fallback to plain text
                 self.push_to_target(target, &display_message).await;
             }
-        } else {
-            // No adapter found — fall back to send_channel_message
-            self.push_to_target(target, &display_message).await;
         }
     }
 

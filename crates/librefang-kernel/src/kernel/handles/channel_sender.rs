@@ -1,5 +1,6 @@
 //! [`kernel_handle::ChannelSender`] — send text / media / file / poll content to a registered channel adapter, plus roster CRUD.
 //! Every outbound send resolves its adapter through the single [`resolve_channel_adapter`] helper, whose precedence rules are the security-relevant part of this module.
+//! [`resolve_channel_adapter`] is `pub(in crate::kernel)` because two callers outside this trait impl must resolve identically or they silently diverge from the send they guard: the interactive approval notification in `kernel::mod` and the owner-notification gate in `kernel::assistant_routing`.
 //!
 //! Every channel runs out-of-process as a sidecar; the per-channel
 //! `default_agent` lookup is therefore single-pass over
@@ -38,7 +39,7 @@ use super::super::LibreFangKernel;
 ///
 /// This widens no authorization.
 /// The cross-chat (#6117) and cross-account (#6443) dispatch guards live upstream in `librefang_runtime::tool_runner::channel` and run before any of this; every pair that resolves here is one that already names a specific registered instance.
-fn resolve_channel_adapter(
+pub(in crate::kernel) fn resolve_channel_adapter(
     adapters: &DashMap<String, Arc<dyn ChannelAdapter>>,
     channel: &str,
     account_id: Option<&str>,
@@ -101,9 +102,15 @@ fn adapter_lookup_error(
     let mut available: Vec<String> = adapters.iter().map(|e| e.key().clone()).collect();
     available.sort();
     if ambiguous > 1 {
-        return format!(
-            "Channel '{channel}' is ambiguous: {ambiguous} registered adapters share that channel type, so routing by type alone could reach the wrong account. Name the instance directly, or pass the account_id of the instance to send through. Available: {available:?}"
-        );
+        // Naming the account is already the caller's most specific option, so telling it to pass one is only useful when it did not.
+        return match account_id {
+            Some(aid) => format!(
+                "Channel '{channel}' with account_id '{aid}' is ambiguous: {ambiguous} registered adapters of that channel type answer to that account, so routing could reach the wrong one. Address the instance by its registered name instead. Available: {available:?}"
+            ),
+            None => format!(
+                "Channel '{channel}' is ambiguous: {ambiguous} registered adapters share that channel type, so routing by type alone could reach the wrong account. Name the instance directly, or pass the account_id of the instance to send through. Available: {available:?}"
+            ),
+        };
     }
     match account_id {
         Some(aid) => format!(
