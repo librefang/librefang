@@ -45,6 +45,11 @@ pub(crate) fn resolve_parent_or_cwd(path: &Path) -> &Path {
 pub enum SkillError {
     #[error("Skill not found: {0}")]
     NotFound(String),
+    /// The registry is frozen (Stable mode, #6540) and the call would have mutated it.
+    ///
+    /// Deliberately distinct from [`SkillError::NotFound`], which is what this used to be reported as: a frozen registry is a configured steady state, not a lookup that failed, and the `Skill not found:` prefix sent operators looking for a broken skill that did not exist (#7964).
+    #[error("Skill registry is frozen (Stable mode): {0}")]
+    RegistryFrozen(String),
     #[error("Invalid skill manifest: {0}")]
     InvalidManifest(String),
     #[error("Skill already installed: {0}")]

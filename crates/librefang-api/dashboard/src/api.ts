@@ -3311,6 +3311,83 @@ export async function getConfigStatus(): Promise<ConfigStatus> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Media model endpoints (refs #8038, #8011)                          */
+/* ------------------------------------------------------------------ */
+/* Custom / self-hosted media endpoints are plain `GET /api/config`    */
+/* sub-tables, not entries in the model catalogue:                    */
+/* `[media.custom_stt]`, `[media.custom_image]`, `[media.custom_video]`*/
+/* and `[tts.custom]`. The types below describe that existing shape so */
+/* the Models tab can render them next to LLM models — the config file */
+/* layout is deliberately unchanged.                                   */
+
+/** Modality of one row in the unified Models tab. `llm` covers the model catalogue. */
+export type ModelEntryKind = "llm" | "tts" | "stt" | "image" | "video";
+
+/** Modality of a custom media endpoint — `ModelEntryKind` minus the catalogue. */
+export type MediaModelKind = Exclude<ModelEntryKind, "llm">;
+
+/**
+ * One custom media endpoint table as `GET /api/config` returns it.
+ *
+ * `api_key_env` is the *name* of an environment variable, never a key — the
+ * secret itself never enters config.toml and never reaches the dashboard.
+ * `model` is `Option<String>` on the Rust side for STT / image / video and a
+ * plain `String` for TTS, so it is optional here; `voice` and `format` exist
+ * on `CustomTtsConfig` only.
+ */
+export interface MediaModelEndpointConfig {
+  base_url?: string;
+  api_key_env?: string;
+  key_required?: boolean;
+  model?: string | null;
+  /** TTS only. */
+  voice?: string;
+  /** TTS only. */
+  format?: string;
+}
+
+/** The subset of a media endpoint the dashboard lets an operator edit. */
+export interface MediaModelEndpointDraft {
+  base_url: string;
+  key_required: boolean;
+  model: string;
+  /** TTS only — ignored for the other kinds. */
+  voice?: string;
+  /** TTS only — ignored for the other kinds. */
+  format?: string;
+}
+
+/** A custom media endpoint projected into a Models-tab row. */
+export interface MediaModelEndpoint {
+  kind: MediaModelKind;
+  /** Dotted `POST /api/config/set` path of the endpoint table, e.g. `media.custom_stt`. */
+  config_path: string;
+  /** Dotted path of the scalar that selects this endpoint, e.g. `media.audio_provider`. */
+  provider_path: string;
+  /** Provider name currently selected for this modality, or `""` when unset. */
+  provider: string;
+  config: MediaModelEndpointConfig;
+  /** Whether a base URL is set — an endpoint without one is never consulted. */
+  configured: boolean;
+  /**
+   * Whether the modality's master switch is on (`[media] audio_transcription`,
+   * `[tts] enabled`, …). A fully filled-in endpoint whose modality is off is
+   * never reached at runtime, so the tab has to say so.
+   */
+  modality_enabled: boolean;
+  /** Dotted path of that master switch, for the warning text. */
+  modality_enabled_path: string;
+  /**
+   * Value of the `[media]` scalar that takes precedence over this table's
+   * `model` (`audio_model` / `image_model` / `video_model`), or `null` when it
+   * is unset or the modality has no such scalar. TTS has none.
+   */
+  model_override: string | null;
+  /** Dotted path of that scalar, or `null` when the modality has none. */
+  model_override_path: string | null;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Config schema (draft-07)                                           */
 /* ------------------------------------------------------------------ */
 /* The backend now emits a draft-07 JSON Schema generated from the   */

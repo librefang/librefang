@@ -8,7 +8,7 @@ use crate::rate_limit_tracker::RateLimitSnapshot;
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use async_trait::async_trait;
 use futures::StreamExt;
-use librefang_types::config::ResponseFormat;
+use librefang_types::config::{ReasoningMode, ResponseFormat};
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -194,6 +194,21 @@ impl OpenAIDriver {
     /// True if the base URL points to Moonshot/Kimi.
     fn is_moonshot(&self) -> bool {
         self.base_url.contains("moonshot")
+    }
+
+    /// Which reasoning dialect this endpoint speaks (#7946).
+    ///
+    /// Decided from `base_url` rather than the model id, because the routing —
+    /// not the model — is what determines whether the nested
+    /// `reasoning: {"effort": …}` form or top-level `reasoning_effort` is
+    /// accepted. `openrouter/deepseek/deepseek-v4-pro` and a direct
+    /// `deepseek-v4-pro` are the same model behind two different dialects.
+    fn reasoning_wire_family(&self) -> ReasoningWireFamily {
+        if self.base_url.to_ascii_lowercase().contains("openrouter") {
+            ReasoningWireFamily::OpenRouter
+        } else {
+            ReasoningWireFamily::Direct
+        }
     }
 
     /// Stable provider tag used by [`crate::shared_rate_guard`].
@@ -626,8 +641,18 @@ struct OaiRequest {
     /// OpenAI-style extended-thinking opt-in, derived from `CompletionRequest.thinking` (#6398).
     /// Many OpenAI-compatible gateways gate reasoning behind this parameter and map it to a thinking budget server-side; without it they never produce the `reasoning_content` deltas the stream path already parses.
     /// An explicit `extra_body.reasoning_effort` overrides this value in `merge_extra_body`.
+    ///
+    /// Mutually exclusive with [`Self::reasoning`] — see [`reasoning_wire_fields`].
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    /// OpenRouter's nested reasoning control, `{"effort": "..."}` (#7946).
+    ///
+    /// OpenRouter answers HTTP 400 to a body that carries both this and the
+    /// top-level `reasoning_effort`, so exactly one of the two is ever
+    /// populated. [`reasoning_wire_fields`] is the single place that decides
+    /// which, and `no_payload_ever_carries_both_reasoning_controls` pins it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
     /// Structured output: `response_format` field (json_object or json_schema).
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
@@ -662,6 +687,25 @@ fn merge_extra_body(
         for k in keys {
             obj.insert(k.clone(), extra[k].clone());
         }
+        // #7946: `reasoning_effort` and `reasoning` are mutually exclusive on
+        // the wire — OpenRouter answers HTTP 400 to a payload carrying both.
+        // `reasoning_wire_fields` already guarantees that invariant for its
+        // own output, but an extra_body override of one spelling must also
+        // clear whichever spelling it resolved to, or the two can still
+        // coexist on an OpenRouter-routed request.
+        // Each guard also requires the *other* spelling to be absent from
+        // `extra`: an operator who deliberately supplied both has overridden
+        // both, and removing each because the other is present would leave the
+        // body with neither — silently dropping the reasoning control instead
+        // of honouring what was asked for.
+        let extra_effort = extra.contains_key("reasoning_effort");
+        let extra_nested = extra.contains_key("reasoning");
+        if extra_effort && !extra_nested {
+            obj.remove("reasoning");
+        }
+        if extra_nested && !extra_effort {
+            obj.remove("reasoning_effort");
+        }
     }
 }
 
@@ -676,6 +720,167 @@ fn reasoning_effort_for_budget(budget_tokens: u32) -> Option<&'static str> {
         4097..=16384 => Some("medium"),
         _ => Some("high"),
     }
+}
+
+/// Which reasoning dialect the endpoint in front of the model speaks (#7946).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningWireFamily {
+    /// The provider's own OpenAI-compatible endpoint.
+    Direct,
+    /// An OpenRouter gateway.
+    OpenRouter,
+}
+
+/// The reasoning-related fields of one outbound OpenAI-compatible body.
+///
+/// Returned as a group rather than resolved field-by-field at the struct
+/// literal because the interesting property is a relationship *between* the
+/// fields — `reasoning_effort` and `reasoning` must never both be populated —
+/// and a relationship can only be enforced where both values are in hand.
+#[derive(Debug, Default, PartialEq)]
+struct ReasoningWireFields {
+    /// DeepSeek / Moonshot gate: `{"type": "enabled" | "disabled"}`.
+    thinking: Option<serde_json::Value>,
+    /// Top-level OpenAI-style grade.
+    reasoning_effort: Option<&'static str>,
+    /// OpenRouter's nested grade, `{"effort": "..."}`.
+    reasoning: Option<serde_json::Value>,
+}
+
+/// DeepSeek V4's `reasoning_effort` vocabulary.
+///
+/// `None` means "no effort field" — the caller disables thinking instead.
+/// V4 accepts `low` / `high` / `max` and folds the compatibility spellings
+/// `medium` and `xhigh` into `high`, so nothing here needs to emit those.
+fn deepseek_reasoning_effort(mode: ReasoningMode) -> Option<&'static str> {
+    match mode {
+        ReasoningMode::None => None,
+        ReasoningMode::Low => Some("low"),
+        ReasoningMode::High => Some("high"),
+        ReasoningMode::Max => Some("max"),
+    }
+}
+
+/// OpenRouter's `reasoning.effort` vocabulary.
+///
+/// Total, because OpenRouter accepts `none` as an effort value and therefore
+/// needs no separate gate field to express non-think.
+/// `max` becomes `xhigh`, OpenRouter's name for the same rung.
+fn openrouter_reasoning_effort(mode: ReasoningMode) -> &'static str {
+    match mode {
+        ReasoningMode::None => "none",
+        ReasoningMode::Low => "low",
+        ReasoningMode::High => "high",
+        ReasoningMode::Max => "xhigh",
+    }
+}
+
+/// The `reasoning_effort` vocabulary of a generic OpenAI-compatible endpoint.
+///
+/// `None` means "omit the field", which is the only portable way to ask a
+/// generic gateway not to reason: OpenAI itself answers 400 to
+/// `reasoning_effort: "none"`, and a gateway that reasons by default is
+/// exactly the case that has its own gate field (DeepSeek V4, Kimi) handled
+/// elsewhere.
+/// `max` is clamped to `high` for the same reason — the OpenAI schema has no
+/// rung above it, and inventing one buys a 400 plus a strip-and-retry.
+fn generic_reasoning_effort(mode: ReasoningMode) -> Option<&'static str> {
+    match mode {
+        ReasoningMode::None => None,
+        ReasoningMode::Low => Some("low"),
+        ReasoningMode::High | ReasoningMode::Max => Some("high"),
+    }
+}
+
+/// Translate a resolved [`ReasoningMode`] (or, absent one, a thinking budget)
+/// into the reasoning fields this endpoint accepts (#7946).
+///
+/// The four families and why they differ:
+///
+/// * **Kimi / Moonshot** ([`ReasoningEchoPolicy::EmptyString`]) — thinking is
+///   disabled wire-side so multi-turn `tool_calls` work without round-tripping
+///   `reasoning_content`. That is a correctness requirement, not a preference,
+///   so an explicit mode does not override it.
+/// * **OpenRouter** — the nested `reasoning: {"effort": …}` form only.
+///   A body carrying both that and top-level `reasoning_effort` is rejected
+///   with HTTP 400, so this branch never sets the latter.
+/// * **DeepSeek V4** ([`ReasoningEchoPolicy::Echo`]) — `thinking` gates,
+///   `reasoning_effort` grades. With no explicit mode nothing is sent: V4
+///   reasons by default and its docs say `budget_tokens` is ignored, so
+///   deriving an effort from the budget would change the wire shape of every
+///   existing V4 request without changing what the model does.
+/// * **Everything else** ([`ReasoningEchoPolicy::None`]) — top-level
+///   `reasoning_effort`, with the pre-#7946 `budget_tokens` bucket as the
+///   fallback when no mode is set.
+///
+/// DeepSeek R1 ([`ReasoningEchoPolicy::Strip`]) reasons unconditionally and
+/// exposes no wire toggle, so it gets nothing in either dialect — including
+/// when routed through OpenRouter, which is why it short-circuits ahead of the
+/// family branch.
+///
+/// `effort_rejected` is the #7769 negative cache: an endpoint that has already
+/// answered 400 to a reasoning control for this model is not asked again.
+fn reasoning_wire_fields(
+    family: ReasoningWireFamily,
+    echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy,
+    mode: Option<ReasoningMode>,
+    budget_tokens: Option<u32>,
+    effort_rejected: bool,
+) -> ReasoningWireFields {
+    use librefang_types::model_catalog::ReasoningEchoPolicy;
+
+    let mut out = ReasoningWireFields::default();
+
+    if echo_policy == ReasoningEchoPolicy::EmptyString {
+        out.thinking = Some(serde_json::json!({"type": "disabled"}));
+        return out;
+    }
+
+    // DeepSeek R1 reasons unconditionally and exposes no wire toggle, in either
+    // dialect. This returns before the family branch below so an R1 route
+    // through OpenRouter is not handed a budget-derived `reasoning.effort` it
+    // never received before #7946 — the model has nothing to do with it.
+    if echo_policy == ReasoningEchoPolicy::Strip {
+        return out;
+    }
+
+    if effort_rejected {
+        return out;
+    }
+
+    if family == ReasoningWireFamily::OpenRouter {
+        let effort = match mode {
+            Some(m) => Some(openrouter_reasoning_effort(m)),
+            None => budget_tokens.and_then(reasoning_effort_for_budget),
+        };
+        out.reasoning = effort.map(|e| serde_json::json!({"effort": e}));
+        return out;
+    }
+
+    match echo_policy {
+        // No mode → nothing sent, preserving the pre-#7946 V4 wire shape.
+        ReasoningEchoPolicy::Echo => {
+            if let Some(m) = mode {
+                match deepseek_reasoning_effort(m) {
+                    Some(effort) => {
+                        out.thinking = Some(serde_json::json!({"type": "enabled"}));
+                        out.reasoning_effort = Some(effort);
+                    }
+                    None => out.thinking = Some(serde_json::json!({"type": "disabled"})),
+                }
+            }
+        }
+        ReasoningEchoPolicy::None => {
+            out.reasoning_effort = match mode {
+                Some(m) => generic_reasoning_effort(m),
+                None => budget_tokens.and_then(reasoning_effort_for_budget),
+            };
+        }
+        // `Strip` and `EmptyString` both returned above.
+        _ => {}
+    }
+
+    out
 }
 
 /// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
@@ -1256,6 +1461,18 @@ impl OpenAIDriver {
 
         let extra_body = request.extra_body.clone();
 
+        // Per-provider reasoning translation (#7946). The mode reaching here is
+        // already resolved (per-call > per-agent > global > compiled default) —
+        // the kernel folds all three layers into `manifest.thinking` before
+        // building the `CompletionRequest`.
+        let reasoning = reasoning_wire_fields(
+            self.reasoning_wire_family(),
+            echo_policy,
+            request.thinking.as_ref().and_then(|tc| tc.reasoning_mode),
+            request.thinking.as_ref().map(|tc| tc.budget_tokens),
+            self.reasoning_effort_rejected(&request.model),
+        );
+
         Ok(OaiRequest {
             model: request.model.clone(),
             messages: oai_messages,
@@ -1276,26 +1493,12 @@ impl OpenAIDriver {
             tool_choice,
             stream: false,
             stream_options: None,
-            // EmptyString policy disables thinking wire-side so multi-turn
-            // tool_calls don't require carrying back full reasoning_content.
-            thinking: if echo_policy == ReasoningEchoPolicy::EmptyString {
-                Some(serde_json::json!({"type": "disabled"}))
-            } else {
-                None
-            },
-            // Request extended thinking when the caller configured a budget (#6398).
-            // Emitted only under the default `None` echo policy: `EmptyString` (Kimi) disables thinking wire-side above, and `Strip` / `Echo` models (DeepSeek R1 / V4) reason by default without an opt-in — this API family rejects requests with unexpected reasoning fields (see the R1 `reasoning_content` note above), so nothing extra is sent to them.
-            // A gateway that already rejected the field for this model is not asked again (#7769) — the answer is deterministic, so re-sending it only buys a 400 and a retry on every turn.
-            reasoning_effort: if echo_policy == ReasoningEchoPolicy::None
-                && !self.reasoning_effort_rejected(&request.model)
-            {
-                request
-                    .thinking
-                    .as_ref()
-                    .and_then(|tc| reasoning_effort_for_budget(tc.budget_tokens))
-            } else {
-                None
-            },
+            // All three reasoning fields come from one resolver (#7946) so the
+            // OpenRouter mutual-exclusion invariant is enforced in a single
+            // place rather than implied by three independent conditionals.
+            thinking: reasoning.thinking,
+            reasoning_effort: reasoning.reasoning_effort,
+            reasoning: reasoning.reasoning,
             response_format: request
                 .response_format
                 .as_ref()
@@ -1467,15 +1670,17 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // A gateway that will not forward `reasoning_effort` rejects the request before the model sees it (#7769).
+                // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
                 // Strip the field, remember the model so `build_request` omits it from here on, and retry — the same shape as the `temperature` strip above.
+                // Both spellings are stripped (#7946): OpenRouter-routed bodies carry the nested `reasoning` object instead of top-level `reasoning_effort`, and a gateway in front of OpenRouter can reject that just as readily.
                 if status == 400
-                    && oai_request.reasoning_effort.is_some()
+                    && (oai_request.reasoning_effort.is_some() || oai_request.reasoning.is_some())
                     && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
                     && attempt < max_retries
                 {
-                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it");
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning control, retrying without it");
                     oai_request.reasoning_effort = None;
+                    oai_request.reasoning = None;
                     self.record_reasoning_effort_rejected(&oai_request.model);
                     // Same small backoff as the sibling parameter strips, so a
                     // misconfigured request cannot tight-loop.
@@ -1916,15 +2121,17 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // A gateway that will not forward `reasoning_effort` rejects the request before the model sees it (#7769).
+                // A gateway that will not forward the reasoning control rejects the request before the model sees it (#7769).
                 // Strip the field, remember the model so `build_request` omits it from here on, and retry — the same shape as the `temperature` strip above.
+                // Both spellings are stripped (#7946): OpenRouter-routed bodies carry the nested `reasoning` object instead of top-level `reasoning_effort`, and a gateway in front of OpenRouter can reject that just as readily.
                 if status == 400
-                    && oai_request.reasoning_effort.is_some()
+                    && (oai_request.reasoning_effort.is_some() || oai_request.reasoning.is_some())
                     && crate::llm_driver::llm_errors::is_unsupported_reasoning_effort_error(&body)
                     && attempt < max_retries
                 {
-                    warn!(model = %oai_request.model, "Gateway rejected reasoning_effort, retrying without it (stream)");
+                    warn!(model = %oai_request.model, "Gateway rejected reasoning control, retrying without it (stream)");
                     oai_request.reasoning_effort = None;
+                    oai_request.reasoning = None;
                     self.record_reasoning_effort_rejected(&oai_request.model);
                     // Same small backoff as the sibling parameter strips, so a
                     // misconfigured request cannot tight-loop.
@@ -3594,7 +3801,8 @@ mod tests {
         assert_eq!(reasoning_effort_for_budget(u32::MAX), Some("high"));
     }
 
-    /// Strip / Echo models (DeepSeek R1 / V4 families) reason by default and reject requests carrying unexpected reasoning fields — a configured budget must not emit `reasoning_effort` to them.
+    /// Strip / Echo models (DeepSeek R1 / V4 families) reason by default, so a configured budget alone must not emit `reasoning_effort` to them — DeepSeek ignores `budget_tokens`, and the derived bucket would change the wire shape without changing the behaviour.
+    /// An *explicit* `reasoning_mode` does reach V4 (#7946); see `deepseek_v4_direct_graded_modes_enable_thinking_with_effort`.
     #[test]
     fn strip_and_echo_policies_do_not_emit_reasoning_effort() {
         use librefang_types::config::ThinkingConfig;
@@ -3642,6 +3850,394 @@ mod tests {
         let mut wire = serde_json::to_value(&oai).expect("serialize");
         merge_extra_body(&oai.extra_body, &mut wire);
         assert_eq!(wire["reasoning_effort"], "high");
+    }
+
+    /// An `extra_body.reasoning_effort` override on an OpenRouter-routed
+    /// request must clear the nested `reasoning` object `reasoning_wire_fields`
+    /// already resolved, or the merged body carries both spellings —
+    /// exactly the combination OpenRouter answers HTTP 400 to.
+    #[test]
+    fn extra_body_reasoning_effort_override_clears_the_nested_openrouter_spelling() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://openrouter.ai/api/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("some-thinking-model", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::High),
+            ..Default::default()
+        });
+        req.extra_body = Some(std::collections::BTreeMap::from([(
+            "reasoning_effort".to_string(),
+            serde_json::json!("low"),
+        )]));
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.reasoning, Some(serde_json::json!({"effort": "high"})));
+        let mut wire = serde_json::to_value(&oai).expect("serialize");
+        merge_extra_body(&oai.extra_body, &mut wire);
+        assert_eq!(wire["reasoning_effort"], "low");
+        assert!(
+            wire.as_object().unwrap().get("reasoning").is_none(),
+            "wire must not carry both reasoning controls: {wire:?}"
+        );
+    }
+
+    /// An `extra_body` that supplies BOTH spellings has overridden both, so the
+    /// merge must honour them rather than cancel them out.
+    ///
+    /// Removing each spelling because the other is present left the body with
+    /// neither: the operator's explicit reasoning control vanished and the model
+    /// silently ran at its provider default with nothing in the payload to
+    /// explain why.
+    #[test]
+    fn extra_body_supplying_both_reasoning_spellings_keeps_both() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://openrouter.ai/api/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("some-thinking-model", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::High),
+            ..Default::default()
+        });
+        req.extra_body = Some(std::collections::BTreeMap::from([
+            ("reasoning_effort".to_string(), serde_json::json!("low")),
+            (
+                "reasoning".to_string(),
+                serde_json::json!({"effort": "xhigh"}),
+            ),
+        ]));
+        let oai = driver.build_request(&req).expect("build_request");
+        let mut wire = serde_json::to_value(&oai).expect("serialize");
+        merge_extra_body(&oai.extra_body, &mut wire);
+        assert_eq!(wire["reasoning_effort"], "low");
+        assert_eq!(wire["reasoning"], serde_json::json!({"effort": "xhigh"}));
+    }
+
+    // ── Per-agent / per-task reasoning mode → wire shape (#7946) ───────────
+    //
+    // These assert the serialized body, not just the struct, and every one of
+    // them asserts what is ABSENT as well as what is present. The absences are
+    // the load-bearing half: OpenRouter answers HTTP 400 to a payload carrying
+    // both `reasoning_effort` and `reasoning.effort`, and OpenAI answers 400 to
+    // `reasoning_effort: "none"`.
+
+    /// A DeepSeek V4 request with `reasoning_mode = "none"` must carry the
+    /// provider's explicit non-think toggle. Omitting the opt-in is not
+    /// equivalent: V4 reasons by default, so "we did not ask" reads as "yes".
+    #[test]
+    fn deepseek_v4_direct_none_mode_disables_thinking_on_the_wire() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("deepseek-v4-pro", ReasoningEchoPolicy::Echo);
+        req.thinking = Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::None),
+            ..Default::default()
+        });
+        let oai = driver.build_request(&req).expect("build_request");
+        let wire = serde_json::to_value(&oai).expect("serialize");
+        assert_eq!(wire["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(
+            wire.get("reasoning_effort").is_none(),
+            "a disabled request must not also grade the effort: {wire}"
+        );
+        assert!(wire.get("reasoning").is_none(), "{wire}");
+    }
+
+    /// The three graded modes send `thinking: enabled` plus DeepSeek's own
+    /// effort vocabulary — including `max`, which the pre-#7946 budget bucket
+    /// could never reach.
+    #[test]
+    fn deepseek_v4_direct_graded_modes_enable_thinking_with_effort() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        for (mode, expected) in [
+            (ReasoningMode::Low, "low"),
+            (ReasoningMode::High, "high"),
+            (ReasoningMode::Max, "max"),
+        ] {
+            let mut req =
+                build_catalog_policy_test_request("deepseek-v4-flash", ReasoningEchoPolicy::Echo);
+            req.thinking = Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            });
+            let oai = driver.build_request(&req).expect("build_request");
+            let wire = serde_json::to_value(&oai).expect("serialize");
+            assert_eq!(
+                wire["thinking"],
+                serde_json::json!({"type": "enabled"}),
+                "mode {mode}"
+            );
+            assert_eq!(wire["reasoning_effort"], expected, "mode {mode}");
+            assert!(
+                wire.get("reasoning").is_none(),
+                "direct DeepSeek must not use OpenRouter's nested form: {wire}"
+            );
+        }
+    }
+
+    /// Without an explicit mode a DeepSeek V4 body is byte-for-byte what it was
+    /// before #7946 — no `thinking`, no `reasoning_effort` — even though a
+    /// default `budget_tokens` is present. DeepSeek ignores `budget_tokens`, so
+    /// deriving an effort from it would change the wire shape of every existing
+    /// V4 request without changing what the model does.
+    #[test]
+    fn deepseek_v4_without_a_mode_keeps_the_pre_7946_wire_shape() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("deepseek-v4-pro", ReasoningEchoPolicy::Echo);
+        req.thinking = Some(ThinkingConfig::default()); // budget 10_000, no mode
+        let oai = driver.build_request(&req).expect("build_request");
+        let wire = serde_json::to_value(&oai).expect("serialize");
+        assert!(wire.get("thinking").is_none(), "{wire}");
+        assert!(wire.get("reasoning_effort").is_none(), "{wire}");
+        assert!(wire.get("reasoning").is_none(), "{wire}");
+    }
+
+    /// The same DeepSeek model behind OpenRouter takes the nested form, and
+    /// `max` becomes OpenRouter's name for that rung, `xhigh`.
+    #[test]
+    fn openrouter_routed_deepseek_uses_the_nested_reasoning_object() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://openrouter.ai/api/v1".to_string());
+        for (mode, expected) in [
+            (ReasoningMode::None, "none"),
+            (ReasoningMode::Low, "low"),
+            (ReasoningMode::High, "high"),
+            (ReasoningMode::Max, "xhigh"),
+        ] {
+            let mut req = build_catalog_policy_test_request(
+                "openrouter/deepseek/deepseek-v4-pro",
+                ReasoningEchoPolicy::Echo,
+            );
+            req.thinking = Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            });
+            let oai = driver.build_request(&req).expect("build_request");
+            let wire = serde_json::to_value(&oai).expect("serialize");
+            assert_eq!(
+                wire["reasoning"],
+                serde_json::json!({"effort": expected}),
+                "mode {mode}"
+            );
+            assert!(
+                wire.get("reasoning_effort").is_none(),
+                "OpenRouter 400s on a body carrying both spellings: {wire}"
+            );
+            assert!(
+                wire.get("thinking").is_none(),
+                "OpenRouter carries the gate inside `reasoning`, not a sibling `thinking`: {wire}"
+            );
+        }
+    }
+
+    /// With no explicit mode an OpenRouter body still gets the pre-#7946
+    /// `budget_tokens` bucket — translated into the nested form, because that is
+    /// the shape this endpoint accepts.
+    #[test]
+    fn openrouter_falls_back_to_the_budget_bucket_without_a_mode() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://openrouter.ai/api/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("openrouter/qwen/qwen3", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig::default()); // budget 10_000 → "medium"
+        let oai = driver.build_request(&req).expect("build_request");
+        let wire = serde_json::to_value(&oai).expect("serialize");
+        assert_eq!(wire["reasoning"], serde_json::json!({"effort": "medium"}));
+        assert!(wire.get("reasoning_effort").is_none(), "{wire}");
+    }
+
+    /// A plain OpenAI-compatible endpoint gets the top-level field. `max` is
+    /// clamped to `high` because the OpenAI schema has no rung above it, and
+    /// `none` is expressed by omission because OpenAI 400s on the literal.
+    #[test]
+    fn generic_openai_compatible_model_maps_modes_to_top_level_effort() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://api.openai.com/v1".to_string());
+        for (mode, expected) in [
+            (ReasoningMode::None, None),
+            (ReasoningMode::Low, Some("low")),
+            (ReasoningMode::High, Some("high")),
+            (ReasoningMode::Max, Some("high")),
+        ] {
+            let mut req =
+                build_catalog_policy_test_request("gpt-mystery", ReasoningEchoPolicy::None);
+            req.thinking = Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            });
+            let oai = driver.build_request(&req).expect("build_request");
+            let wire = serde_json::to_value(&oai).expect("serialize");
+            match expected {
+                Some(e) => assert_eq!(wire["reasoning_effort"], e, "mode {mode}"),
+                None => assert!(
+                    wire.get("reasoning_effort").is_none(),
+                    "mode {mode} must omit the field rather than send a literal \"none\": {wire}"
+                ),
+            }
+            assert!(
+                wire.get("reasoning").is_none(),
+                "the nested form is OpenRouter-only: {wire}"
+            );
+        }
+    }
+
+    /// An explicit mode wins over the `budget_tokens` bucket. `budget_tokens:
+    /// 10_000` alone derives `medium`; asking for `low` must send `low`.
+    #[test]
+    fn explicit_mode_wins_over_the_budget_bucket() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let mut req = build_catalog_policy_test_request("mystery", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig {
+            budget_tokens: 10_000,
+            stream_thinking: false,
+            reasoning_mode: Some(ReasoningMode::Low),
+        });
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.reasoning_effort, Some("low"));
+    }
+
+    /// Kimi disables thinking wire-side so multi-turn `tool_calls` work without
+    /// round-tripping `reasoning_content`. That is a correctness requirement,
+    /// not a preference, so an explicit mode must not re-enable it.
+    #[test]
+    fn kimi_disable_wins_over_an_explicit_reasoning_mode() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://example.com/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("kimi-k2.5", ReasoningEchoPolicy::EmptyString);
+        req.thinking = Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::Max),
+            ..Default::default()
+        });
+        let oai = driver.build_request(&req).expect("build_request");
+        assert_eq!(oai.thinking, Some(serde_json::json!({"type": "disabled"})));
+        assert_eq!(oai.reasoning_effort, None);
+        assert_eq!(oai.reasoning, None);
+    }
+
+    /// The #7769 negative cache suppresses BOTH spellings. An endpoint that has
+    /// already answered 400 to a reasoning control for this model is not asked
+    /// again in either dialect.
+    #[test]
+    fn a_rejected_reasoning_control_suppresses_both_spellings() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        for base_url in ["https://openrouter.ai/api/v1", "https://api.openai.com/v1"] {
+            let driver = OpenAIDriver::new(String::new(), base_url.to_string());
+            driver.record_reasoning_effort_rejected("picky-model");
+            let mut req =
+                build_catalog_policy_test_request("picky-model", ReasoningEchoPolicy::None);
+            req.thinking = Some(ThinkingConfig {
+                reasoning_mode: Some(ReasoningMode::High),
+                ..Default::default()
+            });
+            let oai = driver.build_request(&req).expect("build_request");
+            assert_eq!(oai.reasoning_effort, None, "{base_url}");
+            assert_eq!(oai.reasoning, None, "{base_url}");
+        }
+    }
+
+    /// DeepSeek R1 has no wire toggle, so it must receive nothing in either
+    /// dialect — including through OpenRouter, where the budget bucket would
+    /// otherwise have started emitting a `reasoning.effort` it never got before
+    /// #7946. R1 always reasons; the field would change the payload without
+    /// changing the model.
+    #[test]
+    fn deepseek_r1_gets_no_reasoning_control_in_either_dialect() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        for base_url in [
+            "https://openrouter.ai/api/v1",
+            "https://api.deepseek.com/v1",
+        ] {
+            let driver = OpenAIDriver::new(String::new(), base_url.to_string());
+            for mode in [None, Some(ReasoningMode::None), Some(ReasoningMode::Max)] {
+                let mut req =
+                    build_catalog_policy_test_request("deepseek-r1", ReasoningEchoPolicy::Strip);
+                req.thinking = Some(ThinkingConfig {
+                    reasoning_mode: mode,
+                    ..Default::default()
+                });
+                let oai = driver.build_request(&req).expect("build_request");
+                let wire = serde_json::to_value(&oai).expect("serialize");
+                assert!(
+                    wire.get("thinking").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+                assert!(
+                    wire.get("reasoning_effort").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+                assert!(
+                    wire.get("reasoning").is_none(),
+                    "{base_url} {mode:?}: {wire}"
+                );
+            }
+        }
+    }
+
+    /// The invariant, checked exhaustively rather than per-case: no payload the
+    /// resolver can produce carries both `reasoning_effort` and
+    /// `reasoning.effort`. OpenRouter answers HTTP 400 to one that does, and a
+    /// future branch that sets the wrong pair would otherwise only surface as a
+    /// production 400 on one provider.
+    #[test]
+    fn no_payload_ever_carries_both_reasoning_controls() {
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let modes = [
+            None,
+            Some(ReasoningMode::None),
+            Some(ReasoningMode::Low),
+            Some(ReasoningMode::High),
+            Some(ReasoningMode::Max),
+        ];
+        let policies = [
+            ReasoningEchoPolicy::None,
+            ReasoningEchoPolicy::Strip,
+            ReasoningEchoPolicy::Echo,
+            ReasoningEchoPolicy::EmptyString,
+        ];
+        let families = [ReasoningWireFamily::Direct, ReasoningWireFamily::OpenRouter];
+        for family in families {
+            for policy in policies {
+                for mode in modes {
+                    for budget in [None, Some(0), Some(2_000), Some(10_000), Some(100_000)] {
+                        for rejected in [false, true] {
+                            let f = reasoning_wire_fields(family, policy, mode, budget, rejected);
+                            assert!(
+                                !(f.reasoning_effort.is_some() && f.reasoning.is_some()),
+                                "both reasoning controls set for {family:?}/{policy:?}/{mode:?}/{budget:?}/rejected={rejected}: {f:?}"
+                            );
+                            if family == ReasoningWireFamily::OpenRouter {
+                                assert!(
+                                    f.reasoning_effort.is_none(),
+                                    "OpenRouter must never use the top-level spelling: {f:?}"
+                                );
+                            } else {
+                                assert!(
+                                    f.reasoning.is_none(),
+                                    "only OpenRouter uses the nested spelling: {f:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Catalog `Echo` policy on a model the substring fallback would NOT
@@ -4039,6 +4635,7 @@ mod tests {
             stream_options: None,
             thinking: None,
             reasoning_effort: None,
+            reasoning: None,
             response_format: None,
             extra_body: Some(extra),
         };
@@ -4091,6 +4688,7 @@ mod tests {
                 stream_options: None,
                 thinking: None,
                 reasoning_effort: None,
+                reasoning: None,
                 response_format: None,
                 extra_body: Some(extra),
             };
@@ -4144,6 +4742,7 @@ mod tests {
             stream_options: None,
             thinking: None,
             reasoning_effort: None,
+            reasoning: None,
             response_format: None,
             extra_body: None,
         };
