@@ -680,12 +680,13 @@ def sanitize_rich_markdown(text: str) -> str:
     Two character-local rules. No lookahead, no scanning, no attempt to
     locate a Markdown construct or to find where one ends:
 
-    * ``<`` is escaped so that the run of backslashes preceding it is
-      **odd**, which is what makes Markdown treat it as literal. A ``<``
-      the author already escaped is left exactly as it is. The parity
-      matters: the Bot API warns that "'\\' character usually must be
-      escaped with a preceding '\\' character", and an even run leaves the
-      ``<`` bare.
+    * ``&`` becomes ``&amp;`` and ``<`` becomes ``&lt;``, unconditionally,
+      so the output contains no ``<`` and no tag can be parsed. An earlier
+      version used a backslash and shipped; **Telegram does not treat**
+      ``\\<`` **as an escape** — the backslash is delivered as a character
+      and the tag is parsed anyway, so a quoted ``<tg-button>`` became a
+      real button (#8127). Backslash does work for Markdown syntax, which
+      is why ``\\!`` below is fine and why the mistake was plausible.
     * ``!`` before ``[`` is backslash-escaped, so ``![](url)`` stays inert
       text rather than becoming a media block fetched from that URL.
 
@@ -713,7 +714,8 @@ def sanitize_rich_markdown(text: str) -> str:
     i = 0
     n = len(text)
     # Length of the run of backslashes immediately before the current
-    # position. An odd run already escapes whatever follows it.
+    # position. Only the ``!`` rule needs it: an odd run there is already
+    # an escape the author wrote.
     backslashes = 0
     while i < n:
         ch = text[i]
@@ -722,10 +724,15 @@ def sanitize_rich_markdown(text: str) -> str:
             backslashes += 1
             i += 1
             continue
+        if ch == "&":
+            # First, so an author's literal ``&lt;`` survives as those four
+            # characters rather than decoding into a ``<`` never inspected.
+            out.append("&amp;")
+            backslashes = 0
+            i += 1
+            continue
         if ch == "<":
-            if backslashes % 2 == 0:
-                out.append("\\")
-            out.append("<")
+            out.append("&lt;")
             backslashes = 0
             i += 1
             continue

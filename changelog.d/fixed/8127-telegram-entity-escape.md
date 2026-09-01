@@ -1,0 +1,5 @@
+The Telegram sidecars now neutralise raw HTML in agent text with `&lt;` rather than a backslash, because Telegram does not treat `\<` as an escape: it delivers the backslash as a character and parses the tag anyway.
+A `<tg-button type="callback_data">` quoted from a fetched page, an email body or a file therefore reached the chat as a real button, and a tap on it returned to the adapter as a genuine `ButtonCallback` carrying a payload the quoted content chose — the exact outcome the sanitiser exists to prevent.
+The button was not visible as `reply_markup` but inline at `rich_message.blocks[].text[].button`, which is part of why it survived review.
+Escaping does work for Markdown syntax — `\*not italic\*` arrives as literal asterisks — so the mechanism exists; it simply does not extend to HTML tags, and only a live bot could show that.
+Every `<` is escaped, not just the opening one: escaping only the first leaves `</tg-button>` to be parsed and dropped, silently truncating the quoted text (#8127) (@nevgenov)
