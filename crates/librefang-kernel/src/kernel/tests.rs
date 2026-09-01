@@ -16317,6 +16317,38 @@ async fn step_agent_by_type_spawns_from_template_when_unregistered() {
     kernel.shutdown();
 }
 
+/// A step agent spawned from a type came from a template, so it must carry the
+/// same `source_template` stamp `POST /api/agents` applies (#8018). Without it
+/// the dashboard's origin column is blank, which reads as "not created from a
+/// template" rather than "we did not record it".
+#[tokio::test(flavor = "multi_thread")]
+async fn step_agent_by_type_records_the_template_it_came_from() {
+    let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-provenance");
+    seed_agent_template(
+        &kernel,
+        "researcher",
+        "name = \"researcher\"\ndescription = \"finds things out\"\n",
+    );
+
+    kernel
+        .resolve_step_agent(&StepAgent::ByType {
+            template: "researcher".to_string(),
+        })
+        .expect("type should resolve by spawning the template");
+
+    let entry = kernel
+        .agents
+        .registry
+        .find_by_name("researcher")
+        .expect("spawned agent is registered");
+    assert_eq!(
+        entry.manifest.source_template.as_deref(),
+        Some("researcher"),
+        "a step agent spawned from a type must record the type it came from"
+    );
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn step_agent_by_type_reuses_the_registered_agent() {
     let (_tmp, kernel) = boot_kernel_for_step_agent_tests("by-type-reuse");
