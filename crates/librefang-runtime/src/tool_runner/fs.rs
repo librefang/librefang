@@ -12,6 +12,7 @@
 //! shapes (shared with the dispatcher and unmigrated tools).
 
 use super::error::{ToolError, ToolResult};
+use super::io_retry;
 use crate::kernel_handle::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -393,20 +394,22 @@ pub(super) async fn tool_file_list(
         .as_u64()
         .map(|o| o as usize)
         .unwrap_or(DEFAULT_DIR_OFFSET);
-    let mut entries = tokio::fs::read_dir(&resolved)
+    // #8050: both directory calls go through the EINTR-retrying wrappers.
+    // On a cloud-synced mount an interrupted syscall is routine, and surfacing it failed the tool call with a message that reads like a filesystem outage.
+    let mut entries = io_retry::read_dir(&resolved)
         .await
         .map_err(|e| ToolError::Upstream {
             message: format!("Failed to list directory '{}': {e}", resolved.display()),
             source: Some(Box::new(e)),
         })?;
     let mut files = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| ToolError::Upstream {
-            message: format!("Failed to read entry in '{}': {e}", resolved.display()),
-            source: Some(Box::new(e)),
-        })?
+    while let Some(entry) =
+        io_retry::next_entry(&mut entries)
+            .await
+            .map_err(|e| ToolError::Upstream {
+                message: format!("Failed to read entry in '{}': {e}", resolved.display()),
+                source: Some(Box::new(e)),
+            })?
     {
         let name = entry.file_name().to_string_lossy().to_string();
         let metadata = entry.metadata().await;
