@@ -386,10 +386,8 @@ describe("RuntimePage", () => {
     ]);
   });
 
-  // `ConfirmDialog` stays open when `onConfirm` rejects, and the only other
-  // place a backup failure surfaces is the inline `backupMutation.isError`
-  // notice inside the card — which is behind the modal overlay. Without a
-  // toast the operator sees a dialog that appears to have done nothing.
+  // `ConfirmDialog` stays open when `onConfirm` rejects, and the only other place a backup failure surfaces is the inline `backupMutation.isError` notice inside the card — which is behind the modal overlay.
+  // Without a toast the operator sees a dialog that appears to have done nothing.
   it("reports a failed backup as a toast instead of leaving a silent dialog", async () => {
     const mutateAsync = vi.fn().mockRejectedValue(new Error("disk full"));
     useCreateBackupMock.mockReturnValue(makeMutation({ mutateAsync }));

@@ -946,11 +946,8 @@ export function RuntimePage() {
         title={t("runtime.create_backup_confirm_title")}
         message={t("runtime.create_backup_confirm_desc")}
         confirmLabel={t("runtime.create_backup_confirm")}
-        // `ConfirmDialog` keeps itself open when `onConfirm` rejects, and the
-        // only other place a backup failure surfaces is the inline
-        // `backupMutation.isError` notice inside the card — which is behind
-        // the modal overlay. Reporting it here and letting the promise resolve
-        // closes the dialog and puts the reason where the operator is looking.
+        // `ConfirmDialog` keeps itself open when `onConfirm` rejects, and the only other place a backup failure surfaces is the inline `backupMutation.isError` notice inside the card — which is behind the modal overlay.
+        // Reporting it here and letting the promise resolve closes the dialog and puts the reason where the operator is looking.
         onConfirm={async () => {
           try {
             await backupMutation.mutateAsync(undefined, {
