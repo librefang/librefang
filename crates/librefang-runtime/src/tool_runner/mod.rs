@@ -20,6 +20,7 @@ mod fs;
 mod goal;
 mod hand;
 mod image;
+mod io_retry;
 mod knowledge;
 #[cfg(feature = "media")]
 mod media;
