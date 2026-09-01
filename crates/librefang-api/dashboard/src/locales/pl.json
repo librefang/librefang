@@ -1988,6 +1988,7 @@
     "no_backups": "Nie ma jeszcze kopii zapasowych. Utwórz pierwszą kopię zapasową, aby zapisać migawkę wszystkich konfiguracji agentów, pamięci i ustawień.",
     "backup_created": "Utworzono kopię zapasową",
     "backup_error": "Kopia zapasowa nie powiodła się",
+    "delete_backup_error": "Nie udało się usunąć kopii zapasowej",
     "create_backup_confirm_title": "Utwórz kopię zapasową",
     "create_backup_confirm_desc": "Spowoduje to zapisanie migawki wszystkich konfiguracji agentów, pamięci i ustawień. W dużym obszarze roboczym może to chwilę potrwać.",
     "create_backup_confirm": "Utwórz kopię zapasową",

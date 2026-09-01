@@ -1981,6 +1981,7 @@
     "no_backups": "아직 백업이 없습니다. 첫 백업을 생성하여 모든 에이전트 설정, 메모리, 세팅의 스냅샷을 저장하세요.",
     "backup_created": "백업이 생성되었습니다.",
     "backup_error": "백업 실패",
+    "delete_backup_error": "백업을 삭제하지 못했습니다",
     "create_backup_confirm_title": "백업 생성",
     "create_backup_confirm_desc": "모든 에이전트 설정, 메모리, 세팅의 스냅샷을 저장합니다. 작업 공간이 클 경우 시간이 걸릴 수 있습니다.",
     "create_backup_confirm": "백업 생성",

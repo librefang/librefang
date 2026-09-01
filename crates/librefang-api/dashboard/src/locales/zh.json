@@ -1982,6 +1982,7 @@
     "no_backups": "暂无备份。创建首个备份以保存所有代理配置、记忆和设置的快照。",
     "backup_created": "备份已创建",
     "backup_error": "备份失败",
+    "delete_backup_error": "无法删除备份",
     "create_backup_confirm_title": "创建备份",
     "create_backup_confirm_desc": "将保存所有代理配置、记忆和设置的快照。工作区较大时可能需要一些时间。",
     "create_backup_confirm": "创建备份",
