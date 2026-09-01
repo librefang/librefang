@@ -745,6 +745,58 @@ model = "gpt-4o"
     expect(parsedSchema.properties.id.type).toBe("integer");
   });
 
+  // #7946 added `reasoning_mode` to the `[thinking]` table, and the form has no
+  // widget for it. Before the extras slot below, opening any agent in the visual
+  // editor and pressing save re-emitted `[thinking]` from `budget_tokens` and
+  // `stream_thinking` alone, silently deleting the operator's reasoning mode
+  // from agent.toml — the same class of loss `extras.capabilities` already guards.
+  it("round-trips an unknown [thinking] key such as reasoning_mode", () => {
+    const original = `name = "agent"
+
+[thinking]
+budget_tokens = 5000
+stream_thinking = true
+reasoning_mode = "none"
+`;
+    const result = parseManifestToml(original);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.form.thinking.budget_tokens).toBe("5000");
+    expect(result.extras.thinking).toEqual({ reasoning_mode: "none" });
+
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).toContain('reasoning_mode = "none"');
+    // And it must land inside [thinking], not leak into a later section: an
+    // extra scalar emitted after the next `[header]` would belong to that
+    // section instead, which is a different (and silent) kind of corruption.
+    const after = out.slice(out.indexOf("[thinking]") + "[thinking]".length);
+    const nextHeader = after.search(/\n\[/);
+    const thinkingBlock = nextHeader === -1 ? after : after.slice(0, nextHeader);
+    expect(thinkingBlock).toContain('reasoning_mode = "none"');
+
+    // Stable across a second pass.
+    const second = parseManifestToml(out);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.extras.thinking).toEqual({ reasoning_mode: "none" });
+  });
+
+  // Unticking "enabled" is the user deleting the whole table, so the preserved
+  // keys go with it rather than stranding a [thinking] block nothing owns.
+  it("drops preserved [thinking] extras when the section is disabled", () => {
+    const result = parseManifestToml(`name = "agent"
+
+[thinking]
+reasoning_mode = "max"
+`);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    result.form.thinking.enabled = false;
+    const out = serializeManifestForm(result.form, result.extras);
+    expect(out).not.toContain("[thinking]");
+    expect(out).not.toContain("reasoning_mode");
+  });
+
   it("round-trips: serialize(parse(toml)) preserves form + extras", () => {
     const original = `name = "agent"
 description = "test"

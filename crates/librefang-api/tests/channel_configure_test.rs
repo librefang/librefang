@@ -276,6 +276,101 @@ async fn configure_rejects_name_conflict_with_a_different_channel_type() {
     );
 }
 
+/// Editing one non-secret field on an already-configured instance must not
+/// require re-pasting every required secret (#8063).
+///
+/// The configure drawer never echoes a stored secret back as plaintext — it
+/// shows "•••• (set — leave blank to keep)" and submits nothing for that field —
+/// and the write path has always honoured that: a key absent from `values` never
+/// reaches `upsert_secret`, so the stored secret survives. Only the required-field
+/// pre-check disagreed, rejecting the save with `required field ... is missing or
+/// empty`, which made the drawer's own promise unkeepable and left an operator no
+/// way to change an allowlist without first hunting down their workspace tokens.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_keeps_a_stored_secret_when_the_form_omits_it() {
+    let harness = boot_router().await;
+
+    let (status, body) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({"values": {"TELEGRAM_BOT_TOKEN": "token-original"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Second save: exactly what the drawer sends when the operator edits an
+    // allowlist and leaves the secret field blank.
+    let (status, body) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({"values": {"ALLOWED_USERS": "111,222"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let secrets =
+        std::fs::read_to_string(harness.home.join("secrets.env")).expect("secrets.env exists");
+    assert!(
+        secrets.contains("TELEGRAM_BOT_TOKEN=token-original"),
+        "the omitted secret must be left exactly as it was: {secrets}"
+    );
+    let config =
+        std::fs::read_to_string(harness.home.join("config.toml")).expect("config.toml exists");
+    assert!(
+        config.contains("ALLOWED_USERS"),
+        "the edited non-secret field must be persisted: {config}"
+    );
+
+    // And the row still reports the secret as set, so the next drawer keeps
+    // showing the "leave blank to keep" placeholder rather than an empty
+    // required field.
+    let payload = get_channels(&harness.app).await;
+    let row = channel_row(&payload, "telegram");
+    let token = row["fields"]
+        .as_array()
+        .expect("fields is an array")
+        .iter()
+        .find(|f| f["key"] == "TELEGRAM_BOT_TOKEN")
+        .unwrap_or_else(|| panic!("no TELEGRAM_BOT_TOKEN field in {row}"));
+    assert_eq!(token["has_value"], true, "{row}");
+}
+
+/// The relaxation above is "has a value after this save", not "required fields
+/// are optional now": a first save for an instance with nothing stored is still
+/// a 400, and still writes neither file.
+///
+/// Uses a named second instance so the outcome is decided by `secrets.env` alone.
+/// The required-secret check accepts the daemon's own environment as a source for the bare-key path only, so a `TELEGRAM_BOT_TOKEN` exported into the test process cannot make this pass for the wrong reason.
+/// (That gate is deliberately narrower than what the child actually sees — the supervisor never calls `Command::env_clear`, so an exported bare key reaches every sidecar child — because a namespaced instance must name its own secret rather than silently running on the first instance's token.)
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_still_rejects_a_required_secret_that_was_never_stored() {
+    let harness = boot_router().await;
+
+    let (status, body) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"ALLOWED_USERS": "111"},
+            "instance_name": "telegram-hr",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("TELEGRAM_BOT_TOKEN"),
+        "the 400 must name the field that has no value: {body}"
+    );
+    assert!(
+        !harness.home.join("secrets.env").exists(),
+        "a rejected save must not have written secrets.env"
+    );
+    let config = std::fs::read_to_string(harness.home.join("config.toml")).unwrap_or_default();
+    assert!(
+        !config.contains("telegram-hr"),
+        "a rejected save must not have written the instance block: {config}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_returns_typed_metadata_array() {
     let harness = boot_router().await;

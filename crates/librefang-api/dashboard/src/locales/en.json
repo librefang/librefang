@@ -1057,6 +1057,7 @@
     "saved": "Saved",
     "saved_restart_required": "Saved — restart daemon to apply",
     "schema_unavailable_hint": "This channel runs as an out-of-process sidecar and its setup form could not be loaded. Review the error below. If the SDK is missing, install it; otherwise fix the reported problem. Restart the daemon to retry schema discovery.",
+    "schema_unavailable_hint_no_reason": "This channel runs as an out-of-process sidecar and the daemon has no setup form for its adapter type, so there is nothing to edit here. Configure this instance directly in config.toml, then restart the daemon to retry schema discovery.",
     "schema_unavailable_title": "Setup form unavailable",
     "sidecar_sdk_version": "Adapter SDK",
     "secret_set_placeholder": "•••• (set — leave blank to keep)",

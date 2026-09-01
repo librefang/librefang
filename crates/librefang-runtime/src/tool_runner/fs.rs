@@ -93,6 +93,123 @@ pub(super) fn named_ws_prefixes(
     }
 }
 
+/// Fetch the named-workspace `@alias` → resolved-path mapping for the calling
+/// agent. Returns an empty vec when either kernel or agent id is missing.
+pub(super) fn named_ws_aliases(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<(String, PathBuf)> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k
+            .named_workspace_aliases(aid)
+            .into_iter()
+            .map(|(name, path, _)| (name, path))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Tool input keys that carry a workspace-sandbox path, and so accept the
+/// `@name` form the kernel advertises in `TOOLS.md` (#8051).
+///
+/// `apply_patch` is deliberately absent: its paths live inside the patch text
+/// under `*** Update File:` headers rather than in a path argument, and
+/// rewriting a patch body is a different job from rewriting an argument.
+const ALIAS_PATH_KEYS: &[(&str, &str)] = &[
+    ("file_read", "path"),
+    ("file_write", "path"),
+    ("file_list", "path"),
+    ("code_search", "path"),
+    ("image_analyze", "path"),
+    ("media_describe", "path"),
+    ("media_transcribe", "path"),
+    ("channel_send", "file_path"),
+    ("web_fetch_to_file", "dest_path"),
+];
+
+/// Expand a leading `@name/` in the path argument of `tool_name`, if it has one.
+///
+/// `Ok(None)` means "nothing to rewrite" and the caller keeps the original
+/// input; `Ok(Some(v))` is the rewritten input; `Err` is a message for the
+/// model.
+///
+/// This runs at the dispatch boundary, *before* any arm inspects a path, so
+/// every downstream check — the sandbox resolver, the absolute-path
+/// containment gate, the read-only workspace pre-checks — sees an ordinary
+/// absolute path and enforces against exactly the string that will be opened.
+/// Expanding later, inside the individual tools, would let the two disagree.
+pub(super) fn expand_alias_in_tool_input(
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some((_, key)) = ALIAS_PATH_KEYS.iter().find(|(t, _)| *t == tool_name) else {
+        return Ok(None);
+    };
+    let Some(raw) = input.get(*key).and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    if !raw.starts_with('@') {
+        return Ok(None);
+    }
+    let aliases = named_ws_aliases(kernel, caller_agent_id);
+    if aliases.is_empty() {
+        // This agent has no named workspaces, so `@` here is just the first
+        // character of a filename. Rewriting it would break a legitimate path,
+        // and there is no alias the agent could have meant.
+        return Ok(None);
+    }
+    let expanded = expand_workspace_alias(raw, &aliases)?;
+    let mut rewritten = input.clone();
+    rewritten[*key] = serde_json::Value::String(expanded);
+    Ok(Some(rewritten))
+}
+
+/// Resolve `@name` / `@name/sub/path` against `aliases`.
+///
+/// The remainder is rejected if it is absolute or contains `..`. Both would be
+/// caught downstream (`Path::join` lets an absolute right-hand side replace the
+/// root, and the sandbox resolver refuses `..` and re-checks containment after
+/// canonicalizing), but an alias is a convenience the agent was *told* to use,
+/// so it should fail with a message about the alias rather than a traversal
+/// error about a path the agent never typed.
+pub(super) fn expand_workspace_alias(
+    raw: &str,
+    aliases: &[(String, PathBuf)],
+) -> Result<String, String> {
+    let body = raw.strip_prefix('@').unwrap_or(raw);
+    let (name, rest) = body.split_once('/').unwrap_or((body, ""));
+
+    let Some((_, root)) = aliases.iter().find(|(n, _)| n == name) else {
+        let mut known: Vec<String> = aliases.iter().map(|(n, _)| format!("@{n}")).collect();
+        known.sort();
+        return Err(format!(
+            "unknown named workspace '@{name}'. Declared for this agent: {}",
+            known.join(", ")
+        ));
+    };
+
+    if rest.is_empty() {
+        return Ok(root.display().to_string());
+    }
+    let rest_path = Path::new(rest);
+    if rest_path.is_absolute() {
+        return Err(format!(
+            "path '{raw}' is not valid: the part after '@{name}/' must be relative"
+        ));
+    }
+    if rest_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "path '{raw}' is not valid: '..' components are forbidden inside a named workspace"
+        ));
+    }
+    Ok(root.join(rest_path).display().to_string())
+}
+
 /// Like [`named_ws_prefixes`] but only returns prefixes for read-write
 /// workspaces. Used by `file_write` to widen the writable allowlist.
 pub(super) fn named_ws_prefixes_writable(

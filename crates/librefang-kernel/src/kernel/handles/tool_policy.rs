@@ -73,7 +73,13 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
             .collect()
     }
 
-    fn named_workspace_prefixes(&self, agent_id: &str) -> Vec<(std::path::PathBuf, WorkspaceMode)> {
+    /// The single source of truth for the agent's named workspaces.
+    /// `named_workspace_prefixes` is the trait's derived view of this list
+    /// (name dropped), so both are computed from one resolution pass.
+    fn named_workspace_aliases(
+        &self,
+        agent_id: &str,
+    ) -> Vec<(String, std::path::PathBuf, WorkspaceMode)> {
         let Ok(aid) = agent_id.parse::<AgentId>() else {
             return vec![];
         };
@@ -98,6 +104,7 @@ impl kernel_handle::ToolPolicy for LibreFangKernel {
                     &workspaces_root,
                     &canonical_mount_roots,
                 )
+                .map(|(path, mode)| (name.clone(), path, mode))
             })
             .collect()
     }

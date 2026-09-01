@@ -44,17 +44,48 @@ use std::sync::Mutex;
 use tower::ServiceExt;
 
 struct RecordingChannelAdapter {
+    /// Registration name — the `[[sidecar_channels]] name`, which is what the channel bridge keys the adapter registry by.
+    name: String,
+    channel_type: ChannelType,
+    /// The bridge sources this from the same `name` (`channel_bridge.rs`), so a named instance's account id *is* its instance name.
+    account_id: Option<String>,
     sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingChannelAdapter {
+    /// A single-bot adapter whose name and channel type coincide — the shape every channel had before named instances (#8046).
+    fn telegram(sent: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            name: "telegram".to_string(),
+            channel_type: ChannelType::Telegram,
+            account_id: None,
+            sent,
+        }
+    }
+
+    /// A **named instance**: `name = "slack-hr", channel_type = "slack"` (#8055).
+    fn named_instance(name: &str, channel_type: &str, sent: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            name: name.to_string(),
+            channel_type: ChannelType::Custom(channel_type.to_string()),
+            account_id: Some(name.to_string()),
+            sent,
+        }
+    }
 }
 
 #[async_trait]
 impl ChannelAdapter for RecordingChannelAdapter {
     fn name(&self) -> &str {
-        "telegram"
+        &self.name
     }
 
     fn channel_type(&self) -> ChannelType {
-        ChannelType::Telegram
+        self.channel_type.clone()
+    }
+
+    fn account_id(&self) -> Option<&str> {
+        self.account_id.as_deref()
     }
 
     async fn start(
@@ -1319,7 +1350,7 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
     let sent = Arc::new(Mutex::new(Vec::new()));
     h._state.kernel.channel_adapters_ref().insert(
         "telegram".to_string(),
-        Arc::new(RecordingChannelAdapter { sent: sent.clone() }),
+        Arc::new(RecordingChannelAdapter::telegram(sent.clone())),
     );
 
     // An empty workflow is deterministic: its output is its input, so the route can be exercised without an LLM provider or live Telegram bot.
@@ -1378,6 +1409,92 @@ async fn schedule_manual_run_delivers_workflow_output_to_channel_targets() {
         sent.lock().expect("recording adapter lock").as_slice(),
         ["test-chat-id:scheduled hello"],
         "manual schedule run must use the same delivery_targets fan-out as a timed fire"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_delivery_reaches_a_named_instance_whose_name_differs_from_its_type_8055() {
+    // #8055 through a real route.
+    // Every outbound channel delivery in the daemon funnels into `LibreFangKernel::send_channel_message`, so this exercises the same resolution the post-approval reply path depends on — that path itself needs an LLM round-trip through `send_message_full` and cannot be driven from an integration test, while the cron fan-out reaches the identical kernel method with a caller-supplied `(channel_type, account_id)` pair.
+    //
+    // The registry is seeded exactly as `channel_bridge::start_channel_bridge_with_config` seeds it for a `[[sidecar_channels]]` entry with `name = "slack-hr", channel_type = "slack"`: keys built from the instance NAME, never from the type.
+    // Asking for the type plus the account id — the pair every inbound turn is stamped with — used to miss both keys and drop the delivery.
+    use chrono::Utc;
+    use librefang_types::scheduler::{
+        CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
+    };
+
+    let h = boot().await;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let adapter: Arc<dyn ChannelAdapter> = Arc::new(RecordingChannelAdapter::named_instance(
+        "slack-hr",
+        "slack",
+        sent.clone(),
+    ));
+    h._state
+        .kernel
+        .channel_adapters_ref()
+        .insert("slack-hr".to_string(), adapter.clone());
+    h._state
+        .kernel
+        .channel_adapters_ref()
+        .insert("slack-hr:slack-hr".to_string(), adapter);
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        "/api/workflows",
+        Some(serde_json::json!({"name": "named-instance-delivery", "steps": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    let workflow_id = body["workflow_id"].as_str().expect("workflow id");
+
+    let job = CronJob {
+        id: CronJobId::new(),
+        agent_id: spawn_test_agent(&h),
+        name: "named instance delivery".to_string(),
+        enabled: true,
+        schedule: CronSchedule::Every { every_secs: 3600 },
+        action: CronAction::Workflow {
+            workflow_id: workflow_id.to_string(),
+            input: Some("approved — file uploaded".to_string()),
+            timeout_secs: Some(30),
+        },
+        delivery: CronDelivery::None,
+        delivery_targets: vec![CronDeliveryTarget::Channel {
+            // The adapter TYPE plus the account id, which is how the daemon itself addresses the instance a turn arrived on.
+            channel_type: "slack".to_string(),
+            recipient: "C0BN6UAQ75M".to_string(),
+            thread_id: None,
+            account_id: Some("slack-hr".to_string()),
+        }],
+        peer_id: None,
+        session_mode: None,
+        created_at: Utc::now(),
+        last_run: None,
+        next_run: None,
+        owner: None,
+    };
+    let job_id = h
+        ._state
+        .kernel
+        .cron()
+        .add_job(job, false)
+        .expect("add schedule");
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/schedules/{job_id}/run"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(
+        sent.lock().expect("recording adapter lock").as_slice(),
+        ["C0BN6UAQ75M:approved — file uploaded"],
+        "a channel instance whose name differs from its adapter type must still receive its delivery"
     );
 }
 

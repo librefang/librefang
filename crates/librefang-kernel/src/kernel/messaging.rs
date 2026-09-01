@@ -199,7 +199,7 @@ impl LibreFangKernel {
             None,
             None,
             None,
-            None,
+            librefang_types::config::ThinkingOverride::Inherit,
             None,
             upstream,
             false,
@@ -233,7 +233,7 @@ impl LibreFangKernel {
             None,
             None,
             None,
-            None,
+            librefang_types::config::ThinkingOverride::Inherit,
             Some(session_id),
             upstream,
             false,
@@ -313,7 +313,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         incognito: bool,
         owner: Option<librefang_types::agent::UserId>,
@@ -947,7 +947,10 @@ impl LibreFangKernel {
             content_blocks,
             sender_context,
             session_mode_override,
-            thinking_override,
+            // Every caller of this entry point predates #7946 and passes the
+            // legacy boolean; the mode-carrying variants reach
+            // `send_message_full_with_upstream` directly.
+            thinking_override.into(),
             session_id_override,
             None,
             false,
@@ -978,7 +981,7 @@ impl LibreFangKernel {
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
@@ -1011,7 +1014,7 @@ impl LibreFangKernel {
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
         incognito: bool,
@@ -1685,8 +1688,15 @@ impl LibreFangKernel {
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
         let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
-        self.send_message_streaming_resolved(agent_id, message, handle, None, None, None)
-            .await
+        self.send_message_streaming_resolved(
+            agent_id,
+            message,
+            handle,
+            None,
+            librefang_types::config::ThinkingOverride::Inherit,
+            None,
+        )
+        .await
     }
 
     /// Streaming variant with an explicit session ID override.
@@ -1709,7 +1719,7 @@ impl LibreFangKernel {
             message,
             handle,
             None,
-            None,
+            librefang_types::config::ThinkingOverride::Inherit,
             session_id_override,
         )
         .await
@@ -1736,6 +1746,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         sender_context: Option<&SenderContext>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         incognito: bool,
         owner: Option<librefang_types::agent::UserId>,
@@ -1778,7 +1789,7 @@ impl LibreFangKernel {
             message,
             handle,
             sender_context,
-            None,
+            thinking_override,
             session_id_override,
             loop_opts,
             owner,
@@ -1806,7 +1817,10 @@ impl LibreFangKernel {
             message,
             handle,
             Some(sender),
-            thinking_override,
+            // The channel `/think` toggle is a boolean by construction (#7140);
+            // #7946's richer modes reach the kernel through the HTTP message
+            // routes, not through this entry point.
+            thinking_override.into(),
             None,
         )
         .await
@@ -1836,7 +1850,9 @@ impl LibreFangKernel {
             message,
             handle,
             Some(sender),
-            thinking_override,
+            // Boolean for the same reason as the sibling entry above: the
+            // WebSocket / channel deep-thinking toggle is on/off.
+            thinking_override.into(),
             session_id_override,
         )
         .await
@@ -1860,7 +1876,13 @@ impl LibreFangKernel {
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
         let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
-        self.send_message_streaming_with_sender(agent_id, message, handle, None, None)
+        self.send_message_streaming_with_sender(
+            agent_id,
+            message,
+            handle,
+            None,
+            librefang_types::config::ThinkingOverride::Inherit,
+        )
     }
 
     /// Run a *derivative* (forked) turn for an agent using the canonical
@@ -1982,7 +2004,7 @@ impl LibreFangKernel {
             fork_prompt,
             self.kernel_handle(),
             None, // no sender context — fork uses the canonical session
-            None, // no thinking override
+            librefang_types::config::ThinkingOverride::Inherit, // no per-call override
             None, // forks MUST stay on canonical — see invariant above
             loop_opts,
             None, // fork must not inherit the parent turn's owner (#6460)
@@ -1995,7 +2017,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -2016,7 +2038,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
@@ -2085,7 +2107,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
-        thinking_override: Option<bool>,
+        thinking_override: librefang_types::config::ThinkingOverride,
         session_id_override: Option<SessionId>,
         mut loop_opts: librefang_runtime::agent_loop::LoopOptions,
         owner: Option<librefang_types::agent::UserId>,

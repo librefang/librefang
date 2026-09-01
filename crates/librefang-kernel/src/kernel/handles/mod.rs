@@ -18,7 +18,7 @@ mod agent_control;
 mod api_auth;
 mod approval_gate;
 mod catalog_query;
-mod channel_sender;
+pub(in crate::kernel) mod channel_sender;
 mod cron_control;
 mod event_bus;
 mod goal_control;

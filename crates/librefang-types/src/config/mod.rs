@@ -1648,6 +1648,114 @@ admin_role = "admin"
         assert!(!tc.stream_thinking);
     }
 
+    // ── Reasoning mode (#7946) ─────────────────────────────────────────
+
+    /// The global `[thinking]` table must accept `reasoning_mode` from TOML.
+    /// A missing `#[serde(default)]` would make the whole table fail to parse;
+    /// a missing struct field would make the key an unknown-field error or a
+    /// silent drop, depending on the deserializer.
+    #[test]
+    fn test_thinking_config_parses_reasoning_mode_from_toml() {
+        for (literal, expected) in [
+            ("none", ReasoningMode::None),
+            ("low", ReasoningMode::Low),
+            ("high", ReasoningMode::High),
+            ("max", ReasoningMode::Max),
+        ] {
+            let toml_str = format!(
+                r#"
+                log_level = "info"
+                [thinking]
+                budget_tokens = 2048
+                reasoning_mode = "{literal}"
+                "#
+            );
+            let config: KernelConfig = toml::from_str(&toml_str).unwrap();
+            let tc = config.thinking.expect("thinking table parsed");
+            assert_eq!(tc.reasoning_mode, Some(expected), "literal {literal:?}");
+            assert_eq!(tc.budget_tokens, 2048, "literal {literal:?}");
+        }
+    }
+
+    /// A `[thinking]` table that omits `reasoning_mode` still parses, and the
+    /// field defaults to "no explicit mode" — i.e. the pre-#7946 budget-bucket
+    /// behaviour, not a mode of its own.
+    #[test]
+    fn test_thinking_config_reasoning_mode_defaults_to_none() {
+        let toml_str = r#"
+            log_level = "info"
+            [thinking]
+            budget_tokens = 8192
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let tc = config.thinking.expect("thinking table parsed");
+        assert_eq!(tc.reasoning_mode, None);
+        assert_eq!(ThinkingConfig::default().reasoning_mode, None);
+    }
+
+    /// An unrecognised mode is an error, not a silent fallback to the default.
+    #[test]
+    fn test_thinking_config_rejects_an_unknown_reasoning_mode() {
+        let toml_str = r#"
+            log_level = "info"
+            [thinking]
+            reasoning_mode = "medium"
+        "#;
+        assert!(
+            toml::from_str::<KernelConfig>(toml_str).is_err(),
+            "`medium` is reachable only as the budget-bucket fallback and is not a settable mode",
+        );
+    }
+
+    /// The serde spelling is the documented spelling.
+    #[test]
+    fn test_reasoning_mode_serde_spelling_matches_as_str() {
+        for mode in [
+            ReasoningMode::None,
+            ReasoningMode::Low,
+            ReasoningMode::High,
+            ReasoningMode::Max,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.as_str()));
+            let back: ReasoningMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    /// `ThinkingOverride::resolve` is the per-call rung: the explicit mode wins
+    /// over the legacy boolean whenever both are present.
+    #[test]
+    fn test_thinking_override_resolve_precedence() {
+        assert_eq!(
+            ThinkingOverride::resolve(None, None),
+            ThinkingOverride::Inherit
+        );
+        assert_eq!(
+            ThinkingOverride::resolve(Some(true), None),
+            ThinkingOverride::Enable
+        );
+        assert_eq!(
+            ThinkingOverride::resolve(Some(false), None),
+            ThinkingOverride::Disable
+        );
+        assert_eq!(
+            ThinkingOverride::resolve(None, Some(ReasoningMode::Max)),
+            ThinkingOverride::Mode(ReasoningMode::Max)
+        );
+        for boolean in [None, Some(true), Some(false)] {
+            assert_eq!(
+                ThinkingOverride::resolve(boolean, Some(ReasoningMode::Low)),
+                ThinkingOverride::Mode(ReasoningMode::Low),
+                "reasoning_mode must win over thinking={boolean:?}",
+            );
+        }
+        // The `From<Option<bool>>` shim every pre-#7946 call site goes through.
+        assert_eq!(ThinkingOverride::from(Some(true)), ThinkingOverride::Enable);
+        assert_eq!(ThinkingOverride::from(None), ThinkingOverride::Inherit);
+        assert_eq!(ThinkingOverride::default(), ThinkingOverride::Inherit);
+    }
+
     #[test]
     fn test_thinking_config_absent_is_none() {
         let toml_str = r#"

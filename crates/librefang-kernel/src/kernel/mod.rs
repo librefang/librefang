@@ -1412,24 +1412,39 @@ impl LibreFangKernel {
             buttons,
         };
 
-        if let Some(adapter) = self.mesh.channel_adapters.get(&target.channel_type) {
-            let user = librefang_channels::types::ChannelUser {
-                platform_id: target.recipient.clone(),
-                display_name: target.recipient.clone(),
-                librefang_user: None,
-            };
-            if let Err(e) = adapter.send_interactive(&user, &interactive).await {
-                warn!(
+        // Resolve through the same helper every outbound send uses (#8055).
+        // `NotificationTarget.channel_type` is a channel *type* (`"slack"`) while the bridge keys the registry by instance `name` (`"slack-hr"`), so the bare `channel_adapters.get(&target.channel_type)` that used to sit here missed on every named instance and dropped straight to the plain-text fallback below — silently costing the approver the Approve / Reject buttons on the one notification whose entire point is those buttons.
+        // Resolving to an owned `Arc` also stops a `DashMap` shard guard from being held across the `send_interactive` await.
+        match handles::channel_sender::resolve_channel_adapter(
+            &self.mesh.channel_adapters,
+            &target.channel_type,
+            None,
+        ) {
+            Ok(adapter) => {
+                let user = librefang_channels::types::ChannelUser {
+                    platform_id: target.recipient.clone(),
+                    display_name: target.recipient.clone(),
+                    librefang_user: None,
+                };
+                if let Err(e) = adapter.send_interactive(&user, &interactive).await {
+                    warn!(
+                        channel = %target.channel_type,
+                        error = %e,
+                        "Failed to send interactive approval notification, falling back to text"
+                    );
+                    // Fallback to plain text
+                    self.push_to_target(target, &display_message).await;
+                }
+            }
+            Err(e) => {
+                // No adapter resolved — fall back to send_channel_message, which reports its own failure.
+                debug!(
                     channel = %target.channel_type,
                     error = %e,
-                    "Failed to send interactive approval notification, falling back to text"
+                    "No adapter resolved for interactive approval notification, falling back to text"
                 );
-                // Fallback to plain text
                 self.push_to_target(target, &display_message).await;
             }
-        } else {
-            // No adapter found — fall back to send_channel_message
-            self.push_to_target(target, &display_message).await;
         }
     }
 
@@ -1878,22 +1893,16 @@ impl LibreFangKernel {
             );
             return;
         }
-        // Route the reply through the canonical account-qualified outbound
-        // path (#6492 Bug 2). `send_channel_message` builds the adapter
-        // lookup key as `"<channel>:<account_id>"` when an account is present
-        // and falls back to the bare `<channel>` otherwise — matching how the
-        // channel bridge registers adapters under BOTH keys for multi-account
-        // installs. The previous bare `channel_adapters.get(channel)` ignored
-        // `deferred.account_id`, so on a multi-account daemon a post-approval
-        // reply for a non-first account was delivered to the wrong account's
-        // adapter (wrong bot/chat) or missed entirely. Reusing the canonical
-        // path also picks up the adapter's `output_format` override for free,
-        // exactly as a normal inbound reply would. `thread_id: None` — the wake
-        // path carries no thread context (mirrors the pre-fix `adapter.send()`,
-        // which never threaded). On an adapter-miss OR a send failure the call
-        // returns `Err`; we log WARN (it does not log itself) with the same
-        // information as before — the reply is still persisted in session
-        // history, so the next user turn surfaces it.
+        // Route the reply through the canonical account-qualified outbound path (#6492 Bug 2).
+        // `send_channel_message` delegates to `handles::channel_sender::resolve_channel_adapter`, whose precedence rules are documented there.
+        // The previous bare `channel_adapters.get(channel)` ignored `deferred.account_id`, so on a multi-account daemon a post-approval reply for a non-first account was delivered to the wrong account's adapter (wrong bot/chat) or missed entirely.
+        //
+        // `channel` here is the *channel type* the inbound turn was stamped with (`librefang_channels::bridge` uses `channel_type_str(adapter.channel_type())`), while the bridge keys the adapter registry by instance `name`.
+        // Resolving the two against each other is what #8055 fixed; keep that in mind before reintroducing any direct `channel_adapters` lookup on this path.
+        //
+        // Reusing the canonical path also picks up the adapter's `output_format` override for free, exactly as a normal inbound reply would.
+        // `thread_id: None` — the wake path carries no thread context (mirrors the pre-fix `adapter.send()`, which never threaded).
+        // On an adapter-miss OR a send failure the call returns `Err`; we log WARN (it does not log itself) — the reply is still persisted in session history, so the next user turn surfaces it.
         if let Err(e) = self
             .send_channel_message(
                 channel,

@@ -2356,6 +2356,88 @@ pub enum TypingMode {
 // Gap 7: Thinking level support
 // ---------------------------------------------------------------------------
 
+/// How hard the model should reason on a turn (#7946).
+///
+/// `budget_tokens` cannot express two things operators need.
+/// It cannot say "do not reason at all" — a sub-1024 budget merely omits the opt-in, which leaves a model that reasons by default (every DeepSeek V4 id) reasoning anyway — and it cannot reach the top rung of providers that have one (`max` / `xhigh`), because the bucket mapping in the OpenAI-compatible driver tops out at `high`.
+/// This enum is the direct control: it names the intent and each driver translates it into whatever its wire actually accepts.
+///
+/// Deliberately four rungs rather than the union of every provider's vocabulary.
+/// `medium` is reachable only as the `budget_tokens` fallback bucket, because a fifth rung whose only distinct meaning is "DeepSeek folds it into `high`" is a knob that does nothing on the provider that motivated it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    /// Do not reason — the wire-level "non-think" toggle.
+    None,
+    /// Reason briefly.
+    Low,
+    /// Reason at the provider's normal full effort.
+    High,
+    /// Reason at the provider's highest available effort.
+    Max,
+}
+
+impl ReasoningMode {
+    /// The mode's canonical string, identical to its serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReasoningMode::None => "none",
+            ReasoningMode::Low => "low",
+            ReasoningMode::High => "high",
+            ReasoningMode::Max => "max",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A per-call reasoning override, resolved from the request body before it
+/// reaches the kernel (#7946).
+///
+/// Not a config field — it is the shape the per-message API's two override
+/// keys collapse into, so that everything below the HTTP boundary threads one
+/// value instead of two that can disagree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThinkingOverride {
+    /// No per-call override: use the agent manifest, else the global config.
+    #[default]
+    Inherit,
+    /// Legacy `thinking: true`.
+    /// Ensures reasoning is requested at the inherited budget without pinning a mode.
+    Enable,
+    /// Legacy `thinking: false`.
+    /// Clears the manifest's thinking config for this turn.
+    Disable,
+    /// An explicit `reasoning_mode` from the caller.
+    Mode(ReasoningMode),
+}
+
+impl ThinkingOverride {
+    /// Collapse the per-message API's two override keys into one value.
+    ///
+    /// `reasoning_mode` wins over the older boolean when a caller sends both: it is
+    /// strictly more specific, and a client that has learned to send it is not also
+    /// relying on the boolean to mean something different.
+    pub fn resolve(thinking: Option<bool>, reasoning_mode: Option<ReasoningMode>) -> Self {
+        match (reasoning_mode, thinking) {
+            (Some(mode), _) => ThinkingOverride::Mode(mode),
+            (None, Some(true)) => ThinkingOverride::Enable,
+            (None, Some(false)) => ThinkingOverride::Disable,
+            (None, None) => ThinkingOverride::Inherit,
+        }
+    }
+}
+
+impl From<Option<bool>> for ThinkingOverride {
+    fn from(thinking: Option<bool>) -> Self {
+        ThinkingOverride::resolve(thinking, None)
+    }
+}
+
 /// Extended thinking configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -2364,6 +2446,13 @@ pub struct ThinkingConfig {
     pub budget_tokens: u32,
     /// Whether to stream thinking tokens to the client.
     pub stream_thinking: bool,
+    /// Explicit reasoning mode (#7946).
+    ///
+    /// When set it wins over the [`Self::budget_tokens`] bucket mapping for
+    /// drivers that honour it; when `None` the budget bucket is used, which is
+    /// the pre-#7946 behaviour.
+    #[serde(default)]
+    pub reasoning_mode: Option<ReasoningMode>,
 }
 
 impl Default for ThinkingConfig {
@@ -2371,6 +2460,7 @@ impl Default for ThinkingConfig {
         Self {
             budget_tokens: 10_000,
             stream_thinking: false,
+            reasoning_mode: None,
         }
     }
 }
