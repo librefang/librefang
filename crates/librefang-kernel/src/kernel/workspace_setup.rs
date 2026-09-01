@@ -851,7 +851,8 @@ fn build_tools_content(resolved_workspaces: &HashMap<String, (PathBuf, Workspace
             ));
         }
         content.push_str(
-            "\nUse the paths above when reading or writing shared content.\n\
+            "\nUse either form when reading or writing shared content: the `@name` \
+             alias or the absolute path it points at.\n\
              Read-only workspaces reject write operations.\n",
         );
     }

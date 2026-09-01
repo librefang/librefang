@@ -8,6 +8,8 @@ import {
 } from "../http/client";
 import { configKeys, registryKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
+import { selectMediaModelEndpoints } from "../mediaModelEndpoints";
+import type { MediaModelEndpoint } from "../../api";
 
 const STALE_MS = 60_000;
 const SCHEMA_STALE_MS = 300_000;
@@ -53,12 +55,34 @@ export const configQueries = {
       queryFn: getRawConfigToml,
       staleTime: RAW_STALE_MS,
     }),
+  // Custom media endpoints are a projection of `full`, not a second endpoint:
+  // same query key, narrowed with `select` so the Models tab and the Config
+  // page share one cache entry and one refetch (refs #8038, #8011).
+  mediaModelEndpoints: () =>
+    queryOptions({
+      ...configQueries.full(),
+      select: selectMediaModelEndpoints,
+    }),
 };
 
 
 
 export function useFullConfig(options: QueryOverrides = {}) {
   return useQuery(withOverrides(configQueries.full(), options));
+}
+
+/**
+ * The four custom / self-hosted media endpoints (`STT`, `TTS`, `Image`,
+ * `Video`) as Models-tab rows, always all four so an unconfigured modality is
+ * still discoverable (refs #8038, #8011).
+ *
+ * Backed by the same `GET /api/config` cache entry as `useFullConfig` — it is a
+ * `select` over that query, not a separate subscription.
+ */
+export function useMediaModelEndpoints(
+  options: QueryOverrides = {},
+): ReturnType<typeof useQuery<Record<string, unknown>, Error, MediaModelEndpoint[]>> {
+  return useQuery(withOverrides(configQueries.mediaModelEndpoints(), options));
 }
 
 export function useConfigSchema(options: QueryOverrides = {}) {

@@ -138,6 +138,11 @@ export interface ManifestExtras {
   model: TomlTable;
   resources: TomlTable;
   capabilities: TomlTable;
+  // `[thinking]` keys the form has no widget for — `reasoning_mode` (#7946) is
+  // the first one. Without this slot the form re-emits the section from its two
+  // known fields alone, so opening an agent in the editor and saving it
+  // silently deletes any newer key from that agent's agent.toml.
+  thinking: TomlTable;
 }
 
 export const emptyManifestExtras = (): ManifestExtras => ({
@@ -145,6 +150,7 @@ export const emptyManifestExtras = (): ManifestExtras => ({
   model: {},
   resources: {},
   capabilities: {},
+  thinking: {},
 });
 
 export const emptyManifestForm = (): ManifestFormState => ({
@@ -297,6 +303,7 @@ const FORM_CAPABILITY_KEYS = new Set([
   "agent_spawn",
   "ofp_discover",
 ]);
+const FORM_THINKING_KEYS = new Set(["budget_tokens", "stream_thinking"]);
 
 const SCHEDULE_DEFAULT_INTERVAL = "300";
 const PRIORITIES = ["Low", "Normal", "High", "Critical"] as const;
@@ -488,6 +495,12 @@ export const serializeManifestForm = (
     deferredSectionExtras,
     "capabilities",
   );
+  // Only when the form is still emitting a `[thinking]` section: unticking
+  // "enabled" is the user deleting the whole table, and the preserved keys go
+  // with it rather than stranding a `[thinking]` block the form no longer owns.
+  const safeThinkingExtras = form.thinking.enabled
+    ? pluckSafeExtras(extras.thinking, deferredSectionExtras, "thinking")
+    : {};
 
   // [model]
   const modelBody: string[] = [];
@@ -539,7 +552,7 @@ export const serializeManifestForm = (
     const body: string[] = [];
     writeNumberScalar(body, "budget_tokens", parseInteger(form.thinking.budget_tokens));
     writeBoolScalar(body, "stream_thinking", form.thinking.stream_thinking);
-    lines.push("", "[thinking]", ...body);
+    lines.push("", "[thinking]", ...body, ...renderExtraScalars(safeThinkingExtras));
   }
 
   // [autonomous]
@@ -1001,6 +1014,7 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
     form.thinking.enabled = true;
     form.thinking.budget_tokens = asNumberString(parsed.thinking.budget_tokens);
     form.thinking.stream_thinking = asBoolean(parsed.thinking.stream_thinking, false);
+    extras.thinking = stripKnown(parsed.thinking, FORM_THINKING_KEYS);
   }
 
   // [autonomous]

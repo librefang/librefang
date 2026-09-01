@@ -6,8 +6,13 @@
 //!
 //! All MCP tools are namespaced with `mcp_{server}_{tool}` to prevent collisions.
 
+pub mod call_error;
 pub mod mcp_oauth;
 mod trace_context;
+
+pub use call_error::{
+    McpCallError, McpErrorKind, McpTransportHealthReporter, SharedHealthReporter,
+};
 
 use arc_swap::ArcSwap;
 use http::{HeaderName, HeaderValue};
@@ -821,6 +826,45 @@ type DynRmcpClient = rmcp::service::RunningService<
     Box<dyn rmcp::service::DynService<rmcp::service::RoleClient>>,
 >;
 
+/// Classify an rmcp [`ServiceError`](rmcp::service::ServiceError) as an application- or transport-level failure (#7963).
+///
+/// Structural, not textual: every variant rmcp 3.1 defines is matched explicitly.
+/// The rule is the one in [`crate::call_error`] — the server answering with a JSON-RPC error is an application failure, everything else means no usable response arrived.
+///
+/// `ServiceError` is `#[non_exhaustive]`, so a wildcard arm is unavoidable; it resolves to `Application`, the direction that never tears down a healthy server on an error variant this code has not seen before.
+pub fn classify_service_error(err: &rmcp::service::ServiceError) -> McpErrorKind {
+    use rmcp::service::ServiceError;
+    match err {
+        // The server replied, and its reply was a well-formed JSON-RPC error: bad arguments, unknown tool, upstream 404.
+        // The transport carried it fine, so reconnecting would drop a working server.
+        ServiceError::McpError(_) => McpErrorKind::Application,
+
+        // The peer kept asking for more input past the round cap.
+        // Every one of those rounds was a successful round trip, so this is the server's behaviour, not a broken pipe.
+        // (Unreachable via `call_tool_once`, which drives no follow-up rounds — matched for completeness.)
+        ServiceError::InputRequiredRoundsExceeded { .. } => McpErrorKind::Application,
+
+        // Nothing usable came back.
+        // `TransportSend` / `TransportClosed` are the dead stdio pipe in #7963; `Timeout` is rmcp's own request deadline; `UnexpectedResponse` and `SubscriptionLagged` mean the stream is out of sync with the requests we issued.
+        ServiceError::TransportSend(_)
+        | ServiceError::TransportClosed
+        | ServiceError::Timeout { .. }
+        | ServiceError::UnexpectedResponse
+        | ServiceError::SubscriptionLagged { .. } => McpErrorKind::Transport,
+
+        // A cancelled request.
+        // In the client role rmcp produces this variant in exactly one place — rmcp 3.1.4 `src/service.rs:1607`, where the *peer* sent a `notifications/cancelled` naming our request id.
+        // The server is alive and talking; it chose to abandon this one call, which the MCP spec lets it do for its own reasons (overload, its own deadline).
+        // That is the server's answer, not a broken pipe, so it belongs on the application side: a transport that has actually died surfaces as `TransportSend` / `TransportClosed` / `Timeout` instead, and tearing down a server that merely cancels would kill a healthy process along with the state it holds.
+        // LibreFang itself never issues MCP cancellations for tool calls — it bounds them with `tokio::time::timeout`, which drops the future instead — so the other producer (a cancellation *we* sent) cannot reach this code.
+        ServiceError::Cancelled { .. } => McpErrorKind::Application,
+
+        // A variant added by a later rmcp release.
+        // Treated as an application error so an unrecognised failure cannot cause reconnect churn; if a transport-level variant lands here, classify it above.
+        _ => McpErrorKind::Application,
+    }
+}
+
 /// MCP client handler that declares the `roots` capability and responds to
 /// `roots/list` requests with a pre-configured list of root directories.
 #[allow(deprecated)]
@@ -925,6 +969,10 @@ pub struct McpConnection {
     /// (there is no stored capability object otherwise). Gates resource-tool
     /// registration (#6501).
     server_advertises_resources: bool,
+    /// Where transport-level tool-call failures on this connection are reported so auto-reconnect can notice a server that wedged after a successful handshake (#7963).
+    ///
+    /// Attached by the kernel via [`with_health_reporter`](Self::with_health_reporter) — `connect` leaves it `None`, which is the correct value for stand-alone callers with no health monitor to report to. See [`crate::call_error::McpTransportHealthReporter`].
+    health_reporter: Option<crate::call_error::SharedHealthReporter>,
 }
 
 /// Transport-specific connection handle.
@@ -1381,6 +1429,7 @@ impl McpConnection {
             auth_state: initial_auth_state.unwrap_or(crate::mcp_oauth::McpAuthState::NotRequired),
             resource_ops: std::collections::HashSet::new(),
             server_advertises_resources: false,
+            health_reporter: None,
         };
 
         match discovered_tools {
@@ -2048,11 +2097,15 @@ impl McpConnection {
         Ok(())
     }
 
+    /// Send one JSON-RPC request over the hand-rolled SSE transport.
+    ///
+    /// Errors are classified (#7963) by the same rule the rmcp path uses: a well-formed JSON-RPC error response is an application error, while anything that means no well-formed response arrived — the POST failed, a non-2xx status, a proxy error page instead of JSON, an undecodable body — is transport-level.
+    /// Callers that still deal in `String` errors keep working through `From<McpCallError> for String`.
     async fn sse_send_request(
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, McpCallError> {
         // Extract owned copies of the values we need before any async work,
         // so we don't hold a borrow of `self.inner` across an await point
         // (which would conflict with the concurrent borrow of `self.config`).
@@ -2067,7 +2120,11 @@ impl McpConnection {
                 *next_id += 1;
                 (client.clone(), url.clone(), id, headers.clone())
             }
-            _ => return Err("sse_send_request called on non-SSE transport".to_string()),
+            _ => {
+                return Err(McpCallError::application(
+                    "sse_send_request called on non-SSE transport".to_string(),
+                ))
+            }
         };
         let timeout_secs = self.config.timeout_secs;
 
@@ -2087,10 +2144,13 @@ impl McpConnection {
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
             .await
-            .map_err(|e| format!("MCP SSE request failed: {e}"))?;
+            .map_err(|e| McpCallError::transport(format!("MCP SSE request failed: {e}")))?;
 
         if !response.status().is_success() {
-            return Err(format!("MCP SSE returned {}", response.status()));
+            return Err(McpCallError::transport(format!(
+                "MCP SSE returned {}",
+                response.status()
+            )));
         }
 
         // Reject responses whose Content-Type is neither JSON nor an SSE
@@ -2104,20 +2164,21 @@ impl McpConnection {
             .unwrap_or("");
         if !content_type.contains("application/json") && !content_type.contains("text/event-stream")
         {
-            return Err(format!(
+            return Err(McpCallError::transport(format!(
                 "MCP SSE response has unexpected Content-Type: {content_type:?}; \
                  expected application/json or text/event-stream"
-            ));
+            )));
         }
 
         // Guard against malicious MCP servers returning unbounded response bodies
         // (e.g. gigabytes of garbage) that would OOM the daemon. (#3801)
         let body = read_response_bytes_capped(response)
             .await
-            .map_err(|e| format!("Failed to read SSE response: {e}"))?;
+            .map_err(|e| McpCallError::transport(format!("Failed to read SSE response: {e}")))?;
 
-        let rpc_response: JsonRpcResponse = serde_json::from_slice(&body)
-            .map_err(|e| format!("Invalid MCP SSE JSON-RPC response: {e}"))?;
+        let rpc_response: JsonRpcResponse = serde_json::from_slice(&body).map_err(|e| {
+            McpCallError::transport(format!("Invalid MCP SSE JSON-RPC response: {e}"))
+        })?;
 
         // Verify the JSON-RPC id in the response matches the id we sent.
         // A mismatch indicates a server routing error or a response intended
@@ -2134,7 +2195,8 @@ impl McpConnection {
         }
 
         if let Some(err) = rpc_response.error {
-            return Err(format!("{err}"));
+            // The server answered with a JSON-RPC error object — application level, exactly like `ServiceError::McpError` on the rmcp path.
+            return Err(McpCallError::application(format!("{err}")));
         }
 
         Ok(rpc_response.result)
@@ -2593,7 +2655,12 @@ impl McpConnection {
     /// Returns owned [`ResourceInfo`]s sorted by URI (deterministic order for
     /// prompt-cache stability, #3298). HttpCompat has no resources concept and
     /// returns an error (#6501).
-    pub async fn list_resources(&mut self) -> Result<Vec<ResourceInfo>, String> {
+    ///
+    /// Errors are classified the same way tool calls are (#7963): the synthetic
+    /// `list_resources` / `read_resource` tools reach the server over the very
+    /// transport a wedge breaks, so a timeout here has to count toward
+    /// auto-reconnect exactly as a wedged `tools/call` does.
+    pub async fn list_resources(&mut self) -> Result<Vec<ResourceInfo>, McpCallError> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
             McpTransportKind::Rmcp => {
@@ -2603,12 +2670,17 @@ impl McpConnection {
                 let resources = tokio::time::timeout(timeout, client.list_all_resources())
                     .await
                     .map_err(|_| {
-                        format!(
+                        McpCallError::transport(format!(
                             "MCP resources/list timed out after {}s",
                             self.config.timeout_secs
-                        )
+                        ))
                     })?
-                    .map_err(|e| format!("MCP resources/list failed: {e}"))?;
+                    .map_err(|e| {
+                        McpCallError::new(
+                            classify_service_error(&e),
+                            format!("MCP resources/list failed: {e}"),
+                        )
+                    })?;
                 let mut out: Vec<ResourceInfo> = resources
                     .into_iter()
                     .map(|r| ResourceInfo {
@@ -2625,15 +2697,17 @@ impl McpConnection {
                 let resp = self.sse_send_request("resources/list", None).await?;
                 Ok(parse_sse_resource_list(resp))
             }
-            McpTransportKind::HttpCompat => {
-                Err("resources are not supported over the HttpCompat transport".to_string())
-            }
+            McpTransportKind::HttpCompat => Err(McpCallError::application(
+                "resources are not supported over the HttpCompat transport".to_string(),
+            )),
         }
     }
 
     /// List the URI templates this MCP server exposes
     /// (`resources/templates/list`).
-    pub async fn list_resource_templates(&mut self) -> Result<Vec<ResourceTemplateInfo>, String> {
+    pub async fn list_resource_templates(
+        &mut self,
+    ) -> Result<Vec<ResourceTemplateInfo>, McpCallError> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
             McpTransportKind::Rmcp => {
@@ -2643,12 +2717,17 @@ impl McpConnection {
                 let templates = tokio::time::timeout(timeout, client.list_all_resource_templates())
                     .await
                     .map_err(|_| {
-                        format!(
+                        McpCallError::transport(format!(
                             "MCP resources/templates/list timed out after {}s",
                             self.config.timeout_secs
-                        )
+                        ))
                     })?
-                    .map_err(|e| format!("MCP resources/templates/list failed: {e}"))?;
+                    .map_err(|e| {
+                        McpCallError::new(
+                            classify_service_error(&e),
+                            format!("MCP resources/templates/list failed: {e}"),
+                        )
+                    })?;
                 let mut out: Vec<ResourceTemplateInfo> = templates
                     .into_iter()
                     .map(|t| ResourceTemplateInfo {
@@ -2667,15 +2746,15 @@ impl McpConnection {
                     .await?;
                 Ok(parse_sse_resource_templates(resp))
             }
-            McpTransportKind::HttpCompat => {
-                Err("resources are not supported over the HttpCompat transport".to_string())
-            }
+            McpTransportKind::HttpCompat => Err(McpCallError::application(
+                "resources are not supported over the HttpCompat transport".to_string(),
+            )),
         }
     }
 
     /// Read a single resource by URI (`resources/read`), returning its text
     /// content joined; binary blobs are elided rather than inlined (#6501).
-    pub async fn read_resource(&mut self, uri: &str) -> Result<String, String> {
+    pub async fn read_resource(&mut self, uri: &str) -> Result<String, McpCallError> {
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         match self.transport_kind() {
             McpTransportKind::Rmcp => {
@@ -2686,12 +2765,17 @@ impl McpConnection {
                 let result = tokio::time::timeout(timeout, client.read_resource_once(params))
                     .await
                     .map_err(|_| {
-                        format!(
+                        McpCallError::transport(format!(
                             "MCP resources/read timed out after {}s",
                             self.config.timeout_secs
-                        )
+                        ))
                     })?
-                    .map_err(|e| format!("MCP resources/read failed: {e}"))?;
+                    .map_err(|e| {
+                        McpCallError::new(
+                            classify_service_error(&e),
+                            format!("MCP resources/read failed: {e}"),
+                        )
+                    })?;
                 // `read_resource_once` rather than `read_resource`: the latter drives up to
                 // `DEFAULT_MRTR_MAX_ROUNDS` SEP-2322 `input_required` rounds inside the
                 // `tokio::time::timeout` above, silently turning one round trip into ten under a
@@ -2702,9 +2786,12 @@ impl McpConnection {
                 let result = match result {
                     rmcp::model::ReadResourceResponse::Complete(r) => r,
                     other => {
-                        return Err(format!(
+                        // The server answered, just not with a completed result — an MRTR
+                        // `input_required` round, which `read_resource_once` does not drive.
+                        // The transport is fine.
+                        return Err(McpCallError::application(format!(
                             "MCP resources/read returned an unsupported response: {other:?}"
-                        ));
+                        )));
                     }
                 };
                 Ok(result
@@ -2720,9 +2807,9 @@ impl McpConnection {
                     .await?;
                 Ok(parse_sse_read_resource(resp))
             }
-            McpTransportKind::HttpCompat => {
-                Err("resources are not supported over the HttpCompat transport".to_string())
-            }
+            McpTransportKind::HttpCompat => Err(McpCallError::application(
+                "resources are not supported over the HttpCompat transport".to_string(),
+            )),
         }
     }
 
@@ -2797,7 +2884,7 @@ impl McpConnection {
         &mut self,
         raw_name: &str,
         arguments: &serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<String, McpCallError> {
         match raw_name {
             "list_resources" => {
                 let resources = self.list_resources().await?;
@@ -2808,20 +2895,29 @@ impl McpConnection {
                     "resources": resources,
                     "resourceTemplates": templates,
                 });
-                serde_json::to_string_pretty(&payload)
-                    .map_err(|e| format!("failed to serialize resource list: {e}"))
+                serde_json::to_string_pretty(&payload).map_err(|e| {
+                    McpCallError::application(format!("failed to serialize resource list: {e}"))
+                })
             }
             "read_resource" => {
                 let uri = arguments
                     .get("uri")
                     .and_then(|u| u.as_str())
-                    .ok_or_else(|| "read_resource requires a string 'uri' argument".to_string())?;
+                    .ok_or_else(|| {
+                        McpCallError::application(
+                            "read_resource requires a string 'uri' argument".to_string(),
+                        )
+                    })?;
                 if uri.is_empty() {
-                    return Err("read_resource 'uri' must not be empty".to_string());
+                    return Err(McpCallError::application(
+                        "read_resource 'uri' must not be empty".to_string(),
+                    ));
                 }
                 self.read_resource(uri).await
             }
-            other => Err(format!("unknown resource operation '{other}'")),
+            other => Err(McpCallError::application(format!(
+                "unknown resource operation '{other}'"
+            ))),
         }
     }
 
@@ -2836,7 +2932,7 @@ impl McpConnection {
         &mut self,
         name: &str,
         arguments: &serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<String, McpCallError> {
         self.call_tool_with_caller(name, arguments, None).await
     }
 
@@ -2882,7 +2978,7 @@ impl McpConnection {
         name: &str,
         arguments: &serde_json::Value,
         caller: Option<&CallerContext>,
-    ) -> Result<String, String> {
+    ) -> Result<String, McpCallError> {
         // Resolve raw (un-prefixed) tool name before taint check so we can
         // look it up in the per-tool policy.
         let raw_name: String = self
@@ -2934,7 +3030,7 @@ impl McpConnection {
                 // `violation` is already a redacted rule description from
                 // the scanner — do NOT concatenate the raw payload or the
                 // offending value into the error surface.
-                return Err(violation);
+                return Err(McpCallError::application(violation));
             }
         }
 
@@ -2946,6 +3042,10 @@ impl McpConnection {
         // taint guards above so the synthetic tools get the same argument
         // validation as any other tool.
         if self.resource_ops.contains(&raw_name) {
+            // Classified end to end (#7963) rather than flattened through
+            // `From<String>`: `resources/read` and `resources/list` ride the same
+            // transport a wedge breaks, so a timeout on the synthetic resource tools
+            // has to reach the health monitor just like a wedged `tools/call`.
             return self.dispatch_resource_op(&raw_name, arguments).await;
         }
 
@@ -3013,25 +3113,33 @@ impl McpConnection {
                 }
 
                 let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
-                let response: rmcp::model::CallToolResponse =
-                    tokio::time::timeout(timeout, client.call_tool_once(params))
+                let response: rmcp::model::CallToolResponse = tokio::time::timeout(timeout, client.call_tool_once(params))
                         .await
+                        // The wedge in #7963: the child process is alive but answers nothing, so every call expires here.
+                        // This is transport-level by construction — no response arrived at all.
                         .map_err(|_| {
-                            format!(
+                            McpCallError::transport(format!(
                                 "MCP tool call timed out after {}s",
                                 self.config.timeout_secs
-                            )
+                            ))
                         })?
-                        .map_err(|e| format!("MCP tool call failed: {e}"))?;
+                        .map_err(|e| {
+                            McpCallError::new(
+                                classify_service_error(&e),
+                                format!("MCP tool call failed: {e}"),
+                            )
+                        })?;
                 // `call_tool_once` rather than `call_tool`, for the reason given at the
                 // `read_resource_once` call site above: `call_tool` would drive MRTR follow-up
                 // rounds inside a timeout budget sized for a single request.
                 let result: rmcp::model::CallToolResult = match response {
                     rmcp::model::CallToolResponse::Complete(r) => r,
                     other => {
-                        return Err(format!(
+                        // The server answered, just not with a completed result (an MRTR `input_required` round, which `call_tool_once` deliberately does not drive).
+                        // The transport is fine.
+                        return Err(McpCallError::application(format!(
                             "MCP tool call returned an unsupported response: {other:?}"
-                        ));
+                        )));
                     }
                 };
 
@@ -3054,7 +3162,9 @@ impl McpConnection {
 
                 // Check if the server reported an error via is_error flag
                 if result.is_error == Some(true) {
-                    Err(output)
+                    // A tool-reported error: the server ran the tool and it failed.
+                    // Application-level — never a reconnect trigger.
+                    Err(McpCallError::application(output))
                 } else {
                     Ok(output)
                 }
@@ -3125,7 +3235,9 @@ impl McpConnection {
                             Ok(result.to_string())
                         }
                     }
-                    None => Err("No result from MCP tools/call".to_string()),
+                    None => Err(McpCallError::application(
+                        "No result from MCP tools/call".to_string(),
+                    )),
                 }
             }
 
@@ -3164,8 +3276,12 @@ impl McpConnection {
                         caller,
                     )
                     .await
+                    // HttpCompat holds no persistent connection — a reconnect only rebuilds a `reqwest::Client`, which cannot fix anything — so its failures are never classified as transport-level.
+                    .map_err(McpCallError::from)
                 } else {
-                    Err("HttpCompat inner with non-HttpCompat transport config".to_string())
+                    Err(McpCallError::application(
+                        "HttpCompat inner with non-HttpCompat transport config".to_string(),
+                    ))
                 }
             }
         }
@@ -3179,6 +3295,45 @@ impl McpConnection {
     /// Get the server name.
     pub fn name(&self) -> &str {
         &self.config.name
+    }
+
+    /// Attach the health reporter that transport-level tool-call failures on this connection are reported to (#7963).
+    ///
+    /// Consumed as a builder so the kernel's connect sites read `McpConnection::connect(cfg).await?.with_health_reporter(r)` and a connection can never be *half* wired.
+    /// Leaving it unset (the `connect` default) drops the reports, which is what stand-alone callers with no health monitor want.
+    pub fn with_health_reporter(
+        mut self,
+        reporter: crate::call_error::SharedHealthReporter,
+    ) -> Self {
+        self.health_reporter = Some(reporter);
+        self
+    }
+
+    /// The attached health reporter, if any.
+    pub fn health_reporter(&self) -> Option<&crate::call_error::SharedHealthReporter> {
+        self.health_reporter.as_ref()
+    }
+
+    /// Report the outcome of a tool call on this connection to the attached health monitor (#7963).
+    ///
+    /// A no-op when no reporter is attached, and — critically — a no-op for application errors: only [`McpErrorKind::Transport`] failures are reported, because reconnecting a server that answered "file not found" would drop a perfectly healthy process.
+    pub fn report_call_outcome(&self, outcome: Result<(), &McpCallError>) {
+        let Some(reporter) = self.health_reporter.as_ref() else {
+            return;
+        };
+        match outcome {
+            Ok(()) => reporter.report_call_ok(self.name(), self.tools.len()),
+            Err(err) if err.is_transport() => {
+                warn!(
+                    server = self.name(),
+                    error = err.message(),
+                    "MCP tool call failed at the transport level — reporting to the health monitor"
+                );
+                reporter.report_transport_failure(self.name(), err.message());
+            }
+            // Application error: the server answered. Nothing to report.
+            Err(_) => {}
+        }
     }
 
     /// Get the current OAuth authentication state.
@@ -3742,6 +3897,167 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    // ----------------------------------------------------------------------- #7963 — transport vs application classification -----------------------------------------------------------------------
+
+    #[test]
+    fn service_error_classification_separates_transport_from_application() {
+        use rmcp::model::{ErrorCode, ErrorData};
+        use rmcp::service::ServiceError;
+
+        // The server answered with a JSON-RPC error — bad arguments, missing file.
+        // The transport carried the reply, so reconnecting is wrong.
+        let app = ServiceError::McpError(ErrorData::new(
+            ErrorCode::INVALID_PARAMS,
+            "file not found",
+            None,
+        ));
+        assert_eq!(classify_service_error(&app), McpErrorKind::Application);
+
+        // Nothing came back. These are the #7963 wedge and its neighbours.
+        for err in [
+            ServiceError::TransportClosed,
+            ServiceError::Timeout {
+                timeout: std::time::Duration::from_secs(60),
+            },
+            ServiceError::UnexpectedResponse,
+            ServiceError::SubscriptionLagged { capacity: 16 },
+        ] {
+            assert_eq!(
+                classify_service_error(&err),
+                McpErrorKind::Transport,
+                "{err} must be classified as a transport failure"
+            );
+        }
+
+        // Every round trip succeeded; the server just kept asking for input.
+        let rounds = ServiceError::InputRequiredRoundsExceeded { max_rounds: 4 };
+        assert_eq!(classify_service_error(&rounds), McpErrorKind::Application);
+
+        // A peer-sent `notifications/cancelled` (rmcp 3.1.4 `service.rs:1607` — the only
+        // producer of this variant for a client). The server is alive and answering; it
+        // declined this one call. Reconnecting on it would kill a healthy process.
+        assert_eq!(
+            classify_service_error(&ServiceError::Cancelled {
+                reason: Some("server busy".to_string())
+            }),
+            McpErrorKind::Application
+        );
+    }
+
+    /// rmcp normalises a transport-closed error response into `ServiceError::TransportClosed` before it reaches us, which is what lets the classifier be a structural match instead of a string sniff.
+    /// If a future rmcp stops doing that, an `McpError` carrying the transport-closed marker would silently become an application error — this pins the variant we rely on.
+    #[test]
+    fn transport_closed_is_its_own_service_error_variant() {
+        use rmcp::service::ServiceError;
+        assert_eq!(
+            classify_service_error(&ServiceError::TransportClosed),
+            McpErrorKind::Transport
+        );
+        assert_eq!(
+            ServiceError::TransportClosed.to_string(),
+            "Transport closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_call_outcome_reports_only_transport_failures() {
+        #[derive(Default)]
+        struct Recorder {
+            failures: std::sync::Mutex<Vec<String>>,
+            oks: std::sync::Mutex<Vec<usize>>,
+        }
+        impl crate::call_error::McpTransportHealthReporter for Recorder {
+            fn report_transport_failure(&self, _server: &str, error: &str) {
+                self.failures.lock().unwrap().push(error.to_string());
+            }
+            fn report_call_ok(&self, _server: &str, tool_count: usize) {
+                self.oks.lock().unwrap().push(tool_count);
+            }
+        }
+
+        // A HttpCompat connection is the cheapest real `McpConnection` to build — it needs no handshake — and `report_call_outcome` is transport-agnostic.
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let conn = McpConnection::connect(McpServerConfig {
+            name: "probe".to_string(),
+            transport: McpTransport::HttpCompat {
+                base_url: "http://127.0.0.1:1".to_string(),
+                headers: vec![],
+                tools: vec![HttpCompatToolConfig {
+                    name: "noop".to_string(),
+                    description: "noop".to_string(),
+                    path: "/noop".to_string(),
+                    method: HttpCompatMethod::Get,
+                    request_mode: HttpCompatRequestMode::Query,
+                    response_mode: HttpCompatResponseMode::Json,
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            timeout_secs: 1,
+            env: vec![],
+            headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
+            taint_scanning: true,
+            taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
+            roots: vec![],
+        })
+        .await
+        .expect("HttpCompat connect performs no handshake");
+        let conn = conn.with_health_reporter(recorder.clone());
+
+        conn.report_call_outcome(Err(&McpCallError::application("file not found")));
+        assert!(
+            recorder.failures.lock().unwrap().is_empty(),
+            "an application error must never reach the health monitor"
+        );
+
+        conn.report_call_outcome(Err(&McpCallError::transport("Transport closed")));
+        assert_eq!(
+            recorder.failures.lock().unwrap().as_slice(),
+            ["Transport closed"]
+        );
+
+        conn.report_call_outcome(Ok(()));
+        assert_eq!(recorder.oks.lock().unwrap().as_slice(), [1]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_reports_nothing_when_no_reporter_is_attached() {
+        let conn = McpConnection::connect(McpServerConfig {
+            name: "probe".to_string(),
+            transport: McpTransport::HttpCompat {
+                base_url: "http://127.0.0.1:1".to_string(),
+                headers: vec![],
+                tools: vec![HttpCompatToolConfig {
+                    name: "noop".to_string(),
+                    description: "noop".to_string(),
+                    path: "/noop".to_string(),
+                    method: HttpCompatMethod::Get,
+                    request_mode: HttpCompatRequestMode::Query,
+                    response_mode: HttpCompatResponseMode::Json,
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            timeout_secs: 1,
+            env: vec![],
+            headers: vec![],
+            oauth_provider: None,
+            oauth_config: None,
+            taint_scanning: true,
+            taint_policy: None,
+            taint_rule_sets: empty_taint_rule_sets_handle(),
+            roots: vec![],
+        })
+        .await
+        .expect("HttpCompat connect performs no handshake");
+
+        assert!(conn.health_reporter().is_none());
+        // Must not panic — stand-alone callers have no health monitor.
+        conn.report_call_outcome(Err(&McpCallError::transport("Transport closed")));
+        conn.report_call_outcome(Ok(()));
+    }
+
     #[test]
     fn poisoned_unknown_rule_warning_cache_recovers_and_deduplicates() {
         let warned = std::sync::Mutex::new(std::collections::HashSet::new());
@@ -3935,6 +4251,7 @@ mod tests {
             auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
             resource_ops: std::collections::HashSet::new(),
             server_advertises_resources: false,
+            health_reporter: None,
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -3944,8 +4261,13 @@ mod tests {
         let err = rt
             .block_on(conn.call_tool("mcp_guard_create", &serde_json::json!({})))
             .expect_err("missing required field must be rejected pre-transport");
-        assert!(err.contains("missing required field"), "{err}");
-        assert!(err.contains("name"), "{err}");
+        assert!(err.message().contains("missing required field"), "{err}");
+        assert!(err.message().contains("name"), "{err}");
+        // Pre-transport validation never touched the transport, so it must not be classified as a transport failure (#7963).
+        assert!(
+            !err.is_transport(),
+            "schema rejection is an application error"
+        );
     }
 
     #[test]
@@ -5019,6 +5341,7 @@ mod tests {
             auth_state: crate::mcp_oauth::McpAuthState::NotRequired,
             resource_ops: std::collections::HashSet::new(),
             server_advertises_resources: false,
+            health_reporter: None,
         };
 
         conn.register_http_compat_tools(&[
@@ -5691,7 +6014,7 @@ mod tests {
             .await
             .expect_err("read_resource without uri must error");
         assert!(
-            err.to_lowercase().contains("uri"),
+            err.message().to_lowercase().contains("uri"),
             "error should mention the missing uri; got: {err}"
         );
 

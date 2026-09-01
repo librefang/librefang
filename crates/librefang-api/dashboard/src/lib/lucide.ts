@@ -157,6 +157,7 @@ export { default as User } from "lucide-react/dist/esm/icons/user.mjs";
 export { default as UserCheck } from "lucide-react/dist/esm/icons/user-check.mjs";
 export { default as UserCircle } from "lucide-react/dist/esm/icons/circle-user.mjs";
 export { default as Users } from "lucide-react/dist/esm/icons/users.mjs";
+export { default as Video } from "lucide-react/dist/esm/icons/video.mjs";
 export { default as Volume2 } from "lucide-react/dist/esm/icons/volume-2.mjs";
 export { default as Wallet } from "lucide-react/dist/esm/icons/wallet.mjs";
 export { default as Wand2 } from "lucide-react/dist/esm/icons/wand-sparkles.mjs";
