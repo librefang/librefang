@@ -74,6 +74,8 @@ fn json_body(stream: &mut TcpStream, body: &str) {
 }
 
 /// Spawn a stub server that answers `initialize` / `tools/list` so the connection handshakes and registers one tool, then applies `behaviour` to `tools/call`.
+///
+/// The returned handle is *not* a shutdown handle — dropping a `JoinHandle` detaches the thread rather than stopping it, and the thread is parked in `listener.incoming()` (holding the wedged sockets open, which the wedge test needs). It is returned only so a caller can keep the stub alive for the duration of the test; the thread and its listener go away with the test binary.
 fn spawn_stub(behaviour: CallBehaviour) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub server");
     let addr = listener.local_addr().expect("stub addr");
@@ -233,7 +235,7 @@ fn ctx<'a>(mcp_connections: &'a tokio::sync::Mutex<Vec<McpConnection>>) -> ToolE
 /// The dispatch path must report the timeout so auto-reconnect can eventually engage.
 #[tokio::test]
 async fn transport_failure_is_reported_from_the_dispatch_path() {
-    let (url, server) = spawn_stub(CallBehaviour::Wedge);
+    let (url, _stub) = spawn_stub(CallBehaviour::Wedge);
     let reporter = Arc::new(RecordingReporter::default());
     let conn = connect_stub(url, Some(Arc::clone(&reporter) as Arc<RecordingReporter>)).await;
     let conns = tokio::sync::Mutex::new(vec![conn]);
@@ -255,14 +257,13 @@ async fn transport_failure_is_reported_from_the_dispatch_path() {
         reporter.ok_calls().is_empty(),
         "a failed call must not report success"
     );
-    drop(server);
 }
 
 /// The other half of the contract, and the reason the classification exists: a server that answers with an error is healthy.
 /// Reporting this would tear down a working server every time a model passed bad arguments.
 #[tokio::test]
 async fn application_error_is_not_reported_from_the_dispatch_path() {
-    let (url, server) = spawn_stub(CallBehaviour::JsonRpcError);
+    let (url, _stub) = spawn_stub(CallBehaviour::JsonRpcError);
     let reporter = Arc::new(RecordingReporter::default());
     let conn = connect_stub(url, Some(Arc::clone(&reporter) as Arc<RecordingReporter>)).await;
     let conns = tokio::sync::Mutex::new(vec![conn]);
@@ -283,13 +284,12 @@ async fn application_error_is_not_reported_from_the_dispatch_path() {
         "an application error must NOT be reported as a transport failure: {:?}",
         reporter.transport_failures()
     );
-    drop(server);
 }
 
 /// A successful call resets the consecutive-failure run, so the threshold only ever counts an unbroken sequence of failures.
 #[tokio::test]
 async fn successful_call_is_reported_as_ok_from_the_dispatch_path() {
-    let (url, server) = spawn_stub(CallBehaviour::Success);
+    let (url, _stub) = spawn_stub(CallBehaviour::Success);
     let reporter = Arc::new(RecordingReporter::default());
     let conn = connect_stub(url, Some(Arc::clone(&reporter) as Arc<RecordingReporter>)).await;
     let conns = tokio::sync::Mutex::new(vec![conn]);
@@ -299,13 +299,12 @@ async fn successful_call_is_reported_as_ok_from_the_dispatch_path() {
     assert!(!result.is_error, "call should succeed: {}", result.content);
     assert_eq!(reporter.ok_calls(), vec![("wedged".to_string(), 1)]);
     assert!(reporter.transport_failures().is_empty());
-    drop(server);
 }
 
 /// A connection with no reporter attached — stand-alone callers, tests — must dispatch exactly as before rather than panicking on the `None`.
 #[tokio::test]
 async fn a_connection_without_a_reporter_still_dispatches() {
-    let (url, server) = spawn_stub(CallBehaviour::Success);
+    let (url, _stub) = spawn_stub(CallBehaviour::Success);
     let conn = connect_stub(url, None).await;
     assert!(
         conn.health_reporter().is_none(),
@@ -316,5 +315,4 @@ async fn a_connection_without_a_reporter_still_dispatches() {
     let result = execute_tool_raw("t1", "mcp_wedged_slowop", &json!({}), &ctx(&conns)).await;
 
     assert!(!result.is_error, "call should succeed: {}", result.content);
-    drop(server);
 }
