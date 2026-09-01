@@ -326,15 +326,30 @@ impl App {
             AppEvent::ChannelInstanceSaved {
                 instance_name,
                 restart_required,
+                shadowed_secrets,
             } => {
                 // A save that needs a restart is not a failure, but it is not
                 // live either — say which one it was rather than a flat "saved".
-                let key = if restart_required {
-                    "tui-mod-channel-saved-restart-required"
+                // A shadowed secret outranks both: the write landed but the
+                // value will not be used, so it takes precedence in the one
+                // status line available. `librefang channel setup` already
+                // reports this, and the screen must not be quieter than the CLI.
+                self.channels.status_msg = if shadowed_secrets.is_empty() {
+                    let key = if restart_required {
+                        "tui-mod-channel-saved-restart-required"
+                    } else {
+                        "tui-mod-channel-saved"
+                    };
+                    crate::i18n::t_args(key, &[("name", &instance_name)])
                 } else {
-                    "tui-mod-channel-saved"
+                    crate::i18n::t_args(
+                        "tui-mod-channel-saved-shadowed",
+                        &[
+                            ("name", &instance_name),
+                            ("keys", &shadowed_secrets.join(", ")),
+                        ],
+                    )
                 };
-                self.channels.status_msg = crate::i18n::t_args(key, &[("name", &instance_name)]);
                 self.refresh_channels();
             }
             AppEvent::ChannelInstanceDeleted(name) => {
@@ -490,7 +505,14 @@ impl App {
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
                     Tab::Settings => self.settings.status_msg = err,
-                    Tab::Channels => self.channels.status_msg = err,
+                    Tab::Channels => {
+                        // `draw_list` renders its spinner unconditionally while
+                        // `loading` is set, so a failed fetch that only wrote a
+                        // status message would leave the tab showing nothing but
+                        // a spinner until some later fetch happened to succeed.
+                        self.channels.loading = false;
+                        self.channels.status_msg = err;
+                    }
                     _ => {}
                 }
             }

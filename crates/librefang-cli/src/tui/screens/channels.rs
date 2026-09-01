@@ -101,9 +101,11 @@ pub struct ChannelAdapterInfo {
     pub name: String,
     pub display_name: String,
     pub fields: Vec<ChannelFieldInfo>,
-    /// Why `--describe` produced no schema, when it produced none. An adapter
-    /// in this state can only be configured by hand, so the picker says so
-    /// instead of opening an empty form.
+    /// Why `--describe` produced no schema, when it produced none. The picker
+    /// marks such an adapter, but the form still opens on it: a save is
+    /// refused by the daemon itself (`configure` answers 503 when no schema is
+    /// cached) and that response carries the reason, which is more specific
+    /// than anything this side knows.
     pub schema_error: Option<String>,
 }
 
@@ -285,11 +287,52 @@ impl ChannelForm {
         if name.is_empty() {
             return Err(crate::i18n::t("tui-channels-error-name-required"));
         }
+        // The instance name is both a `[[sidecar_channels]].name` and the path
+        // segment of `DELETE /api/channels/sidecar/{name}`. A `/` in it stops
+        // matching that route at all and a `?` or `#` truncates the segment, so
+        // an instance saved under such a name could never be deleted from this
+        // screen again. Refuse it at creation rather than writing an entry only
+        // a text editor can remove. Existing entries are exempt: their name is
+        // fixed here anyway, and rejecting one would make it uneditable too.
+        if self.name_editable()
+            && !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            return Err(crate::i18n::t_args(
+                "tui-channels-error-name-invalid",
+                &[("name", name)],
+            ));
+        }
         if self.name_editable() && existing.iter().any(|n| n == name) {
             return Err(crate::i18n::t_args(
                 "tui-channels-error-name-taken",
                 &[("name", name)],
             ));
+        }
+        // Distinct names are not enough. Every secret this instance stores goes
+        // to `secrets.env` under `<PREFIX>__<KEY>`, and `instance_secret_prefix`
+        // uppercases the name and maps every non-alphanumeric character to `_`,
+        // so `slack-hr`, `slack_hr` and `slack.hr` — all three accepted by the
+        // charset check above — collapse to one namespace. `build_spawn_env`
+        // then hands each child every `<PREFIX>__KEY` in it, so two instances
+        // with colliding names receive each other's tokens. The daemon already
+        // detects this (`librefang_channels::sidecar::warn_secret_prefix_collisions`),
+        // but only as a WARN in a log nobody is reading while filling in this
+        // form, and only after the credentials are already on disk.
+        // Refuse the name here instead: the collision is fully predictable from
+        // the two names, and this screen is the thing creating it.
+        if self.name_editable() {
+            let prefix = librefang_channels::sidecar::instance_secret_prefix(name);
+            if let Some(other) = existing
+                .iter()
+                .find(|n| librefang_channels::sidecar::instance_secret_prefix(n) == prefix)
+            {
+                return Err(crate::i18n::t_args(
+                    "tui-channels-error-name-secret-collision",
+                    &[("name", name), ("other", other), ("prefix", &prefix)],
+                ));
+            }
         }
 
         let mut values = BTreeMap::new();
@@ -462,15 +505,12 @@ impl ChannelState {
         }
     }
 
-    /// Open the edit form for the selected instance, if one is selected.
-    fn open_edit(&mut self) -> bool {
-        match self.selected_instance() {
-            Some(instance) => {
-                self.form = ChannelForm::for_edit(instance);
-                self.sub = ChannelSubScreen::Form;
-                true
-            }
-            None => false,
+    /// Open the edit form for the selected instance. A no-op when the cursor
+    /// sits on a group header or the add row, neither of which is an instance.
+    fn open_edit(&mut self) {
+        if let Some(instance) = self.selected_instance() {
+            self.form = ChannelForm::for_edit(instance);
+            self.sub = ChannelSubScreen::Form;
         }
     }
 
@@ -502,9 +542,7 @@ impl ChannelState {
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('n') => self.open_adapter_picker(),
-            KeyCode::Char('e') => {
-                self.open_edit();
-            }
+            KeyCode::Char('e') => self.open_edit(),
             KeyCode::Char('d') => {
                 if let Some(instance) = self.selected_instance() {
                     self.pending_delete = Some(instance.name.clone());
@@ -542,8 +580,9 @@ impl ChannelState {
                     // the first instance conventionally holds, so pre-suffix
                     // the seed rather than opening a form that fails its own
                     // uniqueness check.
-                    if self.instance_names().iter().any(|n| n == &self.form.name) {
-                        self.form.name = next_free_name(&self.form.adapter, &self.instance_names());
+                    let existing = self.instance_names();
+                    if !name_is_free(&self.form.name, &existing) {
+                        self.form.name = next_free_name(&self.form.adapter, &existing);
                     }
                     self.sub = ChannelSubScreen::Form;
                 }
@@ -560,6 +599,11 @@ impl ChannelState {
                 self.sub = ChannelSubScreen::List;
                 self.form.error = None;
             }
+            // `Tab` and `BackTab` are consumed by the global tab-cycling in
+            // `tui/mod.rs::handle_key` before any screen sees them, so in the
+            // running TUI only the arrow keys move field focus — which is what
+            // `tui-channels-hints-form` advertises. The arms stay because they
+            // are the correct bindings for this widget if that ever yields.
             KeyCode::Up | KeyCode::BackTab => {
                 self.form.focus = if self.form.focus == 0 {
                     count - 1
@@ -718,15 +762,38 @@ fn cycle_option(field: &mut ChannelFieldInfo, forward: bool) {
     field.value = field.options[next].clone();
 }
 
-/// First `{adapter}-{n}` name not already taken, starting at 2.
+/// First `{adapter}-{n}` name free of every existing instance, starting at 2.
 ///
 /// `2` rather than `1` because the unsuffixed adapter name is the first
 /// instance by convention, so the next one an operator adds is the second.
+///
+/// "Free" is tested on the secret prefix, not the literal name, because that
+/// is the stricter of the two checks [`ChannelForm::to_request`] applies — an
+/// existing `telegram_2` makes `telegram-2` unusable even though the two
+/// strings differ. Seeding a name the form would immediately reject is a
+/// dead end an operator cannot resolve without guessing what is wrong.
 pub fn next_free_name(adapter: &str, existing: &[String]) -> String {
+    let taken: std::collections::BTreeSet<String> = existing
+        .iter()
+        .map(|n| librefang_channels::sidecar::instance_secret_prefix(n))
+        .collect();
     (2..)
         .map(|n| format!("{adapter}-{n}"))
-        .find(|candidate| !existing.iter().any(|n| n == candidate))
+        .find(|candidate| {
+            !taken.contains(&librefang_channels::sidecar::instance_secret_prefix(
+                candidate,
+            ))
+        })
         .unwrap_or_else(|| adapter.to_string())
+}
+
+/// Whether `name` can still be used for a new instance, by both the
+/// exact-name and the secret-prefix test.
+fn name_is_free(name: &str, existing: &[String]) -> bool {
+    let prefix = librefang_channels::sidecar::instance_secret_prefix(name);
+    !existing
+        .iter()
+        .any(|n| n == name || librefang_channels::sidecar::instance_secret_prefix(n) == prefix)
 }
 
 // ── Rendering ───────────────────────────────────────────────────────────────
@@ -1178,6 +1245,98 @@ mod tests {
             error.contains("telegram"),
             "the message must name the collision, got: {error}"
         );
+    }
+
+    /// The instance name is a URL path segment on the delete route, so a `/`
+    /// in it would produce a request that no longer matches that route at all
+    /// — the instance would be creatable and then undeletable from here.
+    #[test]
+    fn an_instance_name_that_would_break_the_delete_path_is_refused() {
+        let mut form = ChannelForm::for_create(&telegram_adapter());
+        form.fields[0].value = "token".to_string();
+
+        for bad in ["tele/gram", "tele gram", "tele?gram", "tele#gram"] {
+            form.name = bad.to_string();
+            let error = form
+                .to_request(&[])
+                .expect_err("a name with URL punctuation cannot round-trip through the API path");
+            assert!(
+                error.contains(bad),
+                "the message must name the input: {error}"
+            );
+        }
+
+        form.name = "telegram-support.2_b".to_string();
+        assert!(
+            form.to_request(&[]).is_ok(),
+            "letters, digits, `-`, `_` and `.` are all usable"
+        );
+    }
+
+    /// Two names that differ only in punctuation collapse to one
+    /// `instance_secret_prefix`, and `build_spawn_env` then hands each child
+    /// every `<PREFIX>__KEY` in that namespace — so the second instance would
+    /// silently receive the first one's credentials. The exact-name uniqueness
+    /// check does not see it, because the names really are different.
+    #[test]
+    fn a_name_that_shares_a_secret_prefix_with_an_existing_instance_is_refused() {
+        let existing = vec!["slack-hr".to_string()];
+        for colliding in ["slack_hr", "slack.hr", "SLACK-HR"] {
+            let mut form = ChannelForm::for_create(&telegram_adapter());
+            form.name = colliding.to_string();
+            form.fields[0].value = "token".to_string();
+
+            let error = form
+                .to_request(&existing)
+                .expect_err("a colliding secret prefix must be refused before the write");
+            assert!(
+                error.contains("SLACK_HR"),
+                "the message must name the shared prefix so the fix is obvious, got: {error}"
+            );
+        }
+
+        let mut form = ChannelForm::for_create(&telegram_adapter());
+        form.name = "slack-legal".to_string();
+        form.fields[0].value = "token".to_string();
+        assert!(
+            form.to_request(&existing).is_ok(),
+            "a name that does not collapse onto an existing one stays usable"
+        );
+    }
+
+    /// The seeded name must satisfy the same checks the form applies to it, or
+    /// the picker opens a form that refuses its own default with no obvious fix.
+    #[test]
+    fn the_seeded_name_clears_the_secret_prefix_check_too() {
+        let existing = vec!["telegram".to_string(), "telegram_2".to_string()];
+        let seeded = next_free_name("telegram", &existing);
+        assert_eq!(
+            seeded, "telegram-3",
+            "`telegram-2` collapses onto the existing `telegram_2`, so it is not free"
+        );
+
+        let mut form = ChannelForm::for_create(&telegram_adapter());
+        form.name = seeded;
+        form.fields[0].value = "token".to_string();
+        assert!(
+            form.to_request(&existing).is_ok(),
+            "the seed the picker offers must be one the form accepts"
+        );
+    }
+
+    /// An instance hand-written into config.toml under an odd name predates
+    /// this check and cannot be renamed here, so editing it must still work —
+    /// refusing would make it uneditable as well as undeletable.
+    #[test]
+    fn an_existing_odd_name_is_still_editable() {
+        let mut existing = instance("tele/gram", "telegram", Some("alice"));
+        existing.fields[0].value = "token".to_string();
+        let form = ChannelForm::for_edit(&existing);
+
+        let request = form
+            .to_request(&["tele/gram".to_string()])
+            .expect("an existing entry is exempt from the charset check");
+        assert_eq!(request.instance_name, "tele/gram");
     }
 
     /// Editing reuses the instance's own name, so uniqueness must not fire.

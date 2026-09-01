@@ -355,6 +355,20 @@ pub(crate) fn cmd_channel_setup(name: Option<&str>) {
         let entered = prompt_input(&prompt);
         let val = entered.trim();
         if val.is_empty() {
+            // `channel-prompt-default` shows the stored value in brackets, so a
+            // bare Enter reads as "keep it" — but an omitted key is a removal,
+            // not a no-op: `write_form_managed` drops every managed env key
+            // absent from `values`. Resend the current value so accepting the
+            // default keeps it instead of deleting it (and, for a required
+            // field, instead of taking a 400 the operator did nothing to earn).
+            // Secrets carry no readable current value, so there is nothing to
+            // resend and blank keeps meaning "leave secrets.env alone".
+            if ftype != "secret" && !current.is_empty() {
+                values.insert(
+                    key.to_string(),
+                    serde_json::Value::String(current.to_string()),
+                );
+            }
             continue;
         }
         values.insert(key.to_string(), serde_json::Value::String(val.to_string()));

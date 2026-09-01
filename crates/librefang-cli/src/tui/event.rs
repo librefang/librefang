@@ -108,6 +108,12 @@ pub enum AppEvent {
     ChannelInstanceSaved {
         instance_name: String,
         restart_required: bool,
+        /// Secret field keys already exported in the daemon's own process
+        /// environment. `build_spawn_env` resolves those ahead of the
+        /// `secrets.env` line this save just wrote, so the value the operator
+        /// typed does not take effect until the variable is unset and the
+        /// daemon restarted — a "saved" with no warning would be a lie.
+        shadowed_secrets: Vec<String>,
     },
     /// A `[[sidecar_channels]]` instance was removed.
     ChannelInstanceDeleted(String),
@@ -988,13 +994,30 @@ pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
             match client.get(format!("{base_url}/api/channels")).send() {
-                Ok(resp) => {
+                Ok(resp) if resp.status().is_success() => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
                     let (instances, adapters) = parse_channel_list(&body);
                     let _ = tx.send(AppEvent::ChannelListLoaded {
                         instances,
                         adapters,
                     });
+                }
+                // A 401 / 423 / 500 body carries no `items`, so parsing it
+                // anyway would render as "No channel instances configured" —
+                // an empty daemon and a rejected request must not look alike.
+                Ok(resp) => {
+                    let status = resp.status();
+                    let payload: serde_json::Value = resp.json().unwrap_or_default();
+                    let message = payload
+                        .pointer("/error/message")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| payload["message"].as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| status.to_string());
+                    let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                        "tui-event-channel-instances-fetch-failed",
+                        &[("error", &message)],
+                    )));
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
@@ -1038,6 +1061,14 @@ pub fn spawn_save_channel_instance(
                             restart_required: payload["restart_required"]
                                 .as_bool()
                                 .unwrap_or(false),
+                            shadowed_secrets: payload["shadowed_secrets"]
+                                .as_array()
+                                .map(|keys| {
+                                    keys.iter()
+                                        .filter_map(|k| k.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
                         });
                     } else {
                         // The daemon's own message names the offending field
