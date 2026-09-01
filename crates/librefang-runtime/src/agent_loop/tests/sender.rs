@@ -1277,6 +1277,71 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
     assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
 }
 
+/// Regression for #8131: `current_time_msg`, unlike `canonical_context_msg`
+/// and the memory-context injection, must survive `safe_trim_messages` —
+/// it exists specifically to give long/autonomous sessions (the ones most
+/// likely to get trimmed) an accurate clock. A head insertion made before
+/// the trim call would be the first thing drained once the session crosses
+/// `max_history`, silently reintroducing the bug this channel exists to fix.
+#[test]
+fn test_prepare_llm_messages_current_time_msg_survives_trim_in_long_session() {
+    let mut manifest = test_manifest();
+    manifest.metadata.insert(
+        "current_time_msg".to_string(),
+        serde_json::json!("[Current date/time: Tuesday, September 1, 2026 22:41 GMT+3]"),
+    );
+
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+
+    // Well past DEFAULT_MAX_HISTORY_MESSAGES (60) — a long-running session,
+    // exactly the case this channel targets.
+    for i in 0..40 {
+        session.messages.push(Message::user(format!("q{i}")));
+        session.messages.push(Message::assistant(format!("a{i}")));
+    }
+    session.messages.push(Message::user("current turn"));
+
+    let PreparedMessages { messages, .. } = prepare_llm_messages(
+        &manifest,
+        &mut session,
+        "current turn",
+        None,
+        DEFAULT_MAX_HISTORY_MESSAGES,
+    );
+
+    assert!(
+        messages
+            .iter()
+            .any(|msg| msg.content.text_content().contains("22:41")),
+        "current_time_msg must survive trim in a long session; got: {:?}",
+        messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect::<Vec<_>>()
+    );
+    // Must sit right before the current turn, not buried in trimmed history.
+    assert_eq!(
+        messages.last().unwrap().content.text_content(),
+        "current turn"
+    );
+    assert!(messages[messages.len() - 2]
+        .content
+        .text_content()
+        .contains("22:41"));
+}
+
 fn orphan_tool_result_message(tool_use_id: &str) -> Message {
     Message {
         role: Role::User,

@@ -840,19 +840,6 @@ pub(super) fn prepare_llm_messages(
         }
     }
 
-    // Precise (minute-resolution) current time, injected per-turn like
-    // canonical_context_msg above — kept out of the cached system prompt
-    // so it doesn't invalidate provider prompt caching (#8131).
-    if let Some(time_msg) = manifest
-        .metadata
-        .get("current_time_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !time_msg.is_empty() {
-            messages.insert(0, Message::user(time_msg));
-        }
-    }
-
     if let Some(mem_msg) = memory_context_msg {
         messages.insert(
             0,
@@ -870,6 +857,26 @@ pub(super) fn prepare_llm_messages(
         max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
+
+    // Precise (minute-resolution) current time, kept out of the cached
+    // system prompt so it doesn't invalidate provider prompt caching
+    // (#8131). Inserted AFTER the trim above (unlike canonical_context_msg
+    // and mem_msg, which are inserted at the head before trimming) and
+    // right before the current turn — the whole point of this channel is
+    // to survive exactly the long/autonomous sessions that `max_history`
+    // trims down, where the system prompt's date-only field is most likely
+    // to have gone stale. A head insertion here would be the first thing
+    // `safe_trim_messages` drains once a session crosses `max_history`.
+    if let Some(time_msg) = manifest
+        .metadata
+        .get("current_time_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !time_msg.is_empty() {
+            let insert_at = messages.len().saturating_sub(1);
+            messages.insert(insert_at, Message::user(time_msg));
+        }
+    }
     let _working_stripped = strip_prior_image_data(&mut messages);
     let session_stripped = strip_prior_image_data(&mut session.messages);
     if session_trimmed || session_stripped {

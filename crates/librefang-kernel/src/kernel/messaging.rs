@@ -628,14 +628,11 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                // Minute-resolution counterpart to `current_date` above, delivered
-                // via `current_time_msg` metadata instead of the cached system
-                // prompt (#8131).
-                current_time_precise: Some(
-                    chrono::Local::now()
-                        .format("%A, %B %d, %Y %H:%M %Z")
-                        .to_string(),
-                ),
+                // This ephemeral (`/btw`) path never runs through
+                // `agent_loop::prepare_llm_messages`, so there is no per-turn
+                // message tail to deliver `current_time_msg` through — same
+                // reasoning as `canonical_context: None` above (#8131).
+                current_time_precise: None,
                 active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
@@ -2738,13 +2735,19 @@ impl LibreFangKernel {
                         .to_string(),
                 ),
                 // Minute-resolution counterpart to `current_date` above, delivered
-                // via `current_time_msg` metadata instead of the cached system
-                // prompt (#8131).
-                current_time_precise: Some(
-                    chrono::Local::now()
-                        .format("%A, %B %d, %Y %H:%M %Z")
-                        .to_string(),
-                ),
+                // via `current_time_msg` metadata (see below) instead of the
+                // cached system prompt. Gated the same way as `canonical_context`
+                // above: `stable_prefix_mode` operators have explicitly opted out
+                // of volatile per-turn message-tail content (#8131).
+                current_time_precise: if stable_prefix_mode {
+                    None
+                } else {
+                    Some(
+                        chrono::Local::now()
+                            .format("%A, %B %d, %Y %H:%M %Z")
+                            .to_string(),
+                    )
+                },
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,

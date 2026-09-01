@@ -871,13 +871,18 @@ impl LibreFangKernel {
                 ),
                 // Minute-resolution counterpart to `current_date` above, delivered
                 // via `current_time_msg` metadata (see below) instead of the
-                // cached system prompt, so it doesn't pay the cache-invalidation
-                // cost `current_date` deliberately avoids (#8131).
-                current_time_precise: Some(
-                    chrono::Local::now()
-                        .format("%A, %B %d, %Y %H:%M %Z")
-                        .to_string(),
-                ),
+                // cached system prompt. Gated the same way as `canonical_context`
+                // above: `stable_prefix_mode` operators have explicitly opted out
+                // of volatile per-turn message-tail content (#8131).
+                current_time_precise: if stable_prefix_mode {
+                    None
+                } else {
+                    Some(
+                        chrono::Local::now()
+                            .format("%A, %B %d, %Y %H:%M %Z")
+                            .to_string(),
+                    )
+                },
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
