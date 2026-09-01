@@ -69,6 +69,13 @@
 //! pulldown-cmark, GramIO's entity builders — all parse with a real parser rather than
 //! scan. We have no parser on this path, so we do not pretend to have one.
 //!
+//! `rich_blocks` does have one — it builds `InputRichMessage.blocks` with `pulldown-cmark`,
+//! in this same crate — and it *does* filter link destinations. That is not a contradiction
+//! of the paragraph above: there the converter holds the destination it is about to emit,
+//! the position `sanitize_telegram_html` is in when it filters an `<a href>` it built
+//! itself. The argument here is against guessing at a parse we do not own, not against
+//! filtering as such.
+//!
 //! What guards a hostile link instead: Telegram renders only schemes it supports ("other
 //! *supported* links are rendered as regular inline links"), the client shows an "Open
 //! this link?" confirmation carrying the full URL, and a chat client has no script
@@ -124,7 +131,11 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
             // `![...](...)` is a real media block in Rich Markdown, fetched from the
             // URL — today it is inert text. Escaping the `!` keeps it that way, and
             // backslash *does* work for Markdown syntax characters, unlike for tags.
-            b'!' if bytes.get(i + 1) == Some(&b'[') && backslashes % 2 == 0 => {
+            //
+            // `is_multiple_of` rather than `% 2 == 0`: clippy's `manual_is_multiple_of`
+            // fires on the latter from 1.94, and the method is stable since 1.87 — under
+            // this crate's 1.88 floor.
+            b'!' if bytes.get(i + 1) == Some(&b'[') && backslashes.is_multiple_of(2) => {
                 out.push_str("\\!");
                 backslashes = 0;
                 i += 1;

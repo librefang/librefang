@@ -489,14 +489,6 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
           cargo build --release
-      # NOTE: this crate is outside the root workspace (`members` is `crates/*` plus
-      # `xtask`), so the MSRV job's `cargo check --workspace --lib` never compiles it, and
-      # the step above installs `stable`. Its declared `rust-version = "1.80"` is therefore
-      # unenforced — and, as of #8049, untrue: `reqwest -> url -> idna -> idna_adapter`
-      # resolves to a version declaring 1.86, and pinning it back cascades into `rand_pcg`.
-      # A step that checks the floor would be a permanently red gate rather than a
-      # regression test, so the fix is to settle what the floor actually is first. Tracked
-      # separately; see the PR discussion on #8049.
       - name: Install cross
         run: cargo install cross --locked
       - name: Sidecar — cross build (aarch64-musl, sibling path dep)
