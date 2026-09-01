@@ -834,6 +834,9 @@ impl SkillRegistry {
     /// logic as `load_all()`: auto-converts SKILL.md, runs prompt injection
     /// scan, blocks critical threats. Skills loaded here override global ones
     /// with the same name (insert semantics).
+    ///
+    /// In Stable mode the registry is frozen and cannot take new skills (#6540).
+    /// The freeze is reported only when this call would actually have loaded something: an empty `<workspace>/skills` directory returns `Ok(0)` either way, so reporting it as an error described a skipped no-op as a failure, once per turn per agent, for the lifetime of the daemon (#7964).
     pub fn load_workspace_skills(
         &mut self,
         workspace_skills_dir: &Path,
@@ -841,21 +844,27 @@ impl SkillRegistry {
         if !workspace_skills_dir.exists() {
             return Ok(0);
         }
+
+        let candidates: Vec<PathBuf> = std::fs::read_dir(workspace_skills_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+
+        if candidates.is_empty() {
+            return Ok(0);
+        }
         if self.frozen {
-            return Err(SkillError::NotFound(
-                "Skill registry is frozen (Stable mode)".to_string(),
-            ));
+            return Err(SkillError::RegistryFrozen(format!(
+                "{} workspace skill directory(ies) at {} were not loaded",
+                candidates.len(),
+                workspace_skills_dir.display()
+            )));
         }
 
         let mut count = 0;
-        let entries = std::fs::read_dir(workspace_skills_dir)?;
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
+        for path in candidates {
             let manifest_path = path.join("skill.toml");
             if !manifest_path.exists() {
                 // Auto-detect SKILL.md and convert
@@ -1483,6 +1492,101 @@ input_schema = { type = "object" }
         let dir = TempDir::new().unwrap();
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
         assert_eq!(registry.load_all().unwrap(), 0);
+    }
+
+    // ── Stable-mode workspace-skill reporting (#7964) ────────────────
+    //
+    // The freeze is a configured steady state, so it must only be reported when this call would actually have loaded something. Reported unconditionally it produced 39-100 WARN/day on one deployment, all of it describing a no-op that was skipped.
+
+    #[test]
+    fn frozen_registry_accepts_an_empty_workspace_skills_dir() {
+        let dir = TempDir::new().unwrap();
+        let ws_skills = dir.path().join("workspace-skills");
+        std::fs::create_dir_all(&ws_skills).unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.freeze();
+
+        assert_eq!(
+            registry.load_workspace_skills(&ws_skills).unwrap(),
+            0,
+            "an empty directory loads zero skills either way, so the freeze has nothing to report"
+        );
+    }
+
+    #[test]
+    fn an_empty_workspace_skills_dir_reads_the_same_frozen_or_not() {
+        let dir = TempDir::new().unwrap();
+        let ws_skills = dir.path().join("workspace-skills");
+        std::fs::create_dir_all(&ws_skills).unwrap();
+        // A stray file is not a loadable skill directory either.
+        std::fs::write(ws_skills.join("README.md"), "not a skill").unwrap();
+
+        let mut unfrozen = SkillRegistry::new(dir.path().to_path_buf());
+        let mut frozen = SkillRegistry::new(dir.path().to_path_buf());
+        frozen.freeze();
+
+        assert_eq!(
+            unfrozen.load_workspace_skills(&ws_skills).unwrap(),
+            frozen.load_workspace_skills(&ws_skills).unwrap()
+        );
+    }
+
+    #[test]
+    fn frozen_registry_reports_the_freeze_when_there_is_a_skill_to_load() {
+        let dir = TempDir::new().unwrap();
+        let ws_skills = dir.path().join("workspace-skills");
+        std::fs::create_dir_all(&ws_skills).unwrap();
+        create_test_skill(&ws_skills, "workspace-only");
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.freeze();
+
+        let err = registry
+            .load_workspace_skills(&ws_skills)
+            .expect_err("a skill that will not be loaded is worth reporting");
+        assert!(
+            matches!(err, SkillError::RegistryFrozen(_)),
+            "expected RegistryFrozen, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            !rendered.starts_with("Skill not found"),
+            "the message must not read like a missing skill, got: {rendered}"
+        );
+        assert!(
+            rendered.contains('1'),
+            "the message should say how many directories were skipped, got: {rendered}"
+        );
+        assert_eq!(registry.count(), 0, "nothing may be loaded while frozen");
+    }
+
+    #[test]
+    fn an_unfrozen_registry_still_loads_workspace_skills() {
+        let dir = TempDir::new().unwrap();
+        let ws_skills = dir.path().join("workspace-skills");
+        std::fs::create_dir_all(&ws_skills).unwrap();
+        create_test_skill(&ws_skills, "workspace-only");
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        assert_eq!(registry.load_workspace_skills(&ws_skills).unwrap(), 1);
+        assert!(registry.get("workspace-only").is_some());
+    }
+
+    #[test]
+    fn a_missing_workspace_skills_dir_is_not_an_error_when_frozen() {
+        // The callers no longer guard on `.exists()`, so this path is now
+        // reached on every turn of every agent without a skills directory.
+        let dir = TempDir::new().unwrap();
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.freeze();
+
+        assert_eq!(
+            registry
+                .load_workspace_skills(&dir.path().join("does-not-exist"))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
