@@ -693,10 +693,17 @@ fn merge_extra_body(
         // own output, but an extra_body override of one spelling must also
         // clear whichever spelling it resolved to, or the two can still
         // coexist on an OpenRouter-routed request.
-        if extra.contains_key("reasoning_effort") {
+        // Each guard also requires the *other* spelling to be absent from
+        // `extra`: an operator who deliberately supplied both has overridden
+        // both, and removing each because the other is present would leave the
+        // body with neither — silently dropping the reasoning control instead
+        // of honouring what was asked for.
+        let extra_effort = extra.contains_key("reasoning_effort");
+        let extra_nested = extra.contains_key("reasoning");
+        if extra_effort && !extra_nested {
             obj.remove("reasoning");
         }
-        if extra.contains_key("reasoning") {
+        if extra_nested && !extra_effort {
             obj.remove("reasoning_effort");
         }
     }
@@ -3873,6 +3880,38 @@ mod tests {
             wire.as_object().unwrap().get("reasoning").is_none(),
             "wire must not carry both reasoning controls: {wire:?}"
         );
+    }
+
+    /// An `extra_body` that supplies BOTH spellings has overridden both, so the
+    /// merge must honour them rather than cancel them out.
+    ///
+    /// Removing each spelling because the other is present left the body with
+    /// neither: the operator's explicit reasoning control vanished and the model
+    /// silently ran at its provider default with nothing in the payload to
+    /// explain why.
+    #[test]
+    fn extra_body_supplying_both_reasoning_spellings_keeps_both() {
+        use librefang_types::config::ThinkingConfig;
+        use librefang_types::model_catalog::ReasoningEchoPolicy;
+        let driver = OpenAIDriver::new(String::new(), "https://openrouter.ai/api/v1".to_string());
+        let mut req =
+            build_catalog_policy_test_request("some-thinking-model", ReasoningEchoPolicy::None);
+        req.thinking = Some(ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::High),
+            ..Default::default()
+        });
+        req.extra_body = Some(std::collections::BTreeMap::from([
+            ("reasoning_effort".to_string(), serde_json::json!("low")),
+            (
+                "reasoning".to_string(),
+                serde_json::json!({"effort": "xhigh"}),
+            ),
+        ]));
+        let oai = driver.build_request(&req).expect("build_request");
+        let mut wire = serde_json::to_value(&oai).expect("serialize");
+        merge_extra_body(&oai.extra_body, &mut wire);
+        assert_eq!(wire["reasoning_effort"], "low");
+        assert_eq!(wire["reasoning"], serde_json::json!({"effort": "xhigh"}));
     }
 
     // ── Per-agent / per-task reasoning mode → wire shape (#7946) ───────────

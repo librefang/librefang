@@ -3,5 +3,6 @@
   There was previously no way to express the choice at all — and for DeepSeek V4, direct or via OpenRouter, LibreFang sent no reasoning fields whatsoever, so every request ran at the provider default of thinking-on at `high` no matter what any agent was configured to want.
   The mode is now translated per provider: DeepSeek V4 gets `thinking: {"type": "disabled"}` for `none` and `thinking: {"type": "enabled"}` plus `reasoning_effort` otherwise, OpenRouter-routed models get the nested `reasoning: {effort}` form with `max` as `xhigh`, and other OpenAI-compatible endpoints keep the top-level `reasoning_effort`.
   The two spellings are mutually exclusive per request because OpenRouter answers HTTP 400 to a payload carrying both.
-  Leaving `reasoning_mode` unset preserves the previous wire shape byte for byte, including the `budget_tokens` bucket fallback, so nothing changes for anyone who does not opt in.
+  Leaving `reasoning_mode` unset preserves the `budget_tokens` bucket fallback everywhere it applied, so no agent changes how hard it reasons without opting in.
+  The one shape change for an existing setup is the spelling: an OpenRouter-routed request with a configured budget now carries that bucket as the nested `reasoning: {effort}` rather than the top-level `reasoning_effort`, because the two cannot coexist and OpenRouter's own form is the one it documents.
   (#8083) (@houko)

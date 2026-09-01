@@ -3301,6 +3301,63 @@ fn test_reasoning_mode_per_call_creates_thinking_config_when_absent() {
     );
 }
 
+/// The legacy boolean documents itself as "force thinking on even if the
+/// manifest has it off". A manifest (or backfilled global) `reasoning_mode =
+/// "none"` is exactly that off-state, so `thinking: true` has to clear it —
+/// otherwise the override deserializes, resolves to `Enable`, reaches the
+/// manifest, and the driver still sends the provider's non-think toggle.
+#[test]
+fn test_enable_clears_an_inherited_non_think_mode() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    let mut manifest = librefang_types::agent::AgentManifest {
+        thinking: Some(ThinkingConfig {
+            budget_tokens: 7777,
+            reasoning_mode: Some(ReasoningMode::None),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+
+    let cfg = manifest
+        .thinking
+        .expect("Enable must keep a thinking config");
+    assert_eq!(
+        cfg.reasoning_mode, None,
+        "`thinking: true` must not be silently overruled by an inherited non-think mode",
+    );
+    assert_eq!(
+        cfg.budget_tokens, 7777,
+        "Enable still keeps the configured budget",
+    );
+}
+
+/// Enable must not disturb a *graded* mode — the caller asked for reasoning,
+/// not for a particular amount of it, so an agent pinned to `max` stays at
+/// `max`.
+#[test]
+fn test_enable_leaves_a_graded_mode_alone() {
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
+
+    for mode in [ReasoningMode::Low, ReasoningMode::High, ReasoningMode::Max] {
+        let mut manifest = librefang_types::agent::AgentManifest {
+            thinking: Some(ThinkingConfig {
+                reasoning_mode: Some(mode),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_thinking_override(&mut manifest, ThinkingOverride::Enable);
+        assert_eq!(
+            manifest.thinking.expect("kept").reasoning_mode,
+            Some(mode),
+            "Enable must not downgrade a graded mode",
+        );
+    }
+}
+
 /// `Mode(None)` and `Disable` are deliberately different. `Disable` clears the
 /// thinking config, which only *omits* the reasoning opt-in — a model that
 /// reasons by default keeps reasoning. `Mode(None)` keeps a config carrying the

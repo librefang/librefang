@@ -179,7 +179,11 @@ pub(super) fn resolve_context_window(
 /// - [`ThinkingOverride::Enable`] (legacy `thinking: true`) — ensure the
 ///   manifest has a `ThinkingConfig`, inserting the default one if previously
 ///   empty, so the driver enables reasoning. No mode is pinned: the caller
-///   asked for reasoning, not for a particular amount of it.
+///   asked for reasoning, not for a particular amount of it. An inherited
+///   `reasoning_mode = "none"` *is* cleared, though: the boolean documents
+///   itself as "force thinking on even if the manifest has it off", and a
+///   non-think mode is exactly that off-state, so leaving it in place would
+///   make `thinking: true` a silent no-op.
 /// - [`ThinkingOverride::Disable`] (legacy `thinking: false`) — clear
 ///   `manifest.thinking` so the driver does not request thinking regardless of
 ///   the manifest/global default.
@@ -194,13 +198,21 @@ pub(super) fn apply_thinking_override(
     manifest: &mut librefang_types::agent::AgentManifest,
     thinking_override: librefang_types::config::ThinkingOverride,
 ) {
-    use librefang_types::config::{ThinkingConfig, ThinkingOverride};
+    use librefang_types::config::{ReasoningMode, ThinkingConfig, ThinkingOverride};
     match thinking_override {
         ThinkingOverride::Enable if manifest.thinking.is_none() => {
             manifest.thinking = Some(ThinkingConfig::default());
         }
-        // Enable when thinking is already set — keep the existing budget.
-        ThinkingOverride::Enable => {}
+        // Enable when thinking is already set — keep the existing budget, but
+        // drop an inherited non-think mode so the caller's "on" is not silently
+        // overruled by the agent's (or the global) `reasoning_mode = "none"`.
+        ThinkingOverride::Enable => {
+            if let Some(tc) = manifest.thinking.as_mut() {
+                if tc.reasoning_mode == Some(ReasoningMode::None) {
+                    tc.reasoning_mode = None;
+                }
+            }
+        }
         ThinkingOverride::Disable => {
             manifest.thinking = None;
         }

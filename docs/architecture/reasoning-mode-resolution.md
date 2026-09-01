@@ -47,6 +47,11 @@ When both are present `reasoning_mode` wins — it is strictly more specific, an
 The two are not redundant. `thinking: false` clears the thinking config, which only *omits* the opt-in; `reasoning_mode: "none"` keeps a config carrying the mode, which is what lets the driver send the provider's explicit non-think toggle.
 Collapsing the two would re-open the gap this feature closes — see `test_disable_and_mode_none_are_not_the_same_thing`.
 
+`thinking: true` clears an inherited `reasoning_mode = "none"` rather than leaving it in place.
+The boolean documents itself as "force thinking on even if the manifest has it off", and a non-think mode is exactly that off-state, so leaving it would make the boolean a silent no-op on any agent (or global config) that pins `none`.
+A *graded* mode is left alone — the caller asked for reasoning, not for a particular amount of it.
+See `test_enable_clears_an_inherited_non_think_mode` and `test_enable_leaves_a_graded_mode_alone`.
+
 ## Per-provider wire mapping
 
 Decided in one place, `reasoning_wire_fields` in `crates/librefang-llm-drivers/src/drivers/openai.rs`.
@@ -105,12 +110,17 @@ Top-level form only:
 |---|---|
 | Kimi / Moonshot (`ReasoningEchoPolicy::EmptyString`) | `"thinking": {"type": "disabled"}` regardless of mode. Thinking is disabled wire-side so multi-turn `tool_calls` work without round-tripping `reasoning_content` — a correctness requirement, not a preference. |
 | DeepSeek R1 (`ReasoningEchoPolicy::Strip`) | Nothing sent, in **either** dialect — the `Strip` check short-circuits ahead of the OpenRouter branch, so an R1 route through OpenRouter is not handed a budget-derived `reasoning.effort` it never received before #7946. R1 reasons unconditionally and exposes no wire toggle, so the field would change the payload without changing the model. Pinned by `deepseek_r1_gets_no_reasoning_control_in_either_dialect`. |
-| Anthropic, Gemini, Ollama drivers | Continue to read `budget_tokens`. Their wire control *is* a token budget rather than an effort enum, and remapping an existing Claude user's configured budget into a four-rung bucket would silently change what they are already paying for. |
+| Anthropic, Gemini, Ollama drivers | Continue to read `budget_tokens` for the graded rungs. Their wire control *is* a token budget rather than an effort enum, and remapping an existing Claude user's configured budget into a four-rung bucket would silently change what they are already paying for. `none` is the one rung they *do* honour, because it has to be: `apply_thinking_override` has to materialise a `ThinkingConfig` to carry the mode, and a bare `budget_tokens` read of that config would enable extended thinking (Anthropic) or `think: true` (Ollama) for a turn that asked for the opposite — and bill it. Both drivers therefore treat `reasoning_mode = "none"` as off, pinned by `reasoning_mode_none_does_not_enable_extended_thinking` and `build_request_think_field_false_for_reasoning_mode_none`. Gemini does not read `request.thinking` at all. |
 
 ## Interaction with the #7769 negative cache
 
 An endpoint that has answered 400 to a reasoning control for a given model is recorded in `reasoning_effort_unsupported` and is not asked again — the answer is deterministic, so re-sending only buys a 400 and a retry every turn.
 That suppression now covers **both** spellings, and the strip-and-retry in `complete()` / `stream()` clears both, because an OpenRouter-routed body carries the nested object rather than the top-level field.
+`is_unsupported_reasoning_effort_error` recognises both names too — matching only the literal `reasoning_effort` left the nested spelling with no strip-and-retry and no cache entry at all, so a gateway answering `unsupported parameter: reasoning` burned every retry and then failed the same way on every subsequent turn.
+`reasoning_content` is excluded from that match: DeepSeek's demand that it be echoed back on `tool_calls` turns is a content requirement, and stripping a reasoning control would not answer it.
+
+One rough edge remains, deliberately: the `effort_rejected` short-circuit in `reasoning_wire_fields` returns *before* the `Echo` branch, so once a model is in the negative cache a V4 agent pinned to `reasoning_mode = "none"` stops receiving `thinking: {"type": "disabled"}` and silently reverts to reasoning-on.
+Emitting the gate anyway would risk a permanent 400 on a gateway that does not understand `thinking` either — the retry loop clears only the two effort fields — so the conservative direction was kept.
 
 ## Bucket mapping (unchanged fallback)
 

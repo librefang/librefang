@@ -10,7 +10,7 @@ use crate::llm_driver::{
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
-use librefang_types::config::{PromptCacheStrategy, ResponseFormat};
+use librefang_types::config::{PromptCacheStrategy, ReasoningMode, ResponseFormat};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -416,9 +416,19 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
 
     // Anthropic requires budget_tokens >= 1024 for extended thinking.
     // Skip thinking if budget is too low.
+    //
+    // `reasoning_mode = "none"` (#7946) is an explicit request NOT to reason, so
+    // it suppresses extended thinking here even though this driver otherwise
+    // ignores the mode and steers on `budget_tokens` alone. Without this the
+    // kernel's `ThinkingOverride::Mode(ReasoningMode::None)` — which has to
+    // materialise a `ThinkingConfig` so the OpenAI-compatible drivers can send
+    // their explicit non-think toggle — would arrive here as a default 10_000
+    // token budget and turn extended thinking *on* for an agent that asked for
+    // the opposite, also inflating `max_tokens` below.
     let thinking_value = request
         .thinking
         .as_ref()
+        .filter(|tc| tc.reasoning_mode != Some(ReasoningMode::None))
         .filter(|tc| tc.budget_tokens >= 1024)
         .map(|tc| {
             serde_json::json!({
@@ -1861,6 +1871,62 @@ mod tests {
         };
         let api_request = build_anthropic_request(&request);
         assert!(api_request.tools[0].cache_control.is_none());
+    }
+
+    /// `reasoning_mode = "none"` (#7946) must not turn extended thinking *on*.
+    ///
+    /// The kernel materialises a `ThinkingConfig` to carry that mode — it has
+    /// to, so the OpenAI-compatible drivers can send their explicit non-think
+    /// toggle — and its default `budget_tokens` is 10_000. Read as a bare
+    /// budget, that enables extended thinking and inflates `max_tokens` by
+    /// `budget + 1024`, i.e. the exact opposite of what was asked for, billed.
+    #[test]
+    fn reasoning_mode_none_does_not_enable_extended_thinking() {
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            max_tokens: 4096,
+            thinking: Some(librefang_types::config::ThinkingConfig {
+                reasoning_mode: Some(ReasoningMode::None),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let api_request = build_anthropic_request(&request);
+        assert!(
+            api_request.thinking.is_none(),
+            "reasoning_mode=none must suppress the thinking block, got {:?}",
+            api_request.thinking,
+        );
+        assert_eq!(
+            api_request.max_tokens, 4096,
+            "max_tokens must not be inflated for a turn that asked not to reason",
+        );
+    }
+
+    /// Positive control for the test above: a graded mode (or none at all)
+    /// leaves the pre-#7946 budget behaviour intact.
+    #[test]
+    fn a_non_none_reasoning_mode_still_enables_extended_thinking() {
+        for mode in [None, Some(ReasoningMode::Low), Some(ReasoningMode::Max)] {
+            let request = CompletionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                messages: std::sync::Arc::new(vec![Message::user("hi")]),
+                max_tokens: 4096,
+                thinking: Some(librefang_types::config::ThinkingConfig {
+                    budget_tokens: 8192,
+                    reasoning_mode: mode,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let api_request = build_anthropic_request(&request);
+            let thinking = api_request
+                .thinking
+                .as_ref()
+                .unwrap_or_else(|| panic!("mode {mode:?} must keep extended thinking enabled"));
+            assert_eq!(thinking["budget_tokens"], 8192, "mode {mode:?}");
+        }
     }
 
     /// Helper: extract the cache_control marker from a message's last block,
