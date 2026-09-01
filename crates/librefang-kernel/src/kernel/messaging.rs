@@ -633,16 +633,22 @@ impl LibreFangKernel {
                 // instead of the cached system prompt (#8131). This
                 // ephemeral (`/btw`) path DOES run through
                 // `agent_loop::prepare_llm_messages` (via `run_agent_loop`
-                // below), same as the other two call sites — an earlier
-                // version of this comment claimed otherwise and left the
-                // field populated but never wired to `current_time_msg`,
-                // silently leaving `/btw` turns without precise time
-                // (caught by adversarial review round 2 on #8132).
-                current_time_precise: Some(
-                    chrono::Local::now()
-                        .format("%A, %B %d, %Y %H:%M %Z")
-                        .to_string(),
-                ),
+                // below), same as the other two call sites — round 1 of
+                // this PR's review (F3) found the field populated but never
+                // wired to `current_time_msg`; round 2 wired it but dropped
+                // the `stable_prefix_mode` gate the other two call sites
+                // carry, unconditionally re-adding volatile per-turn
+                // content on a path operators may have opted out of
+                // (caught by adversarial review round 3 on #8132).
+                current_time_precise: if self.config.load_full().stable_prefix_mode {
+                    None
+                } else {
+                    Some(
+                        chrono::Local::now()
+                            .format("%A, %B %d, %Y %H:%M %Z")
+                            .to_string(),
+                    )
+                },
                 active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
