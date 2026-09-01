@@ -840,6 +840,19 @@ pub(super) fn prepare_llm_messages(
         }
     }
 
+    // Precise (minute-resolution) current time, injected per-turn like
+    // canonical_context_msg above — kept out of the cached system prompt
+    // so it doesn't invalidate provider prompt caching (#8131).
+    if let Some(time_msg) = manifest
+        .metadata
+        .get("current_time_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !time_msg.is_empty() {
+            messages.insert(0, Message::user(time_msg));
+        }
+    }
+
     if let Some(mem_msg) = memory_context_msg {
         messages.insert(
             0,

@@ -869,6 +869,15 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
+                // Minute-resolution counterpart to `current_date` above, delivered
+                // via `current_time_msg` metadata (see below) instead of the
+                // cached system prompt, so it doesn't pay the cache-invalidation
+                // cost `current_date` deliberately avoids (#8131).
+                current_time_precise: Some(
+                    chrono::Local::now()
+                        .format("%A, %B %d, %Y %H:%M %Z")
+                        .to_string(),
+                ),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
@@ -888,6 +897,17 @@ impl LibreFangKernel {
                 manifest.metadata.insert(
                     "canonical_context_msg".to_string(),
                     serde_json::Value::String(cc_msg),
+                );
+            }
+            // Same rationale as canonical_context_msg above: precise time
+            // travels as a per-turn user message, not the cached system
+            // prompt (#8131).
+            if let Some(time_msg) =
+                librefang_runtime::prompt_builder::build_current_time_message(&prompt_ctx)
+            {
+                manifest.metadata.insert(
+                    "current_time_msg".to_string(),
+                    serde_json::Value::String(time_msg),
                 );
             }
 
