@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
 use librefang_skills::SkillError;
@@ -628,27 +629,13 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                // Minute-resolution counterpart to `current_date` above,
-                // delivered via `current_time_msg` metadata (see below)
-                // instead of the cached system prompt (#8131). This
-                // ephemeral (`/btw`) path DOES run through
+                // This ephemeral (`/btw`) path DOES run through
                 // `agent_loop::prepare_llm_messages` (via `run_agent_loop`
-                // below), same as the other two call sites — round 1 of
-                // this PR's review (F3) found the field populated but never
-                // wired to `current_time_msg`; round 2 wired it but dropped
-                // the `stable_prefix_mode` gate the other two call sites
-                // carry, unconditionally re-adding volatile per-turn
-                // content on a path operators may have opted out of
-                // (caught by adversarial review round 3 on #8132).
-                current_time_precise: if self.config.load_full().stable_prefix_mode {
-                    None
-                } else {
-                    Some(
-                        chrono::Local::now()
-                            .format("%A, %B %d, %Y %H:%M %Z")
-                            .to_string(),
-                    )
-                },
+                // below), same as the other two call sites, so it gets the
+                // same treatment (#8131).
+                current_time_precise: current_time_precise_for_prompt(
+                    self.config.load_full().stable_prefix_mode,
+                ),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
@@ -657,14 +644,7 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
-            if let Some(time_msg) =
-                librefang_runtime::prompt_builder::build_current_time_message(&prompt_ctx)
-            {
-                manifest.metadata.insert(
-                    "current_time_msg".to_string(),
-                    serde_json::Value::String(time_msg),
-                );
-            }
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
         }
 
         // #5980: pre-dispatch per-provider budget gate on the ephemeral
@@ -2758,20 +2738,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
-                // Minute-resolution counterpart to `current_date` above, delivered
-                // via `current_time_msg` metadata (see below) instead of the
-                // cached system prompt. Gated the same way as `canonical_context`
-                // above: `stable_prefix_mode` operators have explicitly opted out
-                // of volatile per-turn message-tail content (#8131).
-                current_time_precise: if stable_prefix_mode {
-                    None
-                } else {
-                    Some(
-                        chrono::Local::now()
-                            .format("%A, %B %d, %Y %H:%M %Z")
-                            .to_string(),
-                    )
-                },
+                current_time_precise: current_time_precise_for_prompt(stable_prefix_mode),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
@@ -2796,14 +2763,7 @@ impl LibreFangKernel {
             // Same rationale as canonical_context_msg above: precise time
             // travels as a per-turn user message, not the cached system
             // prompt (#8131).
-            if let Some(time_msg) =
-                librefang_runtime::prompt_builder::build_current_time_message(&prompt_ctx)
-            {
-                manifest.metadata.insert(
-                    "current_time_msg".to_string(),
-                    serde_json::Value::String(time_msg),
-                );
-            }
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
 
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(
