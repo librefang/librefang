@@ -439,6 +439,11 @@ pub async fn list_models(
                 "output_cost_per_m": m.output_cost_per_m,
                 "pricing_known": m.pricing_known,
                 "limits_known": m.limits_known,
+                // The provenance of `supports_vision`, resolved through any operator override (refs #7957).
+                // `"unknown"` means the flag above was inferred from the model's name and nothing acted on it —
+                // the request-build gate keeps sending images. A dashboard can prompt for a declaration
+                // instead of presenting a guess as a capability.
+                "vision_support": catalog.vision_support(m).as_str(),
                 "image_input_cost_per_m": m.image_input_cost_per_m,
                 "image_output_cost_per_m": m.image_output_cost_per_m,
                 "supports_tools": eff.supports_tools,
@@ -679,6 +684,11 @@ pub async fn get_model(
                     "output_cost_per_m": m.output_cost_per_m,
                     "pricing_known": m.pricing_known,
                     "limits_known": m.limits_known,
+                    // The provenance of `supports_vision`, resolved through any operator override (refs #7957).
+                    // `"unknown"` means the flag above was inferred from the model's name and nothing acted on it —
+                    // the request-build gate keeps sending images. A dashboard can prompt for a declaration
+                    // instead of presenting a guess as a capability.
+                    "vision_support": catalog.vision_support(m).as_str(),
                     "image_input_cost_per_m": m.image_input_cost_per_m,
                     "image_output_cost_per_m": m.image_output_cost_per_m,
                     "supports_tools": eff.supports_tools,
@@ -1344,6 +1354,11 @@ pub async fn get_provider(
                             "output_cost_per_m": m.output_cost_per_m,
                             "pricing_known": m.pricing_known,
                             "limits_known": m.limits_known,
+                            // The provenance of `supports_vision`, resolved through any operator override (refs #7957).
+                            // `"unknown"` means the flag above was inferred from the model's name and nothing acted on it —
+                            // the request-build gate keeps sending images. A dashboard can prompt for a declaration
+                            // instead of presenting a guess as a capability.
+                            "vision_support": catalog.vision_support(m).as_str(),
                             "image_input_cost_per_m": m.image_input_cost_per_m,
                             "image_output_cost_per_m": m.image_output_cost_per_m,
                             "supports_tools": eff.supports_tools,
@@ -1490,6 +1505,15 @@ pub async fn add_custom_model(
             .get("supports_vision")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        // A custom model is a hand-entered declaration, but only about the fields the operator
+        // actually filled in. An omitted `supports_vision` is silence, not a declaration of
+        // blindness, so it is recorded as unknown and the request-build gate keeps sending images
+        // (refs #7957). Recording the `unwrap_or(false)` above as a fact would strip a vision
+        // model's images with no error the moment someone added it without ticking the box.
+        vision_known: body
+            .get("supports_vision")
+            .and_then(|v| v.as_bool())
+            .is_some(),
         supports_streaming: body
             .get("supports_streaming")
             .and_then(|v| v.as_bool())

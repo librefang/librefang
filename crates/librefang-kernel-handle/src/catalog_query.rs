@@ -11,6 +11,8 @@
 // catalog misses.
 // ============================================================================
 
+use librefang_types::model_catalog::VisionSupport;
+
 pub trait CatalogQuery: Send + Sync {
     /// How the OpenAI-compatible driver must handle `reasoning_content`
     /// on historical assistant turns for the given model. Default impl
@@ -24,20 +26,17 @@ pub trait CatalogQuery: Send + Sync {
         librefang_types::model_catalog::ReasoningEchoPolicy::None
     }
 
-    /// Whether the given model supports vision (image) input, resolved from
-    /// the model catalog's effective capabilities (#6010). Consulted at
-    /// request-build time to decide whether image content blocks may be sent
-    /// to the model or must be redacted to a text placeholder first —
-    /// text-only OpenAI-compatible models reject image content parts with
-    /// HTTP 400 (`unknown variant image_url, expected text`).
+    /// What is known about the given model's vision (image) input support, resolved from the model catalog (#6010, refs #7957).
+    /// Consulted at request-build time to decide whether image content blocks may be sent to the model or must be redacted to a text placeholder first — text-only OpenAI-compatible models reject image content parts with HTTP 400 (`unknown variant image_url, expected text`).
     ///
-    /// Default impl returns `true` (fail open) so non-overriding mocks and
-    /// stubs keep sending images unchanged. The real kernel impl applies user
-    /// capability overrides (#4745) via `effective_capabilities` and also
-    /// fails open on a catalog miss, so vision-capable models are never
-    /// degraded.
-    fn supports_vision_for(&self, _model: &str) -> bool {
-        true
+    /// Returns a tri-state rather than a `bool` because the gate has to treat a *declared* absence of vision support differently from an *unproven* one.
+    /// #7957: a gateway-discovered model whose operator-chosen alias missed the catalog's name heuristic was recorded as blind, and the gate then removed the images with no error and no log — while a catalog miss, which knows strictly less, correctly kept sending them.
+    /// [`VisionSupport::Unknown`] is what makes the two paths agree.
+    ///
+    /// Default impl returns [`VisionSupport::Unknown`], so non-overriding mocks and stubs keep sending images unchanged.
+    /// The real kernel impl applies operator capability overrides (#4745), honours the entry's `vision_known` provenance flag, and returns `Unknown` on a catalog miss.
+    fn vision_support_for(&self, _model: &str) -> VisionSupport {
+        VisionSupport::Unknown
     }
 
     /// Resolve the effective proactive-memory `extraction_model` for the

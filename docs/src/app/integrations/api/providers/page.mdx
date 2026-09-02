@@ -120,9 +120,13 @@ Get detailed information about a specific model. The `id` parameter supports sla
   "output_cost_per_1m": 0.79,
   "supports_tools": true,
   "supports_vision": false,
+  "vision_support": "unsupported",
   "supports_streaming": true
 }
 ```
+
+`vision_support` is the provenance of `supports_vision`: `supported` / `unsupported` when a source declared it, `unknown` when the flag was inferred from the model's name.
+Only `unsupported` causes image attachments to be stripped from a request — an `unknown` model keeps them, so a guess never silently blinds a model that can see.
 
 ### POST /api/catalog/update
 

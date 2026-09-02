@@ -4545,6 +4545,76 @@ fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
 }
 
 #[test]
+fn test_set_agent_mcp_servers_grandfathers_a_name_the_agent_already_stores() {
+    // #8095: uninstall an MCP server and every agent still naming it became
+    // uneditable. The dashboard editor round-trips the current allowlist, so
+    // the now-unknown name comes back in on every save — including the save
+    // that would have removed it. The operator could not add a server, remove
+    // the stale one, or repair the agent from any surface.
+    //
+    // The pre-existing state is seeded through the registry rather than by
+    // deleting a catalog file, because that is literally what an uninstall
+    // leaves behind: the manifest keeps the name and nothing rewrites it.
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+    register_mcp_server(&kernel, "still-installed");
+
+    let agent_id = spawn_allowlist_test_agent(&kernel, "stale-declaration-agent");
+    kernel
+        .agents
+        .registry
+        .update_mcp_servers(agent_id, vec!["uninstalled-mcp".to_string()])
+        .expect("seed the post-uninstall state");
+
+    // Re-submitting the stale name unchanged must not be refused: it is
+    // already on disk, so rejecting it protects nothing.
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["uninstalled-mcp".to_string()])
+        .expect("a name the agent already stores must stay saveable");
+
+    // The edit the operator actually wants: add a real server alongside it.
+    kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec!["uninstalled-mcp".to_string(), "still-installed".to_string()],
+        )
+        .expect("a stale declaration must not block adding a working server");
+
+    // And the repair: drop the stale name entirely.
+    kernel
+        .set_agent_mcp_servers(agent_id, vec!["still-installed".to_string()])
+        .expect("removing the stale declaration must be possible");
+    assert_eq!(
+        kernel
+            .agents
+            .registry
+            .get(agent_id)
+            .expect("agent exists")
+            .manifest
+            .mcp_servers,
+        vec!["still-installed".to_string()],
+        "the stale name is gone once the operator removes it"
+    );
+
+    // Grandfathering is scoped to names already present: a newly introduced
+    // unknown name is still a typo and still refused. This is the assertion
+    // that keeps the fix from becoming "stop validating".
+    let err = kernel
+        .set_agent_mcp_servers(
+            agent_id,
+            vec!["still-installed".to_string(), "uninstalled-mcp".to_string()],
+        )
+        .expect_err("a name that is no longer stored is new again, and unknown");
+    assert!(
+        err.to_string().contains("uninstalled-mcp"),
+        "the rejection must name the offending server, got: {err}"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
 fn test_set_agent_mcp_servers_accepts_configured_but_unconnected_name() {
     // The old check resolved connected *tools* back to servers, so a server configured in `config.toml` that had not dialed yet — or failed to dial — was rejected even though it is exactly what the operator wrote down.
     let tmp = tempfile::tempdir().unwrap();

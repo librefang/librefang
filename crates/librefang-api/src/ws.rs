@@ -1271,14 +1271,19 @@ async fn handle_text_message(
                 // catalog declared it false (because the provider's
                 // `capabilities` field is wrong), we should let the image
                 // request through.
-                let supports_vision = {
-                    let catalog = state.kernel.model_catalog_ref().load();
-                    catalog
-                        .find_model(&model_name)
-                        .map(|m| catalog.effective_capabilities(m).supports_vision)
-                        .unwrap_or(false)
-                };
-                if !supports_vision {
+                //
+                // Refs #7957: warn only when something that *knows* said the model is text-only.
+                // The previous `unwrap_or(false)` warned on a catalog miss and on a flag inferred
+                // from the model's name, so an operator running a vision-capable model behind a
+                // gateway was told it "cannot analyze images" while the request went through and
+                // worked. This warning has to agree with the agent loop's redaction gate, and that
+                // gate fires on `Unsupported` alone.
+                let vision = state
+                    .kernel
+                    .model_catalog_ref()
+                    .load()
+                    .vision_support_for(&model_name);
+                if !vision.allows_images() {
                     send_json_or_close(
                         sender,
                         &serde_json::json!({

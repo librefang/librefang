@@ -1172,7 +1172,6 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
     let models = vec![
         // Vision model: families includes "clip"
         DiscoveredModelInfo {
-            name: "llava:latest".to_string(),
             families: Some(vec!["llama".to_string(), "clip".to_string()]),
             family: Some("llama".to_string()),
             parameter_size: None,
@@ -1181,10 +1180,10 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("llava:latest".to_string())
         },
         // Embedding model: name contains "embed"
         DiscoveredModelInfo {
-            name: "nomic-embed-text:latest".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1193,10 +1192,10 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("nomic-embed-text:latest".to_string())
         },
         // Thinking model: name contains "deepseek-r1"
         DiscoveredModelInfo {
-            name: "deepseek-r1:8b".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1205,10 +1204,10 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("deepseek-r1:8b".to_string())
         },
         // Plain chat model
         DiscoveredModelInfo {
-            name: "llama3.2:latest".to_string(),
             families: Some(vec!["llama".to_string()]),
             family: Some("llama".to_string()),
             parameter_size: None,
@@ -1217,6 +1216,7 @@ fn test_merge_infers_capabilities_from_ollama_metadata() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("llama3.2:latest".to_string())
         },
     ];
     catalog.merge_discovered_models("ollama", &models);
@@ -1358,7 +1358,6 @@ fn test_merge_upgrades_unknown_capacity_but_never_erases_a_known_one() {
 fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
     let mut catalog = test_catalog();
     let models = vec![DiscoveredModelInfo {
-        name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
         families: Some(vec!["gemma".to_string()]),
         family: Some("gemma".to_string()),
         parameter_size: None,
@@ -1372,6 +1371,7 @@ fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
         ],
         context_window: None,
         max_output_tokens: None,
+        ..DiscoveredModelInfo::bare("Gemma-4-26B-A4B-it-GGUF:latest".to_string())
     }];
     catalog.merge_discovered_models("ollama", &models);
 
@@ -1398,7 +1398,6 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
     catalog.merge_discovered_models(
         "ollama",
         &[DiscoveredModelInfo {
-            name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1407,6 +1406,7 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("Gemma-4-26B-A4B-it-GGUF:latest".to_string())
         }],
     );
     let pre = catalog
@@ -1419,7 +1419,6 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
     catalog.merge_discovered_models(
         "ollama",
         &[DiscoveredModelInfo {
-            name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1432,6 +1431,7 @@ fn test_merge_upgrades_existing_local_entry_capabilities() {
             ],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("Gemma-4-26B-A4B-it-GGUF:latest".to_string())
         }],
     );
     let post = catalog
@@ -1455,7 +1455,6 @@ fn test_merge_never_downgrades_capabilities() {
     catalog.merge_discovered_models(
         "ollama",
         &[DiscoveredModelInfo {
-            name: "vlm-model:latest".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1464,6 +1463,7 @@ fn test_merge_never_downgrades_capabilities() {
             capabilities: vec!["vision".to_string(), "thinking".to_string()],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("vlm-model:latest".to_string())
         }],
     );
     // Re-probe with empty capabilities — must NOT clear the previously
@@ -1471,7 +1471,6 @@ fn test_merge_never_downgrades_capabilities() {
     catalog.merge_discovered_models(
         "ollama",
         &[DiscoveredModelInfo {
-            name: "vlm-model:latest".to_string(),
             families: None,
             family: None,
             parameter_size: None,
@@ -1480,6 +1479,7 @@ fn test_merge_never_downgrades_capabilities() {
             capabilities: vec![],
             context_window: None,
             max_output_tokens: None,
+            ..DiscoveredModelInfo::bare("vlm-model:latest".to_string())
         }],
     );
     let entry = catalog.find_model("vlm-model:latest").unwrap();
@@ -3045,4 +3045,233 @@ fn provider_overlay_round_trips_through_the_directory_loader() {
         .get_provider("litellm")
         .expect("the overlay on disk must produce a provider");
     assert!(provider.discover_models);
+}
+
+// ---------------------------------------------------------------------------
+// #7957 — a gateway model's vision support must come from the gateway, and an
+// unknown capability must never be recorded as a known "no"
+// ---------------------------------------------------------------------------
+
+/// A helper for the #7957 tests: the alias an operator actually gives a LiteLLM deployment.
+/// It matches no vision heuristic (`llava`, `vision`, `-vl-`, a `clip` family, …), which is the
+/// premise of the whole issue.
+const OPERATOR_ALIAS: &str = "team-default";
+
+#[test]
+fn a_gateway_declared_vision_flag_survives_a_name_that_matches_no_heuristic() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_vision: Some(true),
+            ..DiscoveredModelInfo::bare(OPERATOR_ALIAS)
+        }],
+    );
+
+    let entry = catalog
+        .find_model(OPERATOR_ALIAS)
+        .expect("the discovered model must enter the catalog");
+    assert!(
+        entry.supports_vision,
+        "the gateway declared vision support; the model's name must not overrule it"
+    );
+    assert!(
+        entry.vision_known,
+        "a declared flag is knowledge, so the entry must be able to say so"
+    );
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Supported
+    );
+    assert!(catalog.vision_support_for(OPERATOR_ALIAS).allows_images());
+}
+
+#[test]
+fn a_gateway_model_with_no_declared_capability_fails_open_instead_of_stripping() {
+    let mut catalog = test_catalog();
+    // The reproduction case: the bare OpenAI `/v1/models` shape, so `supports_vision` is `None`.
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare(OPERATOR_ALIAS)]);
+
+    let entry = catalog
+        .find_model(OPERATOR_ALIAS)
+        .expect("the discovered model must enter the catalog");
+    assert!(
+        !entry.vision_known,
+        "nothing declared this model's vision support, and the entry must not pretend otherwise"
+    );
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Unknown,
+        "a catalog hit built on a name heuristic must be no more confident than a catalog miss"
+    );
+    assert!(
+        catalog.vision_support_for(OPERATOR_ALIAS).allows_images(),
+        "this is the bug: an unproven capability used to strip the user's images silently"
+    );
+}
+
+#[test]
+fn a_catalog_miss_and_an_inferred_entry_give_the_same_answer() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare(OPERATOR_ALIAS)]);
+
+    // The asymmetry #7957 reported: the miss path was already right, the hit path was not.
+    assert_eq!(
+        catalog.vision_support_for("a-model-nobody-has-ever-heard-of"),
+        VisionSupport::Unknown
+    );
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Unknown
+    );
+}
+
+#[test]
+fn a_gateway_declared_denial_is_believed_and_reads_as_unsupported() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_vision: Some(false),
+            ..DiscoveredModelInfo::bare("looks-like-a-vision-model")
+        }],
+    );
+
+    let entry = catalog.find_model("looks-like-a-vision-model").unwrap();
+    assert!(!entry.supports_vision);
+    assert!(entry.vision_known);
+    assert_eq!(
+        catalog.vision_support_for("looks-like-a-vision-model"),
+        VisionSupport::Unsupported,
+        "a declared text-only model is the one case that may have its images redacted"
+    );
+    assert!(!catalog
+        .vision_support_for("looks-like-a-vision-model")
+        .allows_images());
+}
+
+#[test]
+fn a_gateway_declaration_corrects_a_previously_inferred_flag() {
+    let mut catalog = test_catalog();
+    // First probe: the bare shape, so the name heuristic guesses (and guesses wrong).
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare(OPERATOR_ALIAS)]);
+    assert!(!catalog.find_model(OPERATOR_ALIAS).unwrap().vision_known);
+
+    // Second probe, after the operator turns on LiteLLM's model-info block.
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_vision: Some(true),
+            ..DiscoveredModelInfo::bare(OPERATOR_ALIAS)
+        }],
+    );
+
+    let entry = catalog.find_model(OPERATOR_ALIAS).unwrap();
+    assert!(entry.supports_vision);
+    assert!(entry.vision_known);
+}
+
+#[test]
+fn an_inferred_probe_never_downgrades_a_declared_vision_model() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_vision: Some(true),
+            ..DiscoveredModelInfo::bare(OPERATOR_ALIAS)
+        }],
+    );
+    // A later probe through a proxy that strips the model-info block declares nothing.
+    // It must not turn a known-vision model back into a blind one — the never-downgrade rule that
+    // `merge_discovered_models` has always had, now expressed in terms of provenance.
+    catalog.merge_discovered_models("litellm", &[DiscoveredModelInfo::bare(OPERATOR_ALIAS)]);
+
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Supported
+    );
+}
+
+#[test]
+fn an_operator_override_outranks_the_catalog_in_both_directions() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_vision: Some(false),
+            ..DiscoveredModelInfo::bare(OPERATOR_ALIAS)
+        }],
+    );
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Unsupported
+    );
+
+    // The escape hatch the redaction WARN points the operator at (#4745).
+    catalog.set_overrides(
+        format!("litellm:{OPERATOR_ALIAS}"),
+        ModelOverrides {
+            supports_vision: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        catalog.vision_support_for(OPERATOR_ALIAS),
+        VisionSupport::Supported,
+        "a human saying so is knowledge, and it must beat what the gateway reported"
+    );
+}
+
+#[test]
+fn a_gateway_declared_function_calling_denial_reaches_the_entry() {
+    let mut catalog = test_catalog();
+    catalog.merge_discovered_models(
+        "litellm",
+        &[DiscoveredModelInfo {
+            supports_function_calling: Some(false),
+            ..DiscoveredModelInfo::bare("no-tools-here")
+        }],
+    );
+
+    let entry = catalog.find_model("no-tools-here").unwrap();
+    assert!(
+        !entry.supports_tools,
+        "the gateway declared no function calling; the blanket non-embedding assumption must yield"
+    );
+    assert!(
+        entry.supports_streaming,
+        "streaming tracks `is a chat model`, which the tools flag never spoke to"
+    );
+}
+
+/// The registry side of the same field: a curated entry that omits `supports_vision` is a
+/// declaration of text-only, not a guess, so it keeps working exactly as before.
+#[test]
+fn a_registry_entry_that_omits_the_flag_is_still_a_declaration() {
+    let toml = concat!(
+        "[provider]\n",
+        "id = \"acme\"\n",
+        "display_name = \"ACME\"\n",
+        "api_key_env = \"ACME_API_KEY\"\n",
+        "base_url = \"https://api.acme.test/v1\"\n\n",
+        "[[models]]\n",
+        "id = \"acme-text\"\n",
+        "display_name = \"ACME Text\"\n",
+        "tier = \"balanced\"\n",
+        "context_window = 32768\n",
+        "max_output_tokens = 4096\n",
+        "input_cost_per_m = 1.0\n",
+        "output_cost_per_m = 2.0\n",
+    );
+    let catalog = ModelCatalog::from_sources(&[source(toml, true)], None);
+    let entry = catalog.find_model("acme-text").expect("entry must load");
+    assert!(!entry.supports_vision);
+    assert!(
+        entry.vision_known,
+        "a curated registry entry predates the field and is a declaration; `serde(default)` must be true"
+    );
+    assert_eq!(
+        catalog.vision_support_for("acme-text"),
+        VisionSupport::Unsupported
+    );
 }

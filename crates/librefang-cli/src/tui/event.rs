@@ -32,7 +32,7 @@ use super::screens::{
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
-    workflows::{WorkflowInfo, WorkflowRun},
+    workflows::{WorkflowInfo, WorkflowParamField, WorkflowParamsFetch, WorkflowRun},
 };
 
 // ── BackendRef ──────────────────────────────────────────────────────────────
@@ -128,6 +128,10 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
+    /// Workflow declared parameters loaded for the run-input form. Every
+    /// fetch outcome arrives here — declared parameters, "declares none",
+    /// or "could not consult the schema" (see [`WorkflowParamsFetch`]).
+    WorkflowParamsLoaded(crate::tui::screens::workflows::WorkflowParamsFetch),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -1278,6 +1282,76 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// Fetch a workflow's declared `input_schema` parameters for the run-input form.
+///
+/// Every outcome sends `WorkflowParamsLoaded`, in daemon and in-process mode
+/// alike: declared parameters, "declares none", or "could not consult the
+/// schema" (see [`WorkflowParamsFetch`]). The form then renders one editable
+/// row per declared parameter, the bare-string box, or the bare-string box
+/// plus a status line that says the schema was not consulted - never a
+/// silent fallback to free text.
+pub fn spawn_fetch_workflow_params(
+    backend: BackendRef,
+    workflow_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let fetch = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/workflows/{workflow_id}"))
+                    .send()
+                    .ok()
+                    .filter(|r| r.status().is_success())
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .map(|body| {
+                        match body.get("input_schema").and_then(|v| v.as_array()) {
+                            // A 200 with a declared schema - possibly empty, which
+                            // still means the workflow has no parameters.
+                            Some(arr) => {
+                                let params = arr
+                                    .iter()
+                                    .filter_map(|p| {
+                                        let name = p.get("name")?.as_str()?.to_string();
+                                        Some(WorkflowParamField {
+                                            name,
+                                            param_type: p
+                                                .get("param_type")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("string")
+                                                .to_string(),
+                                            required: p
+                                                .get("required")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(true),
+                                            description: p
+                                                .get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            value: String::new(),
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                WorkflowParamsFetch::Loaded(params)
+                            }
+                            // A 200 whose body carries no `input_schema` array: the
+                            // kernel omits the key when the workflow declares
+                            // nothing (skip_serializing_if), so this is "declares
+                            // none", not a failure.
+                            None => WorkflowParamsFetch::None,
+                        }
+                    })
+                    .unwrap_or(WorkflowParamsFetch::Failed)
+            }
+            // In-process mode has no daemon HTTP API to consult, so the schema
+            // cannot be known. Say so instead of silently pretending it was.
+            BackendRef::InProcess(_) => WorkflowParamsFetch::Failed,
+        };
+        let _ = tx.send(AppEvent::WorkflowParamsLoaded(fetch));
+    });
+}
 /// How long the daemon may hold the run request open before handing the run back as a background task.
 ///
 /// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.

@@ -240,13 +240,20 @@ fn catalog_query_default_returns_none() {
 }
 
 #[test]
-fn catalog_query_supports_vision_defaults_to_true() {
-    // #6010: a stub/mock that doesn't override `supports_vision_for` must
-    // report `true` (fail open), so test fixtures and any handle without a
-    // catalog wired keep sending image content blocks unchanged. Only the
-    // real kernel impl, which consults the model catalog, can return `false`.
+fn catalog_query_vision_support_defaults_to_unknown() {
+    // #6010 / #7957: a stub or mock that doesn't override `vision_support_for` must report
+    // `Unknown`, which fails open, so test fixtures and any handle without a catalog wired keep
+    // sending image content blocks unchanged.
+    // `Unknown` rather than `Supported` because the default is an absence of information, and
+    // saying `Supported` would be the same over-claim on the miss path that #7957 fixed on the hit
+    // path — the gate only needs `allows_images()`, which both answers satisfy.
+    use librefang_types::model_catalog::VisionSupport;
     let stub = StubKernel;
-    assert!(stub.supports_vision_for("deepseek-v4"));
-    assert!(stub.supports_vision_for("gpt-4o"));
-    assert!(stub.supports_vision_for("anything-else"));
+    for model in ["deepseek-v4", "gpt-4o", "anything-else"] {
+        assert_eq!(stub.vision_support_for(model), VisionSupport::Unknown);
+        assert!(
+            stub.vision_support_for(model).allows_images(),
+            "a handle with no catalog wired must never strip images from a request"
+        );
+    }
 }

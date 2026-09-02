@@ -781,12 +781,18 @@ async fn run_agent_loop_streaming_inner(
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
 
-        // Mirror the non-streaming vision gate (#6010): redact image blocks for text-only models before building the request.
-        let supports_vision = kernel
+        // Mirror the non-streaming vision gate (#6010, refs #7957): only a model the catalog
+        // *declares* text-only gets its image blocks redacted before the request is built.
+        // `VisionSupport::Unknown` — no kernel handle, a catalog miss, or an entry whose flag was
+        // inferred from the model's name — fails open and sends the images, so a gateway model with
+        // an operator-chosen alias is never silently blinded. This block must stay identical in
+        // substance to the one in `mod.rs`: a divergence here is invisible until someone attaches a
+        // photo on the streaming path, which is the path the WebUI and every channel bridge use.
+        let vision = kernel
             .as_ref()
-            .map(|k| k.supports_vision_for(&api_model))
-            .unwrap_or(true);
-        let request_messages = if supports_vision {
+            .map(|k| k.vision_support_for(&api_model))
+            .unwrap_or(VisionSupport::Unknown);
+        let request_messages = if vision.allows_images() {
             messages.clone()
         } else {
             super::redact_images_for_text_only(messages.clone(), &api_model)

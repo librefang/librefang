@@ -1,0 +1,3 @@
+Running a workflow from the TUI used to hand the operator one free-form JSON blob and the responsibility for knowing the workflow's parameter names, types and which ones are required.
+The run-input screen now fetches the workflow's declared `input_schema` and renders one editable row per parameter, validates required ones before submitting, and types the payload by `param_type` (numbers as JSON numbers, booleans from the canonical `true`/`1`/`yes` set).
+A workflow that declares no parameters keeps the bare-string input, and a schema that cannot be consulted — in-process mode or an unreachable daemon — says so in the status line instead of silently degrading to the blob the screen used to show. (#7998) (@DaBlitzStein)

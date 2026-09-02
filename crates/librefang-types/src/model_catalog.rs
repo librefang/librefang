@@ -229,8 +229,29 @@ pub struct ModelCatalogEntry {
     #[serde(default)]
     pub supports_tools: bool,
     /// Whether the model supports vision/image inputs.
+    ///
+    /// Read this together with [`Self::vision_known`]: a `false` on its own does not say whether the model was *declared* text-only or merely *guessed* to be.
     #[serde(default)]
     pub supports_vision: bool,
+    /// Whether [`Self::supports_vision`] above came from a source that actually knows (refs #7957).
+    ///
+    /// `true` — a curated registry entry, an operator declaration, or the provider's own listing endpoint stated the capability, so a consumer may act on it in either direction.
+    /// `false` — nobody stated it, and the value present is LibreFang's inference from the model's *name*, which for an operator-chosen gateway alias (`team-default`, `fast`, an internal ticket id) carries no information at all.
+    ///
+    /// The flag records provenance, which the boolean alone cannot, and it exists because the two readings of `false` have opposite correct behaviours.
+    /// A *declared* text-only model must have image content blocks redacted before the request is built, or an OpenAI-compatible endpoint rejects the whole turn with HTTP 400 (`unknown variant image_url, expected text`).
+    /// A *guessed* text-only model must not be: stripping the images there turns a vision-capable model behind a gateway into a blind one, with no error and nothing in the log an operator would think to look for (#7957).
+    /// So a guess resolves to [`VisionSupport::Unknown`] and fails open, exactly as a catalog miss already did.
+    ///
+    /// Older registry entries predate this field and are curated declarations, so a missing value defaults to true — the same convention [`Self::limits_known`] and [`Self::pricing_known`] use.
+    ///
+    /// That default is right for every shape this type is *read* from, because all of them are curated or hand-authored: the registry's and the operator's `providers/*.toml`, and `data/custom_models.json`.
+    /// Gateway-discovered entries — the ones #7957 is about — are `ModelTier::Local`, are never persisted, and are rebuilt with an explicit flag on every probe, so no on-disk artefact carries an inferred value forward.
+    /// The default cannot be inverted: the field is absent from every curated catalog file in the registry, so `false` there would make the entire shipped catalog `Unknown` and start sending images to models genuinely known to be text-only.
+    /// The one residual is an artefact a *pre-#7957* build wrote from a defaulted `false` — a `POST /api/models/custom` that omitted `supports_vision`, or a `providers/everyapi.toml` from an older `librefang everyapi connect`.
+    /// Those read back as a declared denial, which is exactly the behaviour that build had; nothing on disk distinguishes them from an operator who meant `false`, so they are left alone and an override resolves them.
+    #[serde(default = "default_true")]
+    pub vision_known: bool,
     /// Whether the model supports streaming responses.
     #[serde(default)]
     pub supports_streaming: bool,
@@ -345,6 +366,7 @@ impl Default for ModelCatalogEntry {
             image_output_cost_per_m: None,
             supports_tools: false,
             supports_vision: false,
+            vision_known: true,
             supports_streaming: false,
             supports_thinking: false,
             reasoning_echo_policy: ReasoningEchoPolicy::default(),
@@ -484,6 +506,48 @@ pub struct EffectiveCapabilities {
     pub supports_vision: bool,
     pub supports_streaming: bool,
     pub supports_thinking: bool,
+}
+
+/// What is actually known about a model's ability to accept image input (refs #7957).
+///
+/// The tri-state exists because the request-build gate that redacts image content blocks has to treat two of these three cases identically and the third one differently, and a `bool` collapses exactly the distinction that matters.
+///
+/// * [`Self::Supported`] and [`Self::Unknown`] both send the images.
+///   For `Unknown` that is a deliberate fail-open: if the model really is text-only the provider answers HTTP 400, which is a loud, diagnosable failure the operator can act on.
+/// * [`Self::Unsupported`] redacts them, and says so in a `WARN`.
+///
+/// Before #7957 the gate read a `bool` that had already merged "the registry says text-only" with "we inferred text-only from the model's name".
+/// A gateway model whose operator-chosen alias missed the name heuristic therefore lost its images silently — the one outcome worse than an error, because the turn still succeeds and the answer still looks like an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisionSupport {
+    /// A source that knows — registry entry, operator declaration, or the provider's own listing endpoint — says the model accepts image input.
+    Supported,
+    /// A source that knows says the model does **not** accept image input.
+    /// This is the only variant that may strip images from a request.
+    Unsupported,
+    /// Nothing that knows has said either way: the model is absent from the catalog, or its entry carries `vision_known: false` because the value there was inferred from the model's name.
+    #[default]
+    Unknown,
+}
+
+impl VisionSupport {
+    /// Whether image content blocks may be sent to this model.
+    ///
+    /// `true` for [`Self::Supported`] and [`Self::Unknown`] — unknown fails open.
+    /// The negation is deliberately the narrow case: only a *declared* absence of vision support removes an image from a request.
+    pub fn allows_images(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+
+    /// Stable string for tracing and operator-facing surfaces.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Which layer supplied one of the values in [`EffectiveLimits`] (refs #7774).

@@ -120,9 +120,13 @@ LibreFang 内置了包含 49 个提供商的 130 多个模型的目录。这些�
   "output_cost_per_1m": 0.79,
   "supports_tools": true,
   "supports_vision": false,
+  "vision_support": "unsupported",
   "supports_streaming": true
 }
 ```
+
+`vision_support` 表示 `supports_vision` 的来源：有来源声明时为 `supported` / `unsupported`，标志是从模型名字推断出来的则为 `unknown`。
+只有 `unsupported` 会让请求里的图片附件被剥掉——`unknown` 的模型仍会照原样发送，因此一次猜测绝不会悄悄地把一个看得见的模型变成瞎的。
 
 ### POST /api/catalog/update
 
