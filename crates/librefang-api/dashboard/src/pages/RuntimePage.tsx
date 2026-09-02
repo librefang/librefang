@@ -15,6 +15,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
+import { toastErr } from "../lib/errors";
 import {
   Activity, Cpu, HardDrive, Zap, Timer, Layers, CheckCircle2, GitCommit,
   Calendar, Server, Monitor, Settings, HeartPulse, Box, Globe, FolderOpen,
@@ -945,10 +946,16 @@ export function RuntimePage() {
         title={t("runtime.create_backup_confirm_title")}
         message={t("runtime.create_backup_confirm_desc")}
         confirmLabel={t("runtime.create_backup_confirm")}
+        // `ConfirmDialog` keeps itself open when `onConfirm` rejects, and the only other place a backup failure surfaces is the inline `backupMutation.isError` notice inside the card — which is behind the modal overlay.
+        // Reporting it here and letting the promise resolve closes the dialog and puts the reason where the operator is looking.
         onConfirm={async () => {
-          await backupMutation.mutateAsync(undefined, {
-            onSuccess: () => addToast(t("runtime.backup_created"), "success"),
-          });
+          try {
+            await backupMutation.mutateAsync(undefined, {
+              onSuccess: () => addToast(t("runtime.backup_created"), "success"),
+            });
+          } catch (err) {
+            addToast(toastErr(err, t("runtime.backup_error")), "error");
+          }
         }}
         onClose={() => setBackupConfirm(null)}
       />
@@ -991,12 +998,16 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "restore") {
-            await restoreMutation.mutateAsync({
-              filename: backupConfirm.filename,
-              keepConfig: backupConfirm.keepConfig,
-              components: backupConfirm.components,
-            });
-            addToast(t("runtime.restore_success"), "success");
+            try {
+              await restoreMutation.mutateAsync({
+                filename: backupConfirm.filename,
+                keepConfig: backupConfirm.keepConfig,
+                components: backupConfirm.components,
+              });
+              addToast(t("runtime.restore_success"), "success");
+            } catch (err) {
+              addToast(toastErr(err, t("runtime.restore_error")), "error");
+            }
           }
         }}
         onClose={() => setBackupConfirm(null)}
@@ -1011,7 +1022,11 @@ export function RuntimePage() {
         tone="destructive"
         onConfirm={async () => {
           if (backupConfirm?.type === "delete") {
-            await deleteBackupMutation.mutateAsync(backupConfirm.filename);
+            try {
+              await deleteBackupMutation.mutateAsync(backupConfirm.filename);
+            } catch (err) {
+              addToast(toastErr(err, t("runtime.delete_backup_error")), "error");
+            }
           }
         }}
         onClose={() => setBackupConfirm(null)}

@@ -89,7 +89,7 @@ The `polls` and `commands` features are wired through the standard `Content` enu
 The adapter is laid out in five layers:
 
 - `api/` — Bot API client (reqwest + rustls), value types (`Update`, `Message`, `User`, all media variants), typed error.
-- `format/` — Markdown → Telegram HTML converter (`markdown.rs`), HTML sanitiser with tag allowlist (`sanitize.rs`), UTF-16 chunker with tag-aware rebalancing (`chunk.rs`).
+- `format/` — Rich Markdown sanitiser for the primary send path (`rich_sanitize.rs`), plus the pre-10.1 fallback renderer: Markdown → Telegram HTML converter (`markdown.rs`), HTML sanitiser with tag allowlist (`sanitize.rs`), UTF-16 chunker with tag-aware rebalancing (`chunk.rs`).
 - `translator.rs` — inbound `Update` → `MessageBuilder`-shaped `Value` event.
 - `dispatcher.rs` — outbound `Content` → Bot API call (Text, Image, File, FileData, Voice, Video, Audio, Animation, Sticker, Location, Command, Interactive, EditInteractive, DeleteMessage, MediaGroup, Poll).
 - `adapter.rs` — the `TelegramAdapter` impl: produce-side long-poll, on_send / on_command dispatch, streaming-edit state map.
@@ -118,18 +118,33 @@ Edit failures are silently tolerated for `message is not modified` (debounce tic
 ## Text-rendering pipeline
 
 ```
-raw text  ──▶ markdown_to_telegram_html  ──▶ sanitize_telegram_html  ──▶ split_to_utf16_chunks  ──▶ sendMessage(parse_mode=HTML)
-                                                                                                       │
-                                                                                                       └─ on 400 "can't parse entities":
-                                                                                                            html_to_plain(chunk) ──▶ sendMessage(parse_mode=None)
+raw text  ──▶ sanitize_rich_markdown  ──▶ sendRichMessage(rich_message.markdown)     ← primary path
+                                                │
+                                                └─ on a 4xx from Telegram (e.g. Bot API < 10.1):
+                                                     markdown_to_telegram_html ──▶ sanitize_telegram_html ──▶ split_to_utf16_chunks ──▶ sendMessage(parse_mode=HTML)
+                                                                                                                                          │
+                                                                                                                                          └─ on 400 "can't parse entities":
+                                                                                                                                               html_to_plain(chunk) ──▶ sendMessage(parse_mode=None)
 ```
 
-- **Markdown subset.** Only the constructs the Python adapter supports — code fences, headings (`#` through `######`), blockquotes, ordered / unordered lists, bold (`**…**`), italic (`*…*`), inline code (`` `…` ``), links (`[label](url)`).
+A 5xx or a transport failure is **not** a fallback trigger: Telegram may have created the message already, and re-sending through the legacy path would deliver the same answer twice.
+
+- **Rich Markdown (primary).** Telegram parses the GFM itself, so tables, task lists, `_italic_`, `~~strikethrough~~`, `||spoiler||` and nested emphasis all work, and the size limit is 32768 characters rather than 4096.
+  `sanitize_rich_markdown` runs first because Rich Markdown may contain arbitrary HTML: **no bare `<` reaches Telegram**, in any context, so quoted untrusted content cannot render itself a `<tg-button>` whose `callback_data` would come back as a genuine button press.
+  Two character-local rules, no lookahead: a `<` is escaped unless the author already escaped it (the run of preceding backslashes must end up odd — an even run is not an escape and still gets one), and a `!` before `[` is escaped so `![](url)` stays inert text rather than a media fetch.
+  There are no exemptions for code spans, fenced blocks or well-formed tags, and **link destinations are not filtered at all**.
+  Both of those were tried: each needs to decide where a CommonMark construct ends, which means reimplementing part of the parser, and five rounds of review found a defect in that machinery every time — four of them introduced by the fix for the previous one.
+  The legacy `sanitize_telegram_html` can filter schemes because it *constructs* the anchor and knows where the href is; here we would be guessing at someone else's parse, and the reference libraries for this problem parse with a real parser instead of scanning.
+  A hostile link is left to Telegram's own scheme support, the client's "Open this link?" confirmation, and the legacy fallback path, which still filters.
+  The cost: escapes land inside code spans and fenced blocks too, where Markdown does not process them, so `Vec<String>` in a fence reads `Vec\<String>`; and every Rich HTML construct is lost, since they all start with `<` — `<u>`, `<ins>`, `<sub>`, `<sup>`, `<br>`, `<details>`, `<aside>`, `<a name>`, `<tg-map>`, `<tg-collage>`, `<tg-slideshow>`, `<tg-emoji>`, `<tg-time>`.
+  `InputRichMessage.blocks`, where a preformatted block's text is a plain string Telegram never parses, removes both and is tracked separately.
+
+- **Markdown subset (fallback only).** Only the constructs the Python adapter supports — code fences, headings (`#` through `######`), blockquotes, ordered / unordered lists, bold (`**…**`), italic (`*…*`), inline code (`` `…` ``), links (`[label](url)`).
   Inline-code placeholders use Private-Use-Area sentinels (U+E000 / U+E001) that `escape_html` strips from input, so an adversarial user message containing those bytes cannot collide with the placeholder scheme and inject `<code>` past the sanitiser's tag allowlist.
-- **HTML sanitiser.** Allowlist of `b`, `i`, `u`, `s`, `em`, `strong`, `a`, `code`, `pre`, `blockquote`, `tg-spoiler`, `tg-emoji` — matches Telegram's documented HTML subset.
+- **HTML sanitiser (fallback only).** Allowlist of `b`, `i`, `u`, `s`, `em`, `strong`, `a`, `code`, `pre`, `blockquote`, `tg-spoiler`, `tg-emoji` — matches Telegram's documented HTML subset.
   `<a href>` is enforced against `https:` / `http:` / `mailto:` / `tg:` schemes; anything else (including `javascript:` / `data:`) drops the tag entirely.
   Unclosed tags are auto-balanced at end-of-input.
-- **UTF-16 chunker (4096-unit Telegram limit).** Telegram counts code units, not bytes or Unicode scalars; non-BMP characters count as 2.
+- **UTF-16 chunker (4096-unit Telegram limit, fallback only).** Telegram counts code units, not bytes or Unicode scalars; non-BMP characters count as 2.
   The chunker is tag-aware: an `<a href="…">` opened in one chunk has matching `</a>` appended AND `<a href="…">` re-emitted at the start of the next chunk, with the full attribute string preserved, so the user's formatting carries across boundaries.
   Mid-tag and mid-entity boundaries (where the cut would land inside `<…>` or `&…;`) back off to before the open `<` or `&`.
 

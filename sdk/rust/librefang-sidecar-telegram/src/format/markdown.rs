@@ -1,5 +1,7 @@
 //! Lightweight Markdown → Telegram-HTML converter.
 //!
+//! This is the fallback renderer for Bot API servers older than 10.1. Outgoing text normally goes to `sendRichMessage`, which parses GFM server-side — including the tables and nested emphasis this converter structurally cannot express.
+//!
 //! Mirrors the Python adapter's `markdown_to_telegram_html` + `_render_inline_markdown`.
 //! Block-level: code fences, headings, blockquotes, unordered + ordered lists, plain paragraphs.
 //! Inline: `**bold**`, single-star `*italic*`, `` `code` ``, `[text](url)`.

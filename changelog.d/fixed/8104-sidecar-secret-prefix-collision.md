@@ -1,0 +1,5 @@
+Refuse a channel instance name that would move into another instance's secret namespace, instead of silently overwriting its token.
+`instance_secret_prefix` uppercases and maps every non-alphanumeric character to `_`, so it is many-to-one: `bot-1`, `bot.1` and `BOT+1` all land on `BOT_1` and share one `<PREFIX>__KEY` namespace in `secrets.env`.
+Until #8046 a second instance meant hand-editing `config.toml` in front of the existing entries, and a `WARN` from the boot and config-reload loop was a reasonable safety net; a two-field form in the dashboard is not the same thing, because by the time that `WARN` appears the first bot's token is already gone.
+`POST /api/channels/sidecar/{name}/configure` now answers 409 `sidecar_secret_prefix_conflict` naming the shared prefix and the instances that hold it, before anything is written — so #8046's "two bots never share a token" is true rather than nearly true.
+Re-saving an existing instance is unaffected: that is the in-place update path, not a second instance moving in. (#8104) (@houko)

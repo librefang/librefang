@@ -40,7 +40,9 @@ Or use the dashboard's configure form — the schema is served from the adapter 
 
 ## Capabilities
 
-- **text** — incoming and outgoing text messages, with Markdown → Telegram HTML formatting and 4096-UTF-16-unit chunking.
+- **text** — incoming and outgoing text messages.
+  Outgoing text is sent as native Rich Markdown (`sendRichMessage`, Bot API 10.1+), which Telegram parses server-side: GFM tables, `_italic_`, `~~strikethrough~~` and nested emphasis all render, and the limit is 32768 characters.
+  Bot API servers older than 10.1 fall back to the previous Markdown → Telegram HTML formatting with 4096-UTF-16-unit chunking.
 - **media** — incoming and outgoing photos / documents / voice / audio / video / animation / sticker; inline file bytes (`FileData`) are multi-part uploaded.
 - **media-group** — outbound `MediaGroup` with 2–10 photos / videos.
 - **typing** — `Typing` command → `sendChatAction`.

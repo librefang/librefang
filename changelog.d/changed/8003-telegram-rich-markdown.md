@@ -1,0 +1,7 @@
+Telegram sidecars now send outbound text as Telegram's native Rich Markdown (`sendRichMessage`, Bot API 10.1+) instead of the hand-rolled Markdown → HTML converter, so GFM tables, `_italic_`, `~~strikethrough~~` and nested emphasis finally render.
+The old converter was four regexes, and its bold rule `\*\*([^*]+)\*\*` structurally forbade nesting, so `**bold *italic* inside**` could never parse no matter how it was tuned.
+The message limit rises from 4096 UTF-16 code units to 32768 characters, so long replies stop being split mid-sentence.
+Rich Markdown may contain arbitrary HTML, so agent text is passed through a sanitiser first that escapes every `<`: quoted untrusted content cannot render itself a `<tg-button>` whose `callback_data` would come back as a genuine button press.
+That guarantee is structural — two character-local rules, no attempt to locate a Markdown construct — because five rounds of adversarial review found a defect every time the sanitiser tried to decide where one ended, four of them introduced by the fix for the previous one.
+It costs a visible backslash in fenced code samples and the loss of every Rich HTML construct, and link destinations are deliberately left to Telegram's own scheme handling rather than filtered by guesswork.
+A 4xx from Telegram falls back to the previous `sendMessage` + HTML pipeline, so Bot API servers older than 10.1 are unaffected; a 5xx or transport failure does not, because Telegram may have created the message already and re-sending would deliver the same answer twice (#8003) (@nevgenov)

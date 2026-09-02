@@ -11,14 +11,22 @@ in-process ``crates/librefang-channels/src/telegram.rs`` so that
 in-process adapter can be removed. Every subsystem below is a faithful
 port of the audited Rust (function-by-function, not re-derived):
 
-* DONE — Markdown → Telegram-HTML formatter subsystem: a byte-exact
+* DONE — outbound text prefers Telegram's native Rich Markdown
+  (``sendRichMessage`` / ``editMessageText(rich_message=...)``, Bot API
+  10.1+): Telegram parses the GFM itself, so tables, ``_italic_``,
+  ``~~strikethrough~~`` and nested emphasis work, and the limit is
+  32768 characters instead of 4096. Agent text goes through
+  ``sanitize_rich_markdown`` first — a port of
+  ``format::rich_sanitize`` — so quoted untrusted content cannot inject
+  ``<tg-button>`` and friends.
+* DONE — Markdown → Telegram-HTML formatter subsystem, now the
+  fallback for Bot API servers older than 10.1: a byte-exact
   port of ``formatter::markdown_to_telegram_html`` + the
   ``sanitize_telegram_html`` security pass (tag/scheme allowlist,
   attribute-injection escaping, unclosed-tag balancing) + the
   ``message_truncator`` UTF-16/HTML-entity-aware chunker
-  (``split_to_utf16_chunks``). Outbound text is now formatted and sent
-  with ``parse_mode=HTML`` (was ``Markdown``), with the same
-  plain-text retry on Telegram's "can't parse entities" 400.
+  (``split_to_utf16_chunks``), sent with ``parse_mode=HTML``, with the
+  same plain-text retry on Telegram's "can't parse entities" 400.
 * DONE — full inbound parsing: text/bot-command, photo, document,
   audio, voice, animation, video, video_note, location, sticker;
   ``from`` / ``sender_chat`` sender extraction; ``callback_query`` →
@@ -70,6 +78,14 @@ LONGPOLL_CLIENT_SECS = 35
 SEND_TIMEOUT_SECS = 10
 # Telegram's message limit is 4096 *UTF-16 code units* (not chars).
 TELEGRAM_MSG_LIMIT = 4096
+# Rich message limit: "Up to 32768 UTF-8 characters in the rich message
+# text" (Bot API, Rich Message Limits). Counted in characters, unlike the
+# legacy sendMessage path which counts UTF-16 code units.
+RICH_MSG_LIMIT = 32768
+# Cap on a stream's accumulated buffer, mirroring the Rust adapter's
+# MAX_STREAM_BUFFER_BYTES. Without it a stream grows unbounded while
+# `_sync_stream_messages` re-sanitises the whole buffer on every edit tick.
+MAX_STREAM_BUFFER_BYTES = 1024 * 1024
 # Throttle streamed editMessageText (mirrors the Rust adapter's 1s).
 STREAM_EDIT_INTERVAL = 1.0
 RETRY_AFTER_DEFAULT_SECS = 2
@@ -645,6 +661,132 @@ def _format_and_sanitize(text: str) -> str:
 
 
 # ====================================================================
+# Rich Markdown sanitiser
+# (port of format::rich_sanitize::sanitize_rich_markdown)
+# ====================================================================
+
+
+def sanitize_rich_markdown(text: str) -> str:
+    """Neutralise "active" constructs in agent-authored Rich Markdown before
+    it is handed to ``sendRichMessage``.
+
+    Rich Markdown "can contain arbitrary HTML" (Bot API 10.1+). The text we
+    send is model output, and model output routinely *quotes* untrusted
+    content — a fetched web page, an email body, a file the agent read.
+    Without this pass, quoted content could render itself an inline button
+    whose ``callback_data`` comes back to the adapter as a genuine
+    ButtonCallback event.
+
+    Two character-local rules. No lookahead, no scanning, no attempt to
+    locate a Markdown construct or to find where one ends:
+
+    * ``<`` is escaped so that the run of backslashes preceding it is
+      **odd**, which is what makes Markdown treat it as literal. A ``<``
+      the author already escaped is left exactly as it is. The parity
+      matters: the Bot API warns that "'\\' character usually must be
+      escaped with a preceding '\\' character", and an even run leaves the
+      ``<`` bare.
+    * ``!`` before ``[`` is backslash-escaped, so ``![](url)`` stays inert
+      text rather than becoming a media block fetched from that URL.
+
+    Author-written backslashes are left alone. An earlier revision doubled
+    every one, which reached the same parity but silently rewrote the text:
+    ``\\*not italic\\*`` came back as emphasis with stray backslashes, and
+    ``[a\\](https://x)`` — not a link at all — turned into one.
+
+    **Link destinations are not filtered.** Earlier revisions checked them
+    against the legacy scheme allowlist, which meant locating Markdown
+    links: a label scanner with a length cap, a per-message budget, a
+    forward cursor, reference-definition and title parsing. Five rounds of
+    adversarial review found a defect in that machinery every time, four of
+    them introduced by the fix for the previous one. The legacy
+    ``sanitize_telegram_html`` can filter schemes because it *constructs*
+    the anchor itself; here we would be guessing at someone else's parse.
+    Telegram renders only schemes it supports, the client confirms before
+    opening a link, and the legacy fallback path still filters.
+
+    The cost: the escapes land inside code spans and fenced blocks too,
+    where Markdown does not process them, and every Rich HTML construct is
+    lost since they all start with ``<``. ``InputRichMessage.blocks``
+    removes both and is tracked separately."""
+    out = []
+    i = 0
+    n = len(text)
+    # Length of the run of backslashes immediately before the current
+    # position. An odd run already escapes whatever follows it.
+    backslashes = 0
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            out.append(ch)
+            backslashes += 1
+            i += 1
+            continue
+        if ch == "<":
+            if backslashes % 2 == 0:
+                out.append("\\")
+            out.append("<")
+            backslashes = 0
+            i += 1
+            continue
+        if (ch == "!" and i + 1 < n and text[i + 1] == "["
+                and backslashes % 2 == 0):
+            out.append("\\!")
+            backslashes = 0
+            i += 1
+            continue
+        out.append(ch)
+        backslashes = 0
+        i += 1
+    return "".join(out)
+
+
+
+def _is_api_rejection(resp: dict) -> bool:
+    """True when Telegram answered with a definitive refusal, i.e. a 4xx.
+
+    Everything else leaves the outcome unknown and must not be retried with
+    different content: a 5xx can be returned after the message was already
+    created, and re-sending then delivers the same answer twice. (Transport
+    failures raise out of ``_api_post`` rather than reaching here, which has
+    the same effect — no second send.) Mirrors the Rust
+    ``dispatcher::is_api_rejection``."""
+    code = resp.get("_http")
+    if not isinstance(code, int):
+        # Telegram also reports failures with HTTP 200 and ``ok: false``;
+        # ``_api_post`` returns that body verbatim, so the verdict is in
+        # ``error_code``. Rust's ``call_json`` builds ``Error::Api`` from the
+        # same field. A 200 with ``ok: false`` and no ``error_code`` at all is
+        # still a verdict: Telegram answered, in JSON, that it did not
+        # create the message, so it counts as definitive. Reading it as
+        # "unknown"
+        # would silently disable the fallback for any Bot API deployment that
+        # reports failures with a 200, which is exactly the self-hosted
+        # pre-10.1 server the fallback exists for.
+        if resp.get("ok") is False:
+            code = resp.get("error_code")
+            # An explicit `error_code: 0` is the same verdict as no code at
+            # all — Telegram answered that it did not create the message.
+            # Rust reaches `code == 0` either way; treating only the absent
+            # case as definitive made the ports disagree.
+            if not isinstance(code, int) or code == 0:
+                return True
+        else:
+            code = None
+    # 429 is the one 4xx that means "try later", not "not like this". Treating
+    # it as a refusal re-sends the same answer into a chat Telegram has just
+    # asked us to back off from.
+    return isinstance(code, int) and code != 429 and 400 <= code < 500
+
+
+def _prepare_rich_markdown(text: str):
+    """Sanitised text for ``sendRichMessage``, or None when it exceeds the
+    rich limit and the caller should fall back to the chunking pipeline."""
+    sanitized = sanitize_rich_markdown(text)
+    return sanitized if len(sanitized) <= RICH_MSG_LIMIT else None
+
+
+# ====================================================================
 # Reaction emoji map  (port of telegram.rs map_reaction_emoji)
 # ====================================================================
 
@@ -898,11 +1040,66 @@ class TelegramAdapter(SidecarAdapter):
             return None
         return f"{self.api_root}/file/bot{self.token}/{fp}"
 
-    # ---- outbound text (formatter + sanitize + chunk + HTML) ---------
+    # ---- outbound text (rich Markdown, HTML pipeline as fallback) ----
 
     def _send_text(self, chat_id, text: str, thread_id=None) -> dict:
+        """Send outbound text.
+
+        Prefers ``sendRichMessage`` (Bot API 10.1+), which hands the text
+        to Telegram's own GFM-compatible parser. That gets us tables,
+        ``_italic_``, ``~~strikethrough~~`` and nested emphasis — none of
+        which ``markdown_to_telegram_html`` can express — and raises the
+        size limit from 4096 to 32768, so ordinary replies stop being
+        split mid-sentence. The text is sanitised first so quoted
+        untrusted content cannot inject interactive elements.
+
+        A definitive refusal by Telegram (4xx — e.g. ``sendRichMessage``
+        missing on a self-hosted Bot API server older than 10.1) falls
+        back to the legacy HTML pipeline. A 5xx or a transport failure
+        does *not*: Telegram may have created the message already, and
+        re-sending the same answer would deliver it twice."""
+        resp = self._send_rich(chat_id, text, thread_id)
+        if resp is not None:
+            if resp.get("ok") is True:
+                return resp
+            if not _is_api_rejection(resp):
+                # Outcome unknown — do not re-send the same answer.
+                return resp
         responses = self._send_text_chunks(chat_id, text, thread_id)
         return responses[0] if responses else {}
+
+    def _send_rich(self, chat_id, text: str, thread_id=None):
+        """Raw ``sendRichMessage`` response for `text`, or None when the
+        text is over the rich limit and the rich path cannot be used at
+        all. Callers decide what a non-``ok`` response means — see
+        ``_is_api_rejection``."""
+        markdown = _prepare_rich_markdown(text)
+        if markdown is None:
+            return None
+        payload = {"chat_id": chat_id, "rich_message": {"markdown": markdown}}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        return self._call_retrying("sendRichMessage", payload)
+
+    def _edit_rich(self, chat_id, message_id, text: str) -> bool:
+        """``editMessageText(rich_message=...)`` for `text`. True when the
+        caller must NOT fall back to the legacy HTML edit — either the
+        message now shows `text` (``message is not modified`` counts), or
+        the outcome is unknown (5xx / transport), where a second edit with
+        different content could overwrite one that did land."""
+        markdown = _prepare_rich_markdown(text)
+        if markdown is None:
+            return False
+        resp = self._call("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": {"markdown": markdown},
+        })
+        if resp.get("ok") is True:
+            return True
+        if "message is not modified" in str(resp.get("description", "")):
+            return True
+        return not _is_api_rejection(resp)
 
     def _send_text_chunks(self, chat_id, text: str, thread_id=None) -> list:
         sanitized = _format_and_sanitize(text)
@@ -929,10 +1126,6 @@ class TelegramAdapter(SidecarAdapter):
                 plain["message_thread_id"] = thread_id
             resp = self._call("sendMessage", plain)
         return resp
-
-    def _edit_text(self, chat_id, message_id, text: str) -> None:
-        sanitized = _format_and_sanitize(text)
-        self._edit_formatted_chunk(chat_id, message_id, sanitized, text)
 
     def _edit_formatted_chunk(
         self, chat_id, message_id, sanitized: str, plain_fallback: str,
@@ -1659,7 +1852,22 @@ class TelegramAdapter(SidecarAdapter):
         st = self._streams.get(sid)
         if st is None:
             return
+        # Bytes, not characters: Rust compares `String::len()`, so a CJK or
+        # emoji stream would otherwise be allowed several times the cap. The
+        # running total is kept on the state rather than re-encoding the whole
+        # buffer per delta, which was O(n^2) — 7.6 s of pure encoding to fill
+        # the cap with CJK.
+        incoming = len(chunk.encode("utf-8", "replace"))
+        if st["bytes"] + incoming > MAX_STREAM_BUFFER_BYTES:
+            # Matches the Rust adapter: drop the stream rather than let the
+            # buffer grow without bound, since every edit tick re-sanitises
+            # the whole of it.
+            del self._streams[sid]
+            log.warn("telegram stream exceeded the buffer limit; dropped",
+                     stream_id=sid, limit=MAX_STREAM_BUFFER_BYTES)
+            return
         st["text"] += chunk
+        st["bytes"] += incoming
         if not st["initial_attempted"]:
             st["initial_attempted"] = True
             self._sync_stream_messages(st)
@@ -1670,6 +1878,31 @@ class TelegramAdapter(SidecarAdapter):
             st["last_edit"] = time.monotonic()
 
     def _sync_stream_messages(self, st: dict) -> None:
+        # Rich path: while the answer still fits one rich message (32768
+        # chars vs 4096), stream it as a single message rather than a
+        # chunked HTML one, so tables and nested emphasis render during
+        # streaming exactly as they will in the finished reply. Once the
+        # answer has already spilled into several messages, stay on the
+        # legacy chunked path rather than restructuring mid-stream.
+        if len(st["message_ids"]) <= 1:
+            if st["message_ids"]:
+                if self._edit_rich(st["chat_id"], st["message_ids"][0],
+                                   st["text"]):
+                    return
+            else:
+                resp = self._send_rich(st["chat_id"], st["text"],
+                                       st["thread_id"])
+                if resp is not None:
+                    message_id = (resp.get("result") or {}).get("message_id")
+                    if message_id is not None:
+                        st["message_ids"].append(message_id)
+                    if not _is_api_rejection(resp):
+                        # Either it worked, or the outcome is unknown (5xx)
+                        # and Telegram may have created the message anyway.
+                        # Sending the chunked HTML version now would deliver
+                        # the answer twice; the next throttled tick retries.
+                        return
+
         sanitized = _format_and_sanitize(st["text"])
         chunks = _split_to_utf16_chunks(sanitized, TELEGRAM_MSG_LIMIT)
         for index, formatted_chunk in enumerate(chunks):
@@ -1732,7 +1965,8 @@ class TelegramAdapter(SidecarAdapter):
             self._streams[cmd.stream_id] = {
                 "chat_id": cmd.channel_id,
                 "thread_id": getattr(cmd, "thread_id", None),
-                "text": "", "message_ids": [], "initial_attempted": False,
+                "text": "", "bytes": 0,
+                "message_ids": [], "initial_attempted": False,
                 "last_edit": 0.0,
             }
         elif isinstance(cmd, protocol.StreamDelta):

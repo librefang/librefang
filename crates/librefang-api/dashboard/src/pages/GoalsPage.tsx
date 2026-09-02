@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type GoalItem, type GoalTemplate } from "../api";
+import { type GoalItem, type GoalRunState, type GoalTemplate } from "../api";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -123,7 +123,11 @@ function GoalStatusIcon({ status }: { status: string }) {
   return <Clock className="h-4 w-4 text-text-dim/40" />;
 }
 
-const goalRunPhaseBadge = (phase?: string): { bg: string; text: string; dot: string } => {
+// `phase` is typed from the wire contract rather than `string` so a caller cannot pass a typo'd literal.
+// The `default` arm stays regardless: `phase` crosses the network, so an unrecognised value has to render as something.
+const goalRunPhaseBadge = (
+  phase?: GoalRunState["phase"],
+): { bg: string; text: string; dot: string } => {
   switch (phase) {
     case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
     case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
@@ -617,8 +621,10 @@ export function GoalsPage() {
                               </div>
                             </div>
                           )}
-                          {/* Run state — shows phase, iterations, errors like workflow runs */}
-                          {status !== "completed" && <GoalRunInfo goal={r.goal} />}
+                          {/* Run state — phase, iterations and last error, like workflow runs.
+                              Deliberately not gated on status: `GoalRunPhase::Finished` is documented as "the goal reached Completed/Cancelled", so a `status !== "completed"` gate made the `finished` badge — and its five translations — unreachable, and hid the outcome exactly when it is most worth reading (did the run finish on its own, or stop at the iteration cap?).
+                              `GoalRunInfo` already renders nothing when the goal has no run, so a completed goal that never ran stays as quiet as before. */}
+                          <GoalRunInfo goal={r.goal} />
                         </div>
                       )}
                     </div>

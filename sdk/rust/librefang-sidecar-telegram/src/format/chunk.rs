@@ -1,5 +1,7 @@
 //! UTF-16 chunking for Telegram's 4096-code-unit message limit.
 //!
+//! Only the legacy `sendMessage` path needs this. Outgoing text prefers `sendRichMessage`, whose limit is 32768 characters and which therefore does not chunk; see `format::mod`.
+//!
 //! Mirrors the Python adapter's `_utf16_len`, `_truncate_to_utf16_limit`, and `_split_to_utf16_chunks`, with two additional guards specific to the Rust port:
 //! - the entity-boundary back-off only fires for *known* HTML entity prefixes (so a chunk ending in a literal `&` is not silently truncated);
 //! - the splitter is tag-aware: if a chunk ends with one or more open HTML tags, matching close tags are appended to the chunk and the matching open tags are carried over to the next chunk so the user's formatting survives across boundaries.
