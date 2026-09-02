@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # Corpus test for scripts/check-pr-commit-attribution.sh.
 #
-# The checker drives scripts/hooks/commit-msg once per commit, so the rules
-# themselves are already covered by scripts/tests/commit-msg-attribution.sh.
-# What is tested here is the part that script cannot reach: that the driver
-# finds the offending commit at all — the right range, the author field, the
-# committer field, and a clean branch passing.
+# The checker drives scripts/hooks/commit-msg once per commit, so the rules themselves are already covered by scripts/tests/commit-msg-attribution.sh.
+# What is tested here is the part that script cannot reach: that the driver finds the offending commit at all — the right range, the author field, the committer field, and a clean branch passing.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -19,9 +16,7 @@ fi
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-# A throwaway repo, so the corpus is built from real commits rather than from
-# strings — the failure this guards against is a range/field mistake, which a
-# string fixture cannot exercise.
+# A throwaway repo, so the corpus is built from real commits rather than from strings — the failure this guards against is a range/field mistake, which a string fixture cannot exercise.
 work="$tmpdir/repo"
 mkdir -p "$work"
 cd "$work"
@@ -97,8 +92,7 @@ echo h > h.txt && git add h.txt && git commit -q -m "feat: last"
 check "Claude commit in the middle of three" reject buried
 
 # ── a name that merely contains "claude" is NOT collateral ────────────────
-# The hook matches whole names on purpose; this pins that the driver does not
-# widen it.
+# The hook matches whole names on purpose; this pins that the driver does not widen it.
 git checkout -q -b claudia "$base_sha"
 echo i > i.txt && git add i.txt
 GIT_AUTHOR_NAME="Claudia Fernandez" GIT_AUTHOR_EMAIL=claudia@example.com \
@@ -106,8 +100,7 @@ GIT_AUTHOR_NAME="Claudia Fernandez" GIT_AUTHOR_EMAIL=claudia@example.com \
 check "contributor named Claudia" accept claudia
 
 # ── a branch merely behind base is not re-judged ──────────────────────────
-# merge-base, not a raw range: `main` moving forward must not drag unrelated
-# commits into the check.
+# merge-base, not a raw range: `main` moving forward must not drag unrelated commits into the check.
 git checkout -q main
 echo z > z.txt && git add z.txt && git commit -q -m "chore: main moves on"
 check "clean branch while base moved ahead" accept clean
