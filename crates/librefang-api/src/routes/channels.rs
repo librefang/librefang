@@ -750,6 +750,80 @@ fn write_cache_recover<'a, T>(
     })
 }
 
+/// How many `--describe` probes may be in flight at once.
+///
+/// The catalog is 20-plus adapters and every probe spawns a `python3` interpreter, so this is a subprocess-count cap rather than a throughput knob: unbounded fan-out would start one interpreter per catalog entry simultaneously, which on the small ARM boards LibreFang is deployed to (the report in #8094 came from an Orange Pi 5 Plus) trades a slow boot for a thrashing one.
+///
+/// Derived from the host's parallelism and clamped: at least 2, so a single-core container still overlaps process spawn with interpreter startup, and at most 8, because the work is dominated by Python's import time rather than by anything that scales past a handful of cores.
+fn sidecar_probe_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 8)
+}
+
+/// Record one adapter's probe outcome in the schema / schema-error caches.
+///
+/// Split out of [`populate_sidecar_schema_cache`] so the probes can run concurrently while every cache write stays synchronous and short — no lock is ever held across an `.await` — and so the three outcomes are unit testable without a working Python installation.
+fn apply_sidecar_probe_outcome(
+    entry: &'static SidecarCatalogEntry,
+    result: Result<SidecarSchema, super::sidecar_describe::DescribeSidecarError>,
+) {
+    match result {
+        Ok(schema) => {
+            tracing::info!(
+                adapter = entry.name,
+                fields = schema.fields.len(),
+                sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
+                "sidecar schema cached"
+            );
+            write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
+        }
+        Err(e) => {
+            if let Some(static_fields) = entry.static_fields {
+                // Use the compile-time fallback so the configure form is
+                // usable even without a working Python SDK installation.
+                let fallback = SidecarSchema {
+                    name: entry.name.to_string(),
+                    display_name: entry.display_name.to_string(),
+                    description: entry.description.to_string(),
+                    fields: static_fields
+                        .iter()
+                        .map(|f| SidecarSchemaField {
+                            key: f.key.to_string(),
+                            label: f.label.to_string(),
+                            field_type: f.field_type.to_string(),
+                            required: f.required,
+                            placeholder: f.placeholder.to_string(),
+                            advanced: f.advanced,
+                            options: None,
+                        })
+                        .collect(),
+                    // The fallback exists precisely because `--describe`
+                    // failed, so no adapter reported a version here.
+                    sdk_version: None,
+                };
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    fields = fallback.fields.len(),
+                    "sidecar --describe failed; using compile-time fallback schema"
+                );
+                write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
+            } else {
+                tracing::warn!(
+                    adapter = entry.name,
+                    error = %e,
+                    "sidecar --describe failed; channel cards will have no form fields"
+                );
+                // Stash the failure reason so every row for this adapter — the discovery card and each configured `[[sidecar_channels]]` instance of the type (#8063) — can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
+                write_cache_recover(schema_error_cache(), "schema error")
+                    .insert(entry.name, e.to_string());
+            }
+        }
+    }
+}
+
 /// Spawn `<command> <args> --describe` for every catalog entry and cache
 /// the resulting schemas. Called once at daemon boot from
 /// `server::build_router`. `describe_sidecar` injects the binary-embedded
@@ -762,63 +836,27 @@ fn write_cache_recover<'a, T>(
 /// compile-time fields seed the form instead of leaving an empty `fields[]`.
 /// `home_dir` must be the kernel's `KernelConfig.home_dir`
 /// (`KernelApi::home_dir()`); it locates the embedded-SDK extraction dir.
+///
+/// The probes run concurrently, capped at [`sidecar_probe_concurrency`].
+/// They used to run one at a time, and because this is awaited from `server::build_router` *before* the listener binds, every adapter's Python startup was paid serially on the boot path — 20-plus sequential interpreter spawns, which is the 30-second cold start reported in #8094.
+///
+/// Order is not load-bearing: both caches are keyed by `SidecarCatalogEntry::name`, so the completed set is identical whatever order the probes finish in.
+/// The `adapter=` log lines interleave now, which is the one observable difference.
 pub async fn populate_sidecar_schema_cache(home_dir: &std::path::Path) {
-    for entry in SIDECAR_CATALOG {
+    use futures::StreamExt;
+
+    futures::stream::iter(SIDECAR_CATALOG.iter().map(|entry| async move {
         let args: Vec<String> = entry.args.iter().map(|s| s.to_string()).collect();
-        match describe_sidecar(entry.command, &args, home_dir).await {
-            Ok(schema) => {
-                tracing::info!(
-                    adapter = entry.name,
-                    fields = schema.fields.len(),
-                    sdk_version = schema.sdk_version.as_deref().unwrap_or("unreported"),
-                    "sidecar schema cached"
-                );
-                write_cache_recover(schema_cache(), "schema").insert(entry.name, schema);
-            }
-            Err(e) => {
-                if let Some(static_fields) = entry.static_fields {
-                    // Use the compile-time fallback so the configure form is
-                    // usable even without a working Python SDK installation.
-                    let fallback = SidecarSchema {
-                        name: entry.name.to_string(),
-                        display_name: entry.display_name.to_string(),
-                        description: entry.description.to_string(),
-                        fields: static_fields
-                            .iter()
-                            .map(|f| SidecarSchemaField {
-                                key: f.key.to_string(),
-                                label: f.label.to_string(),
-                                field_type: f.field_type.to_string(),
-                                required: f.required,
-                                placeholder: f.placeholder.to_string(),
-                                advanced: f.advanced,
-                                options: None,
-                            })
-                            .collect(),
-                        // The fallback exists precisely because `--describe`
-                        // failed, so no adapter reported a version here.
-                        sdk_version: None,
-                    };
-                    tracing::warn!(
-                        adapter = entry.name,
-                        error = %e,
-                        fields = fallback.fields.len(),
-                        "sidecar --describe failed; using compile-time fallback schema"
-                    );
-                    write_cache_recover(schema_cache(), "schema").insert(entry.name, fallback);
-                } else {
-                    tracing::warn!(
-                        adapter = entry.name,
-                        error = %e,
-                        "sidecar --describe failed; channel cards will have no form fields"
-                    );
-                    // Stash the failure reason so every row for this adapter — the discovery card and each configured `[[sidecar_channels]]` instance of the type (#8063) — can tell the operator *why* the form is empty (typically: Python sidecar SDK not installed).
-                    write_cache_recover(schema_error_cache(), "schema error")
-                        .insert(entry.name, e.to_string());
-                }
-            }
-        }
-    }
+        (
+            entry,
+            describe_sidecar(entry.command, &args, home_dir).await,
+        )
+    }))
+    .buffer_unordered(sidecar_probe_concurrency())
+    .for_each(|(entry, result)| async move {
+        apply_sidecar_probe_outcome(entry, result);
+    })
+    .await;
 }
 
 /// Test-only seeder for the sidecar schema cache. Wipes any existing
@@ -2770,5 +2808,104 @@ mod sidecar_configuration_write_tests {
             "update in place, not a second block: {config}"
         );
         assert!(config.contains("ROOM = \"updated\""));
+    }
+}
+
+#[cfg(test)]
+mod sidecar_probe_outcome_tests {
+    use super::{
+        __test_seed_sidecar_schema_cache, __test_seed_sidecar_schema_error_cache,
+        apply_sidecar_probe_outcome, read_cache_recover, schema_cache, schema_error_cache,
+        sidecar_probe_concurrency, SidecarSchema, SIDECAR_CATALOG,
+    };
+    use crate::routes::sidecar_describe::DescribeSidecarError;
+
+    fn entry(name: &str) -> &'static super::SidecarCatalogEntry {
+        SIDECAR_CATALOG
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("catalog must contain `{name}`"))
+    }
+
+    /// The cap is a subprocess-count bound, so what matters is that it never degenerates to 1 (which is the serial boot #8094 reports) and never grows with core count past the point where Python startup dominates.
+    #[test]
+    fn probe_concurrency_stays_within_its_bounds() {
+        let n = sidecar_probe_concurrency();
+        assert!(
+            (2..=8).contains(&n),
+            "concurrency must stay in 2..=8 so a big host cannot fan out one interpreter per adapter, got {n}"
+        );
+    }
+
+    // All three outcomes in ONE test: the schema / error caches are process-wide and the seeders clear-then-set, so splitting these into parallel tests would race on the shared maps — same reason `schema_error_discovery_tests` keeps its halves together.
+    #[test]
+    fn each_probe_outcome_lands_in_exactly_one_cache() {
+        __test_seed_sidecar_schema_cache(&[]);
+        __test_seed_sidecar_schema_error_cache(&[]);
+
+        // --- describe succeeded: the live schema is cached verbatim ---
+        let live = SidecarSchema {
+            name: "gotify".to_string(),
+            display_name: "Gotify".to_string(),
+            description: "probed".to_string(),
+            fields: vec![],
+            sdk_version: Some("9.9.9".to_string()),
+        };
+        apply_sidecar_probe_outcome(entry("gotify"), Ok(live));
+
+        // --- describe failed WITH a compile-time fallback: schema cache gets the static fields, and no version, because nothing reported one ---
+        apply_sidecar_probe_outcome(
+            entry("telegram"),
+            Err(DescribeSidecarError::SdkMissing(
+                "no sdk (test)".to_string(),
+            )),
+        );
+
+        // --- describe failed WITHOUT a fallback: the reason is cached so the row can explain the empty form instead of just being empty ---
+        apply_sidecar_probe_outcome(
+            entry("ntfy"),
+            Err(DescribeSidecarError::SdkMissing(
+                "no sdk (test)".to_string(),
+            )),
+        );
+
+        let schemas = read_cache_recover(schema_cache(), "schema");
+        let errors = read_cache_recover(schema_error_cache(), "schema error");
+
+        assert_eq!(
+            schemas.get("gotify").and_then(|s| s.sdk_version.as_deref()),
+            Some("9.9.9"),
+            "a successful probe must cache the adapter's own reported version"
+        );
+        assert!(
+            !errors.contains_key("gotify"),
+            "a success must not also leave an error behind"
+        );
+
+        let telegram = schemas
+            .get("telegram")
+            .expect("an entry with static_fields must fall back into the schema cache");
+        assert!(
+            !telegram.fields.is_empty(),
+            "the compile-time fallback must seed the form"
+        );
+        assert_eq!(
+            telegram.sdk_version, None,
+            "the fallback exists because --describe failed, so no version was reported"
+        );
+        assert!(
+            !errors.contains_key("telegram"),
+            "a usable fallback is not a schema error the operator needs to see"
+        );
+
+        assert!(
+            !schemas.contains_key("ntfy"),
+            "no fallback means no schema — the form is genuinely empty"
+        );
+        assert_eq!(
+            errors.get("ntfy").map(String::as_str),
+            Some("no sdk (test)"),
+            "the failure reason must reach the row so the empty form is explained"
+        );
     }
 }
