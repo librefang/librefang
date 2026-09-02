@@ -30,14 +30,14 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.102.2",
+    "@tanstack/react-query": "^5.102.8",
     "clsx": "^2.1.1",
     "framer-motion": "^13.1.1",
-    "lucide-react": "^1.33.0",
+    "lucide-react": "^1.37.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwind-merge": "^3.6.0",
-    "zod": "^4.4.3",
+    "zod": "^4.5.4",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
@@ -46,12 +46,12 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "autoprefixer": "^10.5.4",
     "jsdom": "^30.0.1",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
