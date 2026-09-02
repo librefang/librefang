@@ -1053,7 +1053,16 @@ fn content_to_text(content: &ChannelContent) -> String {
         ChannelContent::Location { lat, lon } => format!("[Location: {lat}, {lon}]"),
         ChannelContent::FileData { filename, .. } => format!("[File: {filename}]"),
         ChannelContent::Interactive { text, .. } => text.clone(),
-        ChannelContent::ButtonCallback { action, .. } => format!("[Button: {action}]"),
+        ChannelContent::ButtonCallback { action, .. } => {
+            // Slash-prefixed actions are commands (e.g. "/agent X" from the /agents inline keyboard), not button labels.
+            // They must survive debounce coalescing as command text, or the merged Text reaches `dispatch_message` as prose and the slash-command dispatcher never sees it — the "tapping the button does nothing" symptom.
+            // Non-command actions keep the human-readable placeholder.
+            if action.starts_with('/') {
+                action.clone()
+            } else {
+                format!("[Button: {action}]")
+            }
+        }
         ChannelContent::DeleteMessage { message_id } => {
             format!("[Delete message: {message_id}]")
         }
@@ -1098,7 +1107,8 @@ fn content_to_text(content: &ChannelContent) -> String {
 /// sanitizer entirely, even in Block mode (this closed the gap where
 /// `File` / `FileData` filenames and `Interactive` text reached the agent
 /// unchecked). Variants that never carry free-form user text (Location,
-/// ButtonCallback action, Sticker, poll ids, …) return `None`.
+/// Sticker, poll ids, …) return `None`.
+/// `ButtonCallback` is not among them — its `action` is attacker-controlled text that `content_to_text` renders into the prompt, so its arm returns `Some(action)`.
 fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
     // Every arm that `content_to_text` renders into agent-facing prompt text
     // from an attacker-controlled field MUST be scanned here, or Block mode is
@@ -10169,6 +10179,17 @@ mod tests {
     }
 
     #[test]
+    fn test_content_to_text_button_callback_slash_action_is_command_text() {
+        // A slash-prefixed action is a command line, not a button label: `content_to_text` must return it bare so debounce coalescing (which merges via these placeholders) still hands the dispatcher dispatchable command text.
+        let cb = ChannelContent::ButtonCallback {
+            action: "/agent foo".to_string(),
+            message_text: Some("Switched".to_string()),
+        };
+        assert_eq!(content_to_text(&cb), "/agent foo");
+        assert_ne!(content_to_text(&cb), "[Button: /agent foo]");
+    }
+
+    #[test]
     fn test_content_to_text_audio() {
         let content = ChannelContent::Audio {
             url: "https://example.com/song.mp3".to_string(),
@@ -10426,6 +10447,78 @@ mod tests {
         fn assert_content_eq(actual: &ChannelContent, expected: &str) {
             let actual_text = content_to_text(actual);
             assert_eq!(actual_text, expected);
+        }
+
+        fn make_test_button_callback(action: &str) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Discord,
+                platform_message_id: "msg1".to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::ButtonCallback {
+                    action: action.to_string(),
+                    message_text: Some("Clicked".to_string()),
+                },
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata: HashMap::new(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_button_callback_slash_actions_coalesce_as_command_text() {
+            // A slash-prefixed ButtonCallback caught in a debounce window drains as command text ("/agent foo"), not the "[Button: …]" placeholder, so the dispatcher still sees a command after coalescing.
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: make_test_button_callback("/agent foo"),
+                    media: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: make_test_button_callback("/agent bar"),
+                    media: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "/agent foo\n/agent bar");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_single_button_callback_slash_action_survives_drain_unchanged() {
+            // A lone slash-action ButtonCallback in the buffer drains with its content untouched (drain's single-message fast path), so `dispatch_message` still sees the `ButtonCallback` arm and routes `/agent foo` through the slash-command dispatcher.
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: make_test_button_callback("/agent foo"),
+                    media: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, media) = result.unwrap();
+            assert!(media.is_empty());
+            assert_content_eq(&drained_msg.content, "/agent foo");
         }
 
         #[tokio::test]

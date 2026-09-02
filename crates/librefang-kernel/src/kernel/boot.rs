@@ -2306,6 +2306,14 @@ impl LibreFangKernel {
                 .collect()
         };
 
+        // Propagate the global default burst ratio to the scheduler so
+        // agents without a per-agent override use the config value instead
+        // of the compiled fallback (fixes #8115).
+        kernel
+            .agents
+            .scheduler
+            .set_default_burst_ratio(kernel.current_budget().default_burst_ratio);
+
         // Restore persisted agents from SQLite
         match kernel.memory.substrate.load_all_agents() {
             Ok(agents) => {

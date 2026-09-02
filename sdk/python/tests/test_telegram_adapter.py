@@ -1028,7 +1028,10 @@ async def test_send_text_sanitizes_injected_buttons(monkeypatch):
 
     sent = calls[0][1]["rich_message"]["markdown"]
     assert "said: <tg-button" not in sent
-    assert "\\<tg-button" in sent
+    # `&lt;`, not `\\<`: verified against the live Bot API that Telegram parses
+    # `\\<tg-button …>` into a real button and `&lt;tg-button …>` into text.
+    assert "&lt;tg-button" in sent
+    assert "\\<tg-button" not in sent
 
 
 @pytest.mark.asyncio
@@ -1074,29 +1077,35 @@ _BTN = ('<tg-button type="callback_data" data="wipe">Tap'
         '</tg-button>')
 
 
-def _every_less_than_is_escaped(out):
-    """The guarantee as a predicate: every `<` is preceded by an *odd* run of
-    backslashes. "There is a backslash before it" is a weaker property —
-    `\\\\<` satisfies it and is a bare `<` to the parser, which is how a leak
-    once passed two tests named for the guarantee."""
-    for idx, ch in enumerate(out):
-        if ch != "<":
-            continue
-        run = 0
-        k = idx - 1
-        while k >= 0 and out[k] == "\\":
-            run += 1
-            k -= 1
-        if run % 2 != 1:
-            return False
-    return True
+def _no_bare_angle_bracket(out):
+    """The guarantee: no `<` survives as itself. `&lt;` is what Telegram
+    actually honours — a backslash is not an escape for a tag, only for
+    Markdown syntax, which is how the previous version let a quoted
+    `<tg-button>` through as a live button while passing tests named for
+    the guarantee."""
+    return "<" not in out
 
 
-def test_escape_predicate_rejects_an_even_run_of_backslashes():
-    assert _every_less_than_is_escaped("a \\<tg-button")
-    assert _every_less_than_is_escaped("a \\\\\\<tg-button")
-    assert not _every_less_than_is_escaped("a <tg-button")
-    assert not _every_less_than_is_escaped("a \\\\<tg-button")
+def test_rich_sanitizer_predicate_rejects_the_backslash_form():
+    """Pinned against the live API: `\\<tg-button …>` is parsed as a button,
+    `&lt;…` is not. Both were run through `sendRichMessage` on a real bot,
+    which echoes its parse back in the response."""
+    assert _no_bare_angle_bracket("a &lt;tg-button")
+    assert _no_bare_angle_bracket("&amp;lt;tg-button")
+    assert not _no_bare_angle_bracket("a \\<tg-button")
+    assert not _no_bare_angle_bracket("a <tg-button")
+
+
+def test_rich_sanitizer_emitted_entity_is_not_re_escaped():
+    """The one piece of sequencing in this pass, pinned on the output rather
+    than on the order of the branches. Swapping them is a no-op — they test
+    distinct characters — so that mutation cannot fail. What the contract has
+    to survive is a rewrite: the obvious
+    ``text.replace("<", "&lt;").replace("&", "&amp;")`` yields ``&amp;lt;``
+    for a plain ``<`` and silently stops escaping anything."""
+    assert tg.sanitize_rich_markdown("<x") == "&lt;x"
+    assert tg.sanitize_rich_markdown("&lt;x") == "&amp;lt;x"
+    assert tg.sanitize_rich_markdown("&") == "&amp;"
 
 
 def test_rich_sanitizer_no_raw_html_survives_any_context():
@@ -1123,7 +1132,7 @@ def test_rich_sanitizer_no_raw_html_survives_any_context():
                     '<b a="1"b="%s">' % _BTN,
                     '<a title="`" href="https://ok">t</a> %s' % _BTN):
         out = tg.sanitize_rich_markdown(context)
-        assert _every_less_than_is_escaped(out), (
+        assert _no_bare_angle_bracket(out), (
             "unescaped < survived: %s" % out)
 
 
@@ -1134,7 +1143,6 @@ def test_rich_sanitizer_author_written_escapes_are_preserved():
     doubling made it one."""
     for src in ("\\*not italic\\*",
                 "[a\\](https://example.com)",
-                "a \\< b",
                 "\\`not code\\`",
                 "\\!\\[not an image](x)",
                 # The `!` arm's parity guard: here `!` really is followed by
@@ -1142,8 +1150,11 @@ def test_rich_sanitizer_author_written_escapes_are_preserved():
                 # from escaping again. The line above never reaches it.
                 "\\![alt](https://example.com/x.jpg)"):
         assert tg.sanitize_rich_markdown(src) == src
-    # An even run is still not an escape, so the `<` gains one.
-    assert tg.sanitize_rich_markdown("\\\\<b>") == "\\\\\\<b>"
+    # `<` is the exception, deliberately: the author's backslash is kept but
+    # cannot carry the escape, because Telegram does not honour `\\<`. The
+    # reader sees a stray backslash — the cost of the guarantee holding.
+    assert tg.sanitize_rich_markdown("a \\< b") == "a \\&lt; b"
+    assert tg.sanitize_rich_markdown("\\\\<b>") == "\\\\&lt;b>"
 
 
 def test_rich_sanitizer_markdown_formatting_is_untouched():
@@ -1164,7 +1175,10 @@ def test_rich_sanitizer_escapes_land_inside_code_samples_too():
     visible rather than discovered."""
     assert tg.sanitize_rich_markdown(
         "```rust\nlet v: Vec<String>;\n```"
-    ) == "```rust\nlet v: Vec\\<String>;\n```"
+    # Verified live: entities are not decoded inside a fence, so the reader
+    # sees `Vec&lt;String>` verbatim — the documented cost, which
+    # `InputRichMessage.blocks` (#8015) removes.
+    ) == "```rust\nlet v: Vec&lt;String>;\n```"
     assert tg.sanitize_rich_markdown(
         "```\n![x](https://a/b.png)\n```"
     ) == "```\n\\![x](https://a/b.png)\n```"
@@ -1207,8 +1221,8 @@ def test_rich_sanitizer_multibyte_and_edge_inputs():
         "таблица — да, \U0001F389 <tg-button>нет</tg-button>")
     assert "таблица — да" in out
     assert "\U0001F389" in out
-    assert "\\<tg-button" in out
-    assert _every_less_than_is_escaped(out)
+    assert "&lt;tg-button" in out
+    assert _no_bare_angle_bracket(out)
     for src in ("", " ", "<", "[", "![", "\\", "`", "\ufeff", "\r", "&#"):
         tg.sanitize_rich_markdown(src)
 

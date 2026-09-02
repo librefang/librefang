@@ -128,6 +128,15 @@ pub struct AgentScheduler {
     usage: Arc<DashMap<AgentId, UsageTracker>>,
     /// Active task handles per agent.
     tasks: DashMap<AgentId, JoinHandle<()>>,
+    /// Global default burst ratio from `[budget] default_burst_ratio` in
+    /// config.toml, stored as f32 bits in an AtomicU32 so it can be updated
+    /// on config hot-reload without &mut self.
+    ///
+    /// `0.0` — the value `new()` initializes — is the "unset" sentinel:
+    /// [`ResourceQuota::effective_burst_ratio`] treats a global default of
+    /// `0.0` as "no configured default" and falls back to the compiled `0.2`.
+    /// Do not repurpose `0.0` as a real value without breaking that coupling.
+    default_burst_ratio_bits: std::sync::atomic::AtomicU32,
 }
 
 /// Roll back a pre-charged token reservation (undo the `total_tokens` increment) without recording an LLM call.
@@ -246,7 +255,32 @@ impl AgentScheduler {
             quotas: DashMap::new(),
             usage: Arc::new(DashMap::new()),
             tasks: DashMap::new(),
+            default_burst_ratio_bits: std::sync::atomic::AtomicU32::new(0f32.to_bits()),
         }
+    }
+
+    /// Update the global default burst ratio (called on config load/reload).
+    ///
+    /// Mirrors the parse-time validation of
+    /// `BudgetConfig::deserialize_default_burst_ratio` at the storage
+    /// boundary: non-finite input is treated as unset (`0.0`) and the stored
+    /// value is clamped to `0.0..=1.0`, so a bad runtime value can never
+    /// widen the burst cap.
+    pub fn set_default_burst_ratio(&self, ratio: f32) {
+        let clamped = if ratio.is_finite() {
+            ratio.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.default_burst_ratio_bits
+            .store(clamped.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn default_burst_ratio(&self) -> f32 {
+        f32::from_bits(
+            self.default_burst_ratio_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Register an agent with its resource quota.
@@ -356,7 +390,7 @@ impl AgentScheduler {
 
         // --- Burst limit: configurable fraction of the hourly budget in any single minute ---
         if token_limit > 0 {
-            let ratio = quota.effective_burst_ratio(0.0);
+            let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
             let burst_cap = (token_limit as f32 * ratio) as u64;
             let tokens_last_min = tracker.tokens_in_last_minute();
             if burst_cap > 0 && tokens_last_min > burst_cap {
@@ -448,7 +482,7 @@ impl AgentScheduler {
             )));
         }
         // Burst check against the projected spend
-        let ratio = quota.effective_burst_ratio(0.0);
+        let ratio = quota.effective_burst_ratio(self.default_burst_ratio());
         let burst_cap = (token_limit as f32 * ratio) as u64;
         let tokens_last_min = tracker.tokens_in_last_minute();
         if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
@@ -657,6 +691,165 @@ mod tests {
             },
         );
         assert!(scheduler.check_quota(id).is_err());
+    }
+
+    /// #8115: an agent registered with `burst_ratio: None` must be burst-capped
+    /// at `token_limit × [budget] default_burst_ratio` from the scheduler, not
+    /// at the compiled `0.2` fallback. The first assertion fails on the
+    /// pre-fix code, which passed a hardcoded `0.0` as the global default.
+    #[test]
+    fn default_burst_ratio_applies_to_agent_without_override() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(1000),
+                max_tool_calls_per_minute: 0, // unlimited tool calls
+                ..Default::default()
+            },
+        );
+        scheduler.set_default_burst_ratio(0.5); // cap = 1000 × 0.5 = 500/min
+
+        // 450 tokens in the last minute: over the compiled 0.2 cap (200),
+        // under the configured 0.5 cap (500).
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 450,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_ok(),
+            "450 tokens/min must pass a 500/min burst cap (1000 × 0.5); the compiled 0.2 cap of 200 would reject it"
+        );
+
+        // 100 more crosses the configured cap: 550 > 500.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "550 tokens/min must exceed the configured 500/min burst cap"
+        );
+    }
+
+    /// A per-agent `burst_ratio` beats the global default, whatever it is.
+    #[test]
+    fn per_agent_burst_ratio_overrides_global_default() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(1000),
+                max_tool_calls_per_minute: 0,
+                burst_ratio: Some(0.3), // cap = 1000 × 0.3 = 300/min
+                ..Default::default()
+            },
+        );
+        // A global default of 0.8 would allow 800/min — the override must win.
+        scheduler.set_default_burst_ratio(0.8);
+
+        // 350 tokens in the last minute: under the global 0.8 cap (800),
+        // over the per-agent 0.3 cap (300).
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 350,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "350 tokens/min must exceed the per-agent 0.3 cap of 300/min even though the global default is 0.8"
+        );
+    }
+
+    /// Reload case (#8115 reviewer point 1): changing the scheduler's global
+    /// default after an agent is registered must move that agent's effective
+    /// burst cap, because `burst_ratio: None` is resolved at check time.
+    #[test]
+    fn set_default_burst_ratio_updates_effective_cap_for_registered_agent() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: Some(1000),
+                max_tool_calls_per_minute: 0,
+                ..Default::default()
+            },
+        );
+
+        // Baseline: global default 0.2 → cap 200/min; 150 tokens pass.
+        scheduler.set_default_burst_ratio(0.2);
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 150,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        assert!(scheduler.check_quota(id).is_ok());
+
+        // Operator raises the default to 0.9 → cap 900/min; the same
+        // already-registered agent may now spend 650 tokens in the minute.
+        scheduler.set_default_burst_ratio(0.9);
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 500,
+                output_tokens: 0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            scheduler.check_quota(id).is_ok(),
+            "650 tokens/min must pass the raised 900/min cap; the stale 200/min cap would reject it"
+        );
+
+        // Operator tightens the default to 0.1 → cap 100/min; the accumulated
+        // 650 tokens in the window now breach it without any new usage.
+        scheduler.set_default_burst_ratio(0.1);
+        assert!(
+            scheduler.check_quota(id).is_err(),
+            "650 tokens/min must breach the tightened 100/min cap"
+        );
+    }
+
+    /// The setter keeps the storage boundary as tight as the config parser:
+    /// non-finite → unset (`0.0`), everything else clamped to `0.0..=1.0`.
+    #[test]
+    fn set_default_burst_ratio_clamps_non_finite_and_out_of_range() {
+        let scheduler = AgentScheduler::new();
+        let assert_ratio = |scheduler: &AgentScheduler, expected: f32| {
+            let actual = scheduler.default_burst_ratio();
+            assert!(
+                (actual - expected).abs() < f32::EPSILON,
+                "expected {expected}, got {actual}"
+            );
+        };
+
+        scheduler.set_default_burst_ratio(f32::NAN);
+        assert_ratio(&scheduler, 0.0); // unset → compiled 0.2 fallback applies
+        scheduler.set_default_burst_ratio(f32::INFINITY);
+        assert_ratio(&scheduler, 0.0);
+        scheduler.set_default_burst_ratio(-0.5);
+        assert_ratio(&scheduler, 0.0);
+        scheduler.set_default_burst_ratio(2.5);
+        assert_ratio(&scheduler, 1.0);
+        scheduler.set_default_burst_ratio(0.5);
+        assert_ratio(&scheduler, 0.5);
     }
 
     /// `burst_tokens()` returns 0 for a turn that hit only the cache —

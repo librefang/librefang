@@ -857,6 +857,34 @@ pub(super) fn prepare_llm_messages(
         max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
+
+    // Precise (minute-resolution) current time, kept out of the cached
+    // system prompt so it doesn't invalidate provider prompt caching
+    // (#8131). Appended AFTER the trim above (unlike canonical_context_msg
+    // and mem_msg, which are inserted at the head before trimming) — the
+    // whole point of this channel is to survive exactly the long/autonomous
+    // sessions that `max_history` trims down, where the system prompt's
+    // date-only field is most likely to have gone stale. A head insertion
+    // here would be the first thing `safe_trim_messages` drains once a
+    // session crosses `max_history`.
+    //
+    // Appended strictly AFTER the last message (not inserted before it):
+    // `session_repair::insert_synthetic_results` folds a synthetic
+    // `ToolResult` into an orphaned `ToolUse`'s next user message, which can
+    // be exactly the current-turn message that ends up last here. Inserting
+    // before that message would land this text between the `ToolUse` and
+    // its `ToolResult`, breaking the immediate-adjacency contract every
+    // provider requires (Anthropic/Gemini both 400 on it) — caught by
+    // adversarial review round 2 on #8132.
+    if let Some(time_msg) = manifest
+        .metadata
+        .get("current_time_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !time_msg.is_empty() {
+            messages.push(Message::user(time_msg));
+        }
+    }
     let _working_stripped = strip_prior_image_data(&mut messages);
     let session_stripped = strip_prior_image_data(&mut session.messages);
     if session_trimmed || session_stripped {

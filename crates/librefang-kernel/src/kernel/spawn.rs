@@ -323,15 +323,14 @@ impl LibreFangKernel {
         let caps = manifest_to_capabilities(&manifest);
         self.agents.capabilities.grant(agent_id, caps);
 
-        // Register with scheduler — pre-resolve global burst ratio
-        let mut quota = manifest.resources.clone();
-        if quota.burst_ratio.is_none() {
-            let global = self.current_budget().default_burst_ratio;
-            if global > 0.0 {
-                quota.burst_ratio = Some(global);
-            }
-        }
-        self.agents.scheduler.register(agent_id, quota);
+        // Register with scheduler.
+        // `burst_ratio: None` stays `None` on purpose: the scheduler resolves
+        // the global default from `[budget] default_burst_ratio` at check time,
+        // so a config hot-reload reaches every agent without an explicit
+        // per-agent override (#8115).
+        self.agents
+            .scheduler
+            .register(agent_id, manifest.resources.clone());
 
         // Create registry entry
         let tags = manifest.tags.clone();

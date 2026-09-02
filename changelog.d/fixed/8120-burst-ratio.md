@@ -1,0 +1,3 @@
+The `[budget] default_burst_ratio` from `config.toml` now reaches every agent without a per-agent `burst_ratio` override, including agents already running when the config is hot-reloaded.
+Before, the scheduler burst-checked against a hardcoded fallback (`0.2`, one fifth of the hourly token budget) and ignored the config value entirely.
+The per-agent `burst_ratio` in `agent.toml` still wins over the global default (#8120) (@DaBlitzStein)

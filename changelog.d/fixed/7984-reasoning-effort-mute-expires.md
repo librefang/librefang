@@ -1,0 +1,4 @@
+A gateway that rejects `reasoning_effort` is now remembered for ten minutes instead of forever, so reconfiguring it no longer needs a daemon restart.
+The driver's negative cache keeps the field off the wire for a rejected model, but it used to be a permanent per-instance set: once litellm answered `UnsupportedParamsError` for `reasoning_effort` on a model, every later turn of every agent using that model silently lost its thinking budget, and only a daemon restart brought it back.
+Entries now carry the rejection time and expire after ten minutes (an in-memory `DashMap` read one key at a time, no cross-request serialization), after which the driver re-probes the gateway by sending the field again at the cost of one relearned 400.
+(#7984) (@DaBlitzStein)

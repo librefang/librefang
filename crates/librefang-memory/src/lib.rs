@@ -33,6 +33,7 @@ pub mod roster_store;
 pub mod semantic;
 pub mod session;
 pub mod structured;
+pub mod template_version_store;
 pub mod usage;
 pub mod workflow_store;
 
@@ -45,6 +46,7 @@ pub use mcp_config_store::McpConfigStore;
 pub use passkey_store::{PasskeyRecord, PasskeyStore, PasskeyStoreError, SqlitePasskeyStore};
 pub use session_store::SessionStore;
 pub use substrate::MemorySubstrate;
+pub use template_version_store::{TemplateVersionRow, TemplateVersionStore};
 pub use workflow_store::{WorkflowRunRow, WorkflowStore};
 
 // Re-export types for convenience

@@ -511,16 +511,20 @@ impl LibreFangKernel {
 
         // Compaction is a side task — route through the auxiliary chain when
         // configured (issue #3314) so users with `[llm.auxiliary] compression`
-        // pay cheap-tier rates rather than the agent's primary model. When no
-        // aux entry can be initialised, the resolver returns a driver
-        // equivalent to `resolve_driver(&entry.manifest)` (the kernel's
-        // default driver chain), so behaviour matches the pre-issue-#3314
-        // baseline.
-        let driver = self
-            .llm
-            .aux_client
-            .load()
-            .driver_for(librefang_types::config::AuxTask::Compression);
+        // pay cheap-tier rates rather than the agent's primary model. With no
+        // aux entry the task runs on the agent's own driver, which is what
+        // `model` below belongs to.
+        //
+        // This comment used to claim the unconfigured resolver already returned
+        // "a driver equivalent to `resolve_driver(&entry.manifest)`". It did
+        // not: it returned `AuxClient`'s primary, i.e. the kernel's
+        // process-wide `default_driver`, which is only the same thing for an
+        // agent running the kernel default. `side_task_driver` makes the claim
+        // true (#8093).
+        let driver = self.side_task_driver(
+            &entry.manifest,
+            librefang_types::config::AuxTask::Compression,
+        );
 
         // Delegate to the context engine when available (and allowed for this agent),
         // otherwise fall back to the built-in compactor directly.

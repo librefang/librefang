@@ -390,6 +390,104 @@ impl LibreFangKernel {
     }
 }
 
+/// Build the per-turn precise-time value for [`PromptContext::current_time_precise`].
+///
+/// Minute-resolution counterpart to `current_date`, which stays date-only so
+/// the cached system prefix is byte-stable across a day (#3700). Suppressed
+/// under `stable_prefix_mode` for the same reason `canonical_context` is:
+/// that mode is an operator opt-out from volatile per-turn content (#8131).
+///
+/// Paired with [`attach_current_time_msg`] — the gate here and the metadata
+/// write there were previously inlined at each dispatch site, and review of
+/// #8132 caught a path that wired one without the other.
+///
+/// **Timezone is the daemon host's, deliberately** (`chrono::Local`), not the
+/// requesting user's — a self-hosted agent's "now" is its own wall clock, and
+/// the daemon has no reliable per-user timezone to prefer anyway. The rendered
+/// `%Z` offset ships with the value, so a user in another timezone reads an
+/// unambiguous timestamp rather than a silently wrong one.
+pub(crate) fn current_time_precise_for_prompt(stable_prefix_mode: bool) -> Option<String> {
+    if stable_prefix_mode {
+        return None;
+    }
+    Some(
+        chrono::Local::now()
+            .format("%A, %B %d, %Y %H:%M %Z")
+            .to_string(),
+    )
+}
+
+/// Attach the per-turn precise-time message to `manifest.metadata` so
+/// `agent_loop::prepare_llm_messages` can append it to the message tail.
+///
+/// Deliberately not part of the system prompt: the tail changes every turn
+/// anyway, so a volatile value there costs nothing, while the same value in
+/// the cached prefix would invalidate it every 60 s (#8131).
+pub(crate) fn attach_current_time_msg(
+    manifest: &mut AgentManifest,
+    prompt_ctx: &librefang_runtime::prompt_builder::PromptContext,
+) {
+    if let Some(time_msg) =
+        librefang_runtime::prompt_builder::build_current_time_message(prompt_ctx)
+    {
+        manifest.metadata.insert(
+            "current_time_msg".to_string(),
+            serde_json::Value::String(time_msg),
+        );
+    }
+}
+
+#[cfg(test)]
+mod current_time_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn precise_time_is_suppressed_under_stable_prefix_mode() {
+        assert_eq!(current_time_precise_for_prompt(true), None);
+    }
+
+    #[test]
+    fn precise_time_carries_minute_resolution_when_enabled() {
+        let value = current_time_precise_for_prompt(false).expect("time present");
+        // Minute resolution is the whole point — `current_date` already
+        // covers the date, and the locked prompt-builder test forbids HH:MM
+        // in the cached system prompt.
+        let has_hh_mm = value.as_bytes().windows(5).any(|w| {
+            w[2] == b':'
+                && w[0].is_ascii_digit()
+                && w[1].is_ascii_digit()
+                && w[3].is_ascii_digit()
+                && w[4].is_ascii_digit()
+        });
+        assert!(has_hh_mm, "expected an HH:MM timestamp, got {value:?}");
+    }
+
+    #[test]
+    fn attach_writes_metadata_only_when_precise_time_present() {
+        let mut ctx = librefang_runtime::prompt_builder::PromptContext {
+            agent_name: "tester".to_string(),
+            ..Default::default()
+        };
+
+        let mut manifest = AgentManifest::default();
+        attach_current_time_msg(&mut manifest, &ctx);
+        assert!(
+            !manifest.metadata.contains_key("current_time_msg"),
+            "no metadata when current_time_precise is None (stable_prefix_mode)"
+        );
+
+        ctx.current_time_precise = Some("Wednesday, September 02, 2026 07:29 GMT+3".to_string());
+        attach_current_time_msg(&mut manifest, &ctx);
+        assert_eq!(
+            manifest
+                .metadata
+                .get("current_time_msg")
+                .and_then(serde_json::Value::as_str),
+            Some("[Current date/time: Wednesday, September 02, 2026 07:29 GMT+3]")
+        );
+    }
+}
+
 #[cfg(test)]
 mod goal_prompt_tests {
     use super::*;

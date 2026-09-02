@@ -1,5 +1,5 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { listAgentTemplates, getAgentType } from "../http/client";
+import { listAgentTemplates, getAgentType, getTemplateHistory } from "../http/client";
 import { agentTypeKeys } from "./keys";
 import { withOverrides, QueryOverrides } from "./options";
 
@@ -21,6 +21,13 @@ export const agentTypeQueries = {
       queryFn: () => getAgentType(name),
       staleTime: STALE_MS,
     }),
+  history: (name: string) =>
+    queryOptions({
+      queryKey: agentTypeKeys.history(name),
+      queryFn: () => getTemplateHistory(name),
+      enabled: !!name,
+      staleTime: STALE_MS,
+    }),
 };
 
 export function useAgentTypes(options: QueryOverrides = {}) {
@@ -29,4 +36,8 @@ export function useAgentTypes(options: QueryOverrides = {}) {
 
 export function useAgentType(name: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentTypeQueries.detail(name), options));
+}
+
+export function useAgentTypeHistory(name: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentTypeQueries.history(name), options));
 }

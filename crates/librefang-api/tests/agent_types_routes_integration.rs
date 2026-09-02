@@ -881,3 +881,131 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
 
     cleanup(name);
 }
+
+// ---------------------------------------------------------------------------
+// Template version history + restore (#8047)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn history_and_restore_round_trip() {
+    let _g = lock().lock().await;
+    let name = "at_history";
+    cleanup(name);
+
+    let h = boot().await;
+    let (status, created) = post(
+        &h,
+        "/api/templates",
+        json!({ "name": name, "description": "first version" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let (status, edited) = put(
+        &h,
+        &format!("/api/templates/{name}"),
+        json!({ "description": "second version" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+
+    // Two snapshots, newest first, each carrying the documented JSON keys.
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(versions.len(), 2, "{history}");
+    assert_eq!(versions[0]["template_name"], name);
+    assert_eq!(versions[0]["change_source"], "dashboard");
+    assert_eq!(versions[1]["change_source"], "create");
+    for v in versions {
+        assert!(v.get("id").is_some(), "missing id: {v}");
+        assert!(v.get("timestamp").is_some(), "missing timestamp: {v}");
+        assert!(
+            v.get("manifest_toml").is_some(),
+            "missing manifest_toml: {v}"
+        );
+    }
+
+    // Restore to the older snapshot and observe the description roll back.
+    let first_id = versions[1]["id"].as_i64().unwrap();
+    let (status, restored) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/{first_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        restored["spec"]["description"], "first version",
+        "{restored}"
+    );
+
+    cleanup(name);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_rejects_foreign_versions_and_live_agents() {
+    let _g = lock().lock().await;
+    let name = "at_history_neg";
+    let other = "at_history_other";
+    let live = "at_history_live";
+    cleanup(name);
+    cleanup(other);
+    cleanup(live);
+
+    let h = boot().await;
+
+    post(
+        &h,
+        "/api/templates",
+        json!({ "name": name, "description": "a" }),
+    )
+    .await;
+    post(
+        &h,
+        "/api/templates",
+        json!({ "name": other, "description": "b" }),
+    )
+    .await;
+
+    // A version that belongs to a different template is refused, not silently applied.
+    let (_, history) = get(&h, &format!("/api/templates/{other}/history")).await;
+    let other_id = history["versions"][0]["id"].as_i64().unwrap();
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/{other_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "version_mismatch", "{body}");
+
+    // A version id that does not exist is a 404, not a crash.
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{name}/history/999999/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "version_not_found", "{body}");
+
+    // A live agent's name is not editable through this route.
+    write_workspace_agent(live, &manifest_with_non_form_fields(live));
+    let (status, body) = request(
+        &h,
+        "POST",
+        &format!("/api/templates/{live}/history/1/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+    cleanup(other);
+    cleanup(live);
+}

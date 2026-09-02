@@ -1738,6 +1738,14 @@ func (r *SystemResource) DeleteAgentType(name string) (interface{}, error) {
 	return r.client.request("DELETE", fmt.Sprintf("/api/templates/%s", name), nil, nil)
 }
 
+func (r *SystemResource) ListTemplateHistory(name string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/history", name), nil, query)
+}
+
+func (r *SystemResource) RestoreTemplateVersion(name string, version_id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/templates/%s/history/%s/restore", name, version_id), nil, nil)
+}
+
 func (r *SystemResource) GetAgentTemplateToml(name string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/templates/%s/toml", name), nil, nil)
 }

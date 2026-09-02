@@ -859,6 +859,7 @@ mod tests {
             tools_md: Some("tools".to_string()),
             peer_agents: vec![("peer".to_string(), "Idle".to_string(), "haiku".to_string())],
             current_date: Some("Friday, 2026-05-16".to_string()),
+            current_time_precise: Some("Friday, May 16, 2026 14:30 UTC".to_string()),
             active_goals: vec![crate::prompt_builder::ActiveGoalPrompt {
                 id: "cc016c43-b781-4434-aeb7-f87d56af1522".to_string(),
                 title: "goal".to_string(),

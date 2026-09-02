@@ -1,0 +1,3 @@
+A slash-prefixed inline-keyboard button press that lands inside a message-debounce window no longer reaches the agent as the `[Button: …]` placeholder.
+`content_to_text` rendered every `ButtonCallback` as `[Button: {action}]`, and the debounced merge builds agent-facing text from those placeholders, so a `/agent X` tap coalesced with another message arrived as prose and the slash-command dispatcher never saw it.
+Slash-prefixed actions now render as the bare command line, matching what `dispatch_message` already does for button callbacks on the immediate path. (#8117) (@DaBlitzStein)

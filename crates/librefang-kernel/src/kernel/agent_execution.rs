@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::kernel::llm_drivers::resolve_effective_fallbacks;
+use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use crate::MeteringSubsystemApi;
 use librefang_skills::SkillError;
 
@@ -869,6 +870,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
+                current_time_precise: current_time_precise_for_prompt(stable_prefix_mode),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
@@ -890,6 +892,10 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+            // Same rationale as canonical_context_msg above: precise time
+            // travels as a per-turn user message, not the cached system
+            // prompt (#8131).
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
 
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(

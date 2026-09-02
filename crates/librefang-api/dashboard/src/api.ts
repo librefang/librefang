@@ -1767,6 +1767,35 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+// ---------------------------------------------------------------------------
+// Template version history
+// ---------------------------------------------------------------------------
+
+export interface TemplateVersionEntry {
+  id: number;
+  template_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  change_source: string;
+}
+
+export async function getTemplateHistory(
+  name: string,
+  limit = 30,
+): Promise<{ versions: TemplateVersionEntry[] }> {
+  return get(`/api/templates/${encodeURIComponent(name)}/history?limit=${limit}`);
+}
+
+export async function restoreTemplateVersion(
+  name: string,
+  versionId: number,
+): Promise<AgentTypeDetail> {
+  return post<AgentTypeDetail>(
+    `/api/templates/${encodeURIComponent(name)}/history/${versionId}/restore`,
+    {},
+  );
+}
+
 /**
  * One ephemeral worker run (#6699).
  *

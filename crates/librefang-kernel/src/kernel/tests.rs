@@ -4434,6 +4434,75 @@ fn test_set_agent_skills_rejects_name_unknown_everywhere_as_invalid_input() {
     kernel.shutdown();
 }
 
+/// #8093: with no `[llm.auxiliary]` entry, a side task must run on the agent's
+/// own driver, not on `AuxClient`'s primary.
+///
+/// Every kernel caller pairs the driver this returns with the *agent's* model.
+/// `AuxClient::primary` is the process-wide `default_driver`, so for an agent
+/// overriding provider/model the request went to the default provider carrying
+/// a model only the agent's provider can serve — a LiteLLM
+/// `403 team_model_access_denied` naming the agent's model, after which
+/// compaction silently degraded to its fallback stub.
+#[test]
+fn test_side_task_driver_prefers_the_agents_own_chain_over_aux_primary() {
+    use librefang_types::config::AuxTask;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().to_path_buf();
+    let kernel = boot_kernel_at(&home_dir);
+
+    // A default config carries no `[llm.auxiliary]`, so the resolution reports
+    // `used_primary` — the branch this test pins.
+    let aux = kernel.llm.aux_client.load();
+    assert!(
+        aux.resolve(AuxTask::Compression).used_primary,
+        "test premise: an unconfigured Compression task resolves to the primary driver"
+    );
+    let aux_primary = aux.driver_for(AuxTask::Compression);
+    drop(aux);
+
+    // A *named, keyless* provider on purpose. A default manifest short-circuits
+    // to the driverless sentinel (#7743), which is the same object boot handed
+    // to `AuxClient` as its primary — so the identity check below would compare
+    // a stub against itself and report the fix as broken in any environment
+    // without provider credentials. `ollama` is local and needs no API key, so
+    // it builds regardless of the test environment (same reasoning as the
+    // allowlist tests in `llm_drivers.rs`).
+    let mut manifest = librefang_types::agent::AgentManifest {
+        name: "side-task-driver-agent".to_string(),
+        description: "side-task driver selection regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    manifest.model.provider = "ollama".to_string();
+    manifest.model.model = "llama3.2:latest".to_string();
+    kernel
+        .spawn_agent_inner(manifest.clone(), None, None, None)
+        .expect("spawn");
+
+    // Precondition first: if the agent's own chain cannot be built,
+    // `side_task_driver` legitimately falls back to the aux primary and the
+    // identity assertion below would fail for a reason that has nothing to do
+    // with the fix. Fail here instead, where the message says so.
+    let own = kernel
+        .resolve_driver(&manifest)
+        .expect("the agent's own driver must build, or this test proves nothing");
+    assert!(
+        !std::sync::Arc::ptr_eq(&own, &aux_primary),
+        "test premise: a named keyless provider must not resolve to the same object as the aux primary"
+    );
+
+    let chosen = kernel.side_task_driver(&manifest, AuxTask::Compression);
+    assert!(
+        !std::sync::Arc::ptr_eq(&chosen, &aux_primary),
+        "an unconfigured side task must not run on AuxClient's primary — that is the driver \
+         that cannot serve the agent's model"
+    );
+
+    kernel.shutdown();
+}
+
 #[test]
 fn test_set_agent_mcp_servers_accepts_catalog_only_pending_name() {
     // The reported bug: `fetch` is in the local MCP catalog but was never configured, so it never connected, so the old accept-set (built from connected tools) rejected it.
