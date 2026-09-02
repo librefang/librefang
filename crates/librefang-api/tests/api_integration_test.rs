@@ -283,6 +283,28 @@ memory_read = ["*"]
 memory_write = ["self.*"]
 "#;
 
+/// `TEST_MANIFEST` with `author = "Eve"`, for tests whose subject is the attachment-ownership boundary rather than agent ownership.
+///
+/// Owner-scoping runs ahead of attachment resolution on both message paths — #6753 for `POST /api/agents/{id}/message`, #8137 for the `GET /api/agents/{id}/ws` upgrade — so a caller who does not author the agent is turned away before the attachment check ever runs: 404 `agent_not_found` on the REST route, 404 on the socket handshake.
+/// Isolating the attachment check therefore needs the caller to own the agent while somebody else owns the upload.
+const EVE_MANIFEST: &str = r#"
+name = "eve-agent"
+version = "0.1.0"
+description = "Integration test agent owned by Eve"
+author = "Eve"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "You are a test agent. Reply concisely."
+
+[capabilities]
+tools = ["file_read"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"#;
+
 /// Manifest that uses Groq for real LLM tests.
 const LLM_MANIFEST: &str = r#"
 name = "test-agent"
@@ -5248,31 +5270,8 @@ async fn test_upload_owner_metadata_survives_registry_miss() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn message_routes_reject_foreign_upload_attachments() {
-    // The agent is authored by Eve on purpose. The owner-scoping guard added in
-    // #6753 runs ahead of attachment resolution in `send_message`, so a caller
-    // who cannot reach the agent at all is turned away with 404
-    // `agent_not_found` (covered by `non_owner_cannot_message_another_users_agent`
-    // in `owner_scoped_routes_integration.rs`) and never reaches the check this
-    // test is about. Eve owning the agent while Alice owns the upload is what
-    // isolates the attachment-ownership boundary.
-    const EVE_MANIFEST: &str = r#"
-name = "eve-agent"
-version = "0.1.0"
-description = "Integration test agent owned by Eve"
-author = "Eve"
-module = "builtin:chat"
-
-[model]
-provider = "ollama"
-model = "test-model"
-system_prompt = "You are a test agent. Reply concisely."
-
-[capabilities]
-tools = ["file_read"]
-memory_read = ["*"]
-memory_write = ["self.*"]
-"#;
-
+    // Eve authors the agent so that the owner-scoping guard (#6753) admits her and the attachment check is what decides the outcome; `non_owner_cannot_message_another_users_agent` in `owner_scoped_routes_integration.rs` covers the guard itself.
+    // See `EVE_MANIFEST`.
     let server = start_test_server_with_rbac_users(
         "any-key",
         vec![
@@ -5437,6 +5436,8 @@ async fn websocket_rejects_foreign_attachment_with_structured_error() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
+    // Eve authors the agent so the #8137 owner-scope guard on the upgrade admits her and the attachment check is what decides the outcome; `non_owner_user_cannot_upgrade_a_websocket_on_another_users_agent` in `ws_agent_owner_scope_test.rs` covers the guard itself.
+    // See `EVE_MANIFEST`.
     let server = start_test_server_with_rbac_users(
         "any-key",
         vec![
@@ -5449,7 +5450,7 @@ async fn websocket_rejects_foreign_attachment_with_structured_error() {
     let spawn = client
         .post(format!("{}/api/agents", server.base_url))
         .header("authorization", "Bearer any-key")
-        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .json(&serde_json::json!({"manifest_toml": EVE_MANIFEST}))
         .send()
         .await
         .unwrap();
