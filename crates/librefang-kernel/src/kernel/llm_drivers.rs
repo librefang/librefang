@@ -547,6 +547,53 @@ impl LibreFangKernel {
 
         Ok(primary)
     }
+
+    /// The driver a side task should run on for `manifest`.
+    ///
+    /// An explicitly configured `[llm.auxiliary]` chain wins, so operators who
+    /// asked for cheap-tier side tasks keep getting them. When no chain is
+    /// configured the task falls back to the **agent's own** driver, not to
+    /// `AuxClient`'s primary (#8093).
+    ///
+    /// That distinction is the whole point. `AuxClient::primary` is the kernel's
+    /// process-wide `default_driver`, and every caller pairs the driver it gets
+    /// back with the *agent's* model. For an agent that overrides `provider` /
+    /// `model` in its manifest the two disagree, and the request goes to the
+    /// default provider carrying a model only the agent's provider can serve —
+    /// observed as a LiteLLM `403 team_model_access_denied` naming the agent's
+    /// model, after which the side task silently degrades to its fallback stub.
+    ///
+    /// `AuxResolution::used_primary` is exactly this signal. `ContextCompressor`
+    /// has always branched on it; this puts the same rule behind the kernel's
+    /// own call sites, in one place rather than copied per site.
+    ///
+    /// Infallible by design: a side task must not abort a turn because the
+    /// agent's chain could not be built, so a `resolve_driver` failure logs and
+    /// yields the aux primary — the historical behaviour, and better than no
+    /// compaction at all.
+    pub(crate) fn side_task_driver(
+        &self,
+        manifest: &AgentManifest,
+        task: librefang_types::config::AuxTask,
+    ) -> Arc<dyn LlmDriver> {
+        let resolution = self.llm.aux_client.load().resolve(task);
+        if !resolution.used_primary {
+            return resolution.driver;
+        }
+        match self.resolve_driver(manifest) {
+            Ok(driver) => driver,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %manifest.name,
+                    %task,
+                    error = %e,
+                    "side task: could not resolve the agent's own driver; \
+                     falling back to the kernel default chain"
+                );
+                resolution.driver
+            }
+        }
+    }
 }
 
 #[cfg(test)]

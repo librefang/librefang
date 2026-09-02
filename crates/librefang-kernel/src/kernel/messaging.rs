@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use crate::kernel::prompt_context::{attach_current_time_msg, current_time_precise_for_prompt};
 use librefang_channels::types::SenderContext;
 use librefang_runtime::agent_loop::{run_agent_loop, AgentLoopResult};
 use librefang_skills::SkillError;
@@ -628,6 +629,13 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
+                // This ephemeral (`/btw`) path DOES run through
+                // `agent_loop::prepare_llm_messages` (via `run_agent_loop`
+                // below), same as the other two call sites, so it gets the
+                // same treatment (#8131).
+                current_time_precise: current_time_precise_for_prompt(
+                    self.config.load_full().stable_prefix_mode,
+                ),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 is_group: false,
                 was_mentioned: false,
@@ -636,6 +644,7 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
         }
 
         // #5980: pre-dispatch per-provider budget gate on the ephemeral
@@ -2729,6 +2738,7 @@ impl LibreFangKernel {
                         .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
+                current_time_precise: current_time_precise_for_prompt(stable_prefix_mode),
                 active_goals: self.active_goals_for_prompt(agent_id),
                 context_md,
                 dynamic_sections,
@@ -2750,6 +2760,10 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+            // Same rationale as canonical_context_msg above: precise time
+            // travels as a per-turn user message, not the cached system
+            // prompt (#8131).
+            attach_current_time_msg(&mut manifest, &prompt_ctx);
 
             // Pass prompt_caching config to the agent loop via metadata.
             manifest.metadata.insert(

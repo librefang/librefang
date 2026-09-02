@@ -652,6 +652,22 @@ pub async fn agent_ws(
         }
     }
 
+    // Owner-scoping (#6753), mirroring `routes::agents::messaging::send_message`.
+    // `min_role_for_privileged_get` in `middleware.rs` lowers `/api/agents/{id}/ws` to `User` on the stated theory that the socket is equivalent to `POST /api/agents/{id}/message`, and it is — but the REST twin pairs that role with an explicit ownership check, and this handler had only an existence check.
+    // Without this a non-owner could drive a full LLM turn — tool execution and budget spend included — on another user's agent by guessing/enumerating its UUID, and over a socket that also carries the `/model`, `/new`, `/compact` and `/stop` commands.
+    // The refusal is the same not-found shape the REST twin returns rather than a 403, so a `User` who does not own the agent cannot use the status to confirm that the id exists.
+    {
+        let api_user = authenticated_user.clone().map(axum::Extension);
+        if !crate::routes::can_access_agent(&state, agent_id, api_user.as_ref()) {
+            warn!(
+                agent_id = %id,
+                user = authenticated_user.as_ref().map(|u| u.name.as_str()).unwrap_or("<none>"),
+                "WebSocket upgrade rejected: agent is not accessible to this user"
+            );
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
+    }
+
     // Optional per-connection explicit session_id override (issue #2959).
     // When present, every send on this socket targets the given session —
     // two browser tabs on the same agent with different `?session_id=` values

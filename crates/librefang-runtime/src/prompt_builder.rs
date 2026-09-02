@@ -208,6 +208,12 @@ pub struct PromptContext {
     pub peer_agents: Vec<(String, String, String)>,
     /// Current date/time string for temporal awareness.
     pub current_date: Option<String>,
+    /// Precise current date/time (minute resolution + timezone), delivered
+    /// out-of-band from `current_date` via [`build_current_time_message`] as a
+    /// per-turn user message instead of the cached system prompt — so agents
+    /// get an accurate clock without invalidating provider prompt caching
+    /// (see #8131; sibling mechanism to `canonical_context`).
+    pub current_time_precise: Option<String>,
     /// Active goals (pending/in_progress) assigned to the agent.
     pub active_goals: Vec<ActiveGoalPrompt>,
     /// Current on-disk `context.md` content for the agent (see `agent_context`).
@@ -596,6 +602,21 @@ pub fn build_canonical_context_message(ctx: &PromptContext) -> Option<String> {
         .as_ref()
         .filter(|c| !c.is_empty())
         .map(|c| format!("[Previous conversation context]\n{}", cap_str(c, 2000)))
+}
+
+/// Build the precise current time as a standalone user message (instead of system prompt).
+///
+/// `current_date` in the system prompt is deliberately date-only (see
+/// `current_date_section_omits_minute_precision_timestamp`) to keep the cached
+/// prefix byte-stable across turns. This delivers minute-resolution time the
+/// same way `build_canonical_context_message` delivers canonical context —
+/// as a per-turn, non-cached user message — so agents get an accurate clock
+/// without paying for cache invalidation (#8131).
+pub fn build_current_time_message(ctx: &PromptContext) -> Option<String> {
+    ctx.current_time_precise
+        .as_ref()
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("[Current date/time: {t}]"))
 }
 
 /// Build the memory section (Section 4).

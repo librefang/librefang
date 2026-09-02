@@ -12566,6 +12566,106 @@
         }
       }
     },
+    "/api/templates/{name}/history": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/{name}/history — how this template's config changed over time.",
+        "operationId": "list_template_history",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max entries (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template version history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid template name"
+          },
+          "404": {
+            "description": "Template not found"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/history/{version_id}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/{name}/history/{version_id}/restore — restore a template to a prior version.",
+        "operationId": "restore_template_version",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "description": "Version row id to restore",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template restored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid template name or version id"
+          },
+          "404": {
+            "description": "Template or version not found"
+          },
+          "409": {
+            "description": "Template belongs to a live agent"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [

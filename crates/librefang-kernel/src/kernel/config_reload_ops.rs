@@ -562,6 +562,9 @@ impl LibreFangKernel {
                     let new_budget = new_config.budget.clone();
                     self.metering
                         .update_budget(|current| *current = new_budget.clone());
+                    self.agents
+                        .scheduler
+                        .set_default_burst_ratio(new_config.budget.default_burst_ratio);
                 }
                 HotAction::ReloadExternalAuth => {
                     // Drop the OIDC discovery + JWKS caches that the

@@ -1451,3 +1451,27 @@ fn current_date_section_omits_minute_precision_timestamp() {
         "## Current Date section must not embed a HH:MM timestamp. Got: {date_section:?}"
     );
 }
+
+#[test]
+fn current_time_message_carries_minute_precision_outside_system_prompt() {
+    let mut ctx = basic_ctx();
+    ctx.current_date = Some("Wednesday, April 29, 2026 (2026-04-29 UTC)".to_string());
+    ctx.current_time_precise = Some("Wednesday, April 29, 2026 14:37 UTC".to_string());
+
+    // The system prompt itself stays untouched — precision lives only in
+    // the side-channel message (#8131).
+    let prompt = build_system_prompt(&ctx);
+    assert!(!prompt.contains("14:37"));
+
+    let time_msg = build_current_time_message(&ctx).expect("time message present");
+    assert_eq!(
+        time_msg,
+        "[Current date/time: Wednesday, April 29, 2026 14:37 UTC]"
+    );
+}
+
+#[test]
+fn current_time_message_absent_when_unset() {
+    let ctx = basic_ctx();
+    assert_eq!(build_current_time_message(&ctx), None);
+}

@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 54;
+const SCHEMA_VERSION: u32 = 55;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -275,6 +275,11 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     //
     // Written against a 51-53 gap held by #7916, #7919 and #7904, which is why it took 54 rather than a contended number. All three have since landed, so the ladder is contiguous and the gap note this comment used to carry no longer describes anything.
     run_step!(54, migrate_v54);
+
+    // v55: template (agent-type) version history so operators can see
+    // how an agent type's manifest changed over time and restore a
+    // prior configuration from the dashboard.
+    run_step!(55, migrate_v55);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1207,6 +1212,26 @@ fn migrate_v54(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (54, datetime('now'), 'Persist agent lineage: agents.parent_id + idx_agents_parent_id + agents.parent_recorded so a pre-v54 row reads as unknown rather than root (#7930)')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS template_versions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_name   TEXT NOT NULL,
+            timestamp       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            manifest_toml   TEXT NOT NULL,
+            change_source   TEXT NOT NULL DEFAULT 'unknown'
+        );
+        CREATE INDEX IF NOT EXISTS idx_template_versions_name
+            ON template_versions(template_name, timestamp DESC);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
         [],
     )?;
     Ok(())

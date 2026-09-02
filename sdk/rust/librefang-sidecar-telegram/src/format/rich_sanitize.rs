@@ -19,23 +19,39 @@
 //! Two character-local rules. No lookahead, no scanning, no attempt to locate a Markdown
 //! construct or to find where one ends:
 //!
-//! * `<` is escaped so that the run of backslashes preceding it is **odd**, which is
-//!   what makes Markdown treat it as literal. A `<` the author already escaped is left
-//!   exactly as it is; only an unescaped one gains a backslash. The parity matters: the
-//!   Bot API warns that "'\' character usually must be escaped with a preceding '\'
-//!   character", and an even run leaves the `<` bare.
+//! * `&` becomes `&amp;` and `<` becomes `&lt;`, unconditionally. No parity to track and
+//!   no state to get wrong: the output simply contains no `<`, so no tag can be parsed.
 //! * `!` before `[` is backslash-escaped, so `![](url)` stays inert text rather than
 //!   becoming a media block fetched from that URL.
 //!
-//! Author-written backslashes are left alone. An earlier revision doubled every one of
-//! them, which reached the same parity but silently rewrote the text: `\*not italic\*`
-//! became `\\*not italic\\*`, so the emphasis the author had escaped came back with
-//! stray backslashes, and `[a\](https://x)` — not a link at all — turned into one.
+//! Author-written backslashes are left alone, so `\*not italic\*` and `[a\](https://x)`
+//! still mean what they meant. The one place this shows is `\<`: the backslash is kept and
+//! the `<` still becomes `&lt;`, so the reader sees a stray backslash. That is a fidelity
+//! cost of the guarantee, not a rewrite of intent — the author asked for a literal `<` and
+//! gets one.
 //!
-//! Backslash rather than `&lt;`, because the Bot API documents that mechanism for the
-//! `markdown` field by example — `\#hashtag` appears in its own Rich Markdown sample —
-//! and says nothing about entity decoding there; the entity note appears only under the
-//! two HTML styles.
+//! `&lt;` rather than a backslash. The first version reasoned the other way — the Bot API
+//! documents backslash for the `markdown` field by example (`\#hashtag` appears in its own
+//! Rich Markdown sample) and says nothing about entity decoding there — and shipped. It was
+//! wrong, and only a live bot could show it: **Telegram does not treat `\<` as an escape.**
+//! The backslash is delivered as a character and the tag is parsed anyway, so a quoted
+//! `<tg-button type="callback_data">` became a real button (#8127). Escaping does work for
+//! Markdown syntax, which is why `\!` below is fine and why the mistake was plausible.
+//!
+//! Measured against `sendRichMessage`, which echoes its own parse back in the response:
+//!
+//! ```text
+//! <tg-button …>T</tg-button>    -> {"type":"button", …}   raw
+//! \<tg-button …>T</tg-button>   -> ["\\", {"type":"button", …}]   backslash, then a button
+//! &lt;tg-button …&gt;T&lt;/tg-button&gt;  -> text
+//! ```
+//!
+//! Every `<` needs it, not just the opening one: escaping only the first leaves
+//! `</tg-button>` to be parsed and dropped, which silently truncates the quoted text. `&` is
+//! escaped first so an author's literal `&lt;` arrives as those four characters rather than
+//! decoding into a `<` this pass never inspected. `>` is left alone — with no `<` there is
+//! no tag for it to close — so the output reads `&lt;/tg-button>`; the sample above escapes
+//! both only because that is how the Bot API prints entities in its own examples.
 //!
 //! **Link destinations are not filtered.** Earlier revisions checked them against
 //! `sanitize`'s scheme allowlist, which meant locating Markdown links: a label scanner
@@ -61,9 +77,10 @@
 //!
 //! # Cost
 //!
-//! The escapes are applied everywhere, including inside code spans and fenced blocks
-//! where Markdown does not process them, so `Vec<String>` in a fence reads
-//! `Vec\<String>` and a literal backslash is doubled. Every Rich HTML construct is lost,
+//! The escapes are applied everywhere, including inside code spans and fenced blocks —
+//! where, verified live, entities are *not* decoded, so `Vec<String>` in a fence reads
+//! `Vec&lt;String>`. Uglier than the `Vec\<String>` it replaces and equally wrong; the
+//! difference is that this version is actually safe. Every Rich HTML construct is lost,
 //! since they all start with `<`: `<u>`, `<ins>`, `<sub>`, `<sup>`, `<br>`,
 //! `<details>` / `<summary>`, `<aside>` / `<cite>`, `<a name>` anchors, `<tg-map>`,
 //! `<tg-collage>`, `<tg-slideshow>`, `<tg-emoji>`, `<tg-time>`. Emphasis, strikethrough,
@@ -79,8 +96,8 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
-    // Length of the run of backslashes immediately before the current position. An odd
-    // run already escapes whatever follows it, so a `<` there needs nothing added.
+    // Length of the run of backslashes immediately before the current position. Only the
+    // `!` rule needs it: an odd run there is already an escape the author wrote.
     let mut backslashes = 0_usize;
 
     while i < bytes.len() {
@@ -90,19 +107,23 @@ pub fn sanitize_rich_markdown(input: &str) -> String {
                 backslashes += 1;
                 i += 1;
             }
-            // The whole security property, in one arm: every `<` ends up behind an odd
-            // run of backslashes, so no bare `<` survives and no raw HTML can reach
-            // Telegram regardless of what the surrounding text looks like.
+            // Escaped first so an author's literal `&lt;` survives as those four
+            // characters instead of being decoded into a `<` we never inspected.
+            b'&' => {
+                out.push_str("&amp;");
+                backslashes = 0;
+                i += 1;
+            }
+            // The whole security property, in one arm: no `<` survives as itself, so no
+            // tag can be parsed, whatever the surrounding text looks like.
             b'<' => {
-                if backslashes % 2 == 0 {
-                    out.push('\\');
-                }
-                out.push('<');
+                out.push_str("&lt;");
                 backslashes = 0;
                 i += 1;
             }
             // `![...](...)` is a real media block in Rich Markdown, fetched from the
-            // URL — today it is inert text. Escaping the `!` keeps it that way.
+            // URL — today it is inert text. Escaping the `!` keeps it that way, and
+            // backslash *does* work for Markdown syntax characters, unlike for tags.
             b'!' if bytes.get(i + 1) == Some(&b'[') && backslashes % 2 == 0 => {
                 out.push_str("\\!");
                 backslashes = 0;
@@ -137,30 +158,42 @@ mod tests {
 
     const BUTTON: &str = r#"<tg-button type="callback_data" data="wipe">Tap</tg-button>"#;
 
-    /// The guarantee, as a predicate: every `<` in the output is preceded by an **odd**
-    /// run of backslashes, so Markdown reads it as escaped. Asserting merely "there is a
-    /// backslash before it" is a weaker property — `\\<` satisfies that and is a bare
-    /// `<` to the parser, which is how a leak once passed two tests named for the
-    /// guarantee.
-    fn every_less_than_is_escaped(out: &str) -> bool {
-        out.match_indices('<').all(|(idx, _)| {
-            out.as_bytes()[..idx]
-                .iter()
-                .rev()
-                .take_while(|&&c| c == b'\\')
-                .count()
-                % 2
-                == 1
-        })
+    /// The guarantee, as a predicate: no `<` survives as itself. `&lt;` is what Telegram
+    /// actually honours — a backslash is not an escape for a tag, only for Markdown
+    /// syntax, which is how the previous version let a quoted `<tg-button>` through as a
+    /// live button while passing two tests named for the guarantee.
+    fn no_bare_angle_bracket(out: &str) -> bool {
+        !out.contains('<')
     }
 
+    /// Pinned against the live API: `\\<tg-button …>` is parsed as a button, `&lt;…` is
+    /// not. Both rows were run through `sendRichMessage` on a real bot, which echoes its
+    /// parse back in the response.
     #[test]
-    fn the_escape_predicate_rejects_an_even_run_of_backslashes() {
-        assert!(every_less_than_is_escaped("a \\<tg-button"));
-        assert!(every_less_than_is_escaped("a \\\\\\<tg-button"));
-        assert!(!every_less_than_is_escaped("a <tg-button"));
-        // The shape that once passed two tests named for the guarantee.
-        assert!(!every_less_than_is_escaped("a \\\\<tg-button"));
+    fn the_predicate_rejects_the_backslash_form_telegram_ignores() {
+        assert!(no_bare_angle_bracket("a &lt;tg-button"));
+        assert!(no_bare_angle_bracket("&amp;lt;tg-button"));
+        // The shape that shipped: Telegram delivers the backslash as a character and
+        // parses the tag anyway.
+        assert!(!no_bare_angle_bracket("a \\<tg-button"));
+        assert!(!no_bare_angle_bracket("a <tg-button"));
+    }
+
+    /// The one piece of sequencing in this pass, pinned on the output rather than on the
+    /// order of the arms.
+    ///
+    /// Swapping the two `match` arms is a no-op — they match distinct bytes — so that
+    /// particular mutation cannot fail. What the contract has to survive is a *rewrite*:
+    /// the obvious `replace('<', "&lt;").replace('&', "&amp;")` produces `&amp;lt;` for a
+    /// plain `<` and silently stops escaping anything. Asserting both directions catches
+    /// it; asserting the predicate alone does not.
+    #[test]
+    fn an_emitted_entity_is_not_re_escaped_and_an_authors_is() {
+        // What we emit must arrive as an entity, not as an escaped ampersand.
+        assert_eq!(sanitize_rich_markdown("<x"), "&lt;x");
+        // What the author wrote must arrive as their four characters.
+        assert_eq!(sanitize_rich_markdown("&lt;x"), "&amp;lt;x");
+        assert_eq!(sanitize_rich_markdown("&"), "&amp;");
     }
 
     /// The guarantee: no bare `<` survives, in any context. These are every input the
@@ -189,10 +222,7 @@ mod tests {
             format!("<a title=\"`\" href=\"https://ok\">t</a> {BUTTON}"),
         ] {
             let out = sanitize_rich_markdown(&context);
-            assert!(
-                every_less_than_is_escaped(&out),
-                "unescaped `<` survived: {out}"
-            );
+            assert!(no_bare_angle_bracket(&out), "unescaped `<` survived: {out}");
         }
     }
 
@@ -204,7 +234,6 @@ mod tests {
         for source in [
             "\\*not italic\\*",
             "[a\\](https://example.com)",
-            "a \\< b",
             "\\`not code\\`",
             "\\!\\[not an image](x)",
             // The `!` arm's parity guard: here `!` really is followed by `[`, so the
@@ -214,8 +243,11 @@ mod tests {
         ] {
             assert_eq!(sanitize_rich_markdown(source), source);
         }
-        // An even run is still not an escape, so the `<` gains one.
-        assert_eq!(sanitize_rich_markdown("\\\\<b>"), "\\\\\\<b>");
+        // `<` is the exception, and deliberately so: the author's backslash is kept but
+        // cannot carry the escape, because Telegram does not honour `\\<`. The reader sees
+        // a stray backslash before the character — the cost of the guarantee holding.
+        assert_eq!(sanitize_rich_markdown("a \\< b"), "a \\&lt; b");
+        assert_eq!(sanitize_rich_markdown("\\\\<b>"), "\\\\&lt;b>");
     }
 
     #[test]
@@ -239,9 +271,13 @@ mod tests {
     /// than discovered: Markdown does not process escapes inside code.
     #[test]
     fn escapes_land_inside_code_samples_too() {
+        // Verified against the live API: entities are *not* decoded inside a fence, so a
+        // reader sees `Vec&lt;String>` verbatim. Worse-looking than the old `Vec\\<String>`
+        // and equally wrong; `InputRichMessage.blocks` (#8015) is what removes it, since a
+        // preformatted block's text is a plain string nothing parses.
         assert_eq!(
             sanitize_rich_markdown("```rust\nlet v: Vec<String>;\n```"),
-            "```rust\nlet v: Vec\\<String>;\n```"
+            "```rust\nlet v: Vec&lt;String>;\n```"
         );
         assert_eq!(
             sanitize_rich_markdown("```\n![x](https://a/b.png)\n```"),
@@ -298,8 +334,8 @@ mod tests {
         let out = sanitize_rich_markdown(s);
         assert!(out.contains("таблица — да"));
         assert!(out.contains('🎉'));
-        assert!(out.contains("\\<tg-button"));
-        assert!(every_less_than_is_escaped(&out));
+        assert!(out.contains("&lt;tg-button"));
+        assert!(no_bare_angle_bracket(&out));
     }
 
     #[test]

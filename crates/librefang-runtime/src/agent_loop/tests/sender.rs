@@ -1277,6 +1277,161 @@ fn test_prepare_llm_messages_new_messages_start_ignores_trimmed_context_injectio
     assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
 }
 
+/// Regression for #8131: `current_time_msg`, unlike `canonical_context_msg`
+/// and the memory-context injection, must survive `safe_trim_messages` —
+/// it exists specifically to give long/autonomous sessions (the ones most
+/// likely to get trimmed) an accurate clock. A head insertion made before
+/// the trim call would be the first thing drained once the session crosses
+/// `max_history`, silently reintroducing the bug this channel exists to fix.
+#[test]
+fn test_prepare_llm_messages_current_time_msg_survives_trim_in_long_session() {
+    let mut manifest = test_manifest();
+    manifest.metadata.insert(
+        "current_time_msg".to_string(),
+        serde_json::json!("[Current date/time: Tuesday, September 1, 2026 22:41 GMT+3]"),
+    );
+
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+
+    // Well past DEFAULT_MAX_HISTORY_MESSAGES (60) — a long-running session,
+    // exactly the case this channel targets.
+    for i in 0..40 {
+        session.messages.push(Message::user(format!("q{i}")));
+        session.messages.push(Message::assistant(format!("a{i}")));
+    }
+    session.messages.push(Message::user("current turn"));
+
+    let PreparedMessages { messages, .. } = prepare_llm_messages(
+        &manifest,
+        &mut session,
+        "current turn",
+        None,
+        DEFAULT_MAX_HISTORY_MESSAGES,
+    );
+
+    assert!(
+        messages
+            .iter()
+            .any(|msg| msg.content.text_content().contains("22:41")),
+        "current_time_msg must survive trim in a long session; got: {:?}",
+        messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect::<Vec<_>>()
+    );
+    // Must sit strictly after the current turn (appended, not inserted
+    // before it) — not buried in trimmed history, and never positioned
+    // where it could land between a ToolUse and its ToolResult.
+    assert_eq!(
+        messages[messages.len() - 2].content.text_content(),
+        "current turn"
+    );
+    assert!(messages
+        .last()
+        .unwrap()
+        .content
+        .text_content()
+        .contains("22:41"));
+}
+
+/// Regression for adversarial review round 2 on #8132: `current_time_msg`
+/// must never be inserted between an assistant's `ToolUse` and the user
+/// message carrying its `ToolResult` — `session_repair::insert_synthetic_results`
+/// folds a synthetic `ToolResult` into the next user message after an
+/// orphaned `ToolUse` (e.g. after a crash mid tool-call), which can be
+/// exactly the current-turn message. An earlier version of this fix
+/// inserted `current_time_msg` immediately before the last message, which
+/// split exactly this pair and would 400 against Anthropic/Gemini on the
+/// very next turn.
+#[test]
+fn test_prepare_llm_messages_current_time_msg_never_splits_tool_use_result_pair() {
+    let mut manifest = test_manifest();
+    manifest.metadata.insert(
+        "current_time_msg".to_string(),
+        serde_json::json!("[Current date/time: Tuesday, September 1, 2026 23:00 GMT+3]"),
+    );
+
+    let agent_id = librefang_types::agent::AgentId::new();
+    let mut session = librefang_memory::session::Session {
+        id: librefang_types::agent::SessionId::new(),
+        agent_id,
+        messages: Vec::new(),
+        context_window_tokens: 0,
+        label: None,
+        model_override: None,
+
+        messages_generation: 0,
+        last_repaired_generation: None,
+        peer_id: None,
+    };
+
+    session.messages.push(Message::user("earlier"));
+    // An orphaned ToolUse (e.g. daemon crashed mid tool-call) with no
+    // ToolResult yet in the session.
+    session.messages.push(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: "tu_1".to_string(),
+            name: "noop".to_string(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    session.messages.push(Message::user("current turn"));
+
+    let PreparedMessages { messages, .. } = prepare_llm_messages(
+        &manifest,
+        &mut session,
+        "current turn",
+        None,
+        DEFAULT_MAX_HISTORY_MESSAGES,
+    );
+
+    // session_repair synthesizes a ToolResult for tu_1 into the next user
+    // message. Find the ToolUse and confirm the very next message carries
+    // its ToolResult — nothing (like current_time_msg) may sit between them.
+    let tool_use_idx = messages
+        .iter()
+        .position(|m| {
+            matches!(&m.content, MessageContent::Blocks(blocks)
+                if blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "tu_1")))
+        })
+        .expect("orphaned ToolUse present in prepared messages");
+
+    let next = messages
+        .get(tool_use_idx + 1)
+        .expect("a message immediately follows the ToolUse");
+    let carries_result = matches!(&next.content, MessageContent::Blocks(blocks)
+        if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tu_1")));
+    assert!(
+        carries_result,
+        "message immediately after ToolUse must carry its ToolResult; got: {:?}",
+        messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect::<Vec<_>>()
+    );
+
+    // current_time_msg must still be present somewhere (appended at the end).
+    assert!(messages
+        .iter()
+        .any(|msg| msg.content.text_content().contains("23:00")));
+}
+
 fn orphan_tool_result_message(tool_use_id: &str) -> Message {
     Message {
         role: Role::User,

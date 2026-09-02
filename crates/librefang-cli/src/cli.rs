@@ -297,6 +297,23 @@ pub(crate) enum Commands {
         long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
     )]
     Gateway(GatewayCommands),
+    /// Run an autonomous goal until an agent completes it [*].
+    #[command(
+        long_about = "Create an autonomous goal and start an agent working on it.\n\nCreates the goal via POST /api/goals, starts the run via POST /api/goals/{id}/start,\nand with --watch polls every 2 seconds until the run leaves the running phase.\nWithout --watch the goal id is printed and the command returns immediately.\n\nWith --watch the exit status reports the outcome: 0 when the run finished, 1 when\nit stopped, was rate-limited, or hit the iteration cap.\n\nExamples:\n  librefang goal \"Fix the login bug\" --agent my-agent\n  librefang goal \"Refactor auth module\" --agent 8f2b1c94-... --watch\n  librefang goal \"Write tests\" --agent my-agent --max-iterations 10 --watch"
+    )]
+    Goal {
+        /// Goal description — serves as both title and prompt.
+        description: String,
+        /// Agent name or UUID that will pursue the goal.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Maximum autonomous iterations before the run stops.
+        #[arg(long)]
+        max_iterations: Option<u64>,
+        /// Poll the run and print progress until it ends.
+        #[arg(long)]
+        watch: bool,
+    },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
         subcommand,

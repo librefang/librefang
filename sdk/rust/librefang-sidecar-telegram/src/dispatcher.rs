@@ -1007,8 +1007,10 @@ mod tests {
             "an injected button reached Telegram: {}",
             seen[0].1
         );
-        // The payload is JSON, so the backslash escape is itself escaped on the wire.
-        assert!(seen[0].1.contains(r#"\\<tg-button"#));
+        // `&lt;`, not `\<`: verified against the live Bot API that Telegram parses
+        // `\<tg-button …>` into a real button and `&lt;tg-button …>` into text.
+        assert!(seen[0].1.contains("&lt;tg-button"), "{}", seen[0].1);
+        assert!(!seen[0].1.contains(r#"\\<tg-button"#), "{}", seen[0].1);
     }
 
     #[test]
