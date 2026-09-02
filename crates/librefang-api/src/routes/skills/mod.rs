@@ -912,7 +912,11 @@ fn validate_static_file_path(
 /// env (`GITHUB_TOKEN`, set by the dashboard GitHub OAuth flow and by
 /// operators), then fall back to the vault. Returns `None` when neither
 /// holds a non-empty token.
-fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
+///
+/// `pub(crate)` so the agent-type promotion handler in
+/// `routes::agent_templates` reuses it rather than duplicating the
+/// env-then-vault order.
+pub(crate) fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
     if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
         if !tok.trim().is_empty() {
             return Some(tok);

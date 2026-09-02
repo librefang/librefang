@@ -239,6 +239,26 @@ impl LibreFangKernel {
             .cloned()
             .collect();
 
+        // Stashed for the same reason, and consumed by the gate below.
+        //
+        // The whole `workflow_*` family, not `workflow_create` alone. The
+        // create tool's own schema tells the model to "call workflow_list
+        // first" to avoid a name clash and says the result "can be run later
+        // with workflow_run / workflow_start", so granting creation without
+        // them hands the model a tool whose documentation points at three it
+        // does not have: it cannot check a name, cannot run what it authored,
+        // and has no remedy for the `Conflict` a duplicate name returns.
+        //
+        // Matched by prefix because `tool_runner::tool_name` is `pub(crate)`
+        // in the runtime crate; if the family were ever renamed there, the
+        // injection test below finds nothing to inject and fails rather than
+        // silently going quiet.
+        let workflow_builtins: Vec<ToolDefinition> = all_builtins
+            .iter()
+            .filter(|t| t.name.starts_with("workflow_"))
+            .cloned()
+            .collect();
+
         let mut all_tools: Vec<ToolDefinition> = if !tools_unrestricted {
             // Agent declares specific tools — only include matching builtins.
             // Evolve tools are injected / stripped by the single post-filter
@@ -285,6 +305,38 @@ impl LibreFangKernel {
                 !Self::is_evolve_tool(&t.name)
                     || declared_tools.iter().any(|d| glob_matches(d, &t.name))
             });
+        }
+
+        // `workflow_*` gate (#7407).
+        //
+        // Injected unconditionally, after the evolve gate so the two injection
+        // blocks stay independent of each other.
+        //
+        // No named profile lists any `workflow_*` tool — see
+        // `ToolProfile::tools` — so a profile-scoped agent never saw one in the
+        // set handed to the model, and a model that named one anyway got
+        // "Unknown tool" back from the dispatcher. `ALWAYS_NATIVE_TOOLS` does
+        // not help: it decides which schemas ship eagerly in lazy-load mode,
+        // not which tools an agent has. The result was that the curated
+        // manifests most likely to want a reusable workflow — `automation`
+        // above all — were the ones that could not author or run one, and no
+        // manifest could express the grant, because the profile list is fixed
+        // in code.
+        //
+        // Unconditional rather than profile-listed because widening five
+        // profiles has the same effect with five places to keep in sync.
+        //
+        // Note this overrides a narrow `capabilities.tools` declaration too,
+        // matching the evolve gate above: an agent declaring
+        // `tools = ["file_read"]` comes out of here able to author a workflow.
+        // That is deliberate — the alternative is that the feature is
+        // unreachable for every agent that declares anything at all — and the
+        // opt-out is that agent's `tool_blocklist`, which still wins in Step 4
+        // below, as does the kernel-wide `tool_policy` in Step 5.
+        for t in workflow_builtins {
+            if !all_tools.iter().any(|existing| existing.name == t.name) {
+                all_tools.push(t);
+            }
         }
 
         // Semantic-memory gate (#7808).
@@ -2227,6 +2279,192 @@ mod tests {
         assert!(
             tools.iter().any(|t| t.name == "canvas_present"),
             "canvas_present must be advertised when [canvas] enabled = true"
+        );
+        kernel.shutdown();
+    }
+
+    // ── workflow_create injection (profile-scoped agents) ──────────────────
+
+    fn kernel_with_agent_manifest(
+        manifest_toml: &str,
+    ) -> (LibreFangKernel, AgentId, tempfile::TempDir) {
+        kernel_with_agent_manifest_and_policy(manifest_toml, Default::default())
+    }
+
+    /// Same, with a kernel-wide `tool_policy` — the operator-level rule set
+    /// applied in Step 5, after every injection gate.
+    fn kernel_with_agent_manifest_and_policy(
+        manifest_toml: &str,
+        tool_policy: librefang_types::tool_policy::ToolPolicy,
+    ) -> (LibreFangKernel, AgentId, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let cfg = KernelConfig {
+            home_dir: home.clone(),
+            data_dir: home.join("data"),
+            tool_policy,
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+        let manifest: librefang_types::agent::AgentManifest =
+            toml::from_str(manifest_toml).expect("manifest should parse");
+        let id = kernel.spawn_agent(manifest).expect("agent should spawn");
+        (kernel, id, dir)
+    }
+
+    /// A profile-scoped agent whose profile never lists `workflow_*` tools
+    /// must still receive `workflow_create` (the injection gate). This test
+    /// fails on a tree without the injection.
+    #[test]
+    fn workflow_create_injected_for_profile_scoped_agent() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            tools.iter().any(|t| t.name == "workflow_create"),
+            "profile-scoped agents must receive workflow_create via injection"
+        );
+        // The family, not the one tool: `workflow_create`'s own schema tells
+        // the model to call `workflow_list` before choosing a name and says
+        // the result runs via `workflow_run` / `workflow_start`. Granting
+        // creation alone would document three tools the agent cannot call.
+        for required in ["workflow_list", "workflow_run", "workflow_start"] {
+            assert!(
+                tools.iter().any(|t| t.name == required),
+                "{required} is named by workflow_create's own schema and must come with it"
+            );
+        }
+        kernel.shutdown();
+    }
+
+    /// A per-agent `tool_blocklist` entry must still win over the injection.
+    #[test]
+    fn tool_blocklist_wins_over_workflow_create_injection() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+tool_blocklist = ["workflow_create"]
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            !tools.iter().any(|t| t.name == "workflow_create"),
+            "tool_blocklist must override the workflow_create injection"
+        );
+        // Blocking one member must not take the family with it: an operator
+        // who bans authoring can still want the agent to run what already
+        // exists.
+        assert!(
+            tools.iter().any(|t| t.name == "workflow_run"),
+            "the blocklist entry must be scoped to the tool it names"
+        );
+        kernel.shutdown();
+    }
+
+    /// A non-empty `tool_allowlist` that does not name `workflow_create`
+    /// must still win over the injection.
+    #[test]
+    fn tool_allowlist_wins_over_workflow_create_injection() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+tool_allowlist = ["web_fetch"]
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            !tools.iter().any(|t| t.name.starts_with("workflow_")),
+            "a non-empty tool_allowlist naming no workflow tool must override the whole injected family"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "web_fetch"),
+            "allowlisted tools must survive"
+        );
+        kernel.shutdown();
+    }
+
+    /// A narrow `capabilities.tools` declaration is overridden too, and that
+    /// is the branch where it matters most.
+    ///
+    /// Step 1's declared-tools arm is documented as "the primary mechanism:
+    /// only send declared tools to the LLM", so an operator shipping
+    /// `tools = ["file_read"]` is entitled to be told that the workflow family
+    /// arrives anyway. If that is ever considered wrong, this test is where it
+    /// gets reversed — not a silent behaviour change.
+    #[test]
+    fn injection_overrides_a_narrow_declared_tool_list() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest(
+            r#"
+name = "sandboxed"
+description = "test"
+module = "builtin:chat"
+
+[capabilities]
+tools = ["file_read"]
+"#,
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            tools.iter().any(|t| t.name == "workflow_create"),
+            "the workflow family is injected past a narrow declared list"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "file_read"),
+            "the declared tool itself must survive"
+        );
+        kernel.shutdown();
+    }
+
+    /// The kernel-wide `tool_policy` deny list still wins over the injection.
+    ///
+    /// Step 4's per-agent lists have their own two tests; Step 5 is the
+    /// operator's org-wide switch and had none. Without cover here, a future
+    /// reordering that moved the injection below Step 5 would take away the
+    /// only opt-out that does not require editing every manifest, and nothing
+    /// would go red.
+    #[test]
+    fn global_tool_policy_deny_wins_over_workflow_injection() {
+        let (kernel, id, _dir) = kernel_with_agent_manifest_and_policy(
+            r#"
+name = "researcher"
+description = "test"
+module = "builtin:chat"
+profile = "research"
+"#,
+            librefang_types::tool_policy::ToolPolicy {
+                global_rules: vec![librefang_types::tool_policy::ToolPolicyRule {
+                    pattern: "workflow_*".to_string(),
+                    effect: librefang_types::tool_policy::PolicyEffect::Deny,
+                }],
+                ..Default::default()
+            },
+        );
+        let tools = kernel.available_tools(id);
+        assert!(
+            !tools.iter().any(|t| t.name.starts_with("workflow_")),
+            "a kernel-wide deny must outrank the injection, got: {:?}",
+            tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .filter(|n| n.starts_with("workflow_"))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "web_fetch"),
+            "the deny must be scoped to the pattern, not empty the set"
         );
         kernel.shutdown();
     }

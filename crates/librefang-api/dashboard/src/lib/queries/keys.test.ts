@@ -218,6 +218,63 @@ describe("query key factories", () => {
     });
   });
 
+  describe("usageKeys", () => {
+    // #8062 — the reporting window is a filter, so it has to live in the key.
+    // If it did not, switching from "last month" to "this month" would serve
+    // the previous month's numbers from cache under the new caption.
+    const RANGE = { start_date: "2026-03-01", end_date: "2026-03-31" };
+
+    it("carries the date range in every ranged factory", () => {
+      expect(usageKeys.summary(RANGE)).toEqual([
+        "usage",
+        "summary",
+        RANGE,
+      ]);
+      expect(usageKeys.byAgent(RANGE)).toEqual(["usage", "byAgent", RANGE]);
+      expect(usageKeys.byModel(RANGE)).toEqual(["usage", "byModel", RANGE]);
+      expect(usageKeys.modelPerformance(RANGE)).toEqual([
+        "usage",
+        "modelPerformance",
+        RANGE,
+      ]);
+    });
+
+    it("defaults to the unbounded window", () => {
+      expect(usageKeys.summary()).toEqual(["usage", "summary", {}]);
+      expect(usageKeys.daily()).toEqual(["usage", "daily", {}, null]);
+    });
+
+    it("gives two different ranges two different keys", () => {
+      const march = usageKeys.summary(RANGE);
+      const april = usageKeys.summary({
+        start_date: "2026-04-01",
+        end_date: "2026-04-30",
+      });
+      expect(march).not.toEqual(april);
+    });
+
+    it("keys the daily breakdown on `days` as well as the range", () => {
+      // `days` only applies to the unbounded window, so the unbounded 366-day
+      // chart must not share a cache entry with an unbounded default one.
+      expect(usageKeys.daily({}, 366)).toEqual(["usage", "daily", {}, 366]);
+      expect(usageKeys.daily({}, 366)).not.toEqual(usageKeys.daily({}));
+    });
+
+    it("anchors every factory under usageKeys.all so domain invalidation works", () => {
+      const prefix = usageKeys.all;
+      for (const key of [
+        usageKeys.summary(RANGE),
+        usageKeys.byAgent(RANGE),
+        usageKeys.byModel(RANGE),
+        usageKeys.modelPerformance(RANGE),
+        usageKeys.daily(RANGE),
+        usageKeys.daily({}, 366),
+      ]) {
+        expect(key.slice(0, prefix.length)).toEqual(prefix);
+      }
+    });
+  });
+
   describe("memoryKeys", () => {
     it("list with filters", () => {
       expect(memoryKeys.list()).toEqual(["memory", "list", {}]);

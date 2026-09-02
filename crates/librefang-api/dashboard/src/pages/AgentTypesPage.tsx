@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
-import { Edit2, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
@@ -9,6 +9,7 @@ import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
+  usePromoteAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
   useUpdateAgentType,
@@ -602,6 +603,7 @@ function AgentTypeRow({
   onEdit,
   onDelete,
   onPromote,
+  onPreviewPromote,
   onHistory,
 }: {
   type: AgentTemplate;
@@ -609,6 +611,7 @@ function AgentTypeRow({
   onEdit: () => void;
   onDelete: () => void;
   onPromote: () => void;
+  onPreviewPromote: () => void;
   onHistory: () => void;
 }) {
   const { t } = useTranslation();
@@ -644,7 +647,7 @@ function AgentTypeRow({
 
         <button
           type="button"
-          onClick={onPromote}
+          onClick={onPreviewPromote}
           className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
           aria-label={t("agentTypes.promote")}
           title={t("agentTypes.promote")}
@@ -657,6 +660,15 @@ function AgentTypeRow({
             that cannot succeed — point at the surface that can instead (#7731). */}
         {type.editable ? (
           <>
+            <button
+              type="button"
+              onClick={onPromote}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+              aria-label={t("agentTypes.promote")}
+              title={t("agentTypes.promote")}
+            >
+              <Share2 className="h-3.5 w-3.5" />
+            </button>
             <button
               type="button"
               onClick={onHistory}
@@ -705,11 +717,14 @@ export function AgentTypesPage() {
   const addToast = useUIStore((s) => s.addToast);
   const types = useAgentTypes();
   const deleteMutation = useDeleteAgentType();
+  const promoteMutation = usePromoteAgentType();
 
   const [editing, setEditing] = useState<{ name: string | null } | null>(null);
   const [quickRun, setQuickRun] = useState<AgentTemplate | null>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
+  const [pendingPromote, setPendingPromote] = useState<string | null>(null);
+  const [promotedPrUrl, setPromotedPrUrl] = useState<string | null>(null);
   const [historyName, setHistoryName] = useState<string | null>(null);
 
   async function confirmDelete() {
@@ -721,6 +736,19 @@ export function AgentTypesPage() {
       addToast(toastErr(err, t("agentTypes.delete_failed")), "error");
     } finally {
       setPendingDelete(null);
+    }
+  }
+
+  async function confirmPromote() {
+    if (!pendingPromote) return;
+    try {
+      const result = await promoteMutation.mutateAsync(pendingPromote);
+      setPromotedPrUrl(result.pr_url);
+      addToast(t("agentTypes.promoted"), "success");
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.promote_failed")), "error");
+    } finally {
+      setPendingPromote(null);
     }
   }
 
@@ -762,7 +790,8 @@ export function AgentTypesPage() {
               onQuickRun={() => setQuickRun(type)}
               onEdit={() => setEditing({ name: type.name })}
               onDelete={() => setPendingDelete(type.name)}
-              onPromote={() => setPromoting(type.name)}
+              onPromote={() => setPendingPromote(type.name)}
+              onPreviewPromote={() => setPromoting(type.name)}
               onHistory={() => setHistoryName(type.name)}
             />
           ))}
@@ -791,6 +820,40 @@ export function AgentTypesPage() {
         message={t("agentTypes.confirm_delete", { name: pendingDelete ?? "" })}
         tone="destructive"
       />
+
+      <ConfirmDialog
+        isOpen={pendingPromote !== null}
+        onClose={() => setPendingPromote(null)}
+        onConfirm={() => void confirmPromote()}
+        title={t("agentTypes.promote")}
+        message={t("agentTypes.confirm_promote", { name: pendingPromote ?? "" })}
+      />
+
+      {/* Success dialog after promotion — shows the PR link */}
+      <Modal
+        isOpen={promotedPrUrl !== null}
+        onClose={() => setPromotedPrUrl(null)}
+        title={t("agentTypes.promoted")}
+        size="sm"
+      >
+        <div className="space-y-3">
+          <p className="text-[13px] text-text-main">{t("agentTypes.promote_success")}</p>
+          <a
+            href={promotedPrUrl ?? "#"}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-brand/30 bg-brand/10 px-3 py-1.5 text-[13px] font-medium text-brand hover:bg-brand/20"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            {t("agentTypes.view_pr")}
+          </a>
+          <div className="flex justify-end pt-1">
+            <Button variant="ghost" onClick={() => setPromotedPrUrl(null)}>
+              {t("common.close")}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

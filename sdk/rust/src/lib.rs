@@ -5048,6 +5048,18 @@ impl SystemResource {
         .await
     }
 
+    pub async fn promote_agent_type(&self, name: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "templates", name, "promote"],
+            None,
+            &[],
+        )
+        .await
+    }
+
     pub async fn get_agent_template_toml(&self, name: &str) -> Result<Value> {
         do_req(
             &self.client,

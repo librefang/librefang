@@ -47,6 +47,28 @@ pub struct ProposedSkillPr {
     pub branch: String,
 }
 
+/// Generic inputs for [`propose_files_to_registry`].
+///
+/// Unlike [`ProposeRequest`], this takes pre-built files and PR metadata
+/// rather than a skill-specific snapshot, so the same fork/push/PR machinery
+/// can be reused for agent types and any future registry content.
+pub struct GenericProposeRequest<'a> {
+    /// Identifier used for the branch name and the directory under `prefix/`.
+    pub name: &'a str,
+    /// Upstream registry repo in `owner/name` form.
+    pub registry_repo: &'a str,
+    /// GitHub token with `repo` scope.
+    pub token: &'a str,
+    /// Top-level directory under the registry root (e.g. `"skills"`, `"agent-types"`).
+    pub prefix: &'a str,
+    /// Files to push — `(relative_path, contents)`.
+    pub files: Vec<(String, Vec<u8>)>,
+    /// PR title.
+    pub pr_title: String,
+    /// PR body (markdown).
+    pub pr_body: String,
+}
+
 /// Inputs for [`propose_skill_to_registry`].
 pub struct ProposeRequest<'a> {
     /// The installed skill snapshot to contribute.
@@ -131,6 +153,69 @@ pub async fn propose_skill_to_registry(
     let head = format!("{login}:{branch}");
     let pr_url = client
         .open_pull_request(req.registry_repo, &default_branch, &head, &title, &body)
+        .await?;
+
+    Ok(ProposedSkillPr {
+        pr_url,
+        repo: req.registry_repo.to_string(),
+        branch,
+    })
+}
+
+/// Fork the registry, push arbitrary files to a branch, and open a PR.
+///
+/// This is the generic counterpart of [`propose_skill_to_registry`]: it
+/// takes pre-built files and PR metadata rather than a skill-specific
+/// snapshot, so the same GitHub machinery can be reused for agent types
+/// (and any future registry content).
+pub async fn propose_files_to_registry(
+    req: GenericProposeRequest<'_>,
+) -> Result<ProposedSkillPr, SkillError> {
+    validate_registry_skill_name(req.name)?;
+    validate_repo_slug(req.registry_repo)?;
+    if req.token.trim().is_empty() {
+        return Err(SkillError::InvalidManifest(
+            "A GitHub token is required to propose content to the registry".to_string(),
+        ));
+    }
+    if req.files.is_empty() {
+        return Err(SkillError::InvalidManifest(format!(
+            "'{}' has no files to propose",
+            req.name
+        )));
+    }
+
+    let client = RegistryGithubClient::new(req.token.to_string());
+
+    let login = client.authenticated_login().await?;
+    let fork_repo = format!("{login}/{}", repo_name(req.registry_repo));
+    client.ensure_fork(req.registry_repo, &fork_repo).await?;
+
+    let (default_branch, base_sha) = client.fork_default_branch_head(&fork_repo).await?;
+    let branch = format!(
+        "{}/{}-{}",
+        sanitize_branch_component(req.prefix),
+        sanitize_branch_component(req.name),
+        chrono::Utc::now().format("%Y%m%d%H%M%S")
+    );
+    client.create_branch(&fork_repo, &branch, &base_sha).await?;
+
+    for (rel_path, contents) in &req.files {
+        let dest = format!("{}/{}/{}", req.prefix, req.name, rel_path);
+        client
+            .put_file(&fork_repo, &branch, &dest, contents, &format!("Add {dest}"))
+            .await?;
+    }
+
+    let head = format!("{login}:{branch}");
+    let pr_url = client
+        .open_pull_request(
+            req.registry_repo,
+            &default_branch,
+            &head,
+            &req.pr_title,
+            &req.pr_body,
+        )
         .await?;
 
     Ok(ProposedSkillPr {

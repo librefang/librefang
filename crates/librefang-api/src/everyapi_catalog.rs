@@ -449,6 +449,11 @@ pub(crate) fn build_catalog_entries(
                 pricing_known,
                 supports_tools: prior.is_some_and(|p| p.supports_tools),
                 supports_vision: prior.is_some_and(|p| p.supports_vision),
+                // The gateway's own listing carries no capability flags, so this entry knows only
+                // what the previous one knew — including whether *that* was a declaration or a
+                // guess. Carrying the value without its provenance would launder a name heuristic
+                // into a fact on every refresh (refs #7957).
+                vision_known: prior.is_some_and(|p| p.vision_known),
                 // Every OpenAI-shaped endpoint on this gateway streams; the
                 // `openai-response` family requires it.
                 supports_streaming: true,

@@ -1,0 +1,4 @@
+`GET /api/plugins/doctor` probes the twelve supported plugin runtimes concurrently instead of one after another, and caches the resulting availability table for 60 seconds.
+Each probe spawns `{launcher} --version` with a 5-second timeout of its own, and Python alone tries three candidates, so probing in sequence had a worst case near a minute — which made this the slowest route in the API and let it trip `route_smoke`'s flat 10-second per-request budget on a loaded CI runner (#8142).
+Fanning the probes out bounds the table by the slowest single probe rather than their sum; the cache means an operator refreshing the dashboard's plugin page no longer re-probes every interpreter on every request.
+The installed-plugin list is deliberately not cached alongside it, so a plugin installed a moment ago still appears immediately. (#8143) (@houko)

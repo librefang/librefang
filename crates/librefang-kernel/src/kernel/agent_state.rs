@@ -651,7 +651,9 @@ impl LibreFangKernel {
     /// Since agent types are shared artefacts that declare what the agent *wants*, and `spawn` performs no equivalent check, a declaration this instance has not installed is a legitimate pending state — the same one `pending_skill_and_mcp_declarations` surfaces on the read side.
     /// Accepting it persists the allowlist entry and nothing else: it does not install, connect, or touch `config.toml`.
     ///
-    /// Only a name absent from both sources is rejected, as `InvalidInput` rather than `Internal`, so a typo stops being reported as a server fault.
+    /// A name the agent already stores is also accepted (#8095): once a declaration is persisted it is a fact about this agent rather than a claim being made now, and refusing it only means an operator who uninstalls a server can no longer edit — or even repair — any agent that still names it.
+    ///
+    /// Only a name absent from all three is rejected, as `InvalidInput` rather than `Internal`, so a typo stops being reported as a server fault.
     /// Dropping the tool walk also removes the old lock guard: the whole check used to sit inside `if let Ok(mcp_tools) = self.mcp.mcp_tools.lock()`, so a poisoned lock skipped validation entirely instead of failing.
     pub fn set_agent_mcp_servers(
         &self,
@@ -689,6 +691,36 @@ impl LibreFangKernel {
                 .iter()
                 .map(|e| librefang_runtime::mcp::normalize_name(&e.id))
                 .collect();
+            // Names this agent is *already* storing are grandfathered (#8095).
+            //
+            // Widening the accept-set to configured-or-catalog fixed the agent
+            // whose agent type shipped a declaration this instance never
+            // installed. It did not fix the agent whose declaration was valid
+            // once and is not any more: uninstall an MCP server and every agent
+            // still naming it becomes uneditable, because the editor round-trips
+            // the current allowlist and the stale name comes back in on every
+            // save — including the save that would have removed it.
+            //
+            // A name that is already persisted is a fact about this agent, not a
+            // claim being made now, so rejecting it protects nothing that is not
+            // already true on disk. A typo is by definition a name that was not
+            // there a moment ago, so it is still refused, which is the case this
+            // check exists for. The read side already reports a name in this
+            // state as pending rather than broken
+            // (`unconnected_mcp_declarations`).
+            let already_declared: std::collections::HashSet<String> = self
+                .agents
+                .registry
+                .get(agent_id)
+                .map(|entry| {
+                    entry
+                        .manifest
+                        .mcp_servers
+                        .iter()
+                        .map(|s| librefang_runtime::mcp::normalize_name(s))
+                        .collect()
+                })
+                .unwrap_or_default();
             for name in &servers {
                 // `["*"]` is a documented value meaning "all connected servers" (`AgentManifest::mcp_servers`, and `available_tools` step 3 honours it), but it is not the name of anything, so the old accept-set never contained it and saving a wildcard allowlist failed with `Unknown MCP server: *`.
                 if name == "*" {
@@ -698,6 +730,7 @@ impl LibreFangKernel {
                 if configured.contains(&normalized)
                     || catalog_ids.contains(&normalized)
                     || catalog.get(name).is_some()
+                    || already_declared.contains(&normalized)
                 {
                     continue;
                 }

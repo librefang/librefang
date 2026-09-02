@@ -337,14 +337,31 @@ export const memoryKeys = {
   agentKv: (agentId: string) => [...memoryKeys.agentKvs(), agentId] as const,
 };
 
+/**
+ * Reporting window carried in every usage key (#8062).
+ *
+ * The selected date range is a query *filter*, so it belongs in the key rather than in component state: changing the range has to produce a different cache entry and a refetch, and two ranges must not overwrite each other's data.
+ * `{}` is the unbounded window, which is what the `all` preset resolves to.
+ */
+export type UsageRangeFilters = {
+  start_date?: string;
+  end_date?: string;
+};
+
 export const usageKeys = {
   all: ["usage"] as const,
-  summary: () => [...usageKeys.all, "summary"] as const,
-  byAgent: () => [...usageKeys.all, "byAgent"] as const,
-  byModel: () => [...usageKeys.all, "byModel"] as const,
-  modelPerformance: () =>
-    [...usageKeys.all, "modelPerformance"] as const,
-  daily: () => [...usageKeys.all, "daily"] as const,
+  summary: (filters: UsageRangeFilters = {}) =>
+    [...usageKeys.all, "summary", filters] as const,
+  byAgent: (filters: UsageRangeFilters = {}) =>
+    [...usageKeys.all, "byAgent", filters] as const,
+  byModel: (filters: UsageRangeFilters = {}) =>
+    [...usageKeys.all, "byModel", filters] as const,
+  modelPerformance: (filters: UsageRangeFilters = {}) =>
+    [...usageKeys.all, "modelPerformance", filters] as const,
+  // The daily breakdown also carries `days`, which the endpoint accepts only for the unbounded window (a range plus `days` is a 400).
+  // Keying on it keeps the unbounded 366-day chart distinct from a bounded one.
+  daily: (filters: UsageRangeFilters = {}, days?: number) =>
+    [...usageKeys.all, "daily", filters, days ?? null] as const,
 };
 
 export const budgetKeys = {

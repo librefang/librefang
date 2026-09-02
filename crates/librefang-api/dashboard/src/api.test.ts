@@ -3,7 +3,12 @@ import {
   buildAuthenticatedWebSocket,
   getAgentTools,
   getMetricsText,
+  getUsageByModelPerformance,
+  getUsageDaily,
+  getUsageSummary,
   listTools,
+  listUsageByAgent,
+  listUsageByModel,
   patchAgentConfig,
   patchHandAgentRuntimeConfig,
   resetAgentSession,
@@ -341,5 +346,84 @@ describe("dashboard auth helpers", () => {
 
     await expect(listTools()).resolves.toEqual([{ name: "bash" }]);
     await expect(listTools()).resolves.toEqual([{ name: "webfetch" }]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Usage date-range parameters (#8062)
+  // -------------------------------------------------------------------------
+  //
+  // The date range is the point of the Analytics rework, so these assert the
+  // exact query string each usage fetcher builds. A range that is computed in
+  // the page, threaded through a query key, and then dropped on the way to
+  // `fetch` would leave the picker looking like it worked.
+
+  function jsonOnce(body: unknown) {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }
+
+  const RANGE = { start_date: "2026-03-01", end_date: "2026-03-31" };
+
+  it("sends start_date and end_date to every ranged usage endpoint", async () => {
+    jsonOnce({});
+    await getUsageSummary(RANGE);
+    jsonOnce({ items: [] });
+    await listUsageByAgent(RANGE);
+    jsonOnce({ models: [] });
+    await listUsageByModel(RANGE);
+    jsonOnce({ models: [] });
+    await getUsageByModelPerformance(RANGE);
+
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/usage/summary?start_date=2026-03-01&end_date=2026-03-31",
+      "/api/usage?start_date=2026-03-01&end_date=2026-03-31",
+      "/api/usage/by-model?start_date=2026-03-01&end_date=2026-03-31",
+      "/api/usage/by-model/performance?start_date=2026-03-01&end_date=2026-03-31",
+    ]);
+  });
+
+  it("omits the query string entirely for the unbounded window", async () => {
+    jsonOnce({});
+    await getUsageSummary();
+    jsonOnce({ models: [] });
+    await listUsageByModel({});
+
+    // Byte-identical to the pre-#8062 request, so the unbounded case cannot
+    // regress into `?start_date=&end_date=`.
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/usage/summary",
+      "/api/usage/by-model",
+    ]);
+  });
+
+  it("sends a one-sided range when only one bound is set", async () => {
+    jsonOnce({});
+    await getUsageSummary({ start_date: "2026-03-01" });
+    jsonOnce({});
+    await getUsageSummary({ end_date: "2026-03-31" });
+
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/usage/summary?start_date=2026-03-01",
+      "/api/usage/summary?end_date=2026-03-31",
+    ]);
+  });
+
+  it("drops `days` when the daily window is bounded, and sends it when it is not", async () => {
+    jsonOnce({ days: [] });
+    await getUsageDaily(RANGE, 366);
+    jsonOnce({ days: [] });
+    await getUsageDaily({}, 366);
+
+    // `days` alongside a range is a 400 from the endpoint ("`days` cannot be
+    // combined with start_date / end_date"), so the bounded call must not carry
+    // it even when a caller passes one.
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "/api/usage/daily?start_date=2026-03-01&end_date=2026-03-31",
+      "/api/usage/daily?days=366",
+    ]);
   });
 });

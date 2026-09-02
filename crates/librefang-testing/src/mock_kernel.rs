@@ -59,6 +59,9 @@ pub fn test_catalog_baseline() -> CatalogSeed {
         image_output_cost_per_m: None,
         supports_tools: true,
         supports_vision: true,
+        // A hand-written fixture is a declaration, so tests that gate on vision see a decided
+        // answer rather than `VisionSupport::Unknown` (refs #7957).
+        vision_known: true,
         supports_streaming: true,
         supports_thinking: false,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),

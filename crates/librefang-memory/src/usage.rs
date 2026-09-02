@@ -373,6 +373,20 @@ pub struct ModelPerformance {
     pub min_latency_ms: u64,
     /// Maximum latency in milliseconds.
     pub max_latency_ms: u64,
+    /// Nearest-rank 95th-percentile latency in milliseconds (#8062).
+    ///
+    /// This is the number a latency SLO is written against.
+    /// `avg_latency_ms` hides the tail an operator gets paged about, and `max_latency_ms` is one outlier, so neither answers "is this model fast enough on 95% of calls".
+    ///
+    /// The definition matches `SessionStore::agent_stats_24h` so the two P95 numbers the dashboard shows mean the same thing: the latency at 1-based rank `ceil(0.95 * n)` of the window's latencies sorted ascending, over the events that **have** a recorded latency (`latency_ms > 0`).
+    ///
+    /// That population matters, and it is narrower than the one behind `avg_latency_ms` / `min_latency_ms` / `max_latency_ms` on this same row.
+    /// `latency_ms` was added to `usage_events` by migration v14 as `INTEGER NOT NULL DEFAULT 0`, so every row written before that upgrade reports `0` — not "instant", but "never measured".
+    /// Ranking those alongside real samples inflates `n` while parking the zeros at the bottom of the sort, which drags the reported percentile down towards the median: ten samples of 100…1000 ms behind ninety legacy rows rank out at 500 ms rather than 1000 ms.
+    /// The three long-standing aggregates keep their whole-window population because their shape is already shipped and read by external dashboards; the percentile is new, so it starts out with the population `agent_stats_24h` has always used.
+    ///
+    /// `0` when the model has no events in the window, and also when it has events but none carries a measured latency.
+    pub p95_latency_ms: u64,
     /// Cost per call in USD.
     pub cost_per_call: f64,
     /// Average latency per call in milliseconds.
@@ -1390,18 +1404,43 @@ impl UsageStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
 
         let (range_sql, range_binds) = range.sql_and_binds();
+        // The range predicate is applied once, inside `filtered`, so the bind list is the same length as it was before P95 was added — the CTEs below reference `filtered` rather than re-filtering `usage_events`.
+        //
+        // `rn >= (n * 95 + 99) / 100` is integer-division `ceil(0.95 * n)` (SQLite `/` truncates), and because `ranked` is ordered ascending the `MIN(latency_ms)` over the qualifying tail is exactly the value at that rank.
+        // n = 1 gives rank 1, n = 10 gives rank 10, n = 100 gives rank 95 — the same nearest-rank definition `agent_stats_24h` uses.
+        //
+        // `ranked` also repeats that function's `latency_ms > 0` guard, and it is load-bearing rather than tidiness: migration v14 backfilled the column with its `DEFAULT 0`, so on any upgraded database the pre-v14 rows are unmeasured, not instant, and ranking them would pull the percentile towards the median of the rows that were measured.
+        // Excluding them is what makes the `LEFT JOIN` below load-bearing too — a model whose every event predates v14 drops out of `p95` entirely and lands on the `COALESCE` default of 0.
         let sql = format!(
-            "SELECT model,
-                    COALESCE(SUM(cost_usd), 0.0),
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0),
+            "WITH filtered AS (
+                 SELECT model, cost_usd, input_tokens, output_tokens, latency_ms
+                 FROM usage_events WHERE 1=1{range_sql}
+             ),
+             ranked AS (
+                 SELECT model,
+                        latency_ms,
+                        ROW_NUMBER() OVER (PARTITION BY model ORDER BY latency_ms) AS rn,
+                        COUNT(*) OVER (PARTITION BY model) AS n
+                 FROM filtered WHERE latency_ms > 0
+             ),
+             p95 AS (
+                 SELECT model, MIN(latency_ms) AS p95_latency_ms
+                 FROM ranked
+                 WHERE rn >= (n * 95 + 99) / 100
+                 GROUP BY model
+             )
+             SELECT f.model,
+                    COALESCE(SUM(f.cost_usd), 0.0),
+                    COALESCE(SUM(f.input_tokens), 0),
+                    COALESCE(SUM(f.output_tokens), 0),
                     COUNT(*),
-                    COALESCE(AVG(latency_ms), 0),
-                    COALESCE(MIN(latency_ms), 0),
-                    COALESCE(MAX(latency_ms), 0)
-             FROM usage_events WHERE 1=1{range_sql}
-             GROUP BY model
-             ORDER BY SUM(cost_usd) DESC"
+                    COALESCE(AVG(f.latency_ms), 0),
+                    COALESCE(MIN(f.latency_ms), 0),
+                    COALESCE(MAX(f.latency_ms), 0),
+                    COALESCE(MAX(p.p95_latency_ms), 0)
+             FROM filtered f LEFT JOIN p95 p ON p.model = f.model
+             GROUP BY f.model
+             ORDER BY SUM(f.cost_usd) DESC"
         );
         let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
 
@@ -1420,6 +1459,7 @@ impl UsageStore {
                     avg_latency_ms,
                     min_latency_ms: row.get::<_, i64>(6)? as u64,
                     max_latency_ms: row.get::<_, i64>(7)? as u64,
+                    p95_latency_ms: row.get::<_, i64>(8)?.max(0) as u64,
                     cost_per_call: if call_count > 0 {
                         total_cost_usd / call_count as f64
                     } else {

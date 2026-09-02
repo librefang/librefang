@@ -73,6 +73,27 @@ Dashboard 在「添加提供商」向导和提供商的配置抽屉里提供同�
 对**注册表下发**的提供商则不然：启动时的注册表同步会重写任何内容与上游副本不一致的文件，所以对 `providers/openai.toml` 之类文件的 `discover_models` 修改会立刻生效，但在下次守护进程启动时被还原。
 对内置本地 id 而言这只是纸面上的限制——它们的发现由 id 而非开关决定；如果你需要让某个注册表下发的远程提供商被长期轮询，请用自己的 id 单独注册一个提供商，而不是修改下发的文件。
 
+### 发现到的能力，以及「不支持视觉」到底是什么意思
+
+一个被发现的模型的 `supports_vision` 决定了图片附件能否真正送到模型面前：被记录为纯文本的模型，其请求在构建前会把每个图片块替换成占位文本，因为纯文本的 OpenAI 兼容端点会以 HTTP 400 拒绝 `image_url` 内容块。
+
+只要网关自己声明了这个标志，LibreFang 就以网关为准。
+LiteLLM 及类似代理会在 `/v1/models` 上按模型暴露 `supports_vision` / `supports_function_calling`（位于顶层或 `model_info` 之下），OpenRouter 形状的列表则暴露 `architecture.input_modalities`；显式标志在两个方向上都被采信，因为网关才是它自己那些模型的权威。
+
+没有任何来源声明时，这个标志是**从模型名字推断出来的**——而名字是你自己起的（`team-default`、`fast`、一个内部工单号），本身不携带任何能力信息。
+因此推断得到的值被记为猜测而不是事实，而猜测绝不会让你丢掉一张图：请求会带着原图发出，如果该模型确实是纯文本的，提供商会返回一个你能据此处理的错误。
+`GET /api/models` 会按模型告诉你落在哪一种情况，字段为 `vision_support`：
+
+| `vision_support` | 来源 | 附加的图片会怎样 |
+|---|---|---|
+| `supported` | 网关、注册表，或你自己的覆盖项说支持 | 照原样发送 |
+| `unsupported` | 上述来源之一说不支持 | 替换为写明模型名与文件路径的占位文本，并记录一条 `WARN` |
+| `unknown` | 无人声明；`supports_vision` 里显示的值是从名字推断的 | 照原样发送 |
+
+如果你的某个模型落在 `unknown` 而你知道答案，就把它声明出来——`PUT /api/models/overrides/{provider}:{model}`，请求体 `{"supports_vision": true}`，或者用 Dashboard 模型抽屉里的能力开关。
+覆盖项属于声明，优先级高于其他一切来源。
+通过 `POST /api/models/custom` 手工添加的模型同理：带上 `supports_vision` 就视为已声明，省略则该模型是 `unknown`，而不是被当作不支持视觉。
+
 ### 无需密钥的提供商同样可以配置 API Key
 
 `key_required = false` 表示密钥**不是必填**，而不是拒绝接受密钥。

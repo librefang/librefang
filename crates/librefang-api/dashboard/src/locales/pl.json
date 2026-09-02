@@ -1364,6 +1364,38 @@
       "unconfigured": "ustaw limit",
       "healthy": "w normie",
       "edit": "Edytuj limity"
+    },
+    "agent": "Agent",
+    "agent_detail_table": "Szczegóły per agent",
+    "agent_detail_count": "{{n}} agentów",
+    "total_tool_calls": "Wywołania narzędzi",
+    "cost_per_call_kpi": "Koszt / wywołanie",
+    "input_tokens": "Wejście",
+    "output_tokens": "Wyjście",
+    "p95_latency": "P95",
+    "worst_p95_latency": "Najgorsze opóźnienie P95",
+    "hand_tag": "hand",
+    "range": {
+      "today": "Dziś",
+      "yesterday": "Wczoraj",
+      "7d": "7 dni",
+      "14d": "14 dni",
+      "30d": "30 dni",
+      "this_month": "Ten miesiąc",
+      "last_month": "Poprzedni miesiąc",
+      "all": "Wszystko",
+      "from": "Od",
+      "to": "Do",
+      "inverted": "Data końcowa jest wcześniejsza niż początkowa — do poprawienia zakresu pokazujemy okno bez filtra.",
+      "data_since": "Zapisane dane użycia zaczynają się {{date}}",
+      "no_data_stored": "Brak zapisanych zdarzeń użycia",
+      "retention": "retencja {{days}} dni — starsze zdarzenia są usuwane",
+      "retention_disabled": "retencja wyłączona — nic nie jest usuwane",
+      "summary_days": "Dni z danymi",
+      "summary_calls": "Wywołania w zakresie",
+      "summary_tokens": "Tokeny w zakresie",
+      "summary_cost": "Koszt w zakresie",
+      "summary_span": "{{withData}} z {{span}} dni wybranego okna zawiera dane użycia."
     }
   },
   "memory": {
@@ -4262,6 +4294,12 @@
     "title": "Typy agentów",
     "tools": "Narzędzia",
     "tools_hint": "Wybierane z narzędzi udostępnianych przez tego demona; nieznane identyfikatory można wpisać ręcznie.",
-    "tools_search": "Szukaj narzędzi…"
+    "tools_search": "Szukaj narzędzi…",
+    "promote": "Opublikuj w rejestrze",
+    "confirm_promote": "Opublikować typ agenta '{{name}}' w publicznym rejestrze? Manifest zostanie oczyszczony i przesłany jako pull request na GitHubie.",
+    "promoted": "PR w rejestrze utworzony",
+    "promote_failed": "Nie udało się opublikować typu agenta",
+    "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
+    "view_pr": "Zobacz pull request"
   }
 }

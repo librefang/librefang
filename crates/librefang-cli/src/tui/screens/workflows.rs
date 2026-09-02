@@ -38,6 +38,34 @@ pub enum WorkflowSubScreen {
     RunResult,
 }
 
+/// One declared parameter, with whatever the operator has typed so far.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowParamField {
+    pub name: String,
+    pub param_type: String,
+    pub required: bool,
+    pub description: String,
+    pub value: String,
+}
+
+/// What the run-input form knows about the workflow's declared parameters.
+///
+/// Every fetch outcome is one of these — success, "declares none" and
+/// "could not load" are three different states, because each one needs a
+/// different next step from the operator and a silent fallback to the
+/// bare-string box hides all three behind the same screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkflowParamsFetch {
+    /// The workflow declared these parameters — one editable row per param.
+    Loaded(Vec<WorkflowParamField>),
+    /// The workflow answered and declares no parameters — bare-string input.
+    None,
+    /// The schema could not be consulted (in-process mode, the daemon was
+    /// unreachable, or the answer was not a success). Bare-string input,
+    /// with the status line saying so.
+    Failed,
+}
+
 pub struct WorkflowState {
     pub sub: WorkflowSubScreen,
     pub workflows: Vec<WorkflowInfo>,
@@ -51,7 +79,9 @@ pub struct WorkflowState {
     pub create_name: String,
     pub create_desc: String,
     pub create_steps: String,
-    // Run
+    // Run — declared parameters fetched from the workflow's `input_schema`
+    pub run_params: Vec<WorkflowParamField>,
+    pub param_cursor: usize,
     pub run_input: String,
     pub run_result: Option<String>,
     pub loading: bool,
@@ -63,6 +93,7 @@ pub enum WorkflowAction {
     Continue,
     Refresh,
     LoadRuns(String),
+    FetchWorkflowParams(String),
     CreateWorkflow {
         name: String,
         description: String,
@@ -87,6 +118,8 @@ impl WorkflowState {
             create_name: String::new(),
             create_desc: String::new(),
             create_steps: String::new(),
+            run_params: Vec::new(),
+            param_cursor: 0,
             run_input: String::new(),
             run_result: None,
             loading: false,
@@ -147,9 +180,13 @@ impl WorkflowState {
                 if let Some(idx) = self.list_state.selected() {
                     if idx < self.workflows.len() {
                         self.selected_workflow = Some(idx);
+                        self.run_params.clear();
+                        self.param_cursor = 0;
                         self.run_input.clear();
                         self.run_result = None;
+                        self.status_msg.clear();
                         self.sub = WorkflowSubScreen::RunInput;
+                        return WorkflowAction::FetchWorkflowParams(self.workflows[idx].id.clone());
                     }
                 }
             }
@@ -239,15 +276,37 @@ impl WorkflowState {
     }
 
     fn handle_run_input(&mut self, key: KeyEvent) -> WorkflowAction {
+        let field_count = self.run_params.len() + 1;
         match key.code {
             KeyCode::Esc => {
                 self.sub = WorkflowSubScreen::List;
             }
+            KeyCode::Tab | KeyCode::Down => {
+                self.param_cursor = (self.param_cursor + 1) % field_count;
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.param_cursor = if self.param_cursor == 0 {
+                    field_count - 1
+                } else {
+                    self.param_cursor - 1
+                };
+            }
             KeyCode::Enter => {
+                if let Some(missing) = self
+                    .run_params
+                    .iter()
+                    .find(|p| p.required && p.value.trim().is_empty())
+                {
+                    self.status_msg = crate::i18n::t_args(
+                        "tui-workflows-param-required",
+                        &[("name", missing.name.as_str())],
+                    );
+                    return WorkflowAction::Continue;
+                }
                 if let Some(idx) = self.selected_workflow {
                     if idx < self.workflows.len() {
                         let wf_id = self.workflows[idx].id.clone();
-                        let input = self.run_input.clone();
+                        let input = self.build_run_input();
                         self.loading = true;
                         self.sub = WorkflowSubScreen::RunResult;
                         return WorkflowAction::RunWorkflow { id: wf_id, input };
@@ -255,14 +314,60 @@ impl WorkflowState {
                 }
             }
             KeyCode::Char(c) => {
-                self.run_input.push(c);
+                if let Some(field) = self.run_params.get_mut(self.param_cursor) {
+                    field.value.push(c);
+                } else {
+                    self.run_input.push(c);
+                }
             }
             KeyCode::Backspace => {
-                self.run_input.pop();
+                if let Some(field) = self.run_params.get_mut(self.param_cursor) {
+                    field.value.pop();
+                } else {
+                    self.run_input.pop();
+                }
             }
             _ => {}
         }
         WorkflowAction::Continue
+    }
+
+    /// Build the payload sent as `input`.
+    ///
+    /// With declared parameters this is a JSON object keyed by parameter name;
+    /// with none declared it stays the bare string every pre-schema workflow expects.
+    pub fn build_run_input(&self) -> String {
+        if self.run_params.is_empty() {
+            return self.run_input.clone();
+        }
+        let mut obj = serde_json::Map::new();
+        for p in &self.run_params {
+            if p.value.trim().is_empty() {
+                continue;
+            }
+            let value = match p.param_type.as_str() {
+                "number" => p
+                    .value
+                    .trim()
+                    .parse::<f64>()
+                    .map(|n| serde_json::json!(n))
+                    .unwrap_or_else(|_| serde_json::json!(p.value)),
+                "boolean" => serde_json::json!(matches!(
+                    p.value.trim().to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes"
+                )),
+                _ => serde_json::json!(p.value),
+            };
+            obj.insert(p.name.clone(), value);
+        }
+        // A declared parameter named `input` wins over the free-text box: the
+        // loop above bound it by name, and the free-text line has no declared
+        // parameter to be.
+        if !self.run_input.trim().is_empty() && !obj.contains_key("input") {
+            obj.insert("input".to_string(), serde_json::json!(self.run_input));
+        }
+        serde_json::to_string(&serde_json::Value::Object(obj))
+            .unwrap_or_else(|_| self.run_input.clone())
     }
 
     fn handle_run_result(&mut self, key: KeyEvent) -> WorkflowAction {
@@ -628,7 +733,10 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        // One row per declared parameter, not one shared row — the old
+        // `Length(1)` clipped everything past the first parameter while
+        // Tab still moved the cursor onto the invisible rows.
+        Constraint::Length(state.run_params.len() as u16),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -655,14 +763,67 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
 
     f.render_widget(widgets::separator(chunks[1].width), chunks[1]);
 
+    // One line per declared parameter; the focused one shows a caret.
+    let mut param_lines: Vec<Line> = Vec::new();
+    for (i, p) in state.run_params.iter().enumerate() {
+        let focused = state.param_cursor == i;
+        let mark = if p.required { "*" } else { " " };
+        param_lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {}{:<16}", mark, p.name),
+                if focused {
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::TEXT_SECONDARY)
+                },
+            ),
+            Span::styled(
+                format!("{}{}", p.value, if focused { "\u{2588}" } else { "" }),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+        ]));
+    }
+    if !param_lines.is_empty() {
+        f.render_widget(Paragraph::new(param_lines), chunks[4]);
+    }
+
+    let hint = state
+        .run_params
+        .get(state.param_cursor)
+        .filter(|p| !p.description.is_empty())
+        .map(|p| format!("  {}", p.description));
+    if !state.status_msg.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  {}", state.status_msg),
+                Style::default().fg(theme::YELLOW),
+            )),
+            chunks[3],
+        );
+    } else if let Some(hint) = hint {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                hint,
+                Style::default().fg(theme::TEXT_TERTIARY),
+            )),
+            chunks[3],
+        );
+    }
+
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            crate::i18n::t("tui-workflows-label-run-input"),
-            Style::default().fg(theme::TEXT_PRIMARY),
-        )])),
+        Paragraph::new(Line::from(vec![
+            Span::styled("  \u{25b7} ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                crate::i18n::t("tui-workflows-label-run-input"),
+                Style::default().fg(theme::TEXT_PRIMARY),
+            ),
+        ])),
         chunks[2],
     );
 
+    let free_focused = state.param_cursor >= state.run_params.len();
     let placeholder = crate::i18n::t("tui-workflows-placeholder-run-input");
     let display = if state.run_input.is_empty() {
         placeholder.as_str()
@@ -674,19 +835,22 @@ fn draw_run_input(f: &mut Frame, area: Rect, state: &WorkflowState) {
     } else {
         theme::input_style()
     };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
-            Span::styled(display, style),
-            Span::styled(
-                "\u{2588}",
-                Style::default()
-                    .fg(theme::GREEN)
-                    .add_modifier(Modifier::SLOW_BLINK),
-            ),
-        ])),
-        chunks[4],
-    );
+
+    if state.run_params.is_empty() || free_focused {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  \u{276f} ", Style::default().fg(theme::ACCENT)),
+                Span::styled(display, style),
+                Span::styled(
+                    "\u{2588}",
+                    Style::default()
+                        .fg(theme::GREEN)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
+            ])),
+            chunks[5],
+        );
+    }
 
     f.render_widget(
         widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-run-input")),
@@ -754,4 +918,135 @@ fn draw_run_result(f: &mut Frame, area: Rect, state: &WorkflowState) {
         widgets::hint_bar(&crate::i18n::t("tui-workflows-hints-run-result")),
         chunks[3],
     );
+}
+
+#[cfg(test)]
+mod run_param_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn field(name: &str, ty: &str, required: bool) -> WorkflowParamField {
+        WorkflowParamField {
+            name: name.to_string(),
+            param_type: ty.to_string(),
+            required,
+            description: String::new(),
+            value: String::new(),
+        }
+    }
+
+    fn state_with(params: Vec<WorkflowParamField>) -> WorkflowState {
+        let mut s = WorkflowState::new();
+        s.sub = WorkflowSubScreen::RunInput;
+        s.workflows.push(WorkflowInfo {
+            id: "wf-1".to_string(),
+            ..Default::default()
+        });
+        s.selected_workflow = Some(0);
+        s.run_params = params;
+        s
+    }
+
+    #[test]
+    fn typing_goes_into_the_focused_parameter_not_the_free_text() {
+        let mut s = state_with(vec![field("ciudad", "string", true)]);
+        for c in "Vigo".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(s.run_params[0].value, "Vigo");
+        assert!(s.run_input.is_empty());
+    }
+
+    #[test]
+    fn tab_moves_to_the_next_field_and_wraps_to_the_free_text_box() {
+        let mut s = state_with(vec![field("a", "string", true)]);
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(s.run_input, "x");
+        assert!(s.run_params[0].value.is_empty());
+    }
+
+    #[test]
+    fn enter_refuses_while_a_required_parameter_is_empty() {
+        let mut s = state_with(vec![field("ciudad", "string", true)]);
+        let action = s.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(action, WorkflowAction::Continue));
+        assert!(s.status_msg.contains("ciudad"));
+        assert!(matches!(s.sub, WorkflowSubScreen::RunInput));
+    }
+
+    #[test]
+    fn the_payload_binds_by_name_and_types_numbers() {
+        let mut s = state_with(vec![
+            field("ciudad", "string", true),
+            field("dias", "number", true),
+        ]);
+        s.run_params[0].value = "Vigo".to_string();
+        s.run_params[1].value = "7".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["ciudad"], serde_json::json!("Vigo"));
+        assert_eq!(payload["dias"], serde_json::json!(7.0));
+    }
+
+    #[test]
+    fn a_non_numeric_number_parameter_falls_back_to_a_string() {
+        let mut s = state_with(vec![field("dias", "number", true)]);
+        s.run_params[0].value = "seven".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["dias"], serde_json::json!("seven"));
+    }
+
+    #[test]
+    fn boolean_parameters_coerce_the_canonical_set_only() {
+        let mut s = state_with(vec![field("reintentar", "boolean", false)]);
+        s.run_params[0].value = "yes".to_string();
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["reintentar"], serde_json::json!(true));
+
+        s.run_params[0].value = "si".to_string();
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["reintentar"], serde_json::json!(false));
+        assert!(payload.get("input").is_none());
+    }
+
+    #[test]
+    fn an_unknown_param_type_stays_a_string() {
+        let mut s = state_with(vec![field("objetivo", "agent_id", true)]);
+        s.run_params[0].value = "writer".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["objetivo"], serde_json::json!("writer"));
+    }
+
+    #[test]
+    fn a_blank_optional_parameter_does_not_block_the_run() {
+        let mut s = state_with(vec![field("nota", "string", false)]);
+        let action = s.handle_key(key(KeyCode::Enter));
+
+        assert!(matches!(action, WorkflowAction::RunWorkflow { .. }));
+    }
+
+    #[test]
+    fn a_declared_input_parameter_is_not_clobbered_by_the_free_text_box() {
+        let mut s = state_with(vec![field("input", "string", false)]);
+        s.run_params[0].value = "declared wins".to_string();
+        s.run_input = "free text".to_string();
+
+        let payload: serde_json::Value = serde_json::from_str(&s.build_run_input()).unwrap();
+        assert_eq!(payload["input"], serde_json::json!("declared wins"));
+    }
+
+    #[test]
+    fn a_workflow_with_no_declared_parameters_still_sends_the_bare_string() {
+        let mut s = state_with(vec![]);
+        s.run_input = "texto libre".to_string();
+        assert_eq!(s.build_run_input(), "texto libre");
+    }
 }

@@ -8,6 +8,7 @@ import {
   getBudgetStatus,
   getProviderBudgets,
 } from "../http/client";
+import type { UsageRangeParams } from "../../api";
 import { usageKeys, budgetKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -20,35 +21,39 @@ const analyticsQueryPolicy = {
   refetchIntervalInBackground: false,
 } as const;
 
+// #8062 — every usage query takes the selected reporting window, and the window is part of its key, so switching presets refetches instead of re-rendering stale numbers under a new caption.
+// The default `{}` is the unbounded window, which reproduces the pre-#8062 request byte for byte.
 export const usageQueries = {
-  summary: () =>
+  summary: (range: UsageRangeParams = {}) =>
     queryOptions({
-      queryKey: usageKeys.summary(),
-      queryFn: getUsageSummary,
+      queryKey: usageKeys.summary(range),
+      queryFn: () => getUsageSummary(range),
       ...analyticsQueryPolicy,
     }),
-  byAgent: () =>
+  byAgent: (range: UsageRangeParams = {}) =>
     queryOptions({
-      queryKey: usageKeys.byAgent(),
-      queryFn: listUsageByAgent,
+      queryKey: usageKeys.byAgent(range),
+      queryFn: () => listUsageByAgent(range),
       ...analyticsQueryPolicy,
     }),
-  byModel: () =>
+  byModel: (range: UsageRangeParams = {}) =>
     queryOptions({
-      queryKey: usageKeys.byModel(),
-      queryFn: listUsageByModel,
+      queryKey: usageKeys.byModel(range),
+      queryFn: () => listUsageByModel(range),
       ...analyticsQueryPolicy,
     }),
-  daily: () =>
+  // `days` is only meaningful for the unbounded window — the endpoint answers 400 when it arrives alongside a range.
+  // See `dailyDaysFor`.
+  daily: (range: UsageRangeParams = {}, days?: number) =>
     queryOptions({
-      queryKey: usageKeys.daily(),
-      queryFn: getUsageDaily,
+      queryKey: usageKeys.daily(range, days),
+      queryFn: () => getUsageDaily(range, days),
       ...analyticsQueryPolicy,
     }),
-  modelPerformance: () =>
+  modelPerformance: (range: UsageRangeParams = {}) =>
     queryOptions({
-      queryKey: usageKeys.modelPerformance(),
-      queryFn: getUsageByModelPerformance,
+      queryKey: usageKeys.modelPerformance(range),
+      queryFn: () => getUsageByModelPerformance(range),
       ...analyticsQueryPolicy,
     }),
 };
@@ -63,6 +68,9 @@ export const budgetQueries = {
   // Per-provider spend snapshot (#5650). Same refresh cadence as the
   // global budget query so the dashboard's two budget cards stay in
   // lock-step rather than ping-ponging slightly out of sync.
+  //
+  // Deliberately NOT range-filtered: `/api/budget/providers` reports live hourly / daily / monthly rollups against the configured caps, which are "right now" facts.
+  // Scoping them to a historical window would render a cap bar that looks breached (or clear) for a month nobody is spending in.
   providers: () =>
     queryOptions({
       queryKey: budgetKeys.providers(),
@@ -71,24 +79,40 @@ export const budgetQueries = {
     }),
 };
 
-export function useUsageSummary(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(usageQueries.summary(), options));
+export function useUsageSummary(
+  range: UsageRangeParams = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(usageQueries.summary(range), options));
 }
 
-export function useUsageByAgent(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(usageQueries.byAgent(), options));
+export function useUsageByAgent(
+  range: UsageRangeParams = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(usageQueries.byAgent(range), options));
 }
 
-export function useUsageByModel(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(usageQueries.byModel(), options));
+export function useUsageByModel(
+  range: UsageRangeParams = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(usageQueries.byModel(range), options));
 }
 
-export function useUsageDaily(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(usageQueries.daily(), options));
+export function useUsageDaily(
+  range: UsageRangeParams = {},
+  days?: number,
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(usageQueries.daily(range, days), options));
 }
 
-export function useModelPerformance(options: QueryOverrides = {}) {
-  return useQuery(withOverrides(usageQueries.modelPerformance(), options));
+export function useModelPerformance(
+  range: UsageRangeParams = {},
+  options: QueryOverrides = {},
+) {
+  return useQuery(withOverrides(usageQueries.modelPerformance(range), options));
 }
 
 export function useBudgetStatus(options: QueryOverrides = {}) {

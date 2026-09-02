@@ -1,0 +1,4 @@
+Uninstalling an MCP server no longer makes every agent that still names it uneditable.
+`set_agent_mcp_servers` rejected any name absent from both `config.toml` and the installed catalog, and the dashboard editor round-trips the agent's current allowlist — so once a declaration went stale, every save carried the now-unknown name back in and was refused, including the save that would have removed it.
+A name the agent already stores is now accepted: it is a fact about the agent rather than a claim being made at save time, and refusing it protects nothing that is not already on disk.
+Grandfathering is scoped to names already present, so a typo — which is by definition a name that was not there a moment ago — is still rejected, and a stale name that has been removed is refused if it comes back (#8125) (@houko)

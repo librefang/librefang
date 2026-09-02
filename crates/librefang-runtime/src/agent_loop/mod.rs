@@ -25,6 +25,7 @@ use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
+use librefang_types::model_catalog::VisionSupport;
 use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::path::Path;
@@ -415,9 +416,20 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
 /// For `ImageFile` blocks (which reference the image by on-disk path) the placeholder keeps that path, so a text-only agent can still read or attach the raw file even though it can't see the pixels.
 /// The inline base64 `Image` variant has no path to keep.
 ///
-/// Pure function: the caller passes a clone, so the live session history is
+/// Pure function apart from the `WARN`: the caller passes a clone, so the live session history is
 /// never mutated and the vision path stays byte-identical to before.
+///
+/// # Observability
+///
+/// Removing a user's image from a request is a lossy, invisible-to-the-user edit, so it emits a
+/// `WARN` naming the model and the number of blocks replaced whenever it actually replaces one
+/// (refs #7957). The original complaint in that issue was not only that the wrong models were
+/// stripped — it was that nothing anywhere said an image had been dropped, so an operator watching
+/// a vision-capable model answer from a filename had nothing to grep for. A model that genuinely
+/// has no vision support still gets its images redacted; it now says so once per turn.
+/// The no-image case stays silent, because the redaction never happened.
 pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &str) -> Vec<Message> {
+    let mut redacted = 0usize;
     for msg in &mut messages {
         if let MessageContent::Blocks(blocks) = &mut msg.content {
             for block in blocks.iter_mut() {
@@ -436,9 +448,21 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
                         text,
                         provider_metadata: None,
                     };
+                    redacted += 1;
                 }
             }
         }
+    }
+    if redacted > 0 {
+        tracing::warn!(
+            model = %model,
+            images_redacted = redacted,
+            "stripped image content from the request: `{model}` is declared text-only (by its registry \
+             entry, an operator override, or the provider's own model listing), so the model receives a \
+             placeholder instead of the picture. \
+             If it can in fact see images, declare that — `PUT /api/models/overrides/{{provider}}:{model}` \
+             with `supports_vision: true`, or the vision toggle in the dashboard's model drawer."
+        );
     }
     messages
 }
@@ -1256,17 +1280,22 @@ async fn run_agent_loop_inner(
             .map(|k| k.reasoning_echo_policy_for(&api_model))
             .unwrap_or_default();
 
-        // Catalog-driven vision-capability gate (#6010). When the target model
-        // has no vision support, image content blocks are redacted to a text
-        // placeholder before the request is built — text-only OpenAI-compatible
-        // models otherwise reject `image_url` content parts with HTTP 400. Fails
-        // open (no kernel handle wired, or catalog miss) so vision and unknown
-        // models keep sending images unchanged.
-        let supports_vision = kernel
+        // Catalog-driven vision-capability gate (#6010, refs #7957). Only a model the catalog
+        // *declares* text-only gets its image content blocks redacted to a text placeholder before
+        // the request is built — such models otherwise reject `image_url` content parts with
+        // HTTP 400.
+        //
+        // Every other answer fails open, and they are now the same answer: no kernel handle wired,
+        // a catalog miss, and a catalog hit whose `supports_vision` was only inferred from the
+        // model's name all resolve to `VisionSupport::Unknown` and keep sending the images.
+        // Before #7957 the last of those three was a bare `false`, so a gateway model named
+        // `team-default` by its operator was silently treated as blind — the hit path was more
+        // confident than the miss path while knowing no more.
+        let vision = kernel
             .as_ref()
-            .map(|k| k.supports_vision_for(&api_model))
-            .unwrap_or(true);
-        let request_messages = if supports_vision {
+            .map(|k| k.vision_support_for(&api_model))
+            .unwrap_or(VisionSupport::Unknown);
+        let request_messages = if vision.allows_images() {
             messages.clone()
         } else {
             redact_images_for_text_only(messages.clone(), &api_model)

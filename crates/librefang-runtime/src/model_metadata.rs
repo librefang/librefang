@@ -294,6 +294,9 @@ fn synthesize_entry(
         image_output_cost_per_m: None,
         supports_tools: false,
         supports_vision: false,
+        // Nothing in this pipeline ever learns a capability: the four booleans above are placeholders on an entry synthesized to carry *capacity*.
+        // `vision_known: false` says so, so the request-build gate reads this entry as `VisionSupport::Unknown` and keeps sending images rather than stripping them on the strength of a placeholder (#7957).
+        vision_known: false,
         supports_streaming: false,
         supports_thinking: false,
         reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
@@ -621,6 +624,45 @@ pub(crate) fn parse_openai_model_max_output(json: &serde_json::Value) -> Option<
         .filter(|n| *n > 0)
 }
 
+/// Read a boolean capability flag from one OpenAI-compatible model object, trying the top level first and LiteLLM's nested `model_info` block second (refs #7957).
+///
+/// LiteLLM normalises its per-model capability booleans under `model_info` on `/v1/model/info`, and echoes them at the top level of `/v1/models` entries when the deployment is configured to expose them.
+/// Both shapes are the gateway stating a fact about its own model, so both count.
+///
+/// `None` means the object said nothing, and it is propagated as "unknown" rather than collapsed to `false` — the same discipline [`parse_openai_model`] follows for capacity since #7780, and for the same reason: a silent `false` here is indistinguishable from a declared `false` at every point downstream.
+fn openai_capability_flag(json: &serde_json::Value, key: &str) -> Option<bool> {
+    json.get(key)
+        .and_then(|v| v.as_bool())
+        .or_else(|| json.pointer(&format!("/model_info/{key}"))?.as_bool())
+}
+
+/// Whether one OpenAI-compatible model object declares image-input support, or says nothing.
+///
+/// Sources, in priority order:
+///
+/// 1. `supports_vision` — LiteLLM's normalised key, top level or under `model_info`.
+/// 2. `/architecture/input_modalities` — OpenRouter's listing shape.
+///    A *present* array is authoritative in both directions: a gateway that enumerates its input modalities and omits `image` has said the model is text-only.
+///
+/// `None` when neither is present, which sends the caller to the name heuristic and records the answer as a guess.
+pub(crate) fn parse_openai_model_supports_vision(json: &serde_json::Value) -> Option<bool> {
+    if let Some(flag) = openai_capability_flag(json, "supports_vision") {
+        return Some(flag);
+    }
+    let modalities = json
+        .pointer("/architecture/input_modalities")
+        .and_then(|v| v.as_array())?;
+    Some(modalities.iter().any(|m| m.as_str() == Some("image")))
+}
+
+/// Whether one OpenAI-compatible model object declares tool/function-calling support, or says nothing.
+///
+/// Reads LiteLLM's `supports_function_calling`, top level or under `model_info`.
+/// `None` when absent, leaving the caller's existing "any non-embedding chat model is tool-capable" assumption in place.
+pub(crate) fn parse_openai_model_supports_tools(json: &serde_json::Value) -> Option<bool> {
+    openai_capability_flag(json, "supports_function_calling")
+}
+
 /// Probe a generic OpenAI-compatible `GET /v1/models/{model}` endpoint.
 ///
 /// No auth header is set — most self-hosted servers (vLLM, LM Studio,
@@ -816,6 +858,7 @@ mod tests {
             image_output_cost_per_m: None,
             supports_tools: false,
             supports_vision: false,
+            vision_known: true,
             supports_streaming: false,
             supports_thinking: false,
             reasoning_echo_policy: librefang_types::model_catalog::ReasoningEchoPolicy::default(),
@@ -1328,6 +1371,76 @@ mod tests {
             "max_tokens": 0u64
         });
         assert_eq!(parse_openai_model(&json), None);
+    }
+
+    // --- #7957: capability flags a gateway declares on its own models ---
+
+    /// LiteLLM's normalised top-level key is read, and read as a `Some` so the caller can tell it
+    /// apart from an entry that said nothing.
+    #[test]
+    fn parse_openai_model_reads_a_top_level_supports_vision_flag() {
+        let json = serde_json::json!({ "id": "team-default", "supports_vision": true });
+        assert_eq!(parse_openai_model_supports_vision(&json), Some(true));
+        let json = serde_json::json!({ "id": "team-default", "supports_vision": false });
+        assert_eq!(parse_openai_model_supports_vision(&json), Some(false));
+    }
+
+    /// LiteLLM nests the same booleans under `model_info` on `/v1/model/info`, and mirrors that
+    /// block into `/v1/models` entries on some deployments. Both are the gateway declaring a fact.
+    #[test]
+    fn parse_openai_model_reads_a_nested_model_info_supports_vision_flag() {
+        let json = serde_json::json!({
+            "id": "internal-4412",
+            "model_info": { "supports_vision": true, "supports_function_calling": false }
+        });
+        assert_eq!(parse_openai_model_supports_vision(&json), Some(true));
+        assert_eq!(parse_openai_model_supports_tools(&json), Some(false));
+    }
+
+    /// OpenRouter enumerates input modalities instead of exposing a boolean.
+    /// A present array is authoritative in *both* directions: listing the inputs and omitting
+    /// `image` is a statement that the model is text-only.
+    #[test]
+    fn parse_openai_model_reads_openrouter_input_modalities() {
+        let vision = serde_json::json!({
+            "id": "vendor/some-model",
+            "architecture": { "input_modalities": ["text", "image"] }
+        });
+        assert_eq!(parse_openai_model_supports_vision(&vision), Some(true));
+        let text_only = serde_json::json!({
+            "id": "vendor/other-model",
+            "architecture": { "input_modalities": ["text"] }
+        });
+        assert_eq!(parse_openai_model_supports_vision(&text_only), Some(false));
+    }
+
+    /// The bare OpenAI `/v1/models` shape declares nothing, and that MUST stay `None`.
+    /// A `Some(false)` here is the whole of #7957: it would assert that a gateway called its model
+    /// blind when the gateway simply never mentioned the subject, and the agent loop would then
+    /// strip the images with no error anyone could act on.
+    #[test]
+    fn parse_openai_model_reports_unknown_capability_as_none() {
+        let json = serde_json::json!({
+            "id": "fast",
+            "object": "model",
+            "created": 1_700_000_000u64,
+            "owned_by": "operator"
+        });
+        assert_eq!(parse_openai_model_supports_vision(&json), None);
+        assert_eq!(parse_openai_model_supports_tools(&json), None);
+    }
+
+    /// A non-boolean value is not a declaration either — a gateway that reports
+    /// `supports_vision: null` has answered "I do not know", which is exactly `None`.
+    #[test]
+    fn parse_openai_model_treats_a_null_capability_as_unknown() {
+        let json = serde_json::json!({
+            "id": "fast",
+            "supports_vision": serde_json::Value::Null,
+            "supports_function_calling": serde_json::Value::Null
+        });
+        assert_eq!(parse_openai_model_supports_vision(&json), None);
+        assert_eq!(parse_openai_model_supports_tools(&json), None);
     }
 
     /// Cache key composition: `provider|base_url|model` triple keeps

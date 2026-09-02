@@ -1360,6 +1360,38 @@
       "unconfigured": "设置上限",
       "healthy": "正常",
       "edit": "编辑上限"
+    },
+    "agent": "智能体",
+    "agent_detail_table": "各智能体明细",
+    "agent_detail_count": "{{n}} 个智能体",
+    "total_tool_calls": "工具调用次数",
+    "cost_per_call_kpi": "每次调用成本",
+    "input_tokens": "输入",
+    "output_tokens": "输出",
+    "p95_latency": "P95",
+    "worst_p95_latency": "最差 P95 延迟",
+    "hand_tag": "手部",
+    "range": {
+      "today": "今天",
+      "yesterday": "昨天",
+      "7d": "7 天",
+      "14d": "14 天",
+      "30d": "30 天",
+      "this_month": "本月",
+      "last_month": "上月",
+      "all": "全部",
+      "from": "起始",
+      "to": "结束",
+      "inverted": "结束日期早于开始日期 — 在范围有效之前显示未筛选的时间窗口。",
+      "data_since": "已存储的用量数据始于 {{date}}",
+      "no_data_stored": "尚未存储任何用量事件",
+      "retention": "保留 {{days}} 天 — 更早的事件会被清除",
+      "retention_disabled": "已禁用保留策略 — 不会清除任何数据",
+      "summary_days": "有数据的天数",
+      "summary_calls": "范围内调用次数",
+      "summary_tokens": "范围内令牌数",
+      "summary_cost": "范围内成本",
+      "summary_span": "所选窗口 {{span}} 天中有 {{withData}} 天记录了用量。"
     }
   },
   "memory": {
@@ -4250,6 +4282,12 @@
     "title": "智能体类型",
     "tools": "工具",
     "tools_hint": "从本守护进程提供的工具中选择，也可手动输入目录之外的标识符。",
-    "tools_search": "搜索工具…"
+    "tools_search": "搜索工具…",
+    "promote": "推广到注册表",
+    "confirm_promote": "将代理类型 '{{name}}' 推广到公共注册表？清单将被清理后作为 GitHub pull request 提交。",
+    "promoted": "注册表 PR 已创建",
+    "promote_failed": "无法推广代理类型",
+    "promote_success": "已在注册表中创建 pull request。审查后合并即可。",
+    "view_pr": "查看 pull request"
   }
 }

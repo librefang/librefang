@@ -998,3 +998,90 @@ bootstrap = "hooks/bootstrap.py"
         "pack output must be byte-identical for identical inputs"
     );
 }
+
+// ── /api/plugins/doctor runtime probes (#8142) ─────────────────────────────
+
+/// The reported table covers every runtime `PluginRuntime::all()` declares, in that exact order.
+///
+/// Load-bearing because the probes now run concurrently: joining the handles out of order, or collecting from a `HashMap`, would make the endpoint's output vary between calls for an unchanged host — the #3298 problem, and also the thing that would make the `runtime` → availability index in `run_doctor` line up with the wrong entry.
+#[test]
+fn doctor_runtime_table_is_complete_and_in_declaration_order() {
+    use crate::plugin_runtime::PluginRuntime;
+
+    let report = run_doctor();
+    let expected: Vec<String> = PluginRuntime::all()
+        .iter()
+        .map(|r| r.label().to_string())
+        .collect();
+    let actual: Vec<String> = report.runtimes.iter().map(|s| s.runtime.clone()).collect();
+    assert_eq!(
+        actual, expected,
+        "the probe table must list every declared runtime in declaration order"
+    );
+}
+
+/// Two calls in a row must agree, and the second must be served from the cache rather than re-probing.
+///
+/// The timing assertion is deliberately loose — it only has to separate "did not spawn ~12 subprocesses" from "did".
+/// A cold call spawns one process per runtime (three for Python); the cached call does no I/O at all, so the gap is orders of magnitude rather than a few percent.
+#[test]
+fn doctor_runtime_probes_are_cached_between_calls() {
+    // Warm the cache and measure the cached read, not the cold one: another
+    // test in this binary may already have populated it, so timing the first
+    // call here would be measuring someone else's state.
+    let first = run_doctor();
+    let began = std::time::Instant::now();
+    let second = run_doctor();
+    let cached_elapsed = began.elapsed();
+
+    let names_first: Vec<_> = first.runtimes.iter().map(|s| &s.runtime).collect();
+    let names_second: Vec<_> = second.runtimes.iter().map(|s| &s.runtime).collect();
+    assert_eq!(
+        names_first, names_second,
+        "a cached read must return the same table"
+    );
+    assert!(
+        cached_elapsed < std::time::Duration::from_millis(500),
+        "a cached probe read must not spawn subprocesses; took {cached_elapsed:?}"
+    );
+}
+
+/// The plugin list is *not* cached alongside the probe table, so a plugin installed between two calls shows up immediately.
+///
+/// This is the half of the caching decision that could silently regress: it would be tempting to cache the whole `DoctorReport`, and nothing else in the suite would notice.
+#[test]
+fn doctor_reflects_a_newly_written_plugin_without_waiting_for_the_probe_ttl() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("LIBREFANG_HOME");
+    std::env::set_var("LIBREFANG_HOME", tmp.path());
+
+    // Prime the probe cache while the plugins dir is empty.
+    let before = run_doctor();
+    let had = before
+        .plugins
+        .iter()
+        .any(|p| p.name == "doctor-cache-probe");
+    assert!(!had, "fixture name must not pre-exist");
+
+    let plugin_dir = plugins_dir().join("doctor-cache-probe");
+    std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+    std::fs::write(
+        plugin_dir.join("plugin.toml"),
+        "name = \"doctor-cache-probe\"\nversion = \"0.1.0\"\ndescription = \"fixture\"\n",
+    )
+    .unwrap();
+
+    let after = run_doctor();
+    let now_listed = after.plugins.iter().any(|p| p.name == "doctor-cache-probe");
+
+    match prev_home {
+        Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+        None => std::env::remove_var("LIBREFANG_HOME"),
+    }
+
+    assert!(
+        now_listed,
+        "the plugin list must be re-read on every call, not cached with the probe table"
+    );
+}

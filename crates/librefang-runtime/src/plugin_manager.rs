@@ -368,17 +368,83 @@ pub struct DoctorReport {
     pub plugins: Vec<PluginDoctorEntry>,
 }
 
-/// Probe the environment and return a diagnostic report.
+/// How long a probed runtime table stays usable before it is re-probed.
 ///
-/// Spawns one subprocess per runtime (`{launcher} --version`) — caller
-/// should wrap in `tokio::task::spawn_blocking` if used from async.
-pub fn run_doctor() -> DoctorReport {
+/// Runtime availability changes when an operator installs an interpreter, which is rare; the installed-plugin list changes whenever someone installs a plugin, which is not.
+/// So only the probe half is cached — [`run_doctor`] always re-reads the plugin list, and a freshly installed plugin still shows up immediately.
+const RUNTIME_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A probe table plus the instant it was taken; `None` before the first probe.
+type CachedRuntimeProbe = Option<(
+    std::time::Instant,
+    Vec<crate::plugin_runtime::RuntimeStatus>,
+)>;
+
+/// Cached runtime probe table: when it was taken, and what it found.
+static RUNTIME_PROBE_CACHE: std::sync::OnceLock<std::sync::Mutex<CachedRuntimeProbe>> =
+    std::sync::OnceLock::new();
+
+/// Probe every supported runtime, concurrently, and cache the table for [`RUNTIME_PROBE_TTL`].
+///
+/// `PluginRuntime::all()` is 12 runtimes and Python alone tries three candidates (`python3` / `python` / `py`), each with a 5 s per-probe timeout in `probe_launcher_version`.
+/// Probing them in sequence therefore has a worst case near a minute, which is how `/api/plugins/doctor` became the slowest route in the API by a wide margin and started tripping `route_smoke`'s flat 10 s per-request budget on a loaded runner (#8142).
+///
+/// Fanning the probes out bounds the whole table by the slowest single probe instead of the sum, the same change #8094 made for sidecar schema probes.
+/// `std::thread::scope` rather than tokio because this runs on the blocking pool already and the probes are `std::process::Command`.
+///
+/// Order is preserved: handles are joined in `PluginRuntime::all()` order, so the reported table is byte-stable across calls regardless of which probe finishes first.
+fn probe_runtimes_cached() -> Vec<crate::plugin_runtime::RuntimeStatus> {
     use crate::plugin_runtime::{check_runtime_status, PluginRuntime};
 
-    let runtimes: Vec<_> = PluginRuntime::all()
-        .iter()
-        .map(|r| check_runtime_status(r.clone()))
-        .collect();
+    let cache = RUNTIME_PROBE_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    // Poison recovery: a panicked prior probe must not permanently disable the
+    // endpoint, and the cached value is plain data.
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken_at, table)) = guard.as_ref() {
+        if taken_at.elapsed() < RUNTIME_PROBE_TTL {
+            debug!("Using cached plugin runtime probe table");
+            return table.clone();
+        }
+    }
+
+    let table: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = PluginRuntime::all()
+            .iter()
+            .map(|r| scope.spawn(|| check_runtime_status(r.clone())))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                // A probe thread panicking is a bug, not an environment
+                // condition — but the endpoint should still answer, so the
+                // runtime is reported unavailable rather than poisoning the
+                // whole report.
+                h.join().unwrap_or_else(|_| {
+                    warn!("A plugin runtime probe thread panicked");
+                    crate::plugin_runtime::RuntimeStatus {
+                        runtime: "unknown".to_string(),
+                        launcher: None,
+                        available: false,
+                        version: None,
+                        install_hint: String::new(),
+                    }
+                })
+            })
+            .collect()
+    });
+
+    *guard = Some((std::time::Instant::now(), table.clone()));
+    table
+}
+
+/// Probe the environment and return a diagnostic report.
+///
+/// Runtime probes are concurrent and cached for [`RUNTIME_PROBE_TTL`]; the installed-plugin list is always re-read.
+/// Caller should still wrap this in `tokio::task::spawn_blocking` if used from async — a cache miss spawns subprocesses.
+pub fn run_doctor() -> DoctorReport {
+    use crate::plugin_runtime::PluginRuntime;
+
+    let runtimes = probe_runtimes_cached();
 
     // Index by runtime tag so per-plugin entries can look up availability
     // without re-probing subprocesses.

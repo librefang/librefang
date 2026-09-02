@@ -32,7 +32,7 @@ use super::screens::{
     templates::{self, ProviderAuth, TemplateInfo, TemplateSource},
     triggers::TriggerInfo,
     usage::{AgentUsage, ModelUsage, UsageSummary},
-    workflows::{WorkflowInfo, WorkflowRun},
+    workflows::{WorkflowInfo, WorkflowParamField, WorkflowParamsFetch, WorkflowRun},
 };
 
 // ── BackendRef ──────────────────────────────────────────────────────────────
@@ -46,6 +46,25 @@ pub enum BackendRef {
         api_key: Option<String>,
     },
     InProcess(Arc<LibreFangKernel>),
+}
+
+/// Why a TUI fetch produced no data.
+///
+/// The two arms need different words in front of the operator, which is the
+/// whole reason they are separate: `RequiresDaemon` will never succeed while
+/// the TUI is attached to an in-process kernel, so advising a retry is wrong,
+/// whereas `Error` is exactly the case where retrying is right. Collapsing
+/// them — or sending nothing, which is what these helpers used to do — leaves
+/// one blank screen meaning all of "failed", "unsupported here" and
+/// "genuinely empty" (#8141).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchFailure {
+    /// The data lives behind the daemon HTTP API and the TUI is attached
+    /// in-process, so there is nothing to reach.
+    RequiresDaemon,
+    /// The request went out and did not come back usable — transport error,
+    /// non-success status, or a body that would not decode.
+    Error(String),
 }
 
 // ── AppEvent ────────────────────────────────────────────────────────────────
@@ -128,6 +147,10 @@ pub enum AppEvent {
     WorkflowRunResult(String),
     /// Workflow created successfully.
     WorkflowCreated(String),
+    /// Workflow declared parameters loaded for the run-input form. Every
+    /// fetch outcome arrives here — declared parameters, "declares none",
+    /// or "could not consult the schema" (see [`WorkflowParamsFetch`]).
+    WorkflowParamsLoaded(crate::tui::screens::workflows::WorkflowParamsFetch),
     /// Trigger list loaded.
     TriggerListLoaded(Vec<TriggerInfo>),
     /// Trigger created.
@@ -151,6 +174,12 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The memory config could not be read — see [`FetchFailure`].
+    ///
+    /// Sent instead of staying silent: without it the Memory screen keeps
+    /// whatever it had (usually nothing) and the operator cannot tell a 5xx
+    /// from an empty config from a request that never went out (#8141).
+    MemoryConfigFailed(FetchFailure),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -178,6 +207,11 @@ pub enum AppEvent {
     TemplateTomlLoaded {
         name: String,
         toml: Option<String>,
+    },
+    /// Result of promoting an agent type to the registry.
+    AgentTypePromoted {
+        name: String,
+        result: Result<String, String>,
     },
     /// Security features loaded.
     SecurityLoaded(Vec<SecurityFeature>),
@@ -236,6 +270,17 @@ pub enum AppEvent {
     /// Goals loaded.
     GoalsLoaded(Vec<GoalInfo>),
     /// Live run state fetched for one goal.
+    /// The goal's run state could not be read — see [`FetchFailure`].
+    ///
+    /// Distinct from `GoalRunLoaded` with an absent run: a goal that never
+    /// ran legitimately answers `{"running": false}`, whereas this means the
+    /// answer never arrived. The start/stop toggle keys off the live phase,
+    /// so conflating the two leaves the operator unable to tell a finished
+    /// run from a failed fetch (#8141).
+    GoalRunFailed {
+        goal_id: String,
+        failure: FetchFailure,
+    },
     GoalRunLoaded {
         goal_id: String,
         phase: Option<String>,
@@ -1278,6 +1323,76 @@ pub fn spawn_fetch_workflow_runs(
     });
 }
 
+/// Fetch a workflow's declared `input_schema` parameters for the run-input form.
+///
+/// Every outcome sends `WorkflowParamsLoaded`, in daemon and in-process mode
+/// alike: declared parameters, "declares none", or "could not consult the
+/// schema" (see [`WorkflowParamsFetch`]). The form then renders one editable
+/// row per declared parameter, the bare-string box, or the bare-string box
+/// plus a status line that says the schema was not consulted - never a
+/// silent fallback to free text.
+pub fn spawn_fetch_workflow_params(
+    backend: BackendRef,
+    workflow_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let fetch = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/workflows/{workflow_id}"))
+                    .send()
+                    .ok()
+                    .filter(|r| r.status().is_success())
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .map(|body| {
+                        match body.get("input_schema").and_then(|v| v.as_array()) {
+                            // A 200 with a declared schema - possibly empty, which
+                            // still means the workflow has no parameters.
+                            Some(arr) => {
+                                let params = arr
+                                    .iter()
+                                    .filter_map(|p| {
+                                        let name = p.get("name")?.as_str()?.to_string();
+                                        Some(WorkflowParamField {
+                                            name,
+                                            param_type: p
+                                                .get("param_type")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("string")
+                                                .to_string(),
+                                            required: p
+                                                .get("required")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(true),
+                                            description: p
+                                                .get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string(),
+                                            value: String::new(),
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                WorkflowParamsFetch::Loaded(params)
+                            }
+                            // A 200 whose body carries no `input_schema` array: the
+                            // kernel omits the key when the workflow declares
+                            // nothing (skip_serializing_if), so this is "declares
+                            // none", not a failure.
+                            None => WorkflowParamsFetch::None,
+                        }
+                    })
+                    .unwrap_or(WorkflowParamsFetch::Failed)
+            }
+            // In-process mode has no daemon HTTP API to consult, so the schema
+            // cannot be known. Say so instead of silently pretending it was.
+            BackendRef::InProcess(_) => WorkflowParamsFetch::Failed,
+        };
+        let _ = tx.send(AppEvent::WorkflowParamsLoaded(fetch));
+    });
+}
 /// How long the daemon may hold the run request open before handing the run back as a background task.
 ///
 /// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
@@ -2184,32 +2299,60 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 ///
 /// Daemon-only. The in-process backend has no HTTP surface to ask, and the
 /// panel says so rather than showing a blank as if it were configuration.
+///
+/// Every exit path sends an event. The screen renders `config: None`
+/// identically for "not fetched yet", "the daemon refused" and "we are
+/// in-process", so a silent return is indistinguishable from still-loading
+/// (#8141).
 pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/memory/config")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let pm = &body["proactive_memory"];
-                    let view = crate::tui::screens::memory::MemoryConfigView {
-                        embedding_provider: body["embedding_provider"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
-                        auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
-                        auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
-                        effective_extraction_model: pm["effective_extraction_model"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        extraction_model_inherited: pm["extraction_model_source"].as_str()
-                            == Some("inherited_default"),
-                    };
-                    let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
-                }
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::RequiresDaemon));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let resp = match client.get(format!("{base_url}/api/memory/config")).send() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                    e.to_string(),
+                )));
+                return;
             }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                status.to_string(),
+            )));
+            return;
         }
+        let body = match resp.json::<serde_json::Value>() {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                    e.to_string(),
+                )));
+                return;
+            }
+        };
+        let pm = &body["proactive_memory"];
+        let view = crate::tui::screens::memory::MemoryConfigView {
+            embedding_provider: body["embedding_provider"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
+            auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
+            auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
+            effective_extraction_model: pm["effective_extraction_model"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            extraction_model_inherited: pm["extraction_model_source"].as_str()
+                == Some("inherited_default"),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
     });
 }
 
@@ -2732,6 +2875,45 @@ pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Se
             }
         };
         let _ = tx.send(AppEvent::TemplateTomlLoaded { name, toml });
+    });
+}
+
+/// Promote an agent type to the registry via `POST /api/templates/{name}/promote`.
+pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let result = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                // Template names are validated to [A-Za-z0-9_-] so no URL encoding needed.
+                match client
+                    .post(format!("{base_url}/api/templates/{name}/promote"))
+                    .json(&serde_json::json!({}))
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => resp
+                        .json::<serde_json::Value>()
+                        .ok()
+                        .and_then(|v| v["pr_url"].as_str().map(|s| s.to_string()))
+                        .ok_or_else(|| crate::i18n::t("tui-event-promote-missing-pr-url")),
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let detail = resp.text().unwrap_or_default();
+                        Err(crate::i18n::t_args(
+                            "tui-event-promote-http-error",
+                            &[
+                                ("status", &status.to_string()),
+                                ("detail", &detail.chars().take(200).collect::<String>()),
+                            ],
+                        ))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            BackendRef::InProcess(_) => {
+                Err(crate::i18n::t("tui-event-promote-not-available-in-process"))
+            }
+        };
+        let _ = tx.send(AppEvent::AgentTypePromoted { name, result });
     });
 }
 
@@ -3735,23 +3917,47 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
 }
 
 /// Fetch the live run state for a single goal.
+///
+/// Every exit path sends an event. The start/stop toggle keys off the live
+/// phase rather than the goal document's `status`, so a silent return leaves
+/// the toggle acting on a stale or absent phase and the operator cannot tell
+/// a finished run from a failed fetch (#8141).
 pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, goal_id: String, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::GoalRunFailed { goal_id, failure });
+        };
+
         let BackendRef::Daemon { base_url, api_key } = backend else {
+            fail(&tx, goal_id, FetchFailure::RequiresDaemon);
             return;
         };
         let client = make_daemon_client(api_key.as_deref());
-        let Ok(resp) = client
+        let resp = match client
             .get(format!("{base_url}/api/goals/{goal_id}/run"))
             .send()
-        else {
-            return;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                fail(&tx, goal_id, FetchFailure::Error(e.to_string()));
+                return;
+            }
         };
-        let Ok(body) = resp.json::<serde_json::Value>() else {
+        let status = resp.status();
+        if !status.is_success() {
+            fail(&tx, goal_id, FetchFailure::Error(status.to_string()));
             return;
+        }
+        let body = match resp.json::<serde_json::Value>() {
+            Ok(b) => b,
+            Err(e) => {
+                fail(&tx, goal_id, FetchFailure::Error(e.to_string()));
+                return;
+            }
         };
         // A goal that never ran answers `{"running": false}` with no `run`
-        // object, which correctly leaves every field `None`.
+        // object, which correctly leaves every field `None`. That is a
+        // successful read of "no run", not a failure — hence `GoalRunLoaded`.
         let run = &body["run"];
         let _ = tx.send(AppEvent::GoalRunLoaded {
             goal_id,
@@ -4712,6 +4918,77 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── fetch helpers must never exit silently (#8141) ─────────────────────
+
+    /// Port 1 on loopback refuses immediately, so this exercises the
+    /// transport-error path without a mock server and without a timeout.
+    fn unreachable_daemon() -> BackendRef {
+        BackendRef::Daemon {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: None,
+        }
+    }
+
+    /// A memory-config fetch that cannot reach the daemon must say so.
+    ///
+    /// Before #8141 this returned without sending anything, and the Memory
+    /// screen kept its spinner and its empty `config` — visually identical to
+    /// "still loading" and to "the daemon says there is no config".
+    #[test]
+    fn memory_config_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_memory_config(unreachable_daemon(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::MemoryConfigFailed(FetchFailure::Error(reason)) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            // `AppEvent` has no `Debug` (it carries `Arc<LibreFangKernel>` and
+            // `AgentLoopResult`), so the wrong-variant message cannot print it.
+            _ => panic!("expected MemoryConfigFailed(FetchFailure::Error), got another AppEvent"),
+        }
+    }
+
+    /// Same for a goal's run state, and the event must name the goal so the
+    /// status line can be specific about which row is stale.
+    #[test]
+    fn goal_run_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_goal_run(unreachable_daemon(), "goal-42".to_string(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::GoalRunFailed { goal_id, failure } => {
+                assert_eq!(goal_id, "goal-42");
+                assert!(
+                    matches!(failure, FetchFailure::Error(ref r) if !r.is_empty()),
+                    "expected a transport error carrying a reason, got {failure:?}"
+                );
+            }
+            _ => panic!("expected GoalRunFailed, got another AppEvent"),
+        }
+    }
+
+    /// The two failure kinds must stay distinguishable at the type level.
+    ///
+    /// This is the whole reason `FetchFailure` is an enum rather than a
+    /// `String`: `RequiresDaemon` will never succeed on retry and `Error`
+    /// usually will, so the handler picks different words for each. A later
+    /// refactor that collapses them to one string would compile fine and
+    /// quietly restore the "one blank screen means three things" problem.
+    #[test]
+    fn the_two_fetch_failure_kinds_are_not_interchangeable() {
+        assert_ne!(
+            FetchFailure::RequiresDaemon,
+            FetchFailure::Error("connection refused".to_string())
+        );
+    }
 
     /// `GET /api/channels` mixes configured instances and catalog adapters in
     /// one array, and `name` means a different thing in each. Getting the

@@ -214,6 +214,10 @@ pub enum TemplatesAction {
         name: String,
         source: TemplateSource,
     },
+    /// Promote the selected manifest-backed agent type to the registry.
+    PromoteTemplate {
+        name: String,
+    },
 }
 
 impl TemplatesState {
@@ -321,6 +325,19 @@ impl TemplatesState {
             KeyCode::Char('f') => {
                 self.category_filter = (self.category_filter + 1) % CATEGORIES.len();
                 self.refilter();
+            }
+            KeyCode::Char('p') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        if t.source == TemplateSource::Manifest {
+                            return TemplatesAction::PromoteTemplate {
+                                name: t.name.clone(),
+                            };
+                        }
+                        self.status_msg = crate::i18n::t("tui-templates-promote-only-custom");
+                    }
+                }
             }
             KeyCode::Char('r') => return TemplatesAction::Refresh,
             _ => {}

@@ -6,7 +6,7 @@
 use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, EffectiveCapabilities, EffectiveLimits, LimitSource,
     ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier, ProviderCatalogToml,
-    ProviderInfo,
+    ProviderInfo, VisionSupport,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -39,6 +39,14 @@ pub struct ModelCatalog {
     overrides: HashMap<String, ModelOverrides>,
 }
 
+/// Whether a model's name marks it as an embedding model, which is neither a chat model nor a vision model.
+///
+/// Shared by [`infer_capabilities`] and [`resolve_discovered_capabilities`] so the two cannot disagree about which side of the short-circuit a name falls on.
+fn is_embedding_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("embed") || lower.contains("embedding")
+}
+
 /// Infer (supports_vision, supports_tools, supports_thinking) from a model's
 /// name and the `families` array returned by Ollama's `/api/tags`.
 ///
@@ -53,8 +61,7 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     // A vision-encoder used for embeddings (e.g. a hypothetical "clip-embed")
     // is still not a chat vision model, so the families check is intentionally
     // skipped for embedding models.
-    let is_embed = lower.contains("embed") || lower.contains("embedding");
-    if is_embed {
+    if is_embedding_name(name) {
         return (false, false, false);
     }
 
@@ -75,34 +82,66 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     (supports_vision, true, supports_thinking)
 }
 
-/// Resolve capabilities from the explicit Ollama ≥0.7 `capabilities` array, falling back to name heuristics when empty.
+/// What one probe learned about a discovered model's capabilities, and how much of it it actually *knows* (refs #7957).
+///
+/// [`Self::vision_known`] is the field that makes this a struct rather than the tuple it used to be.
+/// Before #7957 the resolver returned three bare booleans, so a `supports_vision: false` inferred from a model's name was indistinguishable at the call site from one a provider had declared — and `merge_discovered_models` wrote both into the catalog as the same fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiscoveredCapabilities {
+    supports_vision: bool,
+    /// Whether [`Self::supports_vision`] came from something that knows, rather than from the name heuristic.
+    /// Written straight through to `ModelCatalogEntry::vision_known`.
+    vision_known: bool,
+    supports_tools: bool,
+    supports_streaming: bool,
+    supports_thinking: bool,
+}
+
+/// Resolve a discovered model's capabilities, preferring what the provider declared over what its name suggests.
+///
+/// The rule for vision is one line, and #7957 is what made it worth stating: **`vision_known` is true if and only if the provider declared the capability.**
+/// `reported_vision` is that declaration — an OpenAI-compatible gateway's per-model `supports_vision` flag, or an Ollama `capabilities` array the server actually sent (see `provider_health::parse_ollama_tags`, which deliberately reports `None` for the array it synthesizes from the model name).
+/// Everything else — the name heuristic in [`infer_capabilities`], the synthesized Ollama array, an entry the probe learned nothing about — is a guess, and a guess resolves to [`VisionSupport::Unknown`] at the request-build gate and keeps sending images.
+///
+/// That is the whole defect. An operator-run gateway names its models `team-default` or `fast` or an internal ticket id; the heuristic answered anyway; a wrong `false` reached `redact_images_for_text_only`, which replaced each picture with its on-disk path and let the turn succeed looking like it had worked.
 fn resolve_discovered_capabilities(
     name: &str,
     families: Option<&[String]>,
     capabilities: &[String],
-) -> (bool, bool, bool) {
-    if capabilities.is_empty() {
-        return infer_capabilities(name, families);
-    }
-    let is_embedding = capabilities
-        .iter()
-        .any(|c| c.eq_ignore_ascii_case("embedding"));
-    if is_embedding {
-        return (false, false, false);
-    }
-    let has_vision = capabilities
-        .iter()
-        .any(|c| c.eq_ignore_ascii_case("vision"));
-    let has_thinking = capabilities
-        .iter()
-        .any(|c| c.eq_ignore_ascii_case("thinking"));
+    reported_vision: Option<bool>,
+    reported_tools: Option<bool>,
+) -> DiscoveredCapabilities {
+    let has = |wanted: &str| capabilities.iter().any(|c| c.eq_ignore_ascii_case(wanted));
+    // The `capabilities` array, when present, is the more specific signal for the value of each
+    // flag; the name heuristic covers the case where there is no array at all.
+    let (is_embedding, inferred_vision, supports_thinking) = if capabilities.is_empty() {
+        let (vision, _, thinking) = infer_capabilities(name, families);
+        (is_embedding_name(name), vision, thinking)
+    } else if has("embedding") {
+        (true, false, false)
+    } else {
+        (false, has("vision"), has("thinking"))
+    };
+
     // `tools`/`completion` is the default for any non-embedding chat model.
     // Ollama ≥0.7 emits an explicit `tools` capability for tool-aware models;
     // older daemons just emit `completion`. We treat any non-embedding model
     // as tool-capable to preserve the prior behaviour (`!is_embedding`) and
     // because most modern chat models expose tool calls via the OpenAI shape.
-    let supports_tools = true;
-    (has_vision, supports_tools, has_thinking)
+    // A gateway that states `supports_function_calling` overrides that assumption; an absent flag
+    // leaves it exactly as it was.
+    let supports_tools = !is_embedding && reported_tools.unwrap_or(true);
+
+    DiscoveredCapabilities {
+        supports_vision: reported_vision.unwrap_or(inferred_vision),
+        vision_known: reported_vision.is_some(),
+        supports_tools,
+        // Streaming tracks "is a chat model", not "has tools" — the two were the same expression
+        // before `supports_tools` became overridable, and conflating them would let a gateway's
+        // `supports_function_calling: false` also mark the model non-streaming, which it never said.
+        supports_streaming: !is_embedding,
+        supports_thinking,
+    }
 }
 
 fn strip_catalog_provider_prefix<'a>(provider: &str, model: &'a str) -> &'a str {
@@ -1142,6 +1181,50 @@ impl ModelCatalog {
             .map(|m| self.effective_capabilities(m))
     }
 
+    /// Resolve what is actually *known* about an entry's image-input support, applying any operator override (refs #7957).
+    ///
+    /// Precedence, highest first:
+    ///
+    /// 1. An operator override in `model_overrides.json` — a human stated it, so it is knowledge in both directions.
+    /// 2. The entry's own `supports_vision`, but only when `vision_known` says a source declared it.
+    /// 3. [`VisionSupport::Unknown`] — the entry's boolean came from a name heuristic and carries no information.
+    ///
+    /// This is the vision counterpart to [`Self::effective_limits`], and it exists for the same reason #7774 gave `EffectiveLimits` a `LimitSource`: the value and its provenance have to be computed in one pass over the same override map and entry, or a caller reads a guess and treats it as a declaration.
+    pub fn vision_support(&self, entry: &ModelCatalogEntry) -> VisionSupport {
+        let key = format!("{}:{}", entry.provider, entry.id);
+        let overridden = self
+            .overrides
+            .get(&key)
+            .and_then(|o| o.supports_vision)
+            .map(|v| {
+                if v {
+                    VisionSupport::Supported
+                } else {
+                    VisionSupport::Unsupported
+                }
+            });
+        if let Some(from_operator) = overridden {
+            return from_operator;
+        }
+        match (entry.vision_known, entry.supports_vision) {
+            (true, true) => VisionSupport::Supported,
+            (true, false) => VisionSupport::Unsupported,
+            (false, _) => VisionSupport::Unknown,
+        }
+    }
+
+    /// Look up a model by id-or-alias and resolve its image-input support.
+    ///
+    /// A catalog **miss** is [`VisionSupport::Unknown`], not `Unsupported` — an unknown or
+    /// user-defined model has never been degraded by this gate and must not start being.
+    /// Since #7957 a catalog *hit* whose flag is only inferred resolves to `Unknown` as well,
+    /// so the hit path is no longer more confident than the miss path.
+    pub fn vision_support_for(&self, id_or_alias: &str) -> VisionSupport {
+        self.find_model(id_or_alias)
+            .map(|m| self.vision_support(m))
+            .unwrap_or(VisionSupport::Unknown)
+    }
+
     /// Compute the effective capacity limits for a catalog entry, applying any
     /// operator override on top of the catalog-declared values (refs #7774).
     ///
@@ -1524,6 +1607,13 @@ impl ModelCatalog {
     /// The agent loop built that turn's `ContextBudget` from it, so an 8K model reached through a gateway got a 131K budget: compaction never fired, the prompt was packed past what the provider accepts, and the request failed *after* the input tokens were billed.
     /// The opposite error is just as silent — a 1M model clamped to 131K compacts away prompt content nobody asked to drop.
     ///
+    /// # Vision capability
+    ///
+    /// The same rule, for the same reason, applies to `supports_vision` since #7957.
+    /// An OpenAI-compatible gateway's `/v1/models` entry that declares `supports_vision` is believed in both directions and the entry is stamped `vision_known: true`; an Ollama `capabilities` array counts as a declaration too.
+    /// When nothing declared it, `supports_vision` still carries [`infer_capabilities`]'s reading of the model's *name*, but the entry is stamped `vision_known: false` — and the request-build gate then treats it as [`librefang_types::model_catalog::VisionSupport::Unknown`] and sends the images anyway.
+    /// A model behind a gateway is named by its operator (`team-default`, `fast`, a ticket id), so the heuristic is guessing; a wrong `false` used to reach `redact_images_for_text_only`, which swapped each image for its on-disk path and let the turn succeed looking like it had worked.
+    ///
     /// So an entry gets numbers only when the endpoint supplied them.
     /// When it did not, both fields stay `0` and `limits_known` is `false`, and the `> 0` guards already present throughout the budget math fall through to `UNKNOWN_MODEL_CONTEXT_WINDOW` — whose warning names `agent.toml: model.context_window` as the operator's fix.
     /// A conservative window with a loud warning is recoverable; an invented one is not visible from either end.
@@ -1562,23 +1652,41 @@ impl ModelCatalog {
             if existing_non_local.contains(&key) {
                 continue;
             }
-            let (supports_vision, supports_tools, supports_thinking) =
-                resolve_discovered_capabilities(
-                    &info.name,
-                    info.families.as_deref(),
-                    &info.capabilities,
-                );
+            let caps = resolve_discovered_capabilities(
+                &info.name,
+                info.families.as_deref(),
+                &info.capabilities,
+                info.supports_vision,
+                info.supports_function_calling,
+            );
+            let DiscoveredCapabilities {
+                supports_vision,
+                vision_known,
+                supports_tools,
+                supports_streaming,
+                supports_thinking,
+            } = caps;
             let reported_context = info.context_window.filter(|v| *v > 0);
             let reported_max_output = info.max_output_tokens.filter(|v| *v > 0);
             let limits_known = reported_context.is_some() || reported_max_output.is_some();
             // Upgrade the previously-discovered Local entry in place when the
-            // current probe reports stronger capabilities. We never downgrade:
-            // a transient probe that drops the `capabilities` array (e.g. an
+            // current probe reports stronger capabilities. An *inferred* capability never
+            // downgrades: a transient probe that drops the `capabilities` array (e.g. an
             // older proxy in front of an upgraded Ollama) must not flip a
             // vision-capable model back to non-vision.
+            // A *declared* one does replace what is there — see the `vision_known` branch below.
             if let Some(&idx) = existing_local.get(&key) {
                 let entry = &mut self.models[idx];
-                if supports_vision {
+                // A declared capability replaces whatever is on the entry, in either direction:
+                // the provider has stated a fact, and a stale guess (or a stale declaration from
+                // before the operator reconfigured the gateway) must not outrank it.
+                // A *guess* still only ever upgrades, which is what the never-downgrade rule below
+                // was always protecting — a probe that drops the `capabilities` array reports
+                // `vision_known: false` and therefore cannot flip a known-vision model to blind.
+                if vision_known {
+                    entry.supports_vision = supports_vision;
+                    entry.vision_known = true;
+                } else if supports_vision {
                     entry.supports_vision = true;
                 }
                 if supports_thinking {
@@ -1586,9 +1694,9 @@ impl ModelCatalog {
                 }
                 if supports_tools {
                     entry.supports_tools = true;
-                    if !entry.supports_streaming {
-                        entry.supports_streaming = true;
-                    }
+                }
+                if supports_streaming && !entry.supports_streaming {
+                    entry.supports_streaming = true;
                 }
                 // Capacity follows the same never-downgrade rule as the capability flags, for the same reason: a probe that drops the capacity keys (an older proxy in front of an upgraded gateway) must not erase a number an earlier probe did report.
                 // Only what is still unknown gets filled in.
@@ -1619,7 +1727,12 @@ impl ModelCatalog {
                 output_cost_per_m: 0.0,
                 supports_tools,
                 supports_vision,
-                supports_streaming: supports_tools,
+                // The whole point of #7957: a freshly discovered gateway model records *whether*
+                // its vision flag is a fact. `Default` says `true` because a registry entry that
+                // omits the field is a curated declaration; a probe result is not, unless the
+                // provider actually declared it, so this must be written explicitly.
+                vision_known,
+                supports_streaming,
                 supports_thinking,
                 aliases: Vec::new(),
                 ..Default::default()
@@ -2342,14 +2455,19 @@ fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogE
                         .any(|parameter| parameter.as_str() == Some(wanted))
                 })
             };
-            let supports_vision = model
+            // A present `input_modalities` array is OpenRouter declaring the model's inputs, and it
+            // is authoritative in both directions. An absent one is OpenRouter saying nothing, so
+            // the resulting `false` is a placeholder and `vision_known` records that (#7957) —
+            // otherwise a listing shape change would silently mark every model blind and strip
+            // images from requests that used to carry them.
+            let input_modalities = model
                 .pointer("/architecture/input_modalities")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|modalities| {
-                    modalities
-                        .iter()
-                        .any(|modality| modality.as_str() == Some("image"))
-                });
+                .and_then(serde_json::Value::as_array);
+            let supports_vision = input_modalities.is_some_and(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("image"))
+            });
 
             let input_cost_per_m = openrouter_price_per_million(model, "prompt");
             let output_cost_per_m = openrouter_price_per_million(model, "completion");
@@ -2370,6 +2488,7 @@ fn parse_openrouter_model_entries(body: &serde_json::Value) -> Vec<ModelCatalogE
                 pricing_known: input_cost_per_m.is_some() && output_cost_per_m.is_some(),
                 supports_tools: supports_parameter("tools"),
                 supports_vision,
+                vision_known: input_modalities.is_some(),
                 supports_streaming: true,
                 supports_thinking: supports_parameter("reasoning")
                     || supports_parameter("include_reasoning"),

@@ -1360,6 +1360,38 @@
       "unconfigured": "set a cap",
       "healthy": "healthy",
       "edit": "Edit caps"
+    },
+    "agent": "Agent",
+    "agent_detail_table": "Per-agent Details",
+    "agent_detail_count": "{{n}} agents",
+    "total_tool_calls": "Tool Calls",
+    "cost_per_call_kpi": "Cost / Call",
+    "input_tokens": "Input",
+    "output_tokens": "Output",
+    "p95_latency": "P95",
+    "worst_p95_latency": "Worst P95 Latency",
+    "hand_tag": "hand",
+    "range": {
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "7d": "7 days",
+      "14d": "14 days",
+      "30d": "30 days",
+      "this_month": "This month",
+      "last_month": "Last month",
+      "all": "All",
+      "from": "From",
+      "to": "To",
+      "inverted": "The end date is before the start date — showing the unfiltered window until the range is valid.",
+      "data_since": "Stored usage data starts {{date}}",
+      "no_data_stored": "No usage events stored yet",
+      "retention": "retention {{days}} days — older events are pruned",
+      "retention_disabled": "retention disabled — nothing is pruned",
+      "summary_days": "Days with data",
+      "summary_calls": "Calls in range",
+      "summary_tokens": "Tokens in range",
+      "summary_cost": "Cost in range",
+      "summary_span": "{{withData}} of {{span}} days in the selected window recorded usage."
     }
   },
   "memory": {
@@ -4250,6 +4282,12 @@
     "title": "Agent Types",
     "tools": "Tools",
     "tools_hint": "Picked from the tools this daemon exposes; unknown identifiers can still be typed.",
-    "tools_search": "Search tools…"
+    "tools_search": "Search tools…",
+    "promote": "Promote to registry",
+    "confirm_promote": "Promote the agent type '{{name}}' to the public registry? The manifest will be sanitized for publication and submitted as a GitHub pull request.",
+    "promoted": "Registry PR opened",
+    "promote_failed": "Could not promote the agent type",
+    "promote_success": "A pull request has been opened against the registry. Review it and merge when ready.",
+    "view_pr": "View pull request"
   }
 }

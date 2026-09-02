@@ -1359,6 +1359,38 @@
       "unconfigured": "한도를 설정하세요",
       "healthy": "정상",
       "edit": "한도 편집"
+    },
+    "agent": "에이전트",
+    "agent_detail_table": "에이전트별 상세",
+    "agent_detail_count": "에이전트 {{n}}개",
+    "total_tool_calls": "도구 호출",
+    "cost_per_call_kpi": "호출당 비용",
+    "input_tokens": "입력",
+    "output_tokens": "출력",
+    "p95_latency": "P95",
+    "worst_p95_latency": "최악 P95 지연 시간",
+    "hand_tag": "핸드",
+    "range": {
+      "today": "오늘",
+      "yesterday": "어제",
+      "7d": "7일",
+      "14d": "14일",
+      "30d": "30일",
+      "this_month": "이번 달",
+      "last_month": "지난달",
+      "all": "전체",
+      "from": "시작",
+      "to": "종료",
+      "inverted": "종료일이 시작일보다 앞섭니다. 범위가 올바르게 지정될 때까지 필터를 적용하지 않은 전체 기간을 표시합니다.",
+      "data_since": "저장된 사용 데이터는 {{date}}부터 시작합니다",
+      "no_data_stored": "저장된 사용 이벤트가 없습니다",
+      "retention": "보관 기간 {{days}}일 — 더 오래된 이벤트는 삭제됩니다",
+      "retention_disabled": "보관 정책 비활성화 — 아무것도 삭제되지 않습니다",
+      "summary_days": "데이터가 있는 일수",
+      "summary_calls": "기간 내 호출",
+      "summary_tokens": "기간 내 토큰",
+      "summary_cost": "기간 내 비용",
+      "summary_span": "선택한 기간 {{span}}일 중 {{withData}}일에 사용 기록이 있습니다."
     }
   },
   "memory": {
@@ -4249,6 +4281,12 @@
     "title": "에이전트 타입",
     "tools": "도구",
     "tools_hint": "이 데몬이 제공하는 도구 목록에서 선택하며, 목록에 없는 식별자도 입력할 수 있습니다.",
-    "tools_search": "도구 검색…"
+    "tools_search": "도구 검색…",
+    "promote": "레지스트리에 등록",
+    "confirm_promote": "에이전트 유형 '{{name}}'을(를) 공개 레지스트리에 등록하시겠습니까? 매니페스트가 정리된 후 GitHub pull request로 제출됩니다.",
+    "promoted": "레지스트리 PR 생성됨",
+    "promote_failed": "에이전트 유형을 등록할 수 없습니다",
+    "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
+    "view_pr": "Pull request 보기"
   }
 }

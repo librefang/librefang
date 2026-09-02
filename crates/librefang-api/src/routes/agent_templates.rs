@@ -37,6 +37,10 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             axum::routing::get(get_agent_template_toml),
         )
         .route(
+            "/templates/{name}/promote",
+            axum::routing::post(promote_agent_type),
+        )
+        .route(
             "/templates/{name}/history",
             axum::routing::get(list_template_history),
         )
@@ -136,6 +140,18 @@ fn template_error_messages(lang: &str, name: &str) -> (String, String, String) {
         t.t_args("api-error-template-not-found", &[("name", name)]),
         t.t("api-error-template-invalid-manifest"),
         t.t("api-error-template-read-failed"),
+    )
+}
+
+/// Render the two promote messages that need no dynamic argument, and drop the translator.
+///
+/// The render-failure message carries the TOML error, which is only known after the
+/// sanitization runs, so it is rendered inline at its one call site instead.
+fn promote_error_messages(lang: &str) -> (String, String) {
+    let t = ErrorTranslator::new(lang);
+    (
+        t.t("api-error-template-promote-no-token"),
+        t.t("api-error-template-promote-review-required"),
     )
 }
 
@@ -720,6 +736,158 @@ pub async fn delete_agent_type(
             tracing::error!("Failed to delete agent type '{name}': {e}");
             ApiErrorResponse::internal_scrub(e).into_json_tuple()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Promote to registry (#8043)
+// ---------------------------------------------------------------------------
+
+/// POST /api/templates/:name/promote — open a PR contributing this agent
+/// type to the configured public registry.
+///
+/// Runs the privacy scan first and refuses to publish when a finding sits
+/// inside a field the sanitiser keeps (`removed_by_sanitizer == false`),
+/// so a credential or private endpoint pasted into free text cannot reach
+/// a public git history. Then it sanitizes the manifest (stripping private
+/// fields), renders it as TOML, forks the registry repo, pushes the file to
+/// `agent-types/<name>/agent.toml`, and opens a pull request.
+/// Requires `GITHUB_TOKEN` (env or vault).
+#[utoipa::path(
+    post,
+    path = "/api/templates/{name}/promote",
+    tag = "system",
+    operation_id = "promote_agent_type",
+    params(("name" = String, Path, description = "Agent type name")),
+    responses(
+        (status = 200, description = "PR opened against the registry", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid manifest or name"),
+        (status = 401, description = "No GitHub token configured"),
+        (status = 404, description = "Agent type not found"),
+        (status = 409, description = "Manifest still contains private details that require review"),
+        (status = 502, description = "GitHub request failed")
+    )
+)]
+pub async fn promote_agent_type(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    let (not_found, invalid_manifest, read_failed) = template_error_messages(lang, &name);
+    let (no_token, review_required) = promote_error_messages(lang);
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::not_found(not_found).into_json_tuple();
+    }
+
+    // Read the manifest.
+    let manifest = match read_agent_type(&name).await {
+        Ok(Some((_source, content))) => match toml::from_str::<AgentManifest>(&content) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Invalid template manifest for '{name}': {e}");
+                return ApiErrorResponse::internal(invalid_manifest).into_json_tuple();
+            }
+        },
+        Ok(None) => return ApiErrorResponse::not_found(not_found).into_json_tuple(),
+        Err(e) => {
+            tracing::warn!("Failed to read template '{name}': {e}");
+            return ApiErrorResponse::internal(read_failed).into_json_tuple();
+        }
+    };
+
+    // Privacy gate: refuse to publish while any finding sits inside a field
+    // the sanitiser keeps (`removed_by_sanitizer == false`), because that is
+    // material the operator has to edit by hand — a credential or private
+    // endpoint pasted into a system prompt or description. Findings the
+    // sanitiser already strips are fine: publishing drops them. This is the
+    // server-side half of `promotion_preview`, so the advisory hint and the
+    // endpoint agree.
+    let findings = librefang_types::manifest_privacy::scan_for_publication(&manifest);
+    if findings.iter().any(|finding| !finding.removed_by_sanitizer) {
+        return ApiErrorResponse::conflict(review_required)
+            .with_code("review_required")
+            .with_details(serde_json::json!({ "findings": findings }))
+            .into_json_tuple();
+    }
+
+    // Token check.
+    let Some(token) = super::skills::resolve_github_token(&state) else {
+        return ApiErrorResponse::unauthorized(no_token).into_json_tuple();
+    };
+
+    // Sanitize for publication and render.
+    let publishable = librefang_types::manifest_privacy::sanitize_for_publication(&manifest);
+    let manifest_toml = match toml::to_string_pretty(&publishable) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Could not render publishable manifest for '{name}': {e}");
+            let render_failed = {
+                let t = ErrorTranslator::new(lang);
+                t.t_args(
+                    "api-error-template-promote-render-failed",
+                    &[("error", &e.to_string())],
+                )
+            };
+            return ApiErrorResponse::bad_request(render_failed).into_json_tuple();
+        }
+    };
+
+    let registry_repo = state
+        .kernel
+        .config_snapshot()
+        .skills
+        .registry_repo
+        .clone()
+        .filter(|r| !r.trim().is_empty())
+        .unwrap_or_else(|| librefang_skills::registry_pr::DEFAULT_REGISTRY_REPO.to_string());
+
+    // Build the PR body.
+    let mut body = format!("Contributes the `{name}` agent type to the registry.\n\n");
+    if !publishable.description.is_empty() {
+        body.push_str(&format!("- **Description**: {}\n", publishable.description));
+    }
+    body.push_str(&format!(
+        "- **Provider**: {}\n- **Model**: {}\n",
+        publishable.model.provider, publishable.model.model
+    ));
+    if !publishable.tags.is_empty() {
+        body.push_str(&format!("- **Tags**: {}\n", publishable.tags.join(", ")));
+    }
+
+    let req = librefang_skills::registry_pr::GenericProposeRequest {
+        name: &name,
+        registry_repo: &registry_repo,
+        token: &token,
+        prefix: "agent-types",
+        files: vec![("agent.toml".to_string(), manifest_toml.into_bytes())],
+        pr_title: format!("agent-type: contribute `{name}`"),
+        pr_body: body,
+    };
+
+    match librefang_skills::registry_pr::propose_files_to_registry(req).await {
+        Ok(pr) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "pr_url": pr.pr_url,
+                "repo": pr.repo,
+                "branch": pr.branch,
+            })),
+        ),
+        Err(librefang_skills::SkillError::SecurityBlocked(msg)) => {
+            ApiErrorResponse::unauthorized(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::InvalidManifest(msg)) => {
+            ApiErrorResponse::bad_request(msg).into_json_tuple()
+        }
+        Err(librefang_skills::SkillError::NotFound(msg)) => {
+            ApiErrorResponse::not_found(msg).into_json_tuple()
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

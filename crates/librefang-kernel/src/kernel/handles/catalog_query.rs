@@ -9,7 +9,7 @@
 //! driver to fall back to substring detection.
 
 use librefang_runtime::kernel_handle;
-use librefang_types::model_catalog::ReasoningEchoPolicy;
+use librefang_types::model_catalog::{ReasoningEchoPolicy, VisionSupport};
 
 use super::super::LibreFangKernel;
 use crate::kernel_api::KernelApi;
@@ -27,17 +27,13 @@ impl LibreFangKernel {
             .unwrap_or_default()
     }
 
-    /// Inherent mirror of [`kernel_handle::CatalogQuery::supports_vision_for`]
-    /// (#6010). Resolves the model's effective vision capability from the
-    /// catalog, honouring user capability overrides (#4745) via
-    /// `effective_capabilities`. Fails open (`true`) on a catalog miss so an
-    /// unknown / user-defined model is never silently stripped of image input.
-    pub(crate) fn lookup_supports_vision(&self, model: &str) -> bool {
-        let catalog = self.model_catalog_ref().load();
-        catalog
-            .find_model(model)
-            .map(|m| catalog.effective_capabilities(m).supports_vision)
-            .unwrap_or(true)
+    /// Inherent mirror of [`kernel_handle::CatalogQuery::vision_support_for`] (#6010, refs #7957).
+    ///
+    /// Resolves what the catalog actually *knows* about the model's image-input support, honouring operator capability overrides (#4745).
+    /// Three answers, not two: a catalog miss and an entry whose flag was inferred from the model's name both return [`VisionSupport::Unknown`], because they carry the same amount of information and the gate must therefore behave identically for both.
+    /// Only a declared `supports_vision = false` returns `Unsupported`, and only that answer removes images from a request.
+    pub(crate) fn lookup_vision_support(&self, model: &str) -> VisionSupport {
+        self.model_catalog_ref().load().vision_support_for(model)
     }
 }
 
@@ -46,8 +42,8 @@ impl kernel_handle::CatalogQuery for LibreFangKernel {
         self.lookup_reasoning_echo_policy(model)
     }
 
-    fn supports_vision_for(&self, model: &str) -> bool {
-        self.lookup_supports_vision(model)
+    fn vision_support_for(&self, model: &str) -> VisionSupport {
+        self.lookup_vision_support(model)
     }
 
     /// Resolve the per-agent `extraction_model` for proactive memory

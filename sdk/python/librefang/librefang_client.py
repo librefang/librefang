@@ -1331,6 +1331,9 @@ class _SystemResource(_Resource):
     def restore_template_version(self, name: str, version_id: str):
         return self._c._request("POST", f"/api/templates/{name}/history/{version_id}/restore")
 
+    def promote_agent_type(self, name: str):
+        return self._c._request("POST", f"/api/templates/{name}/promote")
+
     def get_agent_template_toml(self, name: str):
         return self._c._request("GET", f"/api/templates/{name}/toml")
 

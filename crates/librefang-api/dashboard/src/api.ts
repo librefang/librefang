@@ -983,6 +983,12 @@ export interface ModelPerformanceItem {
   avg_latency_ms?: number;
   min_latency_ms?: number;
   max_latency_ms?: number;
+  /**
+   * Nearest-rank 95th-percentile latency for the window (#8062).
+   *
+   * The percentile an SLO is written against — `avg_latency_ms` hides the tail and `max_latency_ms` is a single outlier.
+   */
+  p95_latency_ms?: number;
   cost_per_call?: number;
   avg_latency_per_call?: number;
 }
@@ -993,6 +999,19 @@ export interface UsageByAgentItem {
   total_tokens?: number;
   tool_calls?: number;
   cost?: number;
+  /**
+   * Prompt / completion split, so a chatty agent is distinguishable from an expensive one.
+   * Both are served by `GET /api/usage`.
+   */
+  input_tokens?: number;
+  output_tokens?: number;
+  /** Same value as `cost`; the handler emits both names. */
+  total_cost_usd?: number;
+  call_count?: number;
+  /**
+   * `true` for a hand rather than a top-level agent. A hand's spend is real money, so the page labels these rows instead of dropping them.
+   */
+  is_hand?: boolean;
 }
 
 export interface UsageDailyItem {
@@ -1005,7 +1024,45 @@ export interface UsageDailyItem {
 export interface UsageDailyResponse {
   days?: UsageDailyItem[];
   today_cost_usd?: number;
+  /**
+   * Timestamp of the oldest stored usage event, or `null` when the table is empty.
+   * Deliberately NOT filtered by the selected range — it answers "how far back does the stored data go".
+   *
+   * Despite the `_date` suffix this is `MIN(timestamp)`, so it carries a full RFC 3339 instant rather than a bare `YYYY-MM-DD`.
+   * Render the first 10 characters for a day.
+   */
   first_event_date?: string | null;
+  /**
+   * `usage.retention_days` from `config.toml` (#8062). `0` means the retention sweep is disabled and the table grows without bound.
+   *
+   * Paired with `first_event_date` this distinguishes "this deployment is young" from "the sweep already pruned the rest", which a cost report needs before anyone reads a total as complete.
+   */
+  retention_days?: number;
+}
+
+/**
+ * Inclusive reporting window accepted by every `/api/usage*` endpoint (#7891).
+ *
+ * Both bounds are `YYYY-MM-DD` **UTC calendar days** — see `lib/usageRange.ts` for why the dashboard resolves its presets in UTC rather than local time.
+ * An omitted bound means unbounded on that side; a malformed one is a `400`, so callers normalize before passing values in.
+ */
+export interface UsageRangeParams {
+  start_date?: string;
+  end_date?: string;
+}
+
+function usageRangeQuery(
+  range: UsageRangeParams = {},
+  extra: Record<string, string | number | undefined> = {},
+): string {
+  const params = new URLSearchParams();
+  if (range.start_date) params.set("start_date", range.start_date);
+  if (range.end_date) params.set("end_date", range.end_date);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 }
 
 export interface CommsNode {
@@ -1767,6 +1824,22 @@ export async function deleteAgentType(name: string): Promise<ApiActionResponse> 
   return del<ApiActionResponse>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
+/** Result of promoting an agent type to the public registry as a PR. */
+export interface PromoteAgentTypeResult {
+  pr_url: string;
+  repo: string;
+  branch: string;
+}
+
+/**
+ * Promote an agent type to the configured registry repo as a GitHub PR.
+ * Sanitizes the manifest for publication, pushes it to `agent-types/<name>/agent.toml`,
+ * and opens a pull request. Requires `GITHUB_TOKEN` on the daemon side.
+ */
+export async function promoteAgentType(name: string): Promise<PromoteAgentTypeResult> {
+  return post<PromoteAgentTypeResult>(`/api/templates/${encodeURIComponent(name)}/promote`, {});
+}
+
 // ---------------------------------------------------------------------------
 // Template version history
 // ---------------------------------------------------------------------------
@@ -1994,6 +2067,12 @@ export interface ModelItem {
   supports_vision?: boolean;
   supports_streaming?: boolean;
   supports_thinking?: boolean;
+  // Provenance of `supports_vision`, resolved through any operator override. Refs #7957.
+  // "supported" / "unsupported" mean a source declared it; "unknown" means the boolean above was
+  // inferred from the model's name, and the agent loop then keeps sending images rather than
+  // stripping them on a guess. Surface it wherever a text-only model is presented as a fact, so an
+  // operator can tell "this model cannot see" from "nobody has told us".
+  vision_support?: "supported" | "unsupported" | "unknown";
   // Raw catalog defaults — use for "Auto = revert target" in override editors.
   capabilities_catalog?: {
     supports_tools?: boolean;
@@ -3997,27 +4076,55 @@ export async function decayMemories(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/memory/decay", {});
 }
 
-export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<PaginatedResponse<UsageByAgentItem>>("/api/usage");
+export async function listUsageByAgent(
+  range: UsageRangeParams = {},
+): Promise<UsageByAgentItem[]> {
+  const data = await get<PaginatedResponse<UsageByAgentItem>>(
+    `/api/usage${usageRangeQuery(range)}`,
+  );
   return data.items ?? [];
 }
 
-export async function getUsageSummary(): Promise<UsageSummaryResponse> {
-  return get<UsageSummaryResponse>("/api/usage/summary");
+export async function getUsageSummary(
+  range: UsageRangeParams = {},
+): Promise<UsageSummaryResponse> {
+  return get<UsageSummaryResponse>(`/api/usage/summary${usageRangeQuery(range)}`);
 }
 
-export async function listUsageByModel(): Promise<UsageByModelItem[]> {
-  const data = await get<{ models?: UsageByModelItem[] }>("/api/usage/by-model");
+export async function listUsageByModel(
+  range: UsageRangeParams = {},
+): Promise<UsageByModelItem[]> {
+  const data = await get<{ models?: UsageByModelItem[] }>(
+    `/api/usage/by-model${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageByModelPerformance(): Promise<ModelPerformanceItem[]> {
-  const data = await get<{ models?: ModelPerformanceItem[] }>("/api/usage/by-model/performance");
+export async function getUsageByModelPerformance(
+  range: UsageRangeParams = {},
+): Promise<ModelPerformanceItem[]> {
+  const data = await get<{ models?: ModelPerformanceItem[] }>(
+    `/api/usage/by-model/performance${usageRangeQuery(range)}`,
+  );
   return data.models ?? [];
 }
 
-export async function getUsageDaily(): Promise<UsageDailyResponse> {
-  return get<UsageDailyResponse>("/api/usage/daily");
+/**
+ * Daily breakdown for the window.
+ *
+ * `days` and an explicit range are mutually exclusive server-side (combining
+ * them is a `400`), so a bounded window passes dates only and `days` is used
+ * solely for the unbounded case. `dailyDaysFor` in `lib/usageRange.ts` picks
+ * between them.
+ */
+export async function getUsageDaily(
+  range: UsageRangeParams = {},
+  days?: number,
+): Promise<UsageDailyResponse> {
+  const bounded = Boolean(range.start_date || range.end_date);
+  return get<UsageDailyResponse>(
+    `/api/usage/daily${usageRangeQuery(range, bounded ? {} : { days })}`,
+  );
 }
 
 // Mirrors the kernel-side `BudgetStatus` (crates/librefang-kernel-metering)

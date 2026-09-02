@@ -397,6 +397,8 @@ pub async fn usage_by_model_performance(
                         "avg_latency_ms": m.avg_latency_ms,
                         "min_latency_ms": m.min_latency_ms,
                         "max_latency_ms": m.max_latency_ms,
+                        // #8062 — the percentile a latency SLO is written against. avg hides the tail, max is one outlier.
+                        "p95_latency_ms": m.p95_latency_ms,
                         "cost_per_call": m.cost_per_call,
                         "avg_latency_per_call": m.avg_latency_per_call,
                     })
@@ -481,10 +483,17 @@ pub async fn usage_daily(
         Err(error) => return usage_query_error(error),
     };
 
+    // #8062 — the retention horizon that bounds every `/api/usage*` answer.
+    // `first_event_date` alone cannot distinguish "this deployment is three days old" from "the sweep just pruned everything older than three days", and an operator reading a cost report needs to know which.
+    // Reported here rather than left to `GET /api/config` so the analytics page does not have to fetch the whole configuration (a separate, admin-shaped surface) to caption its own numbers.
+    // `0` means pruning is disabled.
+    let retention_days = state.kernel.config_ref().usage.retention_days;
+
     Json(serde_json::json!({
         "days": days_list,
         "today_cost_usd": today_cost,
         "first_event_date": first_event,
+        "retention_days": retention_days,
     }))
     .into_response()
 }
