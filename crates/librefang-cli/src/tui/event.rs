@@ -2294,7 +2294,6 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 ///
 /// Daemon-only. The in-process backend has no HTTP surface to ask, and the
 /// panel says so rather than showing a blank as if it were configuration.
-/// Fetch `[memory]` config for the Memory screen.
 ///
 /// Every exit path sends an event. The screen renders `config: None`
 /// identically for "not fetched yet", "the daemon refused" and "we are
@@ -3874,7 +3873,6 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
 }
 
 /// Fetch the live run state for a single goal.
-/// Fetch one goal's live run state for the detail pane.
 ///
 /// Every exit path sends an event. The start/stop toggle keys off the live
 /// phase rather than the goal document's `status`, so a silent return leaves
