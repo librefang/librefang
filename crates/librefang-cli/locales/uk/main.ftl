@@ -2532,3 +2532,9 @@ tui-event-channels-not-available-in-process = Керування каналам�
 tui-event-channel-save-failed = Не вдалося зберегти екземпляр каналу { $name }: { $error }
 tui-event-channel-delete-failed = Не вдалося видалити екземпляр каналу { $name }: { $error }
 tui-event-channels-reload-failed = Не вдалося перезавантажити канали: { $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = Налаштування пам'яті надходять з API демона — недоступні, коли TUI підключено в межах процесу.
+tui-memory-config-fetch-failed = Не вдалося прочитати налаштування пам'яті: { $error }
+tui-goals-run-requires-daemon = Стан запуску надходить з API демона — недоступний, коли TUI підключено в межах процесу.
+tui-goals-run-fetch-failed = Не вдалося прочитати стан запуску для { $id }: { $error }

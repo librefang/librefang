@@ -1,0 +1,4 @@
+The TUI's Memory screen and the goals detail pane now say why they are empty instead of silently showing nothing.
+`spawn_fetch_memory_config` and `spawn_fetch_goal_run` returned without sending any event when the TUI was attached to an in-process kernel, when the request failed, or when the body would not decode — so a 5xx, an unsupported backend and a genuinely empty answer all rendered as the same blank panel, indistinguishable from still-loading.
+Both now report a `FetchFailure`, and the status line distinguishes "this data lives behind the daemon API" (which retrying will never fix) from a transport or decode error (which retrying usually will).
+The goal case keeps its last known run state rather than blanking it, because the start/stop toggle keys off the live phase and a stale reading with a status line beats no reading at all. (#8144) (@houko)

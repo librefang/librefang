@@ -2462,3 +2462,9 @@ tui-event-channels-not-available-in-process = 通道管理需要正在运行的�
 tui-event-channel-save-failed = 保存通道实例 { $name } 失败：{ $error }
 tui-event-channel-delete-failed = 删除通道实例 { $name } 失败：{ $error }
 tui-event-channels-reload-failed = 重载通道失败：{ $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = 记忆设置来自守护进程 API —— TUI 以进程内方式接入时不可用。
+tui-memory-config-fetch-failed = 无法读取记忆设置：{ $error }
+tui-goals-run-requires-daemon = 运行状态来自守护进程 API —— TUI 以进程内方式接入时不可用。
+tui-goals-run-fetch-failed = 无法读取 { $id } 的运行状态：{ $error }

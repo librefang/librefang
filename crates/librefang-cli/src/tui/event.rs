@@ -48,6 +48,25 @@ pub enum BackendRef {
     InProcess(Arc<LibreFangKernel>),
 }
 
+/// Why a TUI fetch produced no data.
+///
+/// The two arms need different words in front of the operator, which is the
+/// whole reason they are separate: `RequiresDaemon` will never succeed while
+/// the TUI is attached to an in-process kernel, so advising a retry is wrong,
+/// whereas `Error` is exactly the case where retrying is right. Collapsing
+/// them — or sending nothing, which is what these helpers used to do — leaves
+/// one blank screen meaning all of "failed", "unsupported here" and
+/// "genuinely empty" (#8141).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FetchFailure {
+    /// The data lives behind the daemon HTTP API and the TUI is attached
+    /// in-process, so there is nothing to reach.
+    RequiresDaemon,
+    /// The request went out and did not come back usable — transport error,
+    /// non-success status, or a body that would not decode.
+    Error(String),
+}
+
 // ── AppEvent ────────────────────────────────────────────────────────────────
 
 /// Unified application event.
@@ -155,6 +174,12 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The memory config could not be read — see [`FetchFailure`].
+    ///
+    /// Sent instead of staying silent: without it the Memory screen keeps
+    /// whatever it had (usually nothing) and the operator cannot tell a 5xx
+    /// from an empty config from a request that never went out (#8141).
+    MemoryConfigFailed(FetchFailure),
     /// Memory KV pairs loaded.
     MemoryKvLoaded(Vec<KvPair>),
     /// Memory KV saved.
@@ -240,6 +265,17 @@ pub enum AppEvent {
     /// Goals loaded.
     GoalsLoaded(Vec<GoalInfo>),
     /// Live run state fetched for one goal.
+    /// The goal's run state could not be read — see [`FetchFailure`].
+    ///
+    /// Distinct from `GoalRunLoaded` with an absent run: a goal that never
+    /// ran legitimately answers `{"running": false}`, whereas this means the
+    /// answer never arrived. The start/stop toggle keys off the live phase,
+    /// so conflating the two leaves the operator unable to tell a finished
+    /// run from a failed fetch (#8141).
+    GoalRunFailed {
+        goal_id: String,
+        failure: FetchFailure,
+    },
     GoalRunLoaded {
         goal_id: String,
         phase: Option<String>,
@@ -2258,32 +2294,61 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 ///
 /// Daemon-only. The in-process backend has no HTTP surface to ask, and the
 /// panel says so rather than showing a blank as if it were configuration.
+/// Fetch `[memory]` config for the Memory screen.
+///
+/// Every exit path sends an event. The screen renders `config: None`
+/// identically for "not fetched yet", "the daemon refused" and "we are
+/// in-process", so a silent return is indistinguishable from still-loading
+/// (#8141).
 pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        if let BackendRef::Daemon { base_url, api_key } = backend {
-            let client = make_daemon_client(api_key.as_deref());
-            if let Ok(resp) = client.get(format!("{base_url}/api/memory/config")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let pm = &body["proactive_memory"];
-                    let view = crate::tui::screens::memory::MemoryConfigView {
-                        embedding_provider: body["embedding_provider"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
-                        auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
-                        auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
-                        effective_extraction_model: pm["effective_extraction_model"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        extraction_model_inherited: pm["extraction_model_source"].as_str()
-                            == Some("inherited_default"),
-                    };
-                    let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
-                }
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::RequiresDaemon));
+            return;
+        };
+        let client = make_daemon_client(api_key.as_deref());
+        let resp = match client.get(format!("{base_url}/api/memory/config")).send() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                    e.to_string(),
+                )));
+                return;
             }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                status.to_string(),
+            )));
+            return;
         }
+        let body = match resp.json::<serde_json::Value>() {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = tx.send(AppEvent::MemoryConfigFailed(FetchFailure::Error(
+                    e.to_string(),
+                )));
+                return;
+            }
+        };
+        let pm = &body["proactive_memory"];
+        let view = crate::tui::screens::memory::MemoryConfigView {
+            embedding_provider: body["embedding_provider"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            embedding_model: body["embedding_model"].as_str().unwrap_or("").to_string(),
+            auto_memorize: pm["auto_memorize"].as_bool().unwrap_or(false),
+            auto_retrieve: pm["auto_retrieve"].as_bool().unwrap_or(false),
+            effective_extraction_model: pm["effective_extraction_model"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            extraction_model_inherited: pm["extraction_model_source"].as_str()
+                == Some("inherited_default"),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
     });
 }
 
@@ -3809,23 +3874,48 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
 }
 
 /// Fetch the live run state for a single goal.
+/// Fetch one goal's live run state for the detail pane.
+///
+/// Every exit path sends an event. The start/stop toggle keys off the live
+/// phase rather than the goal document's `status`, so a silent return leaves
+/// the toggle acting on a stale or absent phase and the operator cannot tell
+/// a finished run from a failed fetch (#8141).
 pub fn spawn_fetch_goal_run(backend: BackendRef, goal_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
+        let fail = |tx: &mpsc::Sender<AppEvent>, goal_id: String, failure: FetchFailure| {
+            let _ = tx.send(AppEvent::GoalRunFailed { goal_id, failure });
+        };
+
         let BackendRef::Daemon { base_url, api_key } = backend else {
+            fail(&tx, goal_id, FetchFailure::RequiresDaemon);
             return;
         };
         let client = make_daemon_client(api_key.as_deref());
-        let Ok(resp) = client
+        let resp = match client
             .get(format!("{base_url}/api/goals/{goal_id}/run"))
             .send()
-        else {
-            return;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                fail(&tx, goal_id, FetchFailure::Error(e.to_string()));
+                return;
+            }
         };
-        let Ok(body) = resp.json::<serde_json::Value>() else {
+        let status = resp.status();
+        if !status.is_success() {
+            fail(&tx, goal_id, FetchFailure::Error(status.to_string()));
             return;
+        }
+        let body = match resp.json::<serde_json::Value>() {
+            Ok(b) => b,
+            Err(e) => {
+                fail(&tx, goal_id, FetchFailure::Error(e.to_string()));
+                return;
+            }
         };
         // A goal that never ran answers `{"running": false}` with no `run`
-        // object, which correctly leaves every field `None`.
+        // object, which correctly leaves every field `None`. That is a
+        // successful read of "no run", not a failure — hence `GoalRunLoaded`.
         let run = &body["run"];
         let _ = tx.send(AppEvent::GoalRunLoaded {
             goal_id,
@@ -4786,6 +4876,77 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── fetch helpers must never exit silently (#8141) ─────────────────────
+
+    /// Port 1 on loopback refuses immediately, so this exercises the
+    /// transport-error path without a mock server and without a timeout.
+    fn unreachable_daemon() -> BackendRef {
+        BackendRef::Daemon {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: None,
+        }
+    }
+
+    /// A memory-config fetch that cannot reach the daemon must say so.
+    ///
+    /// Before #8141 this returned without sending anything, and the Memory
+    /// screen kept its spinner and its empty `config` — visually identical to
+    /// "still loading" and to "the daemon says there is no config".
+    #[test]
+    fn memory_config_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_memory_config(unreachable_daemon(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::MemoryConfigFailed(FetchFailure::Error(reason)) => {
+                assert!(!reason.is_empty(), "the failure must carry a reason");
+            }
+            // `AppEvent` has no `Debug` (it carries `Arc<LibreFangKernel>` and
+            // `AgentLoopResult`), so the wrong-variant message cannot print it.
+            _ => panic!("expected MemoryConfigFailed(FetchFailure::Error), got another AppEvent"),
+        }
+    }
+
+    /// Same for a goal's run state, and the event must name the goal so the
+    /// status line can be specific about which row is stale.
+    #[test]
+    fn goal_run_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_goal_run(unreachable_daemon(), "goal-42".to_string(), tx);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::GoalRunFailed { goal_id, failure } => {
+                assert_eq!(goal_id, "goal-42");
+                assert!(
+                    matches!(failure, FetchFailure::Error(ref r) if !r.is_empty()),
+                    "expected a transport error carrying a reason, got {failure:?}"
+                );
+            }
+            _ => panic!("expected GoalRunFailed, got another AppEvent"),
+        }
+    }
+
+    /// The two failure kinds must stay distinguishable at the type level.
+    ///
+    /// This is the whole reason `FetchFailure` is an enum rather than a
+    /// `String`: `RequiresDaemon` will never succeed on retry and `Error`
+    /// usually will, so the handler picks different words for each. A later
+    /// refactor that collapses them to one string would compile fine and
+    /// quietly restore the "one blank screen means three things" problem.
+    #[test]
+    fn the_two_fetch_failure_kinds_are_not_interchangeable() {
+        assert_ne!(
+            FetchFailure::RequiresDaemon,
+            FetchFailure::Error("connection refused".to_string())
+        );
+    }
 
     /// `GET /api/channels` mixes configured instances and catalog adapters in
     /// one array, and `name` means a different thing in each. Getting the

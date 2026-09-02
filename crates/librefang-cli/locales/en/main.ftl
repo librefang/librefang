@@ -2509,3 +2509,9 @@ tui-event-channels-not-available-in-process = Channel management needs a running
 tui-event-channel-save-failed = Failed to save channel instance { $name }: { $error }
 tui-event-channel-delete-failed = Failed to delete channel instance { $name }: { $error }
 tui-event-channels-reload-failed = Failed to reload channels: { $error }
+
+# --- TUI fetch failures that used to be silent (#8141) ---
+tui-memory-config-requires-daemon = Memory settings come from the daemon API — not available when the TUI is attached in-process.
+tui-memory-config-fetch-failed = Could not read the memory settings: { $error }
+tui-goals-run-requires-daemon = Run state comes from the daemon API — not available when the TUI is attached in-process.
+tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }
