@@ -10,6 +10,7 @@ pub mod comms;
 pub mod dashboard;
 pub mod extensions;
 pub mod free_provider_guide;
+pub mod goals;
 pub mod groups;
 pub mod hands;
 pub mod init_wizard;

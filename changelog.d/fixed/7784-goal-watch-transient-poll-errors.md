@@ -1,0 +1,2 @@
+`librefang goal --watch` no longer claims the run failed when a single poll of `GET /api/goals/{id}/run` returns a transient 5xx.
+A poll the CLI cannot classify — a failed HTTP status, or a body whose `running=false` carries no recognized terminal phase — is retried for up to five consecutive failures before the watch gives up with an explicit outcome-unknown message, so only a real terminal `GoalRunPhase` decides the exit code. (#7784) (@DaBlitzStein)

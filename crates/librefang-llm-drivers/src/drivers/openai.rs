@@ -12,7 +12,7 @@ use librefang_types::config::{ReasoningMode, ResponseFormat};
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -49,6 +49,36 @@ pub struct OpenAIDriver {
     /// Cache of uploaded file IDs for Moonshot/Kimi (hash of bytes → file_id).
     /// Avoids re-uploading the same file across agent loop iterations.
     moonshot_file_cache: std::sync::Arc<tokio::sync::Mutex<HashMap<[u8; 32], String>>>,
+    /// Models that answered `reasoning_effort` with a hard 400 from this
+    /// endpoint, mapped to when they did (#7769). `build_request` omits the
+    /// field for a muted model up front so the same combination never
+    /// round-trips a second guaranteed rejection.
+    ///
+    /// Whether a model can reason and whether the gateway in front of it will
+    /// forward the field are different questions, and only the second decides
+    /// the outcome — litellm strips the parameter and 400s before the model
+    /// ever sees it, and the error names the adapter rather than the model. No
+    /// static table answers that, so the driver discovers it: the first
+    /// rejection strips the field and retries (see the strip-and-retry branch
+    /// in `complete`/`stream`), and the model is recorded here.
+    ///
+    /// Keyed by model alone because one driver instance is one `base_url`, so
+    /// the provider half of the pair is already fixed. Deliberately
+    /// per-instance and in-memory — a persisted negative cache would keep
+    /// suppressing the field long after a gateway was reconfigured.
+    ///
+    /// The mute is temporary, not a conviction: entries expire after
+    /// [`REASONING_EFFORT_MUTE_TTL`]. A gateway's parameter support is
+    /// configuration that operators change — a model was seen to reject the
+    /// field under one litellm setup and accept it under the next, and a
+    /// permanent mute would keep withholding it forever, with no way to revoke
+    /// it short of restarting the daemon. Expiry costs one relearned 400 at
+    /// worst, and needs no plumbing from the config surface to the driver.
+    reasoning_effort_unsupported: std::sync::Arc<dashmap::DashMap<String, std::time::Instant>>,
+
+    /// How long a model stays muted after rejecting `reasoning_effort`.
+    /// See the field above for why a TTL beats a permanent set.
+    reasoning_effort_mute_ttl: std::time::Duration,
     /// Per-content single-flight locks for Moonshot uploads.
     /// Weak values avoid retaining one lock forever for every file ever seen.
     moonshot_upload_locks: MoonshotUploadLocks,
@@ -65,14 +95,6 @@ pub struct OpenAIDriver {
     /// after the first try, so the request is issued at most `max_retries + 1`
     /// times. Sourced from `DriverConfig.max_retries` (default 3).
     max_retries: u32,
-    /// Models this endpoint has rejected `reasoning_effort` for (#7769).
-    ///
-    /// Whether a model can reason and whether the gateway in front of it will forward the field are different questions, and only the second decides the outcome — litellm strips the parameter and 400s before the model ever sees it, and the error names the adapter rather than the model.
-    /// No static table answers that, so the driver discovers it: the first rejection strips the field and retries, and the model is recorded here so `build_request` omits it from then on instead of spending a round trip per turn re-learning the same answer.
-    ///
-    /// Keyed by model alone because one driver instance is one `base_url`, so the provider half of the pair is already fixed.
-    /// Deliberately per-instance and in-memory: a gateway's model group can be reconfigured to accept the field, and a persisted negative cache would keep suppressing it long after that.
-    reasoning_effort_unsupported: std::sync::Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 impl OpenAIDriver {
@@ -112,11 +134,12 @@ impl OpenAIDriver {
             use_api_key_header: false,
             url_query: None,
             moonshot_file_cache: Default::default(),
+            reasoning_effort_unsupported: Default::default(),
+            reasoning_effort_mute_ttl: REASONING_EFFORT_MUTE_TTL,
             moonshot_upload_locks: Default::default(),
             request_timeout_secs,
             emit_caller_trace_headers: true,
             max_retries: 3,
-            reasoning_effort_unsupported: Default::default(),
         }
     }
 
@@ -160,30 +183,38 @@ impl OpenAIDriver {
             use_api_key_header: true,
             url_query: Some(format!("api-version={}", api_version)),
             moonshot_file_cache: Default::default(),
+            reasoning_effort_unsupported: Default::default(),
+            reasoning_effort_mute_ttl: REASONING_EFFORT_MUTE_TTL,
             moonshot_upload_locks: Default::default(),
             request_timeout_secs: None,
             emit_caller_trace_headers: true,
             max_retries: 3,
-            reasoning_effort_unsupported: Default::default(),
         }
     }
 
-    /// Whether this endpoint has already rejected `reasoning_effort` for `model`.
+    /// Whether `reasoning_effort` is currently withheld for `model` because
+    /// this endpoint already rejected it.
     ///
-    /// A poisoned lock is recovered rather than propagated: the set is an optimisation, and panicking a live agent turn over it would trade a wasted round trip for a lost turn.
+    /// Reads only the one entry (a single `DashMap` shard, no sweep): an entry
+    /// older than the mute TTL reads as "not muted" and is refreshed by the
+    /// next recorded rejection, so the mute self-heals without a daemon
+    /// restart once the operator has reconfigured the gateway — see the field
+    /// doc on `reasoning_effort_unsupported`. An expired entry for a model
+    /// that is never asked about again just sits there; the map is bounded by
+    /// the number of distinct models this endpoint serves.
     fn reasoning_effort_rejected(&self, model: &str) -> bool {
         self.reasoning_effort_unsupported
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(model)
+            .get(model)
+            .is_some_and(|at| at.elapsed() < self.reasoning_effort_mute_ttl)
     }
 
     /// Record that this endpoint rejected `reasoning_effort` for `model`.
+    ///
+    /// Re-recording an already-muted model restarts its TTL, which is the
+    /// intended reading: the rejection was observed again just now.
     fn record_reasoning_effort_rejected(&self, model: &str) {
         self.reasoning_effort_unsupported
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(model.to_string());
+            .insert(model.to_string(), std::time::Instant::now());
     }
 
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
@@ -708,6 +739,12 @@ fn merge_extra_body(
         }
     }
 }
+
+/// How long a model stays muted after rejecting `reasoning_effort`.
+///
+/// Short enough that an operator who reconfigures the gateway sees the field again without a daemon restart, long enough that a genuinely rejecting gateway is not retried on every single turn of every agent.
+/// Because a re-recorded rejection restarts the clock, the floor that "not retried on every turn" holds at is one relearned 400 per still-rejecting model per TTL window, which is the intended trade.
+const REASONING_EFFORT_MUTE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Map a requested thinking budget to the OpenAI-style `reasoning_effort` bucket.
 ///
@@ -5708,5 +5745,278 @@ mod tests {
             .await
             .expect("default max_retries=3 must survive 3 transport errors");
         assert_eq!(resp.text(), "ok");
+    }
+
+    // ── litellm `UnsupportedParamsError` for `reasoning_effort` ─────────────
+    //
+    // Live-confirmed shape (bug report): a litellm gateway 400s with
+    // `litellm.UnsupportedParamsError: openai does not support parameters:
+    // ['reasoning_effort'], for model=<model>` when the underlying model
+    // group's adapter is OpenAI-shaped but the model itself doesn't accept
+    // the field. The driver must strip the field and retry transparently,
+    // then remember the model so it never sends the field to that
+    // combination again.
+
+    /// Answers 400 with a litellm-shaped `UnsupportedParamsError` whenever the
+    /// request body contains `reasoning_effort`, and 200 otherwise. Records,
+    /// in connection order, whether each request carried the field — tests
+    /// assert on this sequence to prove exactly which attempts carried it.
+    async fn spawn_reasoning_effort_rejecting_server(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let ok_body = serde_json::json!({
+            "id": "cmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+
+        let err_body = serde_json::json!({
+            "error": {
+                "message": "litellm.UnsupportedParamsError: openai does not support \
+                             parameters: ['reasoning_effort'], for \
+                             model=Qwen3.8-27B-ABLITERATED-Q4_K_M.gguf. Received Model \
+                             Group=sensor-model-generic-high",
+                "type": "UnsupportedParamsError",
+                "code": 400
+            }
+        })
+        .to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let has_reasoning_effort =
+                    String::from_utf8_lossy(&buf[..n]).contains("reasoning_effort");
+                seen.lock().unwrap().push(has_reasoning_effort);
+
+                let resp = if has_reasoning_effort {
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        err_body.len(),
+                        err_body
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        ok_body.len(),
+                        ok_body
+                    )
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A request that opts into extended thinking (budget above the 1024
+    /// floor) so `build_request` populates `reasoning_effort` — the
+    /// precondition for every test below.
+    fn thinking_request(model: &str) -> librefang_llm_driver::CompletionRequest {
+        use librefang_types::config::ThinkingConfig;
+        librefang_llm_driver::CompletionRequest {
+            model: model.to_string(),
+            thinking: Some(ThinkingConfig {
+                budget_tokens: 8000,
+                stream_thinking: false,
+                // #7946 added this knob after this PR branched; the tests here exercise the budget-bucket path, which is what `None` selects.
+                reasoning_mode: None,
+            }),
+            ..transport_retry_request()
+        }
+    }
+
+    /// A 400 whose body is litellm's `UnsupportedParamsError` for
+    /// `reasoning_effort` must cause an in-driver retry WITHOUT the field,
+    /// and that retry must succeed.
+    #[tokio::test]
+    async fn unsupported_reasoning_effort_400_retries_without_it_and_succeeds() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let resp = driver
+            .complete(thinking_request("sensor-model-generic-high"))
+            .await
+            .expect("driver must strip reasoning_effort and retry successfully");
+        assert_eq!(resp.text(), "ok");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false],
+            "first attempt must carry reasoning_effort (and get rejected); \
+             the in-driver retry must not"
+        );
+    }
+
+    /// After the first rejection, the SAME model must never send
+    /// `reasoning_effort` again: `build_request` consults the cache the
+    /// strip-and-retry branch populates, so a second independent `complete()`
+    /// call for the same model succeeds in exactly one HTTP round trip with
+    /// no second 400.
+    #[tokio::test]
+    async fn cached_rejection_omits_reasoning_effort_on_next_request() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+        let model = "sensor-model-generic-high";
+
+        // First call learns the rejection (2 HTTP round trips: 400 then 200).
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("first call must recover via strip-and-retry");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+
+        // Second, independent call for the SAME model must not carry the
+        // field at all, so it succeeds in a single round trip.
+        let resp = driver
+            .complete(thinking_request(model))
+            .await
+            .expect("second call must succeed without re-learning the rejection");
+        assert_eq!(resp.text(), "ok");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false, false],
+            "the third HTTP attempt (second complete() call) must not carry \
+             reasoning_effort — no second 400 for the same model"
+        );
+
+        // Direct confirmation at the `build_request` level too: the cache
+        // makes the field disappear from the built request regardless of
+        // transport.
+        let req = driver
+            .build_request(&thinking_request(model))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_none(),
+            "cached model must never build a request carrying reasoning_effort again"
+        );
+    }
+
+    /// End-to-end counterpart of `reasoning_effort_mute_expires_after_the_ttl`:
+    /// a driver whose TTL is deliberately short learns the rejection from a
+    /// live 400, the mute lapses, and the next `complete()` must re-probe the
+    /// gateway by putting `reasoning_effort` back on the wire (which the mock
+    /// gateway answers with the same 400, re-learning the mute).
+    #[tokio::test]
+    async fn mute_expires_and_field_is_resent_after_the_ttl_passes() {
+        let _g = crate::backoff::enable_test_zero_backoff();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_reasoning_effort_rejecting_server(seen.clone()).await;
+        let mut driver = OpenAIDriver::new("test-key".to_string(), base);
+        driver.reasoning_effort_mute_ttl = std::time::Duration::from_millis(50);
+        let model = "sensor-model-generic-high";
+
+        // Learn the rejection: 400, then the strip-and-retry 200.
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("first call must recover via strip-and-retry");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false],
+            "the first call learns the 400 and retries without the field"
+        );
+
+        // Past the TTL the mute must lapse and the driver must re-probe the gateway by sending reasoning_effort again.
+        tokio::time::sleep(
+            driver.reasoning_effort_mute_ttl + std::time::Duration::from_millis(100),
+        )
+        .await;
+        driver
+            .complete(thinking_request(model))
+            .await
+            .expect("call after the mute lapsed must still recover via strip-and-retry");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![true, false, true, false],
+            "the third HTTP attempt (second complete() call) must carry \
+             reasoning_effort again: the mute expired, so the gateway is re-probed"
+        );
+    }
+
+    /// A mute must self-heal: the gateway that rejected the field is
+    /// configuration, and an operator who changes it deserves the field back
+    /// without a daemon restart. The mute expires after the TTL and the check
+    /// prunes lazily, so a build for the same model later emits the field
+    /// again — costing one relearned 400 at worst.
+    #[test]
+    fn reasoning_effort_mute_expires_after_the_ttl() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver.reasoning_effort_unsupported.insert(
+            "expired-model".to_string(),
+            std::time::Instant::now()
+                - (driver.reasoning_effort_mute_ttl + std::time::Duration::from_secs(1)),
+        );
+
+        let req = driver
+            .build_request(&thinking_request("expired-model"))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_some(),
+            "an expired mute must not withhold the field: the gateway may have changed"
+        );
+    }
+
+    /// A fresh mute still withholds — the expiry must not turn the blacklist
+    /// into a no-op for the case it exists for.
+    #[test]
+    fn a_fresh_rejection_still_mutes_the_field() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver
+            .reasoning_effort_unsupported
+            .insert("fresh-model".to_string(), std::time::Instant::now());
+
+        let req = driver
+            .build_request(&thinking_request("fresh-model"))
+            .expect("build_request");
+        assert!(
+            req.reasoning_effort.is_none(),
+            "a fresh mute must withhold the field, or the cache does nothing"
+        );
+    }
+
+    /// The cache is keyed per model, not blanket-disabled for the whole
+    /// provider/driver instance — a different model must still get
+    /// `reasoning_effort` even after another model on the same driver was
+    /// cached as rejecting it.
+    #[test]
+    fn cache_is_scoped_per_model_not_per_provider() {
+        let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
+        driver
+            .reasoning_effort_unsupported
+            .insert("rejected-model".to_string(), std::time::Instant::now());
+
+        let rejected = driver
+            .build_request(&thinking_request("rejected-model"))
+            .expect("build_request");
+        assert!(rejected.reasoning_effort.is_none());
+
+        let other = driver
+            .build_request(&thinking_request("other-model"))
+            .expect("build_request");
+        assert!(
+            other.reasoning_effort.is_some(),
+            "an unrelated model must still get reasoning_effort"
+        );
     }
 }

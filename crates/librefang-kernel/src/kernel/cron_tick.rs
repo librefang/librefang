@@ -657,11 +657,21 @@ async fn cron_prune_session(
         &snapshot,
         effective_keep_recent,
         {
-            kernel_job
-                .llm
-                .aux_client
-                .load()
-                .driver_for(librefang_types::config::AuxTask::Compression)
+            // `model` above is the agent's, so the driver has to be one that
+            // can serve it: an explicitly configured aux chain, else the
+            // agent's own — never `AuxClient`'s process-wide primary (#8093).
+            // The registry lookup that produced `model` already established the
+            // agent is present; if it has gone since, fall back to the aux
+            // resolution rather than skipping the trim.
+            match kernel_job.agents.registry.get(agent_id) {
+                Some(e) => kernel_job
+                    .side_task_driver(&e.manifest, librefang_types::config::AuxTask::Compression),
+                None => kernel_job
+                    .llm
+                    .aux_client
+                    .load()
+                    .driver_for(librefang_types::config::AuxTask::Compression),
+            }
         },
         &model,
         echo_policy,
