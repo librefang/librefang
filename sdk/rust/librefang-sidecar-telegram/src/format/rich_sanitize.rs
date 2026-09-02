@@ -49,7 +49,9 @@
 //! Every `<` needs it, not just the opening one: escaping only the first leaves
 //! `</tg-button>` to be parsed and dropped, which silently truncates the quoted text. `&` is
 //! escaped first so an author's literal `&lt;` arrives as those four characters rather than
-//! decoding into a `<` this pass never inspected.
+//! decoding into a `<` this pass never inspected. `>` is left alone — with no `<` there is
+//! no tag for it to close — so the output reads `&lt;/tg-button>`; the sample above escapes
+//! both only because that is how the Bot API prints entities in its own examples.
 //!
 //! **Link destinations are not filtered.** Earlier revisions checked them against
 //! `sanitize`'s scheme allowlist, which meant locating Markdown links: a label scanner
@@ -175,6 +177,23 @@ mod tests {
         // parses the tag anyway.
         assert!(!no_bare_angle_bracket("a \\<tg-button"));
         assert!(!no_bare_angle_bracket("a <tg-button"));
+    }
+
+    /// The one piece of sequencing in this pass, pinned on the output rather than on the
+    /// order of the arms.
+    ///
+    /// Swapping the two `match` arms is a no-op — they match distinct bytes — so that
+    /// particular mutation cannot fail. What the contract has to survive is a *rewrite*:
+    /// the obvious `replace('<', "&lt;").replace('&', "&amp;")` produces `&amp;lt;` for a
+    /// plain `<` and silently stops escaping anything. Asserting both directions catches
+    /// it; asserting the predicate alone does not.
+    #[test]
+    fn an_emitted_entity_is_not_re_escaped_and_an_authors_is() {
+        // What we emit must arrive as an entity, not as an escaped ampersand.
+        assert_eq!(sanitize_rich_markdown("<x"), "&lt;x");
+        // What the author wrote must arrive as their four characters.
+        assert_eq!(sanitize_rich_markdown("&lt;x"), "&amp;lt;x");
+        assert_eq!(sanitize_rich_markdown("&"), "&amp;");
     }
 
     /// The guarantee: no bare `<` survives, in any context. These are every input the

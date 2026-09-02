@@ -1096,6 +1096,18 @@ def test_rich_sanitizer_predicate_rejects_the_backslash_form():
     assert not _no_bare_angle_bracket("a <tg-button")
 
 
+def test_rich_sanitizer_emitted_entity_is_not_re_escaped():
+    """The one piece of sequencing in this pass, pinned on the output rather
+    than on the order of the branches. Swapping them is a no-op — they test
+    distinct characters — so that mutation cannot fail. What the contract has
+    to survive is a rewrite: the obvious
+    ``text.replace("<", "&lt;").replace("&", "&amp;")`` yields ``&amp;lt;``
+    for a plain ``<`` and silently stops escaping anything."""
+    assert tg.sanitize_rich_markdown("<x") == "&lt;x"
+    assert tg.sanitize_rich_markdown("&lt;x") == "&amp;lt;x"
+    assert tg.sanitize_rich_markdown("&") == "&amp;"
+
+
 def test_rich_sanitizer_no_raw_html_survives_any_context():
     """The guarantee: no bare `<` survives, in any context. These are every
     input the review rounds found against the earlier exemption-based and
