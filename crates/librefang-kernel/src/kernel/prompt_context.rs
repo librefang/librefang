@@ -400,6 +400,12 @@ impl LibreFangKernel {
 /// Paired with [`attach_current_time_msg`] — the gate here and the metadata
 /// write there were previously inlined at each dispatch site, and review of
 /// #8132 caught a path that wired one without the other.
+///
+/// **Timezone is the daemon host's, deliberately** (`chrono::Local`), not the
+/// requesting user's — a self-hosted agent's "now" is its own wall clock, and
+/// the daemon has no reliable per-user timezone to prefer anyway. The rendered
+/// `%Z` offset ships with the value, so a user in another timezone reads an
+/// unambiguous timestamp rather than a silently wrong one.
 pub(crate) fn current_time_precise_for_prompt(stable_prefix_mode: bool) -> Option<String> {
     if stable_prefix_mode {
         return None;
