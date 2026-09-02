@@ -1,0 +1,4 @@
+Close the hole `source_template` slipped through in the `AgentManifest` field-parity guard.
+The field was added to the fixture as `None`, which is its default and — because it carries `skip_serializing_if = "Option::is_none"` — is also omitted from the serialized TOML, so it satisfied the compiler's exhaustive-literal check while being invisible to both assertions the guard actually makes: the round trip never exercised it, and the emitted-key count never moved off 59.
+It now holds a real value, has its own `compare_field!` assertion, and the key count is 60; `docs/architecture/agent-manifest-field-parity.md` gains the row and the counts the guard's own failure message tells you to update.
+The count in the trigger post-mortem is now phrased without a number, so it stops going stale every time a field is added. (#8103) (@houko)

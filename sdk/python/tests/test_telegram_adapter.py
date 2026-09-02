@@ -558,8 +558,17 @@ def test_inbound_edited_message_and_reply(monkeypatch):
 @pytest.mark.asyncio
 async def test_on_command_send_dispatches_every_variant(monkeypatch):
     calls = []
-    monkeypatch.setattr(tg.TelegramAdapter, "_call",
-                        lambda self, m, p: calls.append((m, p)) or {})
+
+    def fake(self, method, payload):
+        calls.append((method, payload))
+        # Stand in for a Bot API server older than 10.1 so the text path
+        # exercises the legacy pipeline the assertions below describe.
+        if method == "sendRichMessage":
+            return {"_http": 404, "ok": False,
+                    "description": "Not Found: method not found"}
+        return {}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
     a = _adapter()
 
     async def send(content):
@@ -605,11 +614,15 @@ async def test_on_command_send_dispatches_every_variant(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_send_text_plain_fallback_on_parse_error(monkeypatch):
+    """Rich fails (pre-10.1 server) -> legacy HTML -> plain text."""
     calls = []
 
     def fake(self, method, payload):
         calls.append((method, payload))
-        if len(calls) == 1:
+        if method == "sendRichMessage":
+            return {"_http": 404, "description": "Not Found: method "
+                    "not found"}
+        if payload.get("parse_mode") == "HTML":
             return {"_http": 400, "description": "Bad Request: can't "
                     "parse entities: unexpected"}
         return {"ok": True}
@@ -617,8 +630,9 @@ async def test_send_text_plain_fallback_on_parse_error(monkeypatch):
     monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
     a = _adapter()
     await a.on_command(tg.protocol.Send("c1", "x", {"Text": "<b>x"}, None, {}))
-    assert calls[0][1]["parse_mode"] == "HTML"
-    assert "parse_mode" not in calls[1][1]
+    assert calls[0][0] == "sendRichMessage"
+    assert calls[1][1]["parse_mode"] == "HTML"
+    assert "parse_mode" not in calls[2][1]
 
 
 def test_send_text_returns_first_chunk_response(monkeypatch):
@@ -674,6 +688,11 @@ async def test_streaming_initial_then_throttled_edit(monkeypatch):
 
     def fake_call(self, method, payload):
         calls.append((method, payload))
+        # A pre-10.1 Bot API server: the rich methods are refused outright,
+        # so everything runs through the legacy HTML pipeline.
+        if method in ("sendRichMessage",) or "rich_message" in payload:
+            return {"_http": 404, "ok": False,
+                    "description": "Not Found: method not found"}
         return {"result": {"message_id": 4242}}
 
     monkeypatch.setattr(tg.TelegramAdapter, "_call", fake_call)
@@ -683,7 +702,10 @@ async def test_streaming_initial_then_throttled_edit(monkeypatch):
     await a.on_command(tg.protocol.StreamDelta("s1", "lo"))
     await a.on_command(tg.protocol.StreamEnd("s1"))
     methods = [m for m, _ in calls]
-    assert methods[0] == "sendMessage"
+    # The mock never returns `ok: True`, so every rich attempt is treated
+    # as unavailable and the legacy HTML pipeline does the actual work.
+    assert methods[0] == "sendRichMessage"
+    assert methods[1] == "sendMessage"
     assert "editMessageText" in methods
     final = [p for m, p in calls if m == "editMessageText"][-1]
     assert final["message_id"] == 4242 and final["text"] == "Hello"
@@ -693,6 +715,10 @@ async def test_streaming_initial_then_throttled_edit(monkeypatch):
 @pytest.mark.asyncio
 async def test_streaming_tracks_and_edits_every_message_chunk(monkeypatch):
     monkeypatch.setattr(tg, "TELEGRAM_MSG_LIMIT", 4)
+    # Force the legacy chunked path: this test is about tracking one message
+    # per chunk, which only happens once the answer no longer fits a single
+    # rich message.
+    monkeypatch.setattr(tg, "RICH_MSG_LIMIT", 4)
     monkeypatch.setattr(tg, "STREAM_EDIT_INTERVAL", 0.0)
     calls = []
     next_id = 100
@@ -734,9 +760,13 @@ async def test_failed_initial_stream_send_is_not_retried_per_delta(monkeypatch):
     await a.on_command(tg.protocol.StreamDelta("failed", "b"))
     await a.on_command(tg.protocol.StreamDelta("failed", "c"))
 
-    assert [m for m, _ in calls] == ["sendMessage"]
+    # 503 is not a verdict: Telegram may have created the message, so the
+    # legacy path must NOT re-send the same answer. One attempt, then
+    # nothing more until the terminal event — deltas b and c must not retry.
+    assert [m for m, _ in calls] == ["sendRichMessage"]
     await a.on_command(tg.protocol.StreamEnd("failed"))
-    assert [m for m, _ in calls] == ["sendMessage", "sendMessage"]
+    # StreamEnd retries once, and again declines to duplicate on a 5xx.
+    assert [m for m, _ in calls] == ["sendRichMessage", "sendRichMessage"]
 
 
 @pytest.mark.asyncio
@@ -955,3 +985,265 @@ async def test_produce_treats_longpoll_timeout_as_normal(monkeypatch):
     assert sleep_calls == [], (
         "TimeoutError must NOT trigger the backoff sleep; got "
         f"sleeps={sleep_calls}")
+
+
+# ====================================================================
+# Rich Markdown (sendRichMessage) — parity with the Rust sidecar's
+# format::rich_sanitize + dispatcher::send_text tests.
+# ====================================================================
+
+
+@pytest.mark.asyncio
+async def test_send_text_prefers_rich_message(monkeypatch):
+    """When sendRichMessage succeeds the legacy HTML pipeline is never
+    invoked, and the table reaches Telegram as Markdown."""
+    calls = []
+
+    def fake(self, method, payload):
+        calls.append((method, payload))
+        return {"ok": True, "result": {"message_id": 1}}
+
+    monkeypatch.setattr(tg.TelegramAdapter, "_call", fake)
+    a = _adapter()
+    table = "| a | b |\n|--|--|\n| _x_ | y |"
+    await a.on_command(tg.protocol.Send("c1", "x", {"Text": table}, None, {}))
+
+    assert [m for m, _ in calls] == ["sendRichMessage"]
+    assert calls[0][1]["rich_message"] == {"markdown": table}
+
+
+@pytest.mark.asyncio
+async def test_send_text_sanitizes_injected_buttons(monkeypatch):
+    """Quoted untrusted content must not be able to render itself an
+    inline button whose callback_data comes back to the adapter."""
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, m, p: calls.append((m, p)) or {"ok": True},
+    )
+    a = _adapter()
+    quoted = ('The page said: <tg-button type="callback_data" '
+              'data="wipe">Confirm</tg-button>')
+    await a.on_command(tg.protocol.Send("c1", "x", {"Text": quoted}, None, {}))
+
+    sent = calls[0][1]["rich_message"]["markdown"]
+    assert "said: <tg-button" not in sent
+    assert "\\<tg-button" in sent
+
+
+@pytest.mark.asyncio
+async def test_oversize_text_bypasses_rich_and_chunks(monkeypatch):
+    """Above the 32768-character rich limit the rich path is skipped and
+    the legacy UTF-16 chunker takes over."""
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, m, p: calls.append((m, p)) or {"ok": True},
+    )
+    a = _adapter()
+    a._send_text("c1", "x" * (tg.RICH_MSG_LIMIT + 1))
+
+    assert calls, "expected at least one send"
+    assert all(m == "sendMessage" for m, _ in calls)
+
+
+@pytest.mark.asyncio
+async def test_stream_edit_prefers_rich_message(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tg.TelegramAdapter, "_call",
+        lambda self, m, p: calls.append((m, p)) or {
+            "ok": True, "result": {"message_id": 4242},
+        },
+    )
+    a = _adapter()
+    await a.on_command(tg.protocol.StreamStart("c1", "s1"))
+    await a.on_command(tg.protocol.StreamDelta("s1", "Hel"))
+    await a.on_command(tg.protocol.StreamDelta("s1", "lo"))
+    await a.on_command(tg.protocol.StreamEnd("s1"))
+
+    edits = [p for m, p in calls if m == "editMessageText"]
+    assert edits, "the final flush must edit the streamed message"
+    assert edits[-1]["rich_message"] == {"markdown": "Hello"}
+    assert "s1" not in a._streams
+
+
+# ---- rich sanitizer -------------------------------------------------
+
+_BTN = ('<tg-button type="callback_data" data="wipe">Tap'
+        '</tg-button>')
+
+
+def _every_less_than_is_escaped(out):
+    """The guarantee as a predicate: every `<` is preceded by an *odd* run of
+    backslashes. "There is a backslash before it" is a weaker property —
+    `\\\\<` satisfies it and is a bare `<` to the parser, which is how a leak
+    once passed two tests named for the guarantee."""
+    for idx, ch in enumerate(out):
+        if ch != "<":
+            continue
+        run = 0
+        k = idx - 1
+        while k >= 0 and out[k] == "\\":
+            run += 1
+            k -= 1
+        if run % 2 != 1:
+            return False
+    return True
+
+
+def test_escape_predicate_rejects_an_even_run_of_backslashes():
+    assert _every_less_than_is_escaped("a \\<tg-button")
+    assert _every_less_than_is_escaped("a \\\\\\<tg-button")
+    assert not _every_less_than_is_escaped("a <tg-button")
+    assert not _every_less_than_is_escaped("a \\\\<tg-button")
+
+
+def test_rich_sanitizer_no_raw_html_survives_any_context():
+    """The guarantee: no bare `<` survives, in any context. These are every
+    input the review rounds found against the earlier exemption-based and
+    scanner-based designs; not one needs a special case now."""
+    for context in (_BTN,
+                    "a `hello\n\n%s\n\n` b" % _BTN,
+                    "a `hello\r> %s\r> ` b" % _BTN,
+                    "a \\` %s \\` b" % _BTN,
+                    "\\" + _BTN,
+                    "\\\\\\" + _BTN,
+                    # Two `<` in a row after an author backslash: the first
+                    # consumes the run, so the second must be judged on its
+                    # own. Dropping the counter reset in the `<` branch leaves
+                    # this one bare — a live tag — and every other test still
+                    # passes.
+                    "\\<" + _BTN,
+                    "\\\\<" + _BTN,
+                    "<b %s" % _BTN,
+                    "    ```\n%s\n" % _BTN,
+                    "```a`b\n%s\n" % _BTN,
+                    "```\n%s\n```\n" % _BTN,
+                    '<b a="1"b="%s">' % _BTN,
+                    '<a title="`" href="https://ok">t</a> %s' % _BTN):
+        out = tg.sanitize_rich_markdown(context)
+        assert _every_less_than_is_escaped(out), (
+            "unescaped < survived: %s" % out)
+
+
+def test_rich_sanitizer_author_written_escapes_are_preserved():
+    """The pass must not change what the text *means*, only neutralise raw
+    HTML. An earlier revision doubled every backslash, which un-escaped
+    whatever the author had escaped: `[a\\](https://x)` is not a link, and
+    doubling made it one."""
+    for src in ("\\*not italic\\*",
+                "[a\\](https://example.com)",
+                "a \\< b",
+                "\\`not code\\`",
+                "\\!\\[not an image](x)",
+                # The `!` arm's parity guard: here `!` really is followed by
+                # `[`, so the arm is reached and the guard is what stops it
+                # from escaping again. The line above never reaches it.
+                "\\![alt](https://example.com/x.jpg)"):
+        assert tg.sanitize_rich_markdown(src) == src
+    # An even run is still not an escape, so the `<` gains one.
+    assert tg.sanitize_rich_markdown("\\\\<b>") == "\\\\\\<b>"
+
+
+def test_rich_sanitizer_markdown_formatting_is_untouched():
+    for src in ("| a | b |\n|:--|--:|\n| _x_ | **y _z_** |\n",
+                "**bold _italic_ bold** ~~strike~~ ||spoiler|| `code`",
+                "# Heading\n\n- item\n- item\n\n1. one\n2. two\n",
+                "> quote\n> more\n\n---\n",
+                "```rust\nfn main() {}\n```\n",
+                "[x](https://example.com/a_(b)_c)",
+                "[x][ref]\n\n[ref]: https://example.com",
+                "[^id2]: Warning: do not do this.",
+                "[call](tel:+123456789)"):
+        assert tg.sanitize_rich_markdown(src) == src
+
+
+def test_rich_sanitizer_escapes_land_inside_code_samples_too():
+    """The documented cost of the guarantee, pinned so the trade-off is
+    visible rather than discovered."""
+    assert tg.sanitize_rich_markdown(
+        "```rust\nlet v: Vec<String>;\n```"
+    ) == "```rust\nlet v: Vec\\<String>;\n```"
+    assert tg.sanitize_rich_markdown(
+        "```\n![x](https://a/b.png)\n```"
+    ) == "```\n\\![x](https://a/b.png)\n```"
+
+
+def test_rich_sanitizer_image_syntax_is_escaped():
+    assert tg.sanitize_rich_markdown(
+        "see ![alt](https://evil.example/x.jpg)"
+    ) == "see \\![alt](https://evil.example/x.jpg)"
+
+
+def test_rich_sanitizer_link_destinations_are_unfiltered():
+    """Deliberate — see the module docstring. Pinned so the decision stays
+    visible and cannot be reverted by accident."""
+    for src in ("[x](javascript:alert(1))",
+                "[y][x]\n\n[x]: javascript:alert(1)"):
+        assert tg.sanitize_rich_markdown(src) == src
+
+
+def test_rich_sanitizer_every_input_shape_is_linear():
+    """Every rule is character-local, so the pass is linear on any input.
+    These shapes each defeated the scanner-based design; one cost 72 s on a
+    megabyte here and 15 s in the Rust port."""
+    import time
+    for src in ("[" * 1000000,
+                "[" * 1000000 + "]",
+                ("[" * 998 + "]") * 1001,
+                "[]" * 500000,
+                "\\" * 1000000,
+                "<" * 1000000):
+        start = time.time()
+        tg.sanitize_rich_markdown(src)
+        elapsed = time.time() - start
+        assert elapsed < 2.0, (
+            "took %.2fs on %d bytes" % (elapsed, len(src)))
+
+
+def test_rich_sanitizer_multibyte_and_edge_inputs():
+    out = tg.sanitize_rich_markdown(
+        "таблица — да, \U0001F389 <tg-button>нет</tg-button>")
+    assert "таблица — да" in out
+    assert "\U0001F389" in out
+    assert "\\<tg-button" in out
+    assert _every_less_than_is_escaped(out)
+    for src in ("", " ", "<", "[", "![", "\\", "`", "\ufeff", "\r", "&#"):
+        tg.sanitize_rich_markdown(src)
+
+
+def test_is_api_rejection_excludes_429_and_treats_bare_ok_false_as_final():
+    """429 means "try later"; falling back would re-send into a flood-wait.
+    A 200 with ok:false is a verdict even without an error_code."""
+    assert tg._is_api_rejection({"_http": 404}) is True
+    assert tg._is_api_rejection({"_http": 429}) is False
+    assert tg._is_api_rejection({"_http": 500}) is False
+    assert tg._is_api_rejection({"ok": False, "error_code": 404}) is True
+    assert tg._is_api_rejection({"ok": False}) is True
+    # An explicit zero is the same verdict as no code at all; Rust
+    # reaches `code == 0` either way.
+    assert tg._is_api_rejection({"ok": False, "error_code": 0}) is True
+    assert tg._is_api_rejection({"ok": False, "error_code": 429}) is False
+    assert tg._is_api_rejection({}) is False
+
+
+@pytest.mark.asyncio
+async def test_stream_buffer_cap_drops_the_stream(monkeypatch):
+    """Mirrors the Rust adapter's MAX_STREAM_BUFFER_BYTES. The cap counts
+    bytes, so a multibyte stream must not be allowed several times over,
+    and the count accumulates across deltas."""
+    monkeypatch.setattr(tg, "MAX_STREAM_BUFFER_BYTES", 64)
+    monkeypatch.setattr(tg.TelegramAdapter, "_call",
+                        lambda self, m, p: {"ok": True,
+                                            "result": {"message_id": 1}})
+    a = _adapter()
+    await a.on_command(tg.protocol.StreamStart("c1", "big"))
+    # Three deltas of 8 CJK characters: 24 bytes each. Only an accumulating
+    # byte count drops the stream on the third.
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 8))
+    assert "big" in a._streams
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 8))
+    assert "big" in a._streams
+    await a.on_command(tg.protocol.StreamDelta("big", "\u4e2d" * 8))
+    assert "big" not in a._streams, "cap did not accumulate across deltas"

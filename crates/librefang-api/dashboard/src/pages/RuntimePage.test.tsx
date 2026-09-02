@@ -386,6 +386,21 @@ describe("RuntimePage", () => {
     ]);
   });
 
+  // `ConfirmDialog` stays open when `onConfirm` rejects, and the only other place a backup failure surfaces is the inline `backupMutation.isError` notice inside the card — which is behind the modal overlay.
+  // Without a toast the operator sees a dialog that appears to have done nothing.
+  it("reports a failed backup as a toast instead of leaving a silent dialog", async () => {
+    const mutateAsync = vi.fn().mockRejectedValue(new Error("disk full"));
+    useCreateBackupMock.mockReturnValue(makeMutation({ mutateAsync }));
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "runtime.create_backup" }));
+    fireEvent.click(screen.getByRole("button", { name: "runtime.create_backup_confirm" }));
+    await act(async () => {});
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+    expect(useUIStore.getState().toasts).toEqual([
+      expect.objectContaining({ type: "error" }),
+    ]);
+  });
+
   it("retries a failed task via retryTask mutation", () => {
     const mutate = vi.fn();
     useRetryTaskMock.mockReturnValue(makeMutation({ mutate }));

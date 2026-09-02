@@ -233,10 +233,30 @@ pub async fn fold_stale_tool_results(
         fold_after_turns, "history_fold: folding stale tool-result messages"
     );
 
-    // Resolve the summarisation driver (aux preferred, primary as fallback).
-    let summary_driver = aux_client
-        .map(|c| c.driver_for(AuxTask::Fold))
-        .unwrap_or_else(|| Arc::clone(&driver));
+    // Resolve the summarisation driver: an explicitly configured aux chain when there is one, otherwise the caller's own driver.
+    //
+    // The fallback has to be `driver` and not `AuxClient`'s primary (#8093).
+    // `summarise_batch` below is called with `model` — the *agent's* model — so the driver it is paired with must be the one that can serve it.
+    // `AuxClient::primary` is the kernel's process-wide `default_driver`, not the triggering agent's chain, so for any agent that overrides `provider` / `model` in its manifest the two disagree: the request goes to the default provider carrying a model only the agent's provider has.
+    // Reported as a LiteLLM `403 team_model_access_denied` — "Tried to access deepseek-v4-pro" — on an agent configured to reach DeepSeek directly.
+    // The fold then silently degrades to `FALLBACK_SUMMARY` on every turn.
+    //
+    // `used_primary` is exactly this signal, and `ContextCompressor` already branches on it the same way (`context_compressor.rs`, the `AuxTask::Compression` resolution) — this brings the fold path in line.
+    let summary_driver = match aux_client {
+        Some(aux) => {
+            let resolution = aux.resolve(AuxTask::Fold);
+            if resolution.used_primary {
+                Arc::clone(&driver)
+            } else {
+                debug!(
+                    chain = ?resolution.resolved,
+                    "history_fold: using auxiliary chain for summarisation"
+                );
+                resolution.driver
+            }
+        }
+        None => Arc::clone(&driver),
+    };
 
     // Collect every stale tool-result block, in message+block order, with
     // its `tool_use_id` / `tool_name` / preview-bounded content.  This is
@@ -1039,6 +1059,60 @@ mod tests {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// #8093: with no `[llm.auxiliary]` entry for `Fold`, the summariser must be the caller's own driver — not `AuxClient`'s primary.
+    ///
+    /// `summarise_batch` is called with the *agent's* `model`, while `AuxClient::primary` is the kernel's process-wide `default_driver`.
+    /// For any agent overriding `provider` / `model` those disagree, and the request goes to the default provider carrying a model only the agent's provider can serve.
+    /// Live symptom: LiteLLM `403 team_model_access_denied` naming the agent's model, after which every fold silently degrades to `FALLBACK_SUMMARY`.
+    #[tokio::test]
+    async fn fold_without_aux_chain_uses_the_callers_driver_not_aux_primary() {
+        let (agent_driver, agent_calls) =
+            CountingTextDriver::new(r#"[{"id":"tool-0-0","summary":"agent driver answered"}]"#);
+        let (aux_primary, aux_primary_calls) =
+            CountingTextDriver::new(r#"[{"id":"tool-0-0","summary":"aux primary answered"}]"#);
+
+        // A default config carries no `[llm.auxiliary]`, so `resolve` reports `used_primary` — the branch this test pins.
+        let config = Arc::new(librefang_types::config::KernelConfig::default());
+        let aux = AuxClient::new(config, Arc::new(aux_primary) as Arc<dyn LlmDriver>);
+        assert!(
+            aux.resolve(AuxTask::Fold).used_primary,
+            "test premise: an unconfigured Fold task must resolve to the primary driver"
+        );
+
+        let driver: Arc<dyn LlmDriver> = Arc::new(agent_driver);
+        let (_out, result) = fold_stale_tool_results(
+            build_history(10),
+            FoldConfig {
+                fold_after_turns: 8,
+                min_batch_size: 1,
+            },
+            "agent-only-model",
+            Some(&aux),
+            driver,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await;
+
+        assert_eq!(
+            result.groups_folded, 1,
+            "the fold pass must have run for this test to say anything"
+        );
+        assert_eq!(
+            agent_calls.load(Ordering::SeqCst),
+            1,
+            "the summariser must be the driver that can serve the agent's model"
+        );
+        assert_eq!(
+            aux_primary_calls.load(Ordering::SeqCst),
+            0,
+            "AuxClient's primary is the kernel default driver, not this agent's — sending the agent's model there is the #8093 mismatch"
+        );
+        assert_eq!(
+            result.groups_used_fallback, 0,
+            "a working summariser must not degrade to FALLBACK_SUMMARY"
+        );
     }
 
     #[tokio::test]

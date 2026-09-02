@@ -64,7 +64,6 @@ import {
   type ManifestFormState,
 } from "../lib/agentManifest";
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
-import { agentKeys } from "../lib/queries/keys";
 import {
   agentQueries,
   useAgentEvents,
@@ -126,6 +125,8 @@ type AgentView = AgentDetail & {
    *  endpoint's `enrich_agent_json`), not on the per-agent detail fetch.
    *  Carried over from the `AgentItem` row when opening the detail panel. */
   parent_agent_id?: string | null;
+  /** Raw `AgentEntry` serde form of the same link, per `AgentItem`'s docs. */
+  parent?: string | null;
   parent_unknown?: boolean;
   children?: string[];
   capabilities?: Omit<NonNullable<AgentDetail["capabilities"]>, "tools" | "skills"> & {
@@ -430,21 +431,20 @@ export function AgentsPage() {
       e?.message || t("agents.delete_failed", { defaultValue: "Failed to delete agent" }),
       "error",
     );
+  // Cancelling the agent's in-flight reads now lives in `useDeleteAgent`'s
+  // `onMutate` (see `lib/mutations/agents.ts`), which is both the right layer
+  // and the only place the cancel can be awaited before the DELETE is sent.
   const deleteMutation = {
-    mutate: (agentId: string) => {
-      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
+    mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      });
-    },
-    mutateAsync: (agentId: string) => {
-      qc.cancelQueries({ queryKey: agentKeys.detail(agentId) });
-      return rawDeleteMutation.mutateAsync(agentId, {
+      }),
+    mutateAsync: (agentId: string) =>
+      rawDeleteMutation.mutateAsync(agentId, {
         onSuccess: () => handleDeleteSuccess(agentId),
         onError: handleDeleteError,
-      });
-    },
+      }),
   };
 
   function mergeHandFlag(agent: AgentDetail, fallback?: boolean) {
@@ -456,12 +456,27 @@ export function AgentsPage() {
   // list row or the previous detail state on refresh.
   function mergeOriginFields<T extends AgentDetail>(
     agent: T,
-    origin?: Pick<AgentView, "parent_agent_id" | "parent_unknown" | "children">,
+    origin?: Pick<AgentView, "parent_agent_id" | "parent" | "parent_unknown" | "children">,
   ): T {
     if (!origin) return agent;
+    // `goToAgent` fabricates a stub row for an id the list does not hold, and
+    // `selectAgent`'s catch branch builds one too. Neither carries lineage, so
+    // overwriting with their `undefined`s would make the Origin panel report
+    // "Root agent" for an agent whose parent was simply never fetched — which
+    // is what `routes/agents/mod.rs:377` explicitly tells clients not to do
+    // ("a client must not render the latter as a root agent"). Carry lineage
+    // over only when the source actually has some.
+    const carriesLineage =
+      origin.parent_agent_id !== undefined ||
+      origin.parent !== undefined ||
+      origin.parent_unknown !== undefined ||
+      origin.children !== undefined;
+    if (!carriesLineage) return agent;
     return {
       ...agent,
-      parent_agent_id: origin.parent_agent_id,
+      // `AgentItem` documents `parent` as the raw `AgentEntry` serde form that
+      // endpoints serializing the struct directly emit, so accept either.
+      parent_agent_id: origin.parent_agent_id ?? origin.parent,
       parent_unknown: origin.parent_unknown,
       children: origin.children,
     };
@@ -2774,7 +2789,23 @@ export function AgentsPage() {
                 <div className="rounded-lg bg-main border border-border-subtle p-4 space-y-2">
                   <DetailRow label={t("agents.parent", { defaultValue: "Parent Agent" })}>
                     {(() => {
-                      const parentId = (detailAgent as AgentView).parent_agent_id;
+                      const view = detailAgent as AgentView;
+                      const parentId = view.parent_agent_id ?? view.parent;
+                      // `enrich_agent_json` emits all three lineage fields
+                      // together, so none of them present means lineage was
+                      // never fetched for this agent — distinct from "it has
+                      // no parent", and it must not be shown as a root agent.
+                      if (
+                        parentId === undefined &&
+                        view.parent_unknown === undefined &&
+                        view.children === undefined
+                      ) {
+                        return (
+                          <span className="text-text-dim">
+                            {t("agents.origin_unloaded")}
+                          </span>
+                        );
+                      }
                       if (parentId) {
                         const parent = agents.find(a => a.id === parentId);
                         const label = parent
@@ -2790,10 +2821,10 @@ export function AgentsPage() {
                           </button>
                         );
                       }
-                      if ((detailAgent as AgentView).parent_unknown) {
+                      if (view.parent_unknown) {
                         return (
                           <span className="text-text-dim">
-                            {t("agents.origin_unknown", { defaultValue: "Unknown (pre-migration)" })}
+                            {t("agents.origin_unknown")}
                           </span>
                         );
                       }

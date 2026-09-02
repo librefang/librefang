@@ -210,11 +210,16 @@ pub(super) async fn call_with_retry(
         // the actual HTTP round-trip and released before any backoff sleep.
         // Holding it across retries would block a slot for the full backoff
         // duration (up to minutes on rate-limit), starving other agents.
-        let _permit = LLM_CONCURRENCY
-            .acquire()
-            .await
-            .expect("LLM_CONCURRENCY semaphore closed");
-        match driver.complete(request.clone()).await {
+        // The permit is bound inside this block on purpose.
+        // A `let _permit = …` at loop-body scope lives until the end of the iteration, which is *after* the backoff sleep inside `handle_retryable_llm_error` — the leading underscore silences the unused-variable warning, it does not drop the guard early.
+        let call_result = {
+            let _permit = LLM_CONCURRENCY
+                .acquire()
+                .await
+                .expect("LLM_CONCURRENCY semaphore closed");
+            driver.complete(request.clone()).await
+        };
+        match call_result {
             Ok(response) => {
                 record_retry_success(provider, cooldown);
                 return Ok(response);
@@ -331,94 +336,102 @@ pub(super) async fn stream_with_retry(
             });
         }
 
-        // Same rationale as call_with_retry: acquire inside the loop so
-        // the permit is not held during backoff sleeps between retries.
-        let _permit = LLM_CONCURRENCY
-            .acquire()
-            .await
-            .expect("LLM_CONCURRENCY semaphore closed");
+        // Same rationale as call_with_retry: the permit covers the driver round-trip and the join of the forwarding task, and is released at the end of this block — before any backoff sleep in the match below.
+        // Binding it at loop-body scope instead would keep the slot until the end of the iteration, i.e. across the sleep inside `handle_retryable_llm_error`.
+        let (driver_result, cascade_leak_aborted, content_emitted, text_emitted) = {
+            let _permit = LLM_CONCURRENCY
+                .acquire()
+                .await
+                .expect("LLM_CONCURRENCY semaphore closed");
 
-        // Proxy channel: driver writes to `proxy_tx`; we forward events to
-        // `tx` with incremental cascade-leak scanning on TextDelta.
-        let (proxy_tx, mut proxy_rx) = mpsc::channel::<StreamEvent>(64);
-        let outer_tx = tx.clone();
+            // Proxy channel: driver writes to `proxy_tx`; we forward events to
+            // `tx` with incremental cascade-leak scanning on TextDelta.
+            let (proxy_tx, mut proxy_rx) = mpsc::channel::<StreamEvent>(64);
+            let outer_tx = tx.clone();
 
-        // Spawn a forwarding task that accumulates text and checks for leaks.
-        // Cap the accumulator at 128 KB so a pathologically long stream cannot
-        // grow the leak-detection buffer unboundedly (the rolling suffix kept
-        // after the cap still covers any marker that could span a delta boundary).
-        const ACCUMULATED_CAP: usize = 128 * 1024;
-        let forward_task = tokio::spawn(async move {
-            let mut accumulated = String::new();
-            let mut leak_fired = false;
-            // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
-            let mut content_emitted = false;
-            let mut text_emitted = false;
-            while let Some(event) = proxy_rx.recv().await {
-                match &event {
-                    StreamEvent::TextDelta { text } if !leak_fired => {
-                        // Rolling-window: once we exceed the cap, discard the
-                        // oldest bytes and keep only the tail that is large
-                        // enough to overlap any multi-token marker.  The longest
-                        // marker in STRUCTURAL_TURN_FRAMES / ENVELOPE_* is
-                        // ~30 chars; 512 bytes of overlap is a comfortable
-                        // margin.
-                        if accumulated.len() + text.len() > ACCUMULATED_CAP {
-                            const OVERLAP: usize = 512;
-                            let keep_from = accumulated.len().saturating_sub(OVERLAP);
-                            // Walk to a valid UTF-8 boundary.
-                            let keep_from = (keep_from..=accumulated.len())
-                                .find(|&i| accumulated.is_char_boundary(i))
-                                .unwrap_or(accumulated.len());
-                            accumulated.drain(..keep_from);
+            // Spawn a forwarding task that accumulates text and checks for leaks.
+            // Cap the accumulator at 128 KB so a pathologically long stream cannot
+            // grow the leak-detection buffer unboundedly (the rolling suffix kept
+            // after the cap still covers any marker that could span a delta boundary).
+            const ACCUMULATED_CAP: usize = 128 * 1024;
+            let forward_task = tokio::spawn(async move {
+                let mut accumulated = String::new();
+                let mut leak_fired = false;
+                // Whether any observable output reached the caller's `tx` on this attempt (drives the no-retry-after-content guard below).
+                let mut content_emitted = false;
+                let mut text_emitted = false;
+                while let Some(event) = proxy_rx.recv().await {
+                    match &event {
+                        StreamEvent::TextDelta { text } if !leak_fired => {
+                            // Rolling-window: once we exceed the cap, discard the
+                            // oldest bytes and keep only the tail that is large
+                            // enough to overlap any multi-token marker.  The longest
+                            // marker in STRUCTURAL_TURN_FRAMES / ENVELOPE_* is
+                            // ~30 chars; 512 bytes of overlap is a comfortable
+                            // margin.
+                            if accumulated.len() + text.len() > ACCUMULATED_CAP {
+                                const OVERLAP: usize = 512;
+                                let keep_from = accumulated.len().saturating_sub(OVERLAP);
+                                // Walk to a valid UTF-8 boundary.
+                                let keep_from = (keep_from..=accumulated.len())
+                                    .find(|&i| accumulated.is_char_boundary(i))
+                                    .unwrap_or(accumulated.len());
+                                accumulated.drain(..keep_from);
+                            }
+                            accumulated.push_str(text);
+                            if crate::silent_response::is_cascade_leak(&accumulated) {
+                                leak_fired = true;
+                                // Stop forwarding TextDelta — do not send this
+                                // token to the wire. Other event types continue.
+                                continue;
+                            }
+                            // Forward the delta; ignore send errors (client gone).
+                            if !text.is_empty() {
+                                content_emitted = true;
+                                text_emitted = true;
+                            }
+                            let _ = outer_tx
+                                .send(StreamEvent::TextDelta { text: text.clone() })
+                                .await;
                         }
-                        accumulated.push_str(text);
-                        if crate::silent_response::is_cascade_leak(&accumulated) {
-                            leak_fired = true;
-                            // Stop forwarding TextDelta — do not send this
-                            // token to the wire. Other event types continue.
-                            continue;
+                        StreamEvent::TextDelta { .. } => {
+                            // leak_fired: swallow remaining text tokens silently.
                         }
-                        // Forward the delta; ignore send errors (client gone).
-                        if !text.is_empty() {
-                            content_emitted = true;
-                            text_emitted = true;
+                        other => {
+                            // Observable output (matches the content set the failover guards use); metadata events (PhaseChange…) do not count as content the caller would see twice.
+                            if matches!(
+                                other,
+                                StreamEvent::ToolUseStart { .. }
+                                    | StreamEvent::ToolInputDelta { .. }
+                                    | StreamEvent::ToolUseEnd { .. }
+                                    | StreamEvent::ThinkingDelta { .. }
+                                    | StreamEvent::ContentComplete { .. }
+                                    | StreamEvent::ToolExecutionResult { .. }
+                            ) {
+                                content_emitted = true;
+                            }
+                            let _ = outer_tx.send(other.clone()).await;
                         }
-                        let _ = outer_tx
-                            .send(StreamEvent::TextDelta { text: text.clone() })
-                            .await;
-                    }
-                    StreamEvent::TextDelta { .. } => {
-                        // leak_fired: swallow remaining text tokens silently.
-                    }
-                    other => {
-                        // Observable output (matches the content set the failover guards use); metadata events (PhaseChange…) do not count as content the caller would see twice.
-                        if matches!(
-                            other,
-                            StreamEvent::ToolUseStart { .. }
-                                | StreamEvent::ToolInputDelta { .. }
-                                | StreamEvent::ToolUseEnd { .. }
-                                | StreamEvent::ThinkingDelta { .. }
-                                | StreamEvent::ContentComplete { .. }
-                                | StreamEvent::ToolExecutionResult { .. }
-                        ) {
-                            content_emitted = true;
-                        }
-                        let _ = outer_tx.send(other.clone()).await;
                     }
                 }
-            }
-            (leak_fired, content_emitted, text_emitted)
-        });
+                (leak_fired, content_emitted, text_emitted)
+            });
 
-        // Drive the LLM stream, then join the forwarding task exactly once.
-        // The join handle is consumed here; each match arm either returns or
-        // continues, so there is exactly one await site per control-flow path.
-        let driver_result = driver.stream(request.clone(), proxy_tx).await;
-        // proxy_tx is dropped when driver returns (moved into driver.stream).
-        // forward_task drains the proxy channel and finishes.
-        let (cascade_leak_aborted, content_emitted, text_emitted) =
-            forward_task.await.unwrap_or((false, false, false));
+            // Drive the LLM stream, then join the forwarding task exactly once.
+            // The join handle is consumed here; each match arm either returns or
+            // continues, so there is exactly one await site per control-flow path.
+            let driver_result = driver.stream(request.clone(), proxy_tx).await;
+            // proxy_tx is dropped when driver returns (moved into driver.stream).
+            // forward_task drains the proxy channel and finishes.
+            let (cascade_leak_aborted, content_emitted, text_emitted) =
+                forward_task.await.unwrap_or((false, false, false));
+            (
+                driver_result,
+                cascade_leak_aborted,
+                content_emitted,
+                text_emitted,
+            )
+        };
         // Propagate to the sticky flag so any retry iteration short-circuits.
         if cascade_leak_aborted {
             leak_fired_sticky = true;
@@ -536,6 +549,8 @@ mod tests {
     use super::*;
     use crate::auth_cooldown::CircuitState;
     use crate::llm_driver::CompletionResponse;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// A streaming driver that forwards one observable delta and then errors with a *retryable* variant — the shape that makes an un-guarded retry re-stream and duplicate output.
     struct PartialThenOverloaded;
@@ -799,6 +814,101 @@ mod tests {
             circuit_state_after_one_failure(500, UNSUPPORTED_PARAM_BODY).await,
             CircuitState::Open,
             "only a 400 is a parameter rejection; a 500 carrying the same words is an outage"
+        );
+    }
+
+    // ── LLM_CONCURRENCY permit lifetime ────────────────────────────────────
+
+    /// A driver that reports a rate limit on every call, counting how many times it was entered so a test can tell when the retry loop has reached its first backoff.
+    /// `retry_after_ms: 0` leaves the backoff at the `BASE_RETRY_DELAY_MS` floor.
+    struct AlwaysRateLimited {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for AlwaysRateLimited {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(LlmError::RateLimited {
+                retry_after_ms: 0,
+                message: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: CompletionRequest,
+            _tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(LlmError::RateLimited {
+                retry_after_ms: 0,
+                message: None,
+            })
+        }
+    }
+
+    /// Poll the process-global semaphore over the first three quarters of the first backoff window, and report whether every permit was free at some point after the driver had already been entered.
+    ///
+    /// The comparison is against `MAX_CONCURRENT_LLM_CALLS` rather than a count sampled at test start, and it is retried across the whole window, which makes it one-sided: a permit taken by another test running in the same process can only push the count *below* the maximum, so contention can fail this helper but never manufacture a pass.
+    /// A permit released before the sleep stays observable for the rest of that second, while a permit held across the sleep can never bring the count back up to the maximum.
+    async fn all_permits_free_during_first_backoff(calls: &AtomicUsize) -> bool {
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(BASE_RETRY_DELAY_MS * 3 / 4);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if calls.load(Ordering::SeqCst) >= 1
+                && LLM_CONCURRENCY.available_permits() == MAX_CONCURRENT_LLM_CALLS
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The `LLM_CONCURRENCY` permit must cover the HTTP round-trip only, never the retry backoff.
+    /// A rate-limited provider can hand back a retry-after measured in minutes, and a slot pinned for that long starves every other agent in the process while nothing at all is in flight on it.
+    ///
+    /// Binding the permit as `let _permit = …` directly in the loop body reads like a scoped guard but keeps it alive to the end of the iteration — past the `tokio::time::sleep` in `handle_retryable_llm_error` — which leaves the permit count one below the maximum for the whole backoff and fails this test.
+    #[tokio::test]
+    async fn call_with_retry_releases_llm_permit_during_backoff() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver = AlwaysRateLimited {
+            calls: Arc::clone(&calls),
+        };
+
+        let retrying = tokio::spawn(async move {
+            let _ = call_with_retry(&driver, CompletionRequest::default(), None, None).await;
+        });
+
+        let freed = all_permits_free_during_first_backoff(&calls).await;
+        retrying.abort();
+
+        assert!(
+            freed,
+            "call_with_retry held an LLM_CONCURRENCY permit across the retry backoff"
+        );
+    }
+
+    /// The same contract on the streaming path, where the permit additionally spans the join of the forwarding task.
+    #[tokio::test]
+    async fn stream_with_retry_releases_llm_permit_during_backoff() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let driver = AlwaysRateLimited {
+            calls: Arc::clone(&calls),
+        };
+        let (tx, _rx) = mpsc::channel(64);
+
+        let retrying = tokio::spawn(async move {
+            let _ = stream_with_retry(&driver, CompletionRequest::default(), tx, None, None).await;
+        });
+
+        let freed = all_permits_free_during_first_backoff(&calls).await;
+        retrying.abort();
+
+        assert!(
+            freed,
+            "stream_with_retry held an LLM_CONCURRENCY permit across the retry backoff"
         );
     }
 }

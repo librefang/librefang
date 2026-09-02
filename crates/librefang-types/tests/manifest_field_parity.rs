@@ -10,7 +10,7 @@
 //! Every field, set to a value distinct from its default, comes back unchanged through
 //! serialize-then-parse.
 //! And a manifest whose optional free-form JSON is absent still serializes at all — the failure
-//! mode is not one lost field but a `to_string_pretty` error that aborts the write for all 59.
+//! mode is not one lost field but a `to_string_pretty` error that aborts the write for every other field.
 
 use librefang_types::agent::{
     AgentManifest, AsyncTasksConfig, AutonomousConfig, CompactionOverrides, FallbackModel,
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 /// Every field of `AgentManifest` set to something a `Default::default()` manifest does not have.
 ///
 /// Written as one exhaustive struct literal with no `..Default::default()` at the top level, so the
-/// compiler — not a reviewer — is what notices a 59th field being added.
+/// compiler — not a reviewer — is what notices a 61st field being added.
 /// The point of the fixture is that a field whose type cannot survive TOML breaks
 /// `every_manifest_field_survives_a_toml_round_trip` here, rather than in production on the first
 /// `agent.toml` write, where the failure is a swallowed log and a frozen file.
@@ -38,7 +38,7 @@ fn fully_populated_manifest() -> AgentManifest {
         description: "a manifest with nothing left at its default".into(),
         author: "houko".into(),
         owner: Some("group:platform".into()),
-        source_template: None,
+        source_template: Some("customer-support".into()),
         module: "builtin:chat".into(),
         schedule: ScheduleMode::Periodic {
             cron: "0 9 * * *".into(),
@@ -197,6 +197,7 @@ fn every_manifest_field_survives_a_toml_round_trip() {
     compare_field!(dropped, before, after, description);
     compare_field!(dropped, before, after, author);
     compare_field!(dropped, before, after, owner);
+    compare_field!(dropped, before, after, source_template);
     compare_field!(dropped, before, after, module);
     compare_field!(dropped, before, after, schedule);
     compare_field!(dropped, before, after, session_mode);
@@ -271,8 +272,8 @@ fn the_populated_fixture_covers_every_serialized_manifest_key() {
     let table: toml::Table = toml::from_str(&toml_text).expect("parses as a table");
     assert_eq!(
         table.len(),
-        59,
-        "AgentManifest emitted {} top-level keys, not the 59 this parity sweep enumerated. \
+        60,
+        "AgentManifest emitted {} top-level keys, not the 60 this parity sweep enumerated. \
          Add the new field to fully_populated_manifest() and to the round-trip assertions, \
          then update docs/architecture/agent-manifest-field-parity.md.",
         table.len()

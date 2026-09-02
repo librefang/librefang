@@ -112,6 +112,28 @@ export function useDeleteAgent() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: deleteAgent,
+    // Stop every in-flight read of this agent before the DELETE goes out, so a
+    // response that was already on the wire cannot repopulate the cache after
+    // `onSuccess` has removed it.
+    //
+    // `agentKeys.detail(id)` is not enough, and is in fact the one key in this
+    // family that never polls: `agentQueries.detail` declares only a staleTime.
+    // The queries that do poll — `stats` (30 s), `events` (15 s) and
+    // `sessionContext` (15 s) — sit on sibling branches under `agentKeys.all`
+    // (`["agents","stats",id]`, not `["agents","detail",id,…]`), so a prefix
+    // match on the detail key misses all three. There is no single prefix for
+    // "everything about agent X", hence the predicate.
+    //
+    // This lives in `onMutate` rather than at a call site because TanStack
+    // awaits `onMutate` before `mutationFn`: that is what actually closes the
+    // window, and it keeps the cancel next to the `onSuccess` removal instead
+    // of splitting one cache protocol across two files.
+    onMutate: async (agentId) => {
+      await qc.cancelQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "agents" && query.queryKey.includes(agentId),
+      });
+    },
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.removeQueries({ queryKey: agentKeys.detail(variables) });

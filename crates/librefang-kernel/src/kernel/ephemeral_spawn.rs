@@ -202,6 +202,12 @@ impl LibreFangKernel {
                     load_agent_template(self.home_dir(), agent_type).map_err(|e| {
                         KernelError::LibreFang(LibreFangError::InvalidInput(e.to_string()))
                     })?;
+                // Deliberately no `source_template` stamp here, unlike the
+                // step-agent resolver and `POST /api/agents` (#8018): an
+                // ephemeral worker registers no agent and persists no manifest,
+                // so there is nothing for the provenance to live on. The field
+                // is about answering "where did this agent come from" in the
+                // catalog, and this run never enters it.
                 let declared = template.capabilities.tools.clone();
                 (template, Some(declared))
             }

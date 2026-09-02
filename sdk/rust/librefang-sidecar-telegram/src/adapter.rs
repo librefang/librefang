@@ -165,15 +165,47 @@ impl TelegramAdapter {
         }
     }
 
-    /// Edit a streaming message with HTML formatting and a plain-text fallback on `can't parse entities`. The plain fallback is derived from `html_body` via `dispatcher::html_to_plain` so the user sees readable prose (matching `send_text`'s fallback shape) rather than literal markdown / HTML markup. `message is not modified` is treated as success on both paths. Other failures are logged; token-bearing errors are already redacted at the BotClient layer.
+    /// Edit a streaming message, preferring `editMessageText(rich_message=…)` (Bot API
+    /// 10.1+) so partial output is parsed by Telegram with the same fidelity as a
+    /// finished `send_text`. On any rich failure it falls back to the legacy HTML edit,
+    /// which itself has a plain-text fallback on `can't parse entities` derived via
+    /// `dispatcher::html_to_plain` so the user sees readable prose rather than literal
+    /// markup. `message is not modified` is treated as success on every path. Other
+    /// failures are logged; token-bearing errors are already redacted at the BotClient layer.
+    ///
+    /// Takes the raw buffered text, not pre-rendered HTML — the rich path needs the
+    /// original Markdown, and the legacy path renders it itself.
+    ///
+    /// The streaming lifecycle stays edit-in-place: `sendRichMessageDraft` is an
+    /// ephemeral 30-second preview that must be finalized with a separate
+    /// `sendRichMessage`, which is a different lifecycle and a separate change.
     ///
     /// Empty / whitespace-only bodies are no-ops — Telegram rejects `editMessageText` with `400 message text is empty`, so we skip the call entirely and leave the previous content (the `…` placeholder, or the last successful edit) in place.
-    async fn edit_with_fallback(
-        client: &BotClient,
-        chat_id: i64,
-        message_id: i64,
-        html_body: &str,
-    ) {
+    async fn edit_with_fallback(client: &BotClient, chat_id: i64, message_id: i64, raw: &str) {
+        if raw.trim().is_empty() {
+            return;
+        }
+        if let Some(markdown) = crate::format::prepare_rich_markdown(raw) {
+            match client
+                .edit_rich_message_text(chat_id, message_id, &markdown)
+                .await
+            {
+                Ok(_) => return,
+                Err(e) if is_message_not_modified(&e) => return,
+                // Only a verdict from Telegram means the rich edit is unavailable. A
+                // transport failure leaves the outcome unknown; retrying with different
+                // content could overwrite an edit that did land, and the next throttled
+                // tick will resync anyway.
+                Err(e) if !crate::dispatcher::is_api_rejection(&e) => {
+                    eprintln!("[telegram] stream rich edit failed in transport: {e}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("[telegram] stream rich edit rejected, using HTML: {e}");
+                }
+            }
+        }
+        let html_body = &crate::format::format_and_sanitize(raw);
         if html_body.trim().is_empty() {
             return;
         }
@@ -206,42 +238,41 @@ impl TelegramAdapter {
     /// of an edit of the `"…"` placeholder. Telegram edits never fire a push
     /// notification, so a user who backgrounded the client after the placeholder
     /// ping received nothing when the answer landed. A new message notifies
-    /// reliably; the placeholder is then deleted. Mirrors `edit_with_fallback`'s
-    /// HTML→plain fallback, and if the fresh send fails outright it falls back to
-    /// editing the placeholder in place (answer still visible, just no push).
+    /// reliably; the placeholder is then deleted. Delegates to `dispatcher::send_text`,
+    /// so the final answer takes the same rich-first / legacy-HTML fallback path (and
+    /// the same chunking) as any other outbound text. If the fresh send fails outright
+    /// it falls back to editing the placeholder in place (answer still visible, just no
+    /// push).
     async fn finalize_as_new_message(
         client: &BotClient,
         chat_id: i64,
         placeholder_id: i64,
         thread_id: Option<i64>,
-        html_body: &str,
+        raw: &str,
     ) {
-        if html_body.trim().is_empty() {
+        if raw.trim().is_empty() {
             // No answer to deliver — leave the placeholder as-is (matches the
             // empty-body early return in `edit_with_fallback`).
             return;
         }
-        let sent = match client
-            .send_message(chat_id, html_body, Some("HTML"), thread_id, None)
-            .await
-        {
-            Ok(_) => true,
-            Err(e) if is_parse_entities_error(&e) => {
-                let plain = crate::dispatcher::html_to_plain(html_body);
-                match client
-                    .send_message(chat_id, &plain, None, thread_id, None)
-                    .await
-                {
-                    Ok(_) => true,
-                    Err(e2) => {
-                        eprintln!("[telegram] stream finalize (plain fallback) failed: {e2}");
-                        false
-                    }
-                }
-            }
-            Err(e) => {
+        // `send_text` may chunk, and a mid-sequence failure leaves earlier chunks already
+        // in the chat with no way to roll them back. Re-rendering the whole answer into
+        // the placeholder in that case would show the user the first chunk twice, so the
+        // count decides: only a delivery that reached nobody may fall back to the edit.
+        let (delivered, error) =
+            crate::dispatcher::send_text_counting(client, chat_id, raw, thread_id).await;
+        let sent = match (delivered, error) {
+            (_, None) => true,
+            (0, Some(e)) => {
                 eprintln!("[telegram] stream finalize failed: {e}");
                 false
+            }
+            (n, Some(e)) => {
+                eprintln!(
+                    "[telegram] stream finalize partially delivered {n} message(s), \
+                     not re-sending: {e}"
+                );
+                true
             }
         };
         if sent {
@@ -254,7 +285,7 @@ impl TelegramAdapter {
         } else {
             // Fresh send failed outright — fall back to the old edit-in-place so
             // the answer is still visible (no notification, but not lost).
-            Self::edit_with_fallback(client, chat_id, placeholder_id, html_body).await;
+            Self::edit_with_fallback(client, chat_id, placeholder_id, raw).await;
         }
     }
 }
@@ -429,7 +460,7 @@ impl SidecarAdapter for TelegramAdapter {
                 if elapsed >= Duration::from_millis(STREAM_EDIT_INTERVAL_MS) {
                     let chat_id = state.chat_id;
                     let message_id = state.message_id;
-                    let body = crate::format::format_and_sanitize(&state.buf);
+                    let body = state.buf.clone();
                     let buf_len = state.buf.len();
                     state.last_edit = Instant::now();
                     drop(map);
@@ -453,7 +484,7 @@ impl SidecarAdapter for TelegramAdapter {
                     state.message_id,
                     state.buf.len()
                 );
-                let body = crate::format::format_and_sanitize(&state.buf);
+                let body = state.buf.clone();
                 let chat_id = state.chat_id;
                 let message_id = state.message_id;
                 let thread_id = state.thread_id;

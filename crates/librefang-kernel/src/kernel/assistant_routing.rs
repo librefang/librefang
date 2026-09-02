@@ -155,9 +155,13 @@ impl LibreFangKernel {
         if let Some(entry) = self.agents.registry.find_by_name(name) {
             return Ok(entry.id);
         }
-        let (manifest, _source_path) =
+        let (mut manifest, _source_path) =
             crate::agent_template::load_agent_template(self.home_dir(), name)
                 .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        // Same provenance stamp `POST /api/agents` and the step-agent resolver
+        // apply (#8018): a specialist spawned by LLM routing did come from a
+        // template, and a blank field would read as "not from a template".
+        manifest.source_template = Some(name.to_string());
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
         Ok(id)

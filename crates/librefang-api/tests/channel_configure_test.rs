@@ -370,7 +370,80 @@ async fn configure_still_rejects_a_required_secret_that_was_never_stored() {
         "a rejected save must not have written the instance block: {config}"
     );
 }
+/// `instance_secret_prefix` uppercases and maps every non-alphanumeric byte to `_`, so it is many-to-one.
+/// Two instances that collapse onto the same prefix share one `<PREFIX>__KEY` namespace in secrets.env, and the second save would overwrite the first one's token — which is the opposite of the isolation multi-instance support is for, and what the feature's own changelog promises ("so two bots never share a token").
+///
+/// `warn_secret_prefix_collisions` only reports this from the boot / reload loop, after the damage.
+/// The write path has to refuse it.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_refuses_an_instance_name_that_shares_a_secret_namespace() {
+    let harness = boot_router().await;
 
+    let (status, body) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"TELEGRAM_BOT_TOKEN": "first-token"},
+            "instance_name": "bot-1",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // `bot.1` normalizes to `BOT_1`, exactly where `bot-1` keeps its secret.
+    let (status, body) = configure(
+        &harness.app,
+        "telegram",
+        serde_json::json!({
+            "values": {"TELEGRAM_BOT_TOKEN": "second-token"},
+            "instance_name": "bot.1",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "sidecar_secret_prefix_conflict", "{body}");
+
+    // The refusal must land before the first mutation: the original token is still there and no second instance was created.
+    let secrets = std::fs::read_to_string(harness.home.join("secrets.env")).unwrap_or_default();
+    assert!(
+        secrets.contains("BOT_1__TELEGRAM_BOT_TOKEN=first-token"),
+        "the rejected save overwrote the first instance's secret: {secrets}"
+    );
+    assert!(
+        !secrets.contains("second-token"),
+        "the rejected save wrote its own token anyway: {secrets}"
+    );
+    let payload = get_channels(&harness.app).await;
+    assert!(
+        payload.to_string().contains("bot-1") && !payload.to_string().contains("bot.1"),
+        "the rejected instance must not have been created: {payload}"
+    );
+}
+
+/// Re-saving the same instance is `upsert_sidecar_block` editing it in place, not a second instance moving into its namespace, so it must still work.
+#[tokio::test(flavor = "multi_thread")]
+async fn configure_still_allows_reconfiguring_the_same_named_instance() {
+    let harness = boot_router().await;
+
+    for token in ["first-token", "second-token"] {
+        let (status, body) = configure(
+            &harness.app,
+            "telegram",
+            serde_json::json!({
+                "values": {"TELEGRAM_BOT_TOKEN": token},
+                "instance_name": "bot-1",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let secrets = std::fs::read_to_string(harness.home.join("secrets.env")).unwrap_or_default();
+    assert!(
+        secrets.contains("BOT_1__TELEGRAM_BOT_TOKEN=second-token"),
+        "re-saving an instance must update its own secret: {secrets}"
+    );
+}
 #[tokio::test(flavor = "multi_thread")]
 async fn registry_returns_typed_metadata_array() {
     let harness = boot_router().await;

@@ -184,11 +184,16 @@ impl LibreFangKernel {
             return Ok(resolved);
         }
 
-        let (manifest, source_path) = load_agent_template(self.home_dir(), requested)?;
+        let (mut manifest, source_path) = load_agent_template(self.home_dir(), requested)?;
         // `load_agent_template` guarantees `manifest.name == requested`, which
         // is what makes the duplicate-race reuse below safe: the entry we
         // re-read under `requested` is the same agent this spawn was building.
         debug_assert_eq!(manifest.name, requested);
+        // Record the provenance the same way `POST /api/agents` does (#8018).
+        // Without this a step agent spawned from a type shows a blank
+        // `source_template`, which the dashboard cannot tell apart from "this
+        // agent was not created from a template at all".
+        manifest.source_template = Some(requested.to_string());
         let inherit = manifest.inherit_parent_context;
 
         match self.spawn_agent_with_source(manifest, Some(source_path)) {

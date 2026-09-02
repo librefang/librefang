@@ -387,3 +387,52 @@ describe("useSendAgentMessage", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: usageKeys.all });
   });
 });
+
+describe("useDeleteAgent cancels the agent's in-flight reads", () => {
+  it("cancels every per-agent query, not just the detail key", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const cancelSpy = vi.spyOn(queryClient, "cancelQueries");
+
+    const { result } = renderHook(() => useDeleteAgent(), { wrapper });
+    await result.current.mutateAsync("agent-1");
+
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+    const predicate = cancelSpy.mock.calls[0][0]?.predicate;
+    expect(predicate).toBeTypeOf("function");
+
+    const matches = (queryKey: readonly unknown[]) =>
+      predicate!({ queryKey } as never);
+
+    // `detail` is the one key in this family that does NOT poll, so a prefix
+    // match on it was never enough. These three carry `refetchInterval`.
+    expect(matches(agentKeys.stats("agent-1"))).toBe(true);
+    expect(matches(agentKeys.events("agent-1", 30))).toBe(true);
+    expect(matches(agentKeys.sessionContext("agent-1", "session-1"))).toBe(true);
+    expect(matches(agentKeys.detail("agent-1"))).toBe(true);
+    expect(matches(agentKeys.sessions("agent-1"))).toBe(true);
+
+    // Another agent's queries, and unrelated domains, must survive.
+    expect(matches(agentKeys.stats("agent-2"))).toBe(false);
+    expect(matches(agentKeys.detail("agent-2"))).toBe(false);
+    expect(matches(overviewKeys.snapshot())).toBe(false);
+  });
+
+  it("cancels before the DELETE is sent, so a late response cannot repopulate the cache", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const order: string[] = [];
+    vi.spyOn(queryClient, "cancelQueries").mockImplementation(async () => {
+      order.push("cancel");
+    });
+    (http.deleteAgent as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        order.push("delete");
+        return {};
+      },
+    );
+
+    const { result } = renderHook(() => useDeleteAgent(), { wrapper });
+    await result.current.mutateAsync("agent-1");
+
+    expect(order).toEqual(["cancel", "delete"]);
+  });
+});
