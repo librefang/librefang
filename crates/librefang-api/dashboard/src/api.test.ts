@@ -224,6 +224,32 @@ describe("dashboard auth helpers", () => {
     expect(body.components).toEqual(["agents", "data"]);
   });
 
+  // `null` has to survive JSON.stringify as `null`, not vanish. It is the only
+  // way for a client to say "hand this field back to inherit" — an omitted key
+  // means "leave it alone", which is a different request.
+  it("patchAgentConfig sends an explicit null to clear a pinned value", async () => {
+    setApiKey("secret-token");
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok", warnings: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await patchAgentConfig("test-agent-id", {
+      temperature: null,
+      top_p: 0.9,
+      context_window: 200000,
+    });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toHaveProperty("temperature", null);
+    expect(body.top_p).toBe(0.9);
+    expect(body.context_window).toBe(200000);
+    // Untouched knobs stay out of the payload entirely.
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
   it("patchHandAgentRuntimeConfig trims tri-state string fields before sending", async () => {
     setApiKey("secret-token");
     fetchMock.mockResolvedValue(

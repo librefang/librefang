@@ -110,6 +110,9 @@ impl AgentTypeSpec {
                 // Sampling and endpoint overrides are per-deployment, not per-type; an agent type that pinned them would override the operator's global config at every spawn.
                 max_tokens: model_defaults.max_tokens,
                 temperature: model_defaults.temperature,
+                top_p: model_defaults.top_p,
+                frequency_penalty: model_defaults.frequency_penalty,
+                presence_penalty: model_defaults.presence_penalty,
                 api_key_env: model_defaults.api_key_env,
                 base_url: model_defaults.base_url,
                 context_window: model_defaults.context_window,

@@ -164,14 +164,13 @@ impl SetupWizard {
             model: ModelConfig {
                 provider: provider.to_string(),
                 model: model.to_string(),
-                max_tokens: 4096,
-                temperature: 0.7,
+                // A wizard-created agent inherits: no number is pinned until
+                // the operator picks one, so a later per-model override still
+                // reaches it.
+                max_tokens: None,
+                temperature: None,
                 system_prompt,
-                api_key_env: None,
-                base_url: None,
-                context_window: None,
-                max_output_tokens: None,
-                extra_params: std::collections::BTreeMap::new(),
+                ..Default::default()
             },
             resources: ResourceQuota::default(),
             priority: Priority::default(),

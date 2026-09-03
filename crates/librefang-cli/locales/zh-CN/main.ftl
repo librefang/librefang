@@ -1171,7 +1171,11 @@ tui-agents-opt-create-new = 创建新 Agent
 
 tui-agents-hints-filter =   [输入] 过滤  [Enter] 应用  [Esc] 取消搜索
 tui-agents-hints-list =   [↑↓] 导航  [Enter] 详情  [/] 搜索  [Esc] 返回
-tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-hints-detail =   [s] 编辑 Skill  [m] 编辑 MCP  [n] 编辑频道  [p] 模型参数  [c] 聊天  [k] 停止  [Esc] 返回
+tui-agents-title-model-params = 模型参数
+tui-agents-prompt-model-params = 该代理自己的设置优先于模型设置。`inherit` 表示使用模型的设置。
+tui-agents-hints-model-params =   [←→] 修改  [i] 继承  [e] 自定义值  [Enter] 保存  [Esc] 取消
+tui-agents-hints-model-params-custom =   输入值  [Enter] 确认  [Esc] 取消  （留空 = 继承）
 tui-agents-hints-navigate =     [↑↓] 导航  [Enter] 选择  [Esc] 返回
 tui-agents-hints-input =     [Enter] 下一步  [Esc] 返回
 tui-agents-hints-tools =     [↑↓] 导航  [Space] 切换  [Enter] 创建  [Esc] 返回
@@ -1662,7 +1666,8 @@ agent-merge-history-not-implemented = merge-history 尚未实现（refs #4614 �
 agent-set-model-success = 代理 { $id } 的模型已设为 { $value }。
 agent-set-model-failed-with-reason = 设置模型失败：{ $error }
 agent-set-no-daemon = 未找到正在运行的守护进程。用以下命令启动：librefang start
-agent-set-unknown-field = 未知字段：{ $field }。支持的字段：model
+agent-set-unknown-field = 未知字段：{ $field }。支持的字段：model, temperature, max_tokens, top_p, frequency_penalty, presence_penalty, context_window, max_output_tokens
+agent-set-field-success = 代理 { $id } 的 { $field } 已设为 { $value }。
 agent-new-no-templates = 未找到代理模板
 agent-new-no-templates-fix = 运行 `librefang init` 设置 agents 目录
 agent-new-template-not-found = 未找到模板 `{ $name }`
@@ -2469,6 +2474,31 @@ tui-event-channels-not-available-in-process = 通道管理需要正在运行的�
 tui-event-channel-save-failed = 保存通道实例 { $name } 失败：{ $error }
 tui-event-channel-delete-failed = 删除通道实例 { $name } 失败：{ $error }
 tui-event-channels-reload-failed = 重载通道失败：{ $error }
+
+tui-event-model-params-fetch-failed = 无法加载该代理的模型参数
+tui-event-model-params-update-failed = 无法保存模型参数
+tui-event-model-params-daemon-only = 模型参数通过守护进程编辑；请先启动守护进程再重新连接。
+tui-mod-agent-model-params-updated = 代理 { $id } 的模型参数已更新。
+tui-agents-param-temperature = 温度
+tui-agents-param-temperature-hint = temperature — 模型用词的变化程度。越低越稳定。
+tui-agents-param-top-p = Top-p
+tui-agents-param-top-p-hint = top_p — 核采样。通常保持继承。
+tui-agents-param-frequency-penalty = 频率惩罚
+tui-agents-param-frequency-penalty-hint = frequency_penalty — 抑制重复相同词语。
+tui-agents-param-presence-penalty = 存在惩罚
+tui-agents-param-presence-penalty-hint = presence_penalty — 抑制反复回到相同主题。
+tui-agents-param-max-tokens = 回复长度
+tui-agents-param-max-tokens-hint = max_tokens — 该代理请求的回复长度。你的设置优先于模型的。
+tui-agents-param-context-window = 上下文窗口
+tui-agents-param-context-window-hint = context_window — 该 endpoint 能读取多少。这是限制，不是偏好。
+tui-agents-param-max-output-tokens = 输出上限
+tui-agents-param-max-output-tokens-hint = max_output_tokens — endpoint 自身的输出上限。这是限制，不是偏好。
+tui-agents-param-not-a-number = { $field } 必须是数字
+tui-agents-param-not-whole = { $field } 必须是大于 0 的整数
+tui-agents-param-out-of-range = { $field } 必须在 { $min } 到 { $max } 之间
+agent-set-invalid-integer = { $field } 必须是正整数，得到 '{ $value }'
+agent-set-invalid-decimal = { $field } 必须是小数，得到 '{ $value }'
+agent-set-limit-warning = 警告：{ $message }
 
 # --- TUI fetch failures that used to be silent (#8141) ---
 tui-memory-config-requires-daemon = 记忆设置来自守护进程 API —— TUI 以进程内方式接入时不可用。

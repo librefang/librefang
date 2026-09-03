@@ -47,8 +47,8 @@ fn fully_populated_manifest() -> AgentManifest {
         model: ModelConfig {
             provider: "openai".into(),
             model: "gpt-4o".into(),
-            max_tokens: 4242,
-            temperature: 0.42,
+            max_tokens: Some(4242),
+            temperature: Some(0.42),
             system_prompt: "you are a parity fixture".into(),
             api_key_env: Some("PARITY_KEY".into()),
             base_url: Some("https://example.invalid/v1".into()),

@@ -321,6 +321,33 @@ impl ModelCatalogEntry {
         self.modality == Modality::Image
     }
 
+    /// This entry's context window as a limit that may be warned against, or
+    /// `None` when it is absent (`0`) or a discovery placeholder.
+    ///
+    /// The `limits_known` gate is what keeps a `131_072` that nobody measured
+    /// from being reported to an operator as a ceiling they crossed (#7780).
+    pub fn known_context_window(&self) -> Option<crate::inference_params::KnownLimit> {
+        if !self.limits_known {
+            return None;
+        }
+        crate::inference_params::KnownLimit::new(
+            self.context_window,
+            crate::inference_params::LimitSource::Registry,
+        )
+    }
+
+    /// This entry's maximum output tokens as a warnable limit.
+    /// See [`Self::known_context_window`].
+    pub fn known_max_output_tokens(&self) -> Option<crate::inference_params::KnownLimit> {
+        if !self.limits_known {
+            return None;
+        }
+        crate::inference_params::KnownLimit::new(
+            self.max_output_tokens,
+            crate::inference_params::LimitSource::Registry,
+        )
+    }
+
     /// Modality-aware schema check applied after TOML deserialization.
     ///
     /// `context_window` and `max_output_tokens` use `#[serde(default)]` so
@@ -358,10 +385,10 @@ impl Default for ModelCatalogEntry {
             modality: Modality::default(),
             context_window: 0,
             max_output_tokens: 0,
+            limits_known: true,
             input_cost_per_m: 0.0,
             output_cost_per_m: 0.0,
             pricing_known: true,
-            limits_known: true,
             image_input_cost_per_m: None,
             image_output_cost_per_m: None,
             supports_tools: false,

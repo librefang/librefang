@@ -367,10 +367,13 @@ struct LegacyHandAgentConfig {
     model: String,
     api_key_env: Option<String>,
     base_url: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    max_tokens: u32,
-    #[serde(default = "default_temperature")]
-    temperature: f32,
+    /// Tri-state, matching `ModelConfig`: an omitted key means "inherit", so
+    /// the per-model override supplies the value instead of a hardcoded 4096
+    /// landing on every legacy hand agent.
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f32>,
     #[serde(default)]
     system_prompt: String,
     /// Agent-loop iteration cap.
@@ -416,9 +419,7 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
                 system_prompt: legacy.system_prompt,
                 api_key_env: legacy.api_key_env,
                 base_url: legacy.base_url,
-                context_window: None,
-                max_output_tokens: None,
-                extra_params: std::collections::BTreeMap::new(),
+                ..Default::default()
             },
             schedule: legacy.schedule.unwrap_or_default(),
             autonomous,
@@ -673,12 +674,6 @@ fn default_provider() -> String {
 fn default_model() -> String {
     // Same sentinel story as default_provider — see the comment above.
     "default".to_string()
-}
-fn default_max_tokens() -> u32 {
-    4096
-}
-fn default_temperature() -> f32 {
-    0.7
 }
 
 /// Localized label/description for a single setting (optional).
@@ -2188,11 +2183,11 @@ metrics = []
         let planner = &def.agents["planner"];
         assert!(planner.coordinator);
         assert_eq!(planner.manifest.model.provider, "anthropic");
-        assert_eq!(planner.manifest.model.max_tokens, 8192);
+        assert_eq!(planner.manifest.model.max_tokens, Some(8192));
 
         let analyst = &def.agents["analyst"];
         assert_eq!(analyst.manifest.model.provider, "groq");
-        assert_eq!(analyst.manifest.model.temperature, 0.3);
+        assert_eq!(analyst.manifest.model.temperature, Some(0.3));
     }
 
     #[test]
@@ -2539,7 +2534,7 @@ metrics = []
         // Provider and model come from base.
         assert_eq!(writer.manifest.model.provider, "anthropic");
         assert_eq!(writer.manifest.model.model, "some-anthropic-model");
-        assert_eq!(writer.manifest.model.max_tokens, 4096);
+        assert_eq!(writer.manifest.model.max_tokens, Some(4096));
         // System prompt is overridden by the hand.
         assert_eq!(
             writer.manifest.model.system_prompt,
@@ -2599,9 +2594,9 @@ metrics = []
         assert_eq!(agent.manifest.description, "Overridden description");
         assert_eq!(agent.manifest.model.provider, "groq");
         assert_eq!(agent.manifest.model.model, "llama-3.3-70b-versatile");
-        assert_eq!(agent.manifest.model.temperature, 0.3);
+        assert_eq!(agent.manifest.model.temperature, Some(0.3));
         // Preserved from base (not overridden).
-        assert_eq!(agent.manifest.model.max_tokens, 4096);
+        assert_eq!(agent.manifest.model.max_tokens, Some(4096));
         assert_eq!(
             agent.manifest.model.system_prompt,
             "You are a helpful assistant."

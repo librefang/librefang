@@ -4,6 +4,12 @@ import { AlertTriangle, ChevronDown, Plus, Trash2, X } from "lucide-react";
 import { generateUid } from "../lib/agentManifest";
 import type { ManifestExtras, ManifestFormState } from "../lib/agentManifest";
 import { MultiSelectCmdk } from "./ui/MultiSelectCmdk";
+import { StepLadderInput } from "./ui/StepLadderInput";
+import {
+  CONTEXT_WINDOW_LADDER,
+  MAX_OUTPUT_TOKENS_LADDER,
+  formatTokens,
+} from "../lib/modelParamLadders";
 
 /**
  * Catalog entry for the skill/tool finder (#5049). Both fields are
@@ -20,7 +26,23 @@ interface AgentManifestFormProps {
   value: ManifestFormState;
   onChange: (next: ManifestFormState) => void;
   providers: { name: string }[];
-  models: { provider: string; id: string }[];
+  /**
+   * Model options for the picker. The capacity fields are optional because a
+   * caller may only have ids to hand; when they are present they trim the
+   * ladders and drive the over-limit advisory.
+   *
+   * `limits_known === false` marks the capacities as discovery placeholders
+   * rather than measurements (#7780). The form ignores them in that case: an
+   * unknown limit is not a ceiling, and warning against an invented one trains
+   * operators to ignore warnings.
+   */
+  models: {
+    provider: string;
+    id: string;
+    context_window?: number;
+    max_output_tokens?: number;
+    limits_known?: boolean;
+  }[];
   invalidFields: Set<string>;
   // Read-only view of preserved-but-not-form-renderable extras. We show
   // a hint next to dropdowns whose form widget can't represent the
@@ -98,6 +120,42 @@ export function AgentManifestForm({
   const mcpFinder = useMemo(
     () => mergeCatalog(mcpCatalog, value.mcp_servers),
     [mcpCatalog, value.mcp_servers],
+  );
+
+  // Limits for the selected model, and only when the catalog vouches for them.
+  const selectedModelLimits = useMemo(() => {
+    const entry = models.find(
+      (m) => m.id === value.model.model && m.provider === value.model.provider,
+    );
+    if (!entry || entry.limits_known === false) return {};
+    return {
+      contextWindow: entry.context_window && entry.context_window > 0 ? entry.context_window : undefined,
+      maxOutputTokens:
+        entry.max_output_tokens && entry.max_output_tokens > 0 ? entry.max_output_tokens : undefined,
+    };
+  }, [models, value.model.model, value.model.provider]);
+
+  // Advisory, not a validation error: the field is not marked invalid and the
+  // value is saved as typed. If the catalog figure is the thing that is wrong,
+  // an explicit provider error beats a silent truncation.
+  const overLimit = (raw: string, limit?: number): string | undefined => {
+    const parsed = Number(raw.trim());
+    if (raw.trim() === "" || !Number.isFinite(parsed) || limit === undefined) return undefined;
+    return parsed > limit
+      ? t("agents.form.over_limit_warning", { limit: formatTokens(limit) })
+      : undefined;
+  };
+  const maxTokensWarning = overLimit(
+    value.model.max_tokens,
+    // An operator-set output cap describes this endpoint and outranks the
+    // catalog's figure for it.
+    value.model.max_output_tokens.trim() !== ""
+      ? Number(value.model.max_output_tokens)
+      : selectedModelLimits.maxOutputTokens,
+  );
+  const contextWindowWarning = overLimit(
+    value.model.context_window,
+    selectedModelLimits.contextWindow,
   );
 
   const jsonSchemaFormat =
@@ -218,30 +276,116 @@ export function AgentManifestForm({
             className={textareaClass}
           />
         </Field>
+        {/*
+          Sampling preferences. Each is tri-state and empty means inherit —
+          this agent has no opinion, so the per-model override supplies the
+          value. An agent that does state a preference wins over that override,
+          which is what lets two instances of one agent type run the same model
+          at different temperatures.
+        */}
+        <p className="text-[11px] text-text-dim">{t("agents.form.preferences_hint")}</p>
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.temperature")}>
             <input
               type="number"
-              step="0.1"
+              step="0.05"
               min="0"
               max="2"
               value={value.model.temperature}
               onChange={(e) => updateModel({ temperature: e.target.value })}
-              placeholder={t("agents.form.temperature_placeholder")}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.temperature")}
+              placeholder={t("agents.form.inherit_default")}
               className={inputClass}
             />
           </Field>
-          <Field label={t("agents.form.max_tokens")}>
+          <Field label={t("agents.form.top_p")}>
             <input
               type="number"
-              min="1"
-              value={value.model.max_tokens}
-              onChange={(e) => updateModel({ max_tokens: e.target.value })}
-              placeholder={t("agents.form.max_tokens_placeholder")}
+              step="0.05"
+              min="0"
+              max="1"
+              value={value.model.top_p}
+              onChange={(e) => updateModel({ top_p: e.target.value })}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.top_p")}
+              placeholder={t("agents.form.inherit_default")}
+              className={inputClass}
+            />
+          </Field>
+          <Field label={t("agents.form.frequency_penalty")}>
+            <input
+              type="number"
+              step="0.1"
+              min="-2"
+              max="2"
+              value={value.model.frequency_penalty}
+              onChange={(e) => updateModel({ frequency_penalty: e.target.value })}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.frequency_penalty")}
+              placeholder={t("agents.form.inherit_default")}
+              className={inputClass}
+            />
+          </Field>
+          <Field label={t("agents.form.presence_penalty")}>
+            <input
+              type="number"
+              step="0.1"
+              min="-2"
+              max="2"
+              value={value.model.presence_penalty}
+              onChange={(e) => updateModel({ presence_penalty: e.target.value })}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.presence_penalty")}
+              placeholder={t("agents.form.inherit_default")}
               className={inputClass}
             />
           </Field>
         </div>
+        <StepLadderInput
+          label={t("agents.form.max_tokens")}
+          value={value.model.max_tokens}
+          onChange={(next) => updateModel({ max_tokens: next })}
+          ladder={MAX_OUTPUT_TOKENS_LADDER}
+          cap={selectedModelLimits.maxOutputTokens}
+          inheritLabel={t("agents.form.inherit_default")}
+          customLabel={t("agents.form.custom")}
+          customPlaceholder={t("agents.form.max_tokens_placeholder")}
+          warning={maxTokensWarning}
+        />
+        {/*
+          Endpoint limits, not preferences. These describe what the model can
+          accept; over-limit values are reported rather than clamped, so the
+          operator sees the conflict instead of a number they never chose.
+        */}
+        <p className="text-[11px] text-text-dim">{t("agents.form.limits_hint")}</p>
+        <StepLadderInput
+          label={t("agents.form.context_window")}
+          value={value.model.context_window}
+          onChange={(next) => updateModel({ context_window: next })}
+          ladder={CONTEXT_WINDOW_LADDER}
+          inheritLabel={t("agents.form.inherit_default")}
+          customLabel={t("agents.form.custom")}
+          customPlaceholder={t("agents.form.context_window_placeholder")}
+          warning={contextWindowWarning}
+        />
+        <StepLadderInput
+          label={t("agents.form.max_output_tokens")}
+          value={value.model.max_output_tokens}
+          onChange={(next) => updateModel({ max_output_tokens: next })}
+          ladder={MAX_OUTPUT_TOKENS_LADDER}
+          inheritLabel={t("agents.form.inherit_default")}
+          customLabel={t("agents.form.custom")}
+          customPlaceholder={t("agents.form.max_output_tokens_placeholder")}
+        />
         <div className="grid grid-cols-2 gap-3">
           <Field label={t("agents.form.api_key_env")} hint={t("agents.form.api_key_env_hint")}>
             <input

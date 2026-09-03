@@ -588,6 +588,11 @@ pub(crate) fn synthesize_catalog(
             modality,
             context_window: metadata.context_window,
             max_output_tokens: metadata.max_output_tokens,
+            // Every branch of `resolve_metadata` reads a real source — the
+            // gateway's own `/model/info`, the pricing feed, or the bundled
+            // OpenRouter snapshot. `token_limits_borrowed` records *which*
+            // for the report; all three count as known (#7780).
+            limits_known: metadata.context_window > 0 || metadata.max_output_tokens > 0,
             // Always emitted, never omitted: neither cost field carries
             // `#[serde(default)]`, so a missing one fails the whole file's
             // parse. `pricing_known` is the flag that distinguishes "free"

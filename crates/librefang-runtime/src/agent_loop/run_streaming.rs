@@ -811,8 +811,9 @@ async fn run_agent_loop_streaming_inner(
             } else {
                 tools_cache.get(available_tools, &session_loaded_tools)
             },
-            max_tokens: manifest.model.max_tokens,
-            temperature: manifest.model.temperature,
+            // Same resolution as the non-streaming loop.
+            max_tokens: manifest.model.effective_max_tokens(),
+            temperature: manifest.model.effective_temperature(),
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
             system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),

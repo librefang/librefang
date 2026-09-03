@@ -70,7 +70,7 @@ export function SliderInput({
               aria-label={label}
               onClick={() => onToggle(!enabled)}
               className={`relative w-8 h-[18px] rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-brand ${
-                enabled ? "bg-brand" : "bg-text-dim"
+                enabled ? "bg-brand" : "bg-text-dim/60 hover:bg-text-dim/80"
               }`}
             >
               <span

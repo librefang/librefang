@@ -20,18 +20,28 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+interface HarnessModel {
+  provider: string;
+  id: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  limits_known?: boolean;
+}
+
 function Harness({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
   initialState,
   invalidFields = new Set(),
+  models = [{ provider: "openai", id: "gpt-4o" }],
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
   mcpCatalog?: ManifestCatalogEntry[];
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
+  models?: HarnessModel[];
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -39,7 +49,7 @@ function Harness({
       value={state}
       onChange={setState}
       providers={[{ name: "openai" }]}
-      models={[{ provider: "openai", id: "gpt-4o" }]}
+      models={models}
       invalidFields={invalidFields}
       extras={emptyManifestExtras()}
       skillCatalog={skillCatalog}
@@ -237,5 +247,168 @@ describe("AgentManifestForm — compact controls", () => {
     expect(
       screen.getByRole("checkbox", { name: "agents.form.stream_thinking" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("AgentManifestForm — inference parameters", () => {
+  /** The four knobs an agent could not reach before (#7781). */
+  it("lets the agent set every sampling preference, not just temperature and max_tokens", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    for (const label of [
+      "agents.form.temperature",
+      "agents.form.top_p",
+      "agents.form.frequency_penalty",
+      "agents.form.presence_penalty",
+    ]) {
+      expect(screen.getByRole("spinbutton", { name: label })).toBeInTheDocument();
+    }
+
+    const topP = screen.getByRole("spinbutton", { name: "agents.form.top_p" });
+    await user.type(topP, "0.85");
+    expect(topP).toHaveValue(0.85);
+  });
+
+  it("starts every knob on inherit rather than on a number nobody chose", () => {
+    render(<Harness />);
+    expect(screen.getByRole("spinbutton", { name: "agents.form.temperature" })).toHaveValue(null);
+    // The ladder's inherit rung is pressed, which is the same state made visible.
+    const inheritRungs = screen.getAllByRole("button", { name: "agents.form.inherit_default" });
+    expect(inheritRungs.length).toBeGreaterThan(0);
+    for (const rung of inheritRungs) {
+      expect(rung).toHaveAttribute("aria-pressed", "true");
+    }
+  });
+
+  it("replaces the response-length slider with a ladder plus a custom entry", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    // Scoped to the response-length field: the form also renders the context
+    // ladder, which legitimately offers 2M. An unscoped query would be asking
+    // whether 2M appears anywhere on the page, which is a different question.
+    const lengthField = screen.getByText("agents.form.max_tokens").closest("div") as HTMLElement;
+
+    // The output ladder stops at 128K. 1M / 2M are context figures, and no
+    // model emits a million tokens of reply.
+    for (const label of ["1K", "4K", "8K", "16K", "32K", "64K", "128K"]) {
+      expect(within(lengthField).getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    expect(within(lengthField).queryByRole("button", { name: "2M" })).not.toBeInTheDocument();
+    expect(within(lengthField).queryByRole("button", { name: "1M" })).not.toBeInTheDocument();
+
+    await user.click(within(lengthField).getByRole("button", { name: "8K" }));
+    expect(
+      within(lengthField).getByRole("button", { name: "8K", pressed: true }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers the context ladder up to 2M, which the output ladder must not", () => {
+    render(<Harness />);
+    const contextField = screen
+      .getByText("agents.form.context_window")
+      .closest("div") as HTMLElement;
+    expect(within(contextField).getByRole("button", { name: "2M" })).toBeInTheDocument();
+    expect(within(contextField).getByRole("button", { name: "1M" })).toBeInTheDocument();
+  });
+
+  it("opens a custom field for a value that is not on the ladder", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+
+    const customButtons = screen.getAllByRole("button", { name: "agents.form.custom" });
+    await user.click(customButtons[0]);
+
+    const field = screen.getByRole("spinbutton", {
+      name: "agents.form.max_tokens — agents.form.custom",
+    });
+    await user.clear(field);
+    await user.type(field, "50000");
+    expect(field).toHaveValue(50000);
+  });
+
+  /**
+   * Warn, do not clamp. A silent truncation leaves the operator debugging a
+   * number they never chose — worse than an explicit provider error when the
+   * catalog figure is the thing that is wrong.
+   */
+  it("flags an over-limit response length without changing it", async () => {
+    const state = emptyManifestForm();
+    state.model.provider = "openai";
+    state.model.model = "gpt-4o";
+    state.model.max_tokens = "65536";
+
+    render(
+      <Harness
+        initialState={state}
+        models={[
+          {
+            provider: "openai",
+            id: "gpt-4o",
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            limits_known: true,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(/agents\.form\.over_limit_warning/)).toBeInTheDocument();
+    // The value is untouched, and the field is not marked invalid.
+    expect(screen.getByRole("button", { name: "agents.form.custom", pressed: true })).toBeInTheDocument();
+  });
+
+  /**
+   * An inferred limit is a guess, not a ceiling. Warning against one is noise,
+   * and noise is what makes operators stop reading warnings (#7780).
+   */
+  it("stays silent when the model's limits were never sourced", () => {
+    const state = emptyManifestForm();
+    state.model.provider = "openai";
+    state.model.model = "gpt-4o";
+    state.model.max_tokens = "65536";
+
+    render(
+      <Harness
+        initialState={state}
+        models={[
+          {
+            provider: "openai",
+            id: "gpt-4o",
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            limits_known: false,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/agents\.form\.over_limit_warning/)).not.toBeInTheDocument();
+  });
+
+  it("hides ladder rungs above a limit the model actually declared", () => {
+    const state = emptyManifestForm();
+    state.model.provider = "openai";
+    state.model.model = "gpt-4o";
+
+    render(
+      <Harness
+        initialState={state}
+        models={[
+          {
+            provider: "openai",
+            id: "gpt-4o",
+            context_window: 200_000,
+            max_output_tokens: 16_384,
+            limits_known: true,
+          },
+        ]}
+      />,
+    );
+
+    const lengthField = screen.getByText("agents.form.max_tokens").closest("div") as HTMLElement;
+    expect(within(lengthField).getByRole("button", { name: "16K" })).toBeInTheDocument();
+    expect(within(lengthField).queryByRole("button", { name: "32K" })).not.toBeInTheDocument();
   });
 });

@@ -753,6 +753,82 @@ pub async fn set_agent_channels(
 // ---------------------------------------------------------------------------
 // Agent Config Hot-Update
 // ---------------------------------------------------------------------------
+/// Deserialize a field so that "absent" and "explicit `null`" stay distinguishable.
+///
+/// `#[serde(default)]` on an `Option<Option<T>>` yields `None` when the key is
+/// missing; this function is reached only when the key *is* present, so a JSON
+/// `null` lands as `Some(None)`. That is what lets a PATCH say "hand this field
+/// back to inherit" as opposed to "leave it alone" — with a plain `Option<T>`
+/// the two are the same value and the inherit state is unreachable over HTTP.
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// Collect the advisory limit warnings for a config PATCH.
+///
+/// Reports, never clamps: an over-limit value is sent to the provider exactly
+/// as the operator typed it. The reasoning is in
+/// `librefang_types::inference_params` — when the catalog figure is the thing
+/// that is wrong, a silent truncation leaves the operator debugging a value
+/// they never chose, whereas an explicit provider error names the problem.
+///
+/// Only limits that some source actually asserted produce a warning. A
+/// discovery placeholder or a name-pattern guess yields `None` and stays quiet
+/// (#7780).
+fn collect_limit_warnings(
+    // Via the kernel re-export: `librefang-runtime` is a dev-dependency of this
+    // crate, so it is not linkable from `src/`. Same path `providers.rs` uses.
+    catalog: &librefang_kernel::model_catalog::ModelCatalog,
+    model: &librefang_types::agent::ModelConfig,
+    requested_max_tokens: Option<u32>,
+    requested_context_window: Option<u64>,
+) -> Vec<librefang_types::inference_params::LimitWarning> {
+    use librefang_types::inference_params::{
+        check_context_limit, check_output_limit, KnownLimit, LimitSource,
+    };
+    let entry = catalog.find_model_for_manifest(&model.provider, &model.model);
+    let mut out = Vec::new();
+    if let Some(requested) = requested_max_tokens {
+        // An operator-set `max_output_tokens` on the agent describes this
+        // endpoint and outranks the catalog's figure for it.
+        let limit = model
+            .max_output_tokens
+            .and_then(|v| KnownLimit::new(v, LimitSource::Operator))
+            .or_else(|| entry.and_then(|e| e.known_max_output_tokens()));
+        out.extend(check_output_limit(requested, limit));
+    }
+    if let Some(requested) = requested_context_window {
+        // Checked against the catalog only: comparing the operator's own
+        // override against itself would always pass and say nothing.
+        out.extend(check_context_limit(
+            requested,
+            entry.and_then(|e| e.known_context_window()),
+        ));
+    }
+    out
+}
+
+fn limit_warnings_json(
+    warnings: &[librefang_types::inference_params::LimitWarning],
+) -> Vec<serde_json::Value> {
+    warnings
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "field": w.kind.as_str(),
+                "requested": w.requested,
+                "limit": w.limit,
+                "limit_source": w.source.as_str(),
+                "message": w.message(),
+            })
+        })
+        .collect()
+}
+
 /// Request body for patching agent config (name, description, prompt, identity, model).
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -771,10 +847,42 @@ pub struct PatchAgentConfigRequest {
     pub provider: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
-    /// Maximum tokens for LLM response. Controls conversation window size.
-    pub max_tokens: Option<u32>,
+    /// Maximum tokens to request for the LLM response.
+    ///
+    /// Tri-state: omit the key to leave it unchanged, send `null` to hand the
+    /// field back to "inherit" (the per-model override, then the system
+    /// default, supplies it), or send a number to pin it for this agent.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<u32>)]
+    pub max_tokens: Option<Option<u32>>,
     /// Sampling temperature (0.0–2.0). Lower values are more deterministic.
-    pub temperature: Option<f32>,
+    /// Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub temperature: Option<Option<f32>>,
+    /// Top-p / nucleus sampling (0.0–1.0). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub top_p: Option<Option<f32>>,
+    /// Frequency penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub frequency_penalty: Option<Option<f32>>,
+    /// Presence penalty (-2.0–2.0). Same tri-state as [`Self::max_tokens`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<f32>)]
+    pub presence_penalty: Option<Option<f32>>,
+    /// Context-window override in tokens — a limit, not a preference.
+    /// Same tri-state as [`Self::max_tokens`]; `null` returns resolution to
+    /// the registry / probe chain.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<u64>)]
+    pub context_window: Option<Option<u64>>,
+    /// Maximum-output-tokens override for this endpoint — a limit, not a
+    /// preference. Same tri-state as [`Self::context_window`].
+    #[serde(default, deserialize_with = "deserialize_present")]
+    #[schema(value_type = Option<u64>)]
+    pub max_output_tokens: Option<Option<u64>>,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
     /// Web search augmentation mode: "off", "auto", or "always".
@@ -1052,46 +1160,109 @@ pub async fn patch_agent_config(
         }
     }
 
-    // Validate and update temperature (sampling randomness)
-    if let Some(temperature) = req.temperature {
-        if !(0.0..=2.0).contains(&temperature) {
+    // Sampling preferences. Each is tri-state: absent leaves the stored value
+    // alone, `null` hands the field back to inherit, a value pins it for this
+    // agent — and a pinned value now wins over the per-model override rather
+    // than losing to it.
+    //
+    // Range checks run only on a supplied value; `null` is always valid
+    // because it stores nothing.
+    for (value, range, message) in [
+        (
+            req.temperature.flatten(),
+            0.0..=2.0,
+            "temperature must be between 0.0 and 2.0",
+        ),
+        (
+            req.top_p.flatten(),
+            0.0..=1.0,
+            "top_p must be between 0.0 and 1.0",
+        ),
+        (
+            req.frequency_penalty.flatten(),
+            -2.0..=2.0,
+            "frequency_penalty must be between -2.0 and 2.0",
+        ),
+        (
+            req.presence_penalty.flatten(),
+            -2.0..=2.0,
+            "presence_penalty must be between -2.0 and 2.0",
+        ),
+    ] {
+        if value.is_some_and(|v| !range.contains(&v)) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "temperature must be between 0.0 and 2.0"})),
-            );
-        }
-        if state
-            .kernel
-            .agent_registry()
-            .update_temperature(agent_id, temperature)
-            .is_err()
-        {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                Json(serde_json::json!({ "error": message })),
             );
         }
     }
+    if let Some(Some(0)) = req.max_tokens {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "max_tokens must be greater than 0"})),
+        );
+    }
+    if let Some(Some(0)) = req.context_window {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "context_window must be greater than 0"})),
+        );
+    }
+    if let Some(Some(0)) = req.max_output_tokens {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "max_output_tokens must be greater than 0"})),
+        );
+    }
 
-    // Update max_tokens (response length / conversation window limit)
-    if let Some(max_tokens) = req.max_tokens {
-        if max_tokens == 0 {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "max_tokens must be greater than 0"})),
-            );
+    let registry = state.kernel.agent_registry();
+    let model_writes = [
+        req.temperature
+            .map(|v| registry.update_temperature(agent_id, v)),
+        req.max_tokens
+            .map(|v| registry.update_max_tokens(agent_id, v)),
+        req.top_p.map(|v| registry.update_top_p(agent_id, v)),
+        req.frequency_penalty
+            .map(|v| registry.update_frequency_penalty(agent_id, v)),
+        req.presence_penalty
+            .map(|v| registry.update_presence_penalty(agent_id, v)),
+        req.context_window
+            .map(|v| registry.update_context_window(agent_id, v)),
+        req.max_output_tokens
+            .map(|v| registry.update_model_max_output_tokens(agent_id, v)),
+    ];
+    if model_writes.iter().flatten().any(|r| r.is_err()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
+
+    // Advisory limit check, run after the writes so it sees the endpoint
+    // limits this same PATCH may have just set. Reports and logs; the stored
+    // value is not touched.
+    let limit_warnings = match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) => {
+            let catalog = state.kernel.model_catalog_ref().load();
+            collect_limit_warnings(
+                &catalog,
+                &entry.manifest.model,
+                entry.manifest.model.max_tokens,
+                entry.manifest.model.context_window,
+            )
         }
-        if state
-            .kernel
-            .agent_registry()
-            .update_max_tokens(agent_id, max_tokens)
-            .is_err()
-        {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
-        }
+        None => Vec::new(),
+    };
+    for w in &limit_warnings {
+        tracing::warn!(
+            agent_id = %id,
+            field = w.kind.as_str(),
+            requested = w.requested,
+            limit = w.limit,
+            limit_source = w.source.as_str(),
+            "{}",
+            w.message()
+        );
     }
 
     // Update fallback model chain
@@ -1135,9 +1306,16 @@ pub async fn patch_agent_config(
     // dashboard changes on next boot (#996, #1018).
     state.kernel.persist_manifest_to_disk(agent_id);
 
+    // `200` with a `warnings` array, not `400`: the write happened and the
+    // value stands. The array is empty on the ordinary path, so a client that
+    // ignores it sees the same response as before.
     (
         StatusCode::OK,
-        Json(serde_json::json!({"status": "ok", "agent_id": id})),
+        Json(serde_json::json!({
+            "status": "ok",
+            "agent_id": id,
+            "warnings": limit_warnings_json(&limit_warnings),
+        })),
     )
 }
 
@@ -1233,8 +1411,12 @@ pub async fn patch_hand_agent_runtime_config(
             .filter(|v| !v.is_empty()),
         api_key_env: hand_override_nullable_string(req.api_key_env),
         base_url: hand_override_nullable_string(req.base_url),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
+        // `HandAgentRuntimeOverride` has no "clear this one field" state of its
+        // own — `DELETE /hand-runtime-config` drops the whole override — so an
+        // explicit `null` here flattens to "leave unchanged" rather than
+        // inventing a third meaning for it on this endpoint.
+        max_tokens: req.max_tokens.flatten(),
+        temperature: req.temperature.flatten(),
         web_search_augmentation: req.web_search_augmentation,
     };
 

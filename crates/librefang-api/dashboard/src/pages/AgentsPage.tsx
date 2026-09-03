@@ -37,7 +37,7 @@ import { copyToClipboard } from "../lib/clipboard";
 import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, Trash2, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles, ChevronDown, Check, Save, Library, GitBranch } from "lucide-react";
-import { buildModelConfigPatch, MODEL_MAX_TOKENS_DEFAULT, MODEL_TEMPERATURE_DEFAULT } from "../lib/agentModelPatch";
+import { buildModelConfigPatch } from "../lib/agentModelPatch";
 import { truncateId } from "../lib/string";
 import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
@@ -486,8 +486,12 @@ export function AgentsPage() {
     setModelDraft({
       provider: detailAgent?.model?.provider ?? "",
       model: detailAgent?.model?.model ?? "",
-      max_tokens: String(detailAgent?.model?.max_tokens ?? MODEL_MAX_TOKENS_DEFAULT),
-      temperature: String(detailAgent?.model?.temperature ?? MODEL_TEMPERATURE_DEFAULT),
+      // An empty field is the inherit state, so a `null` from the backend seeds
+      // an empty box rather than the compiled default. Seeding 4096 / 0.7 here
+      // is what used to make an untouched field look like a deliberate choice.
+      max_tokens: detailAgent?.model?.max_tokens == null ? "" : String(detailAgent.model.max_tokens),
+      temperature:
+        detailAgent?.model?.temperature == null ? "" : String(detailAgent.model.temperature),
     });
     setEditingModel(true);
   }
@@ -622,10 +626,11 @@ export function AgentsPage() {
   function saveModelEdit() {
     if (!detailAgent) return;
     // buildModelConfigPatch validates the draft and includes a field only when
-    // the user changed it from its persisted (nullish-defaulted) value, using
-    // the same 4096 / 0.7 baseline as the modelDirty gate so the two can't drift
-    // (the #5917 follow-up: a provider-only edit must not write back defaults
-    // for max_tokens / temperature the backend had omitted).
+    // the user changed it, using the same baseline as the modelDirty gate so the
+    // two can't drift (the #5917 follow-up: a provider-only edit must not write
+    // back values for max_tokens / temperature the backend had omitted). An
+    // emptied field is a real edit and reaches the backend as `null`, which
+    // hands the knob back to the per-model override.
     const { patch } = buildModelConfigPatch(modelDraft, detailAgent.model);
     if (!patch) return;
 
@@ -792,6 +797,11 @@ export function AgentsPage() {
       (formModelsQuery.data?.models ?? []).map((m) => ({
         provider: m.provider,
         id: m.id,
+        // Carried through so the editor's ladders stop where the endpoint does
+        // and the over-limit advisory has something real to compare against.
+        context_window: m.context_window,
+        max_output_tokens: m.max_output_tokens,
+        limits_known: m.limits_known,
       })),
     [formModelsQuery.data?.models],
   );
@@ -987,7 +997,6 @@ export function AgentsPage() {
   const activeConfigMutation = patchAgentRuntimeConfigMutation;
   // Save enables when the draft is both valid AND differs from the persisted model in any field — Provider, Model, Max tokens, or Temperature.
   // Both facts are read off `buildModelConfigPatch`, the same strict builder Save itself calls: a null patch means the draft is invalid, an empty patch means nothing changed.
-  // Deriving the two separately is what produced #5917 — the gate checked validity only, and combined with the provider-switch model reset, Max-token / Temperature edits never lit Save.
   // Sharing the builder also keeps trailing garbage ("4096abc") from enabling a button that then no-ops, because the parse that rejects it is the parse that would have built the request.
   const currentModel = detailAgent?.model;
   const modelPatchPreview = buildModelConfigPatch(modelDraft, currentModel).patch;
@@ -2766,14 +2775,27 @@ export function AgentsPage() {
                         <DetailRow label={t("agents.model")}>
                           <span className="font-mono">{detailAgent.model.model}</span>
                         </DetailRow>
+                        {/*
+                          `null` is the inherit state, so it is named rather
+                          than rendered as the system default. Printing 4096
+                          here said the agent had chosen that number when it had
+                          chosen nothing, which is the same confusion the
+                          tri-state fields were introduced to remove.
+                        */}
                         <DetailRow label={t("agents.max_tokens")}>
-                          <span className="font-mono">{(detailAgent.model.max_tokens ?? 4096).toLocaleString()}</span>
+                          <span className="font-mono">
+                            {detailAgent.model.max_tokens == null
+                              ? t("agents.form.inherit_default")
+                              : detailAgent.model.max_tokens.toLocaleString()}
+                          </span>
                         </DetailRow>
-                        {detailAgent.model.temperature != null && (
-                          <DetailRow label={t("agents.temperature")}>
-                            <span className="font-mono">{detailAgent.model.temperature}</span>
-                          </DetailRow>
-                        )}
+                        <DetailRow label={t("agents.temperature")}>
+                          <span className="font-mono">
+                            {detailAgent.model.temperature == null
+                              ? t("agents.form.inherit_default")
+                              : detailAgent.model.temperature}
+                          </span>
+                        </DetailRow>
                       </>
                     )}
                   </div>

@@ -2605,8 +2605,8 @@ async fn hand_runtime_config_patch_supports_tristate_and_404() {
         set_entry.manifest.model.base_url.as_deref(),
         Some("https://patched.invalid/v1")
     );
-    assert_eq!(set_entry.manifest.model.max_tokens, 777);
-    assert!((set_entry.manifest.model.temperature - 0.7).abs() < 1e-6);
+    assert_eq!(set_entry.manifest.model.max_tokens, Some(777));
+    assert_eq!(set_entry.manifest.model.temperature, Some(0.7));
     assert_eq!(
         set_entry.manifest.web_search_augmentation,
         WebSearchAugmentationMode::Always

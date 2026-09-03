@@ -877,7 +877,22 @@ impl ToolProfile {
     }
 }
 
+/// System default for [`ModelConfig::max_tokens`] when neither the agent nor the model sets one.
+pub const DEFAULT_MODEL_MAX_TOKENS: u32 = 4096;
+
+/// System default for [`ModelConfig::temperature`] when neither the agent nor the model sets one.
+pub const DEFAULT_MODEL_TEMPERATURE: f32 = 0.7;
+
 /// LLM model configuration for an agent.
+///
+/// The five sampling knobs (`max_tokens`, `temperature`, `top_p`, `frequency_penalty`, `presence_penalty`) are **preferences**, and each is tri-state.
+/// `Some(v)` is an explicit agent-level choice and beats the per-model override in [`crate::model_catalog::ModelOverrides`]; `None` means "inherit", so the model override applies, and failing that the system default.
+/// The specific setting winning over the general one is what lets two instances of the same agent type run the same model at different temperatures.
+///
+/// The knob deliberately absent here is `reasoning_effort`.
+/// That one is not a preference but a fact about the endpoint — a gateway that rejects the parameter rejects every turn that carries it (#7770) — so it stays model-level-only and the model level always wins, including over an `extra_params["reasoning_effort"]` entry written by hand.
+///
+/// [`Self::context_window`] and [`Self::max_output_tokens`] are **limits**, not preferences, and follow the opposite rule: they describe what the endpoint can do, they are never merged into the request as sampling parameters, and a `max_tokens` above a *known* limit is reported to the operator rather than silently clamped (see [`crate::inference_params::check_output_limit`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -886,10 +901,21 @@ pub struct ModelConfig {
     /// Model identifier.
     #[serde(alias = "name")]
     pub model: String,
-    /// Maximum tokens for completion.
-    pub max_tokens: u32,
-    /// Sampling temperature.
-    pub temperature: f32,
+    /// Maximum tokens to request for the completion. `None` = inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature. `None` = inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Top-p / nucleus sampling (0.0–1.0). `None` = inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Frequency penalty (-2.0–2.0). `None` = inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty (-2.0–2.0). `None` = inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
     /// System prompt for the agent.
     pub system_prompt: String,
     /// Optional API key environment variable name.
@@ -936,8 +962,11 @@ impl Default for ModelConfig {
         Self {
             provider: "default".to_string(),
             model: "default".to_string(),
-            max_tokens: 4096,
-            temperature: 0.7,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             system_prompt: "You are a helpful AI agent.".to_string(),
             api_key_env: None,
             base_url: None,
@@ -945,6 +974,23 @@ impl Default for ModelConfig {
             max_output_tokens: None,
             extra_params: std::collections::BTreeMap::new(),
         }
+    }
+}
+
+impl ModelConfig {
+    /// The `max_tokens` to send when no per-model override participates.
+    ///
+    /// Call this only on a manifest that has already been through
+    /// [`crate::inference_params::resolve_inference_params`], or from a code path
+    /// that has no catalog in hand (the agent loop's fallback).
+    pub fn effective_max_tokens(&self) -> u32 {
+        self.max_tokens.unwrap_or(DEFAULT_MODEL_MAX_TOKENS)
+    }
+
+    /// The `temperature` to send when no per-model override participates.
+    /// See [`Self::effective_max_tokens`].
+    pub fn effective_temperature(&self) -> f32 {
+        self.temperature.unwrap_or(DEFAULT_MODEL_TEMPERATURE)
     }
 }
 
@@ -3356,14 +3402,11 @@ model = "llama-3.3-70b-versatile"
         let config = ModelConfig {
             provider: "qwen".to_string(),
             model: "qwen3.6".to_string(),
-            max_tokens: 4096,
-            temperature: 0.7,
+            max_tokens: Some(4096),
+            temperature: Some(0.7),
             system_prompt: "test".to_string(),
-            api_key_env: None,
-            base_url: None,
-            context_window: None,
-            max_output_tokens: None,
             extra_params: extra,
+            ..Default::default()
         };
 
         // Serialize to TOML

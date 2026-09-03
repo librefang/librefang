@@ -460,6 +460,33 @@ pub(super) fn save_registry_cache(path: &std::path::Path, bytes: &[u8]) {
     let _ = std::fs::write(path, bytes);
 }
 
+/// Sidecar path holding the Ed25519 signature over the cached index bytes.
+///
+/// The index cache (`registry_cache_path`) is written only after signature
+/// verification succeeded; the sidecar stores the signature that verified it
+/// so the serve-stale path can re-verify the bytes instead of trusting the
+/// cache file on its own (a cache file is daemon-user writable, so it is not
+/// a trust root by itself — verify-at-read on the stale path).
+pub(super) fn registry_cache_sig_path(cache_path: &std::path::Path) -> std::path::PathBuf {
+    let mut os = cache_path.as_os_str().to_os_string();
+    os.push(".sig");
+    std::path::PathBuf::from(os)
+}
+
+/// Read the cache file regardless of TTL, returning its bytes and age.
+///
+/// Used by the serve-stale fallback when the remote index is unreachable:
+/// bytes in this cache were signature-verified before being written, but the
+/// stale path re-verifies them at read time as well.
+fn load_stale_registry_cache(path: &std::path::Path) -> Option<(Vec<u8>, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(meta.modified().ok()?)
+        .ok()?
+        .as_secs();
+    Some((std::fs::read(path).ok()?, age))
+}
+
 /// Pick the `(index_url, sig_url)` pair to fetch for `registry`, honoring
 /// `LIBREFANG_REGISTRY_INDEX_URL` / `LIBREFANG_REGISTRY_INDEX_SIG_URL`
 /// overrides. For the official registry the default is the worker-signed
@@ -491,18 +518,31 @@ pub(super) fn registry_index_urls(
 
 /// Fetch registry `index.json` and optionally verify its Ed25519 signature.
 ///
-/// Signature verification is skipped when:
-/// - `LIBREFANG_REGISTRY_VERIFY=0` env var is set
-/// - No `index.json.sig` companion file exists at the registry
-/// - The configured public key is the placeholder value (all-zero bytes)
+/// Signature verification is skipped only when `LIBREFANG_REGISTRY_VERIFY=0`
+/// is set. A present but invalid signature is always a hard error, and a
+/// missing or unreachable `.sig` is a hard error too (no implicit unsigned
+/// downgrade path).
 ///
-/// A missing signature file produces a warning; a present but invalid
-/// signature is always a hard error.
+/// When the remote index fetch fails (HTTP error / network error after
+/// caller-level retries), the caller-transparent serve-stale fallback
+/// [`serve_stale_verified_index`] may serve the disk cache past its TTL —
+/// but only after re-verifying the cached bytes against the cached
+/// signature with the same Ed25519 trust root as the remote path.
 pub(super) async fn fetch_verified_index(
     client: &reqwest::Client,
     registry: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let cache_path = registry_cache_path(registry);
+    fetch_verified_index_with_cache_path(client, registry, &registry_cache_path(registry)).await
+}
+
+/// Inner body of [`fetch_verified_index`] parameterised over the cache path
+/// so tests can point the cache at a tempdir instead of the real
+/// `~/.librefang/registry_cache`.
+pub(super) async fn fetch_verified_index_with_cache_path(
+    client: &reqwest::Client,
+    registry: &str,
+    cache_path: &std::path::Path,
+) -> Result<Vec<serde_json::Value>, String> {
     let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -511,7 +551,7 @@ pub(super) async fn fetch_verified_index(
     // Try cache first (skip if LIBREFANG_REGISTRY_NO_CACHE=1).
     let skip_cache = std::env::var("LIBREFANG_REGISTRY_NO_CACHE").as_deref() == Ok("1");
     if !skip_cache {
-        if let Some(cached) = load_registry_cache(&cache_path, ttl) {
+        if let Some(cached) = load_registry_cache(cache_path, ttl) {
             if let Ok(value) = serde_json::from_slice::<Vec<serde_json::Value>>(&cached) {
                 debug!("Using cached registry index for {registry} (age < {ttl}s)");
                 return Ok(value);
@@ -525,24 +565,33 @@ pub(super) async fn fetch_verified_index(
         std::env::var("LIBREFANG_REGISTRY_INDEX_SIG_URL").ok(),
     );
 
-    // Fetch index bytes.
-    let index_resp = client
-        .get(&index_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch registry index: {e}"))?;
-
-    if !index_resp.status().is_success() {
-        return Err(format!(
-            "Registry index returned HTTP {}",
-            index_resp.status()
-        ));
-    }
-
-    let index_bytes = index_resp
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read registry index body: {e}"))?;
+    // Fetch index bytes. On failure, serve the stale but signature-verified
+    // cache (re-verified at read time) rather than hard-failing the install.
+    let index_bytes = match client.get(&index_url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read registry index body: {e}"))?,
+        Ok(resp) => {
+            let status = resp.status();
+            return serve_stale_verified_index(
+                client,
+                registry,
+                cache_path,
+                format!("Registry index returned HTTP {status}"),
+            )
+            .await;
+        }
+        Err(e) => {
+            return serve_stale_verified_index(
+                client,
+                registry,
+                cache_path,
+                format!("Failed to fetch registry index: {e}"),
+            )
+            .await;
+        }
+    };
 
     // Skip verification if explicitly disabled.
     if std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0") {
@@ -580,6 +629,15 @@ pub(super) async fn fetch_verified_index(
                     .map_err(|e| format!("Failed to read signature: {e}"))?;
                 verify_registry_index_multi(&index_bytes, sig_text.trim(), &pubkey)?;
                 info!(registry, "Registry index signature verified OK");
+                // Stash the signature that just verified so the serve-stale
+                // fallback can re-verify the cached bytes offline. Not written
+                // on the VERIFY=0 path (nothing was verified — serving those
+                // bytes stale would be an unsigned downgrade).
+                let sig_path = registry_cache_sig_path(cache_path);
+                if let Some(parent) = sig_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                    let _ = std::fs::write(&sig_path, sig_text.trim().as_bytes());
+                }
             }
             Ok(sig_resp) => {
                 return Err(format!(
@@ -601,8 +659,74 @@ pub(super) async fn fetch_verified_index(
     }
 
     // Persist to disk cache for future calls.
-    save_registry_cache(&cache_path, &index_bytes);
+    save_registry_cache(cache_path, &index_bytes);
 
     serde_json::from_slice::<Vec<serde_json::Value>>(&index_bytes)
         .map_err(|e| format!("Failed to parse registry index JSON: {e}"))
+}
+
+/// Serve the signature-verified index cache past its TTL when the remote
+/// fetch fails (sustained upstream 404 / outage).
+///
+/// This is serve-stale, not a downgrade: the cache is written only after
+/// verification succeeded, and the stale path re-verifies the cached bytes
+/// against the cached `.sig` sidecar and the resolved pubkey before serving
+/// them (verify-at-read, same Ed25519 trust root as the remote path). With
+/// `LIBREFANG_REGISTRY_VERIFY=0` the stale path likewise skips verification,
+/// mirroring the remote path's explicit opt-out. With no usable verified
+/// cache the call still fails — installs fail safe when the trust root is
+/// unreachable.
+async fn serve_stale_verified_index(
+    client: &reqwest::Client,
+    registry: &str,
+    cache_path: &std::path::Path,
+    last_err: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let refuse = |reason: String| -> String {
+        format!(
+            "Cannot serve stale registry index for '{registry}': {reason}. \
+             Remote index fetch failed ({last_err}). Refusing to install from an \
+             unverified index — installs fail safe when no verified cache exists."
+        )
+    };
+
+    let (bytes, age) = load_stale_registry_cache(cache_path)
+        .ok_or_else(|| refuse("no cached index".to_string()))?;
+
+    let verify_disabled = std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0");
+
+    // Re-verify at read time. The cache file is daemon-user writable, so
+    // membership in it is not a trust root by itself; the same Ed25519
+    // verification that gates the remote path gates the stale path too.
+    if !verify_disabled {
+        let sig_path = registry_cache_sig_path(cache_path);
+        let sig_text = std::fs::read_to_string(&sig_path).map_err(|e| {
+            refuse(format!(
+                "cached signature {} is missing or unreadable: {e}",
+                sig_path.display()
+            ))
+        })?;
+        let pubkey = resolve_registry_pubkey(client)
+            .await
+            .map_err(|e| refuse(format!("registry public key unavailable: {e}")))?;
+        verify_registry_index_multi(&bytes, sig_text.trim(), &pubkey)
+            .map_err(|e| refuse(format!("cached index signature verification failed: {e}")))?;
+    }
+
+    let value = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)
+        .map_err(|e| refuse(format!("cached index parse error: {e}")))?;
+    if verify_disabled {
+        warn!(
+            registry,
+            age_secs = age,
+            "Remote registry index unreachable; serving stale cache without signature re-verification (LIBREFANG_REGISTRY_VERIFY=0)"
+        );
+    } else {
+        warn!(
+            registry,
+            age_secs = age,
+            "Remote registry index unreachable; serving stale signature-verified cache (re-verified at read time)"
+        );
+    }
+    Ok(value)
 }

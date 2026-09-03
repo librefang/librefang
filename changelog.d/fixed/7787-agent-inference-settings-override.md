@@ -1,0 +1,6 @@
+An agent's own inference settings now win over the per-model override instead of silently losing to it.
+Two instances of one agent type could not run the same model at different temperatures: `ModelConfig.max_tokens` and `.temperature` were plain numbers, so every agent carried a concrete 4096 / 0.7 whether or not anyone chose them, and letting the manifest win would have made per-model overrides unreachable for every agent in existence.
+Both fields are now `Option` with `None` meaning "inherit", and the chain runs agent manifest → per-model override → system default; the three preference knobs that existed only per model (`top_p`, `frequency_penalty`, `presence_penalty`) gain a per-agent equivalent, and the two endpoint limits (`context_window`, `max_output_tokens`) are editable per agent from the API, CLI, TUI and dashboard.
+`reasoning_effort` deliberately keeps the opposite rule — it is a fact about the endpoint rather than a preference, so the model level still wins there (#7770).
+Asking for more tokens than a model allows is reported at save time — a `warnings` entry on `PATCH /api/agents/{id}/config`, red in the editors, a `WARN` in the daemon log — never clamped (#7781).
+(#7787) (@DaBlitzStein)

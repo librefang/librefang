@@ -1218,16 +1218,16 @@ pub(crate) enum AgentCommands {
         #[arg(long)]
         from: String,
     },
-    /// Set an agent property (e.g., model).
+    /// Set an agent property (model, or one of its inference parameters).
     #[command(
-        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model. Provider can be set if provided as a prefix.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet"
+        long_about = "Set a property on a running agent.\n\nFields:\n  model               Model id; provider can be set as a prefix\n  temperature         Sampling temperature (0.0-2.0)\n  max_tokens          Output tokens to request\n  top_p               Nucleus sampling (0.0-1.0)\n  frequency_penalty   -2.0 to 2.0\n  presence_penalty    -2.0 to 2.0\n  context_window      Context-window override for this endpoint\n  max_output_tokens   Output-cap override for this endpoint\n\nThe agent's own value wins over the per-model override. Pass `inherit`\nto drop the agent's value and let the per-model override (or the system\ndefault) supply it again.\n\nAsking for more than the model's known limit is reported, not clamped:\nthe value you set is the value that gets sent.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-code/claude-sonnet\n  librefang agent set <ID> temperature 0.2\n  librefang agent set <ID> temperature inherit"
     )]
     Set {
         /// Agent ID (UUID).
         agent_id: String,
-        /// Field to set (model).
+        /// Field to set — see the command's long help for the full list.
         field: String,
-        /// New value.
+        /// New value, or `inherit` to clear the agent's own value.
         value: String,
     },
 }

@@ -536,6 +536,99 @@ describe("ModelsPage", () => {
     expect(useUIStore.getState().toasts).toEqual([]);
   });
 
+  it("saves context_window when the override is enabled and omits it when untouched", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    const ctxSwitch = () => screen.getByRole("switch", { name: "models.context_window" });
+    expect(ctxSwitch()).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(ctxSwitch());
+    expect(ctxSwitch()).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.change(
+      screen.getAllByLabelText("models.context_window")
+        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
+      { target: { value: "262144" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(update.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overrides: expect.objectContaining({ context_window: 262144 }),
+        }),
+      ),
+    );
+  });
+
+  it("omits context_window and max_output_tokens when both overrides stay off", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => expect(update.mutateAsync).toHaveBeenCalled());
+    const { overrides } = update.mutateAsync.mock.calls[0][0];
+    expect(overrides).not.toHaveProperty("context_window");
+    expect(overrides).not.toHaveProperty("max_output_tokens");
+  });
+
+  it("saves max_output_tokens when its override is enabled", async () => {
+    setLoaded();
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    const outSwitch = () => screen.getByRole("switch", { name: "models.max_output" });
+    fireEvent.click(outSwitch());
+    fireEvent.change(
+      screen.getAllByLabelText("models.max_output")
+        .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!,
+      { target: { value: "16384" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(update.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overrides: expect.objectContaining({ max_output_tokens: 16384 }),
+        }),
+      ),
+    );
+  });
+
+  it("treats a zero context_window as unknown and offers the default, never 0", async () => {
+    // `ModelCatalogEntry::context_window` is a `u64` with `#[serde(default)]` and no
+    // `skip_serializing_if`, so an unknown window arrives as `0` on the wire, not as
+    // `undefined` — `??` would let it through. The type's own doc is explicit:
+    // "Consumers MUST treat `0` as unknown and supply their own default." Enabling the
+    // override on such a model must post the default, not write the sentinel back as
+    // if the operator had chosen it.
+    setLoaded([{ ...sampleModels[0], id: "zero-window", context_window: 0 }]);
+    const { update } = setMutationDefaults();
+    renderPage();
+    fireEvent.click(screen.getAllByTitle("models.settings_title")[0]);
+
+    const slider = screen.getAllByLabelText("models.context_window")
+      .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type === "range")!;
+    // Before the toggle: the display falls back to the default, not to the 1024 floor.
+    expect(slider.value).toBe("128000");
+
+    fireEvent.click(screen.getByRole("switch", { name: "models.context_window" }));
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(update.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          overrides: expect.objectContaining({ context_window: 128000 }),
+        }),
+      ),
+    );
+  });
+
   it("requires double-click to delete a custom model (confirm-then-delete)", () => {
     setLoaded();
     const muts = setMutationDefaults();

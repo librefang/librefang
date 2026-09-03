@@ -1403,8 +1403,19 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 export interface AgentModelDetail {
   provider?: string;
   model?: string;
-  max_tokens?: number;
-  temperature?: number;
+  /**
+   * Tri-state on the wire. `null` is the inherit state — the agent has no
+   * opinion, so the per-model override supplies the value and, failing that,
+   * the system default. It is not zero and not "the default happens to be N".
+   */
+  max_tokens?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
+  frequency_penalty?: number | null;
+  presence_penalty?: number | null;
+  /** Endpoint limits rather than sampling preferences. */
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface AgentDetail {
@@ -1507,13 +1518,28 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
+/**
+ * PATCH /api/agents/{id}/config.
+ *
+ * The numeric knobs are tri-state: omit a key to leave it unchanged, send
+ * `null` to hand the field back to inherit, send a number to pin it for this
+ * agent. A pinned value wins over the per-model override.
+ *
+ * An over-limit value is reported in `warnings` and stored as sent — never
+ * clamped. See `librefang_types::inference_params`.
+ */
 export async function patchAgentConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
+    top_p?: number | null;
+    frequency_penalty?: number | null;
+    presence_penalty?: number | null;
+    context_window?: number | null;
+    max_output_tokens?: number | null;
     web_search_augmentation?: "off" | "auto" | "always";
   },
 ): Promise<ApiActionResponse> {
@@ -1537,10 +1563,10 @@ function trimOptionalHandRuntimeString(value: string | undefined): string | unde
  * do not silently inherit those semantics.
  */
 function serializeHandAgentRuntimeConfigPatch(config: {
-  max_tokens?: number;
+  max_tokens?: number | null;
   model?: string;
   provider?: string;
-  temperature?: number;
+  temperature?: number | null;
   api_key_env?: string;
   base_url?: string;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1555,6 +1581,13 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 } {
   return {
     ...config,
+    // A hand override has no per-field clear: `DELETE /hand-runtime-config`
+    // drops the whole thing. Dropping the key is therefore the honest
+    // translation of `null` here — sending it would read as "leave unchanged"
+    // on the backend anyway, and omitting it says the same thing without
+    // implying the endpoint supports a clear it does not.
+    max_tokens: config.max_tokens ?? undefined,
+    temperature: config.temperature ?? undefined,
     api_key_env: trimOptionalHandRuntimeString(config.api_key_env),
     base_url: trimOptionalHandRuntimeString(config.base_url),
   };
@@ -1568,10 +1601,10 @@ function serializeHandAgentRuntimeConfigPatch(config: {
 export async function patchHandAgentRuntimeConfig(
   agentId: string,
   config: {
-    max_tokens?: number;
+    max_tokens?: number | null;
     model?: string;
     provider?: string;
-    temperature?: number;
+    temperature?: number | null;
     api_key_env?: string;
     base_url?: string;
     web_search_augmentation?: "off" | "auto" | "always";
@@ -2059,6 +2092,13 @@ export interface ModelItem {
   // sentinel — never a limit. Refs #7774.
   context_window?: number;
   max_output_tokens?: number;
+  /**
+   * Whether the two capacities above were actually sourced.
+   * `false` marks them as discovery placeholders rather than measurements (#7780) — the daemon has
+   * to put *some* number in for compaction and budget math, but nothing may present it as measured.
+   * Absent on older daemons, where the field did not exist; treat that as `true`.
+   */
+  limits_known?: boolean;
   input_cost_per_m?: number;
   output_cost_per_m?: number;
   pricing_known?: boolean;
