@@ -830,7 +830,15 @@ impl ProactiveMemoryStore {
         // an UPDATE decision would mutate the OTHER chat's memory with the
         // current chat's content.
         let chat_scope_active = chat_scope.map(|s| !s.trim().is_empty()).unwrap_or(false);
-        let fetch_limit = if chat_scope_active { 20 } else { 5 };
+        // #7605 widens the same window for the same reason, and this is where it matters most: `chat_scope` is `None` for every non-channel caller (dashboard, REST, CLI), so on a session-scoped agent the retain below was pruning an un-widened 5-row window.
+        // Five rows belonging to other sessions are enough to crowd out this session's own copy, and once the candidate list comes back empty the extractor has nothing to dedupe against: a restatement lands as a second row and a correction lands beside the stale fact instead of replacing it, because the UPDATE path and `detect_memory_conflict` are reached only through a candidate.
+        // Mirrors the widening `auto_retrieve` already does for both stamps.
+        let active_session_scope = session_scope.map(str::trim).filter(|s| !s.is_empty());
+        let fetch_limit = if chat_scope_active || active_session_scope.is_some() {
+            20
+        } else {
+            5
+        };
         let filter = Some({
             let mut f = MemoryFilter::agent(agent_id);
             f.peer_id = peer_id.map(String::from);
@@ -937,7 +945,7 @@ impl ProactiveMemoryStore {
         // above: two sessions of a public agent are two different people, so
         // "this is a stable user fact" is a reason to keep the rows apart,
         // not to merge them.
-        if let Some(want) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(want) = active_session_scope {
             existing.retain(|frag| memory_session_scope_allows_recall(&frag.metadata, want));
         }
         // Truncate back to the extractor's expected window so we don't
@@ -1622,15 +1630,17 @@ impl ProactiveMemoryStore {
     ///
     /// Returns a list of previous content values, most recent first.
     /// Each entry has `content` and `replaced_at` timestamp.
-    pub fn history(&self, memory_id: &str) -> LibreFangResult<Vec<serde_json::Value>> {
+    ///
+    /// Both ways the caller can be wrong are reported as caller errors, because both used to be `LibreFangError::Internal` and reached the HTTP layer as a `500 Internal server error` plus an `ERROR` log line for what is a client-side mistake.
+    /// An id that is not a UUID is `InvalidInput`, and an id that parses but matches no row is `Ok(None)` — the same "absent, not broken" signal [`Self::find_agent_id_for_memory`] gives the update / delete handlers.
+    pub fn history(&self, memory_id: &str) -> LibreFangResult<Option<Vec<serde_json::Value>>> {
         let uuid = uuid::Uuid::parse_str(memory_id)
-            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+            .map_err(|e| LibreFangError::InvalidInput(format!("Invalid memory_id: {e}")))?;
         let mid = MemoryId(uuid);
 
-        let frag = self
-            .semantic
-            .get_by_id(mid, false)?
-            .ok_or_else(|| LibreFangError::Internal("Memory not found".to_string()))?;
+        let Some(frag) = self.semantic.get_by_id(mid, false)? else {
+            return Ok(None);
+        };
 
         let history = frag
             .metadata
@@ -1642,7 +1652,7 @@ impl ProactiveMemoryStore {
         // Return in reverse chronological order (most recent first)
         let mut history = history;
         history.reverse();
-        Ok(history)
+        Ok(Some(history))
     }
 
     /// Consolidate memories: merge near-duplicates and remove stale entries.
@@ -3540,6 +3550,72 @@ mod tests {
         );
     }
 
+    /// The retain that keeps sessions apart prunes the candidate list *after* it has been fetched, so the fetch has to be wide enough to survive it.
+    /// `chat_scope` widened it from 5 to 20; `session_scope` did not — and `chat_scope` is `None` for every non-channel caller, which is exactly where session scoping is used.
+    ///
+    /// Repro: an agent whose other sessions hold five shorter restatements of a fact this session also stored.
+    /// All five outrank this session's own row on bm25 (fts5 scores a shorter document higher for the same term), so they fill a 5-row window completely, the retain discards all five, and the extractor decides against an empty candidate list — returning ADD for a fact the session already has, and skipping the UPDATE / conflict path that only a candidate can reach.
+    #[tokio::test]
+    async fn dedup_candidate_window_widens_for_an_active_session_scope_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent_id = AgentId::new();
+        let own_session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let content = "quantumsupercalibration schedule confirmed for the northwind logistics warehouse relocation";
+
+        let seed = |text: &str, session: &str| {
+            let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
+            metadata.insert(
+                SESSION_SCOPE_METADATA_KEY.to_string(),
+                serde_json::Value::String(session.to_string()),
+            );
+            store
+                .semantic
+                .remember_with_embedding_and_peer(
+                    agent_id,
+                    text,
+                    MemorySource::Conversation,
+                    MemoryLevel::Session.scope_str(),
+                    metadata,
+                    None,
+                    None,
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .unwrap();
+        };
+
+        // This session's own copy of the fact.
+        seed(content, own_session);
+        // Five other sessions, each with a shorter restatement that shares the one distinctive keyword the dedupe search runs on.
+        for (index, tail) in ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .iter()
+            .enumerate()
+        {
+            seed(
+                &format!("quantumsupercalibration {tail}"),
+                &format!("bbbbbbbb-bbbb-4bbb-8bbb-{index:012}"),
+            );
+        }
+
+        let mut item = MemoryItem::new(content.to_string(), MemoryLevel::Session);
+        item.metadata.insert(
+            SESSION_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String(own_session.to_string()),
+        );
+
+        let decision = store
+            .add_with_decision(agent_id, &item, None, None, Some(own_session))
+            .await
+            .unwrap();
+
+        assert!(
+            decision.is_none(),
+            "restating a fact this session already stored must dedupe to NOOP; the five foreign-session rows filled the candidate window, the session retain emptied it, and the extractor fell through to ADD instead — got {decision:?}"
+        );
+    }
+
     /// #5227 — verify `auto_memorize` itself stamps `chat_scope` onto stored memories so the recall filter has something to act on.
     /// Uses `DefaultMemoryExtractor`'s "I prefer …" rule, which yields a `MemoryLevel::User` memory; that's fine — the assertion is only about the metadata key being present and equal to the scope supplied by the caller.
     /// (Level-User exemption is verified separately in `test_auto_retrieve_cross_chat_isolation_5227`.)
@@ -4606,7 +4682,7 @@ mod tests {
             .unwrap();
 
         // Check version history
-        let history = store.history(&mem_id).unwrap();
+        let history = store.history(&mem_id).unwrap().expect("memory exists");
         assert_eq!(history.len(), 1);
         let prev = history[0].get("content").and_then(|v| v.as_str()).unwrap();
         assert!(prev.contains("dark mode"));
@@ -4617,8 +4693,33 @@ mod tests {
             .await
             .unwrap();
 
-        let history2 = store.history(&mem_id).unwrap();
+        let history2 = store.history(&mem_id).unwrap().expect("memory exists");
         assert_eq!(history2.len(), 2);
+    }
+
+    /// The two client mistakes `history` can be handed must be reported as client mistakes.
+    /// Before the fix both were `LibreFangError::Internal`, which the API layer maps to `500 Internal server error` with a `tracing::error!` — so a mistyped id and a deleted-then-polled id both read as "the server is broken" and filled the operator's error log.
+    #[tokio::test]
+    async fn history_reports_a_bad_id_as_client_error_not_internal() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        match store.history("not-a-uuid") {
+            Err(LibreFangError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("memory_id"),
+                    "the message must name the offending field, got: {msg}"
+                );
+            }
+            other => panic!("a malformed memory id must be InvalidInput, got {other:?}"),
+        }
+
+        let absent = MemoryId::new().0.to_string();
+        assert_eq!(
+            store.history(&absent).unwrap(),
+            None,
+            "a well-formed id matching no row is absence, not a server fault"
+        );
     }
 
     #[tokio::test]
