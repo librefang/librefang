@@ -214,6 +214,9 @@ When LibreFang loads a `config.toml` written against an older schema version it 
 
 In managed mode that write is **skipped**, and a single warning is logged naming the file and both schema versions.
 
+The write is skipped for the same reason, with its own warning, when the primary file composes its configuration out of an `include = [...]` chain — in either ownership mode.
+The write-back serializes the *merged* result of the chain, so performing it would inline every included file's values (API keys and shared secrets among them) into the primary file at the primary file's own permissions, and drop the `include` directive itself, after which later edits to the included files would be silently ignored.
+
 This is not a limitation to work around — it is the correct behaviour, and the alternative is worse.
 Attempting the write against a read-only mount fails, and because the failure was only a `warn!` the migration would silently re-run on every boot forever with nothing but a repeating log line to show for it.
 The in-memory config is migrated either way, so nothing is degraded at runtime.

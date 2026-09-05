@@ -11,6 +11,7 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::event::{Event, EventPayload, LifecycleEvent, SystemEvent};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -321,9 +322,13 @@ pub struct TriggerEngine {
     /// Per-subject entries stay in memory: a restart then costs at most one extra fire per subject, which is the safe direction, and it keeps the persisted field meaning what it says.
     last_fired: DashMap<(TriggerId, Option<String>), DateTime<Utc>>,
     /// Maximum number of triggers that can fire from a single event.
-    max_triggers_per_event: usize,
+    ///
+    /// Atomic because `[triggers] max_per_event` hot-reloads: the engine is built once at boot and owned by the workflow subsystem rather than held behind the config `ArcSwap`, so a reload updates it in place through [`TriggerEngine::apply_config`] instead of replacing the engine.
+    max_triggers_per_event: AtomicUsize,
     /// Default cooldown duration (seconds) applied when a trigger has no override.
-    default_cooldown_secs: u64,
+    ///
+    /// Atomic for the same reason as `max_triggers_per_event`.
+    default_cooldown_secs: AtomicU64,
     /// Path to the persistence file (`<home>/trigger_jobs.json`).
     /// `None` means no persistence (used in tests).
     persist_path: Option<PathBuf>,
@@ -349,8 +354,8 @@ impl TriggerEngine {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
-            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            max_triggers_per_event: AtomicUsize::new(DEFAULT_MAX_TRIGGERS_PER_EVENT),
+            default_cooldown_secs: AtomicU64::new(DEFAULT_COOLDOWN_SECS),
             persist_path: None,
             persist_lock: std::sync::Mutex::new(()),
         }
@@ -365,8 +370,8 @@ impl TriggerEngine {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: config.max_per_event.max(1),
-            default_cooldown_secs: config.cooldown_secs,
+            max_triggers_per_event: AtomicUsize::new(config.max_per_event.max(1)),
+            default_cooldown_secs: AtomicU64::new(config.cooldown_secs),
             persist_path: Some(home_dir.join("trigger_jobs.json")),
             persist_lock: std::sync::Mutex::new(()),
         }
@@ -379,9 +384,22 @@ impl TriggerEngine {
     /// trigger from ever firing.
     pub fn with_max_triggers_per_event(max: usize) -> Self {
         Self {
-            max_triggers_per_event: max.max(1),
+            max_triggers_per_event: AtomicUsize::new(max.max(1)),
             ..Self::new()
         }
+    }
+
+    /// Adopt a new `[triggers]` config on a running engine.
+    ///
+    /// `cooldown_secs` and `max_per_event` are the two fields of the section that the engine keeps a copy of; the rest are read from the kernel's live config per event and per workflow run.
+    /// Without this the pair stayed at its boot value for the life of the process while `POST /api/config/reload` reported the edit as already effective.
+    ///
+    /// `max_per_event` is clamped to a minimum of 1 for the same reason as in [`TriggerEngine::with_max_triggers_per_event`]: a budget of 0 makes the per-event check true immediately and no trigger could ever fire.
+    pub fn apply_config(&self, config: &librefang_types::config::TriggersConfig) {
+        self.max_triggers_per_event
+            .store(config.max_per_event.max(1), Ordering::Relaxed);
+        self.default_cooldown_secs
+            .store(config.cooldown_secs, Ordering::Relaxed);
     }
 
     // -- Persistence ----------------------------------------------------------
@@ -942,8 +960,11 @@ impl TriggerEngine {
             // Check the cooldown window using wall-clock timestamps so that windows survive daemon restarts.
             // The window is scoped to the event's subject where the pattern names one (#6756), so a second task completing a second after the first is a distinct window rather than a suppressed repeat.
             let subject = cooldown_subject(&trigger.pattern, event);
-            let cooldown =
-                Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
+            let cooldown = Duration::from_secs(
+                trigger
+                    .cooldown_secs
+                    .unwrap_or_else(|| self.default_cooldown_secs.load(Ordering::Relaxed)),
+            );
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&(trigger.id, subject.clone())) {
                     // `now - *last` is negative when `*last > now`, which can happen
@@ -996,10 +1017,11 @@ impl TriggerEngine {
                 // The warning log includes the total number of registered
                 // triggers so operators can compare it against the budget and
                 // tune `max_triggers_per_event` accordingly.
-                if matches.len() >= self.max_triggers_per_event {
+                let budget = self.max_triggers_per_event.load(Ordering::Relaxed);
+                if matches.len() >= budget {
                     warn!(
                         trigger_id = %trigger.id,
-                        budget = self.max_triggers_per_event,
+                        budget,
                         total_registered,
                         "Per-event trigger budget exhausted, skipping remaining matches — \
                          consider increasing max_triggers_per_event if too many triggers are starved"
@@ -1126,12 +1148,13 @@ impl TriggerEngine {
         if self.last_fired.len() < PRUNE_THRESHOLD {
             return;
         }
+        let default_cooldown = self.default_cooldown_secs.load(Ordering::Relaxed);
         let longest = self
             .triggers
             .iter()
-            .map(|t| t.cooldown_secs.unwrap_or(self.default_cooldown_secs))
+            .map(|t| t.cooldown_secs.unwrap_or(default_cooldown))
             .max()
-            .unwrap_or(self.default_cooldown_secs);
+            .unwrap_or(default_cooldown);
         // `cooldown_secs` is a `u64` that arrives from the API unvalidated (`routes/workflows/triggers.rs` reads it with `as_u64` and neither clamps nor bounds it), so this arithmetic has to survive values no sane operator would type.
         // `Duration::seconds` panics past roughly 9.2e15, and a bare `as i64` on something larger wraps negative — a negative horizon makes the retain below drop every window including the live ones, silently disabling same-subject suppression installation-wide.
         // Saturating keeps "absurdly large" meaning "effectively never expires", which is what the operator asked for.
@@ -2409,6 +2432,44 @@ mod tests {
         assert_eq!(matches.len(), 3);
     }
 
+    /// `[triggers] max_per_event` and `cooldown_secs` hot-reload, but the engine is built once at boot and owned by the workflow subsystem, so a config swap cannot replace it.
+    /// Both values therefore have to be pushed into the live engine; while they were plain fields they stayed at their boot value for the life of the process even though the reload response reported the edit as already effective.
+    #[test]
+    fn apply_config_updates_the_live_per_event_budget_and_cooldown() {
+        let engine = TriggerEngine::new();
+
+        // Registered with no per-trigger cooldown override, so each inherits the engine default.
+        for _ in 0..5 {
+            engine
+                .register(
+                    AgentId::new(),
+                    TriggerPattern::All,
+                    "Event: {{event}}".to_string(),
+                    0,
+                )
+                .unwrap();
+        }
+
+        engine.apply_config(&librefang_types::config::TriggersConfig {
+            cooldown_secs: 0,
+            max_per_event: 2,
+            ..Default::default()
+        });
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // The tightened budget is in force on the running engine ...
+        assert_eq!(engine.evaluate(&event).0.len(), 2);
+        // ... and so is the reloaded cooldown of 0, which the 5 s default would otherwise suppress.
+        assert_eq!(engine.evaluate(&event).0.len(), 2);
+    }
+
     #[test]
     fn test_cooldown_clears_on_remove() {
         let engine = TriggerEngine::new();
@@ -3354,8 +3415,8 @@ mod tests {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
-            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            max_triggers_per_event: AtomicUsize::new(DEFAULT_MAX_TRIGGERS_PER_EVENT),
+            default_cooldown_secs: AtomicU64::new(DEFAULT_COOLDOWN_SECS),
             persist_path: Some(persist_path.clone()),
             persist_lock: std::sync::Mutex::new(()),
         };
@@ -3395,8 +3456,8 @@ mod tests {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
-            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            max_triggers_per_event: AtomicUsize::new(DEFAULT_MAX_TRIGGERS_PER_EVENT),
+            default_cooldown_secs: AtomicU64::new(DEFAULT_COOLDOWN_SECS),
             persist_path: Some(persist_path),
             persist_lock: std::sync::Mutex::new(()),
         };
@@ -4619,8 +4680,8 @@ mod tests {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
-            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            max_triggers_per_event: AtomicUsize::new(DEFAULT_MAX_TRIGGERS_PER_EVENT),
+            default_cooldown_secs: AtomicU64::new(DEFAULT_COOLDOWN_SECS),
             persist_path: Some(path.clone()),
             persist_lock: std::sync::Mutex::new(()),
         };
@@ -4655,8 +4716,8 @@ mod tests {
             triggers: DashMap::new(),
             agent_triggers: DashMap::new(),
             last_fired: DashMap::new(),
-            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
-            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            max_triggers_per_event: AtomicUsize::new(DEFAULT_MAX_TRIGGERS_PER_EVENT),
+            default_cooldown_secs: AtomicU64::new(DEFAULT_COOLDOWN_SECS),
             persist_path: Some(path),
             persist_lock: std::sync::Mutex::new(()),
         };

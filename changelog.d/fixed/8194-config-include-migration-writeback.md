@@ -1,0 +1,4 @@
+Stop the boot-time schema migration from rewriting a `config.toml` that composes its configuration out of an `include = [...]` chain.
+The write-back serialized the fully merged `KernelConfig`, so it inlined every included file's values — API keys, `[provider_api_keys]`, `network.shared_secret` — into the primary file at the primary file's own permissions rather than the included file's, and dropped the `include` directive permanently, after which later edits to the included files were silently ignored.
+Nothing the product generates stamps `config_version`, so this fired on the first load of any config created by `librefang init`, including from a read-only command such as `librefang status`.
+The migration now applies in memory only for a composed config and logs a warning naming the file, the same treatment deployment-managed mode already gets (#8194) (@houko)
