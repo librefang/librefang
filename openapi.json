@@ -8164,6 +8164,471 @@
         }
       }
     },
+    "/api/media/image": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Generate one or more images from a text prompt.",
+        "description": "The provider is taken from the request body's `provider` when set;\notherwise it is resolved from the `[capabilities] image_generation`\nnomination and then the registry preference order.",
+        "operationId": "generate_image",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Generated images, saved to the uploads directory and returned as URLs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, unsupported capability, or provider content filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for image generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/music": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Generate music from a prompt and/or lyrics.",
+        "description": "At least one of `prompt` or `lyrics` must be present; `instrumental`\nselects a lyric-free rendering.",
+        "operationId": "generate_music",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Generated audio, saved to the uploads directory and returned as a URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither prompt nor lyrics supplied, or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for music generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to persist the generated audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/providers": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "List available media providers with their capabilities and config status.",
+        "description": "`configured` reports whether the provider's credentials are present, and\n`capabilities` is the set of `MediaCapability` values it advertises — the\nsame values the `[capabilities]` config block routes by.",
+        "operationId": "list_media_providers",
+        "responses": {
+          "200": {
+            "description": "Known media providers with their capabilities and configuration status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/speech": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Synthesize speech from text (TTS).",
+        "description": "Returns an upload URL rather than inline audio; the bytes are written to\nthe uploads directory and served by `GET /api/uploads/{id}`.",
+        "operationId": "synthesize_speech",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Synthesized audio, saved to the uploads directory and returned as a URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for text-to-speech",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to persist the generated audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/transcribe": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Transcribe audio to text (STT).",
+        "description": "Accepts raw audio bytes with `Content-Type` set to the audio MIME type\n(e.g. `audio/webm`, `audio/wav`). Returns the transcribed text.\n\nThe body is the audio itself, not a JSON envelope, and is capped at 10 MB.\nThe provider is resolved from `[capabilities] speech_to_text`, then\n`[media] audio_provider`, then env-var auto-detection.",
+        "operationId": "transcribe_audio",
+        "requestBody": {
+          "description": "Raw audio bytes; `Content-Type` must be an `audio/*` type",
+          "content": {
+            "audio/webm": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transcript, with the provider and model that produced it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty body or a non-audio Content-Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Audio larger than 10 MB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Transcription failed, or the temp file could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/video": {
+      "post": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Submit a video generation task (async — returns a task ID for polling).",
+        "description": "Video generation is long-running everywhere it is offered, so this returns\n`202 Accepted` with a provider-scoped `task_id`. Poll it with\n`GET /api/media/video/{task_id}?provider=…` — the same provider must be\nnamed, because the task id is only meaningful to the provider that issued\nit.",
+        "operationId": "submit_video",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Task accepted; poll `task_id` for the result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or unsupported capability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No provider configured for video generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Upstream provider rate limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/media/video/{task_id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Poll video generation task status and retrieve result when complete.",
+        "description": "Query parameter `provider` is required to route the poll to the correct\ndriver (the task ID is provider-specific).\n\nWhile the task is running the response is `{\"status\": …, \"task_id\": …}`;\non completion it carries a `result` object with the video URL and\ndimensions. A failed task answers `200` with `status: \"failed\"` and an\n`error` field — the HTTP status describes the poll, not the task.",
+        "operationId": "poll_video_task",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Provider-scoped task id returned by POST /api/media/video",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "description": "Provider that issued the task id — required, the id is not portable",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task status, or the finished video when complete",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing `provider` query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown task id for this provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/memory": {
       "get": {
         "tags": [
@@ -16848,6 +17313,10 @@
     {
       "name": "groups",
       "description": "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"
+    },
+    {
+      "name": "media",
+      "description": "Media generation (image, speech, video, music) and transcription; provider selection follows the `[capabilities]` routing block"
     }
   ]
 }

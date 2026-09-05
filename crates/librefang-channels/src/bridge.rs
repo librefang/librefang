@@ -5748,7 +5748,7 @@ async fn maybe_describe_inbound_image_with_timeout(
                 return None;
             }
             Some(ContentBlock::Text {
-                text: format!("[Image description: {trimmed}]"),
+                text: librefang_types::media::image_description_block_text(trimmed),
                 provider_metadata: None,
             })
         }
@@ -6047,7 +6047,12 @@ const INBOUND_DESCRIPTION_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// User-facing text for an inbound image description that didn't produce a
 /// usable result. Deliberately opaque to avoid leaking provider error
 /// envelopes into the LLM prompt.
-const IMAGE_DESCRIPTION_UNAVAILABLE_BLOCK: &str = "[Image description unavailable]";
+///
+/// Re-exported from `librefang-types` rather than spelled out here: the agent
+/// loop matches on this exact text to detect that an image was already
+/// described, so the two sides must not drift.
+const IMAGE_DESCRIPTION_UNAVAILABLE_BLOCK: &str =
+    librefang_types::media::IMAGE_DESCRIPTION_UNAVAILABLE;
 
 /// Extract a basename-style filename from the path component of a URL.
 ///

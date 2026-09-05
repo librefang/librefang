@@ -277,6 +277,7 @@ pub struct LibreFang {
     pub hands: Arc<HandsResource>,
     pub inbox: Arc<InboxResource>,
     pub mcp: Arc<McpResource>,
+    pub media: Arc<MediaResource>,
     pub memory: Arc<MemoryResource>,
     pub models: Arc<ModelsResource>,
     pub network: Arc<NetworkResource>,
@@ -323,6 +324,7 @@ impl LibreFang {
             hands: Arc::new(HandsResource::new(base_url.clone(), client.clone())),
             inbox: Arc::new(InboxResource::new(base_url.clone(), client.clone())),
             mcp: Arc::new(McpResource::new(base_url.clone(), client.clone())),
+            media: Arc::new(MediaResource::new(base_url.clone(), client.clone())),
             memory: Arc::new(MemoryResource::new(base_url.clone(), client.clone())),
             models: Arc::new(ModelsResource::new(base_url.clone(), client.clone())),
             network: Arc::new(NetworkResource::new(base_url.clone(), client.clone())),
@@ -2712,6 +2714,104 @@ impl McpResource {
             &["api", "mcp", "taint-rules"],
             None,
             &[],
+        )
+        .await
+    }
+}
+
+// ── Media ──
+
+#[derive(Debug, Clone)]
+pub struct MediaResource {
+    base_url: String,
+    client: Client,
+}
+
+impl MediaResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn generate_image(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "image"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn generate_music(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "music"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_media_providers(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "providers"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn synthesize_speech(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "speech"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn transcribe_audio(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "transcribe"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn submit_video(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "media", "video"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn poll_video_task(&self, task_id: &str, provider: Option<&str>) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "media", "video", task_id],
+            None,
+            &[("provider", provider)],
         )
         .await
     }

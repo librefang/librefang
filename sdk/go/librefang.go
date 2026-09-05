@@ -45,6 +45,7 @@ type Client struct {
 	Hands *HandsResource
 	Inbox *InboxResource
 	Mcp *McpResource
+	Media *MediaResource
 	Memory *MemoryResource
 	Models *ModelsResource
 	Network *NetworkResource
@@ -81,6 +82,7 @@ func New(baseURL string) *Client {
 		c.Hands = &HandsResource{client: c}
 		c.Inbox = &InboxResource{client: c}
 		c.Mcp = &McpResource{client: c}
+		c.Media = &MediaResource{client: c}
 		c.Memory = &MemoryResource{client: c}
 		c.Models = &ModelsResource{client: c}
 		c.Network = &NetworkResource{client: c}
@@ -1008,6 +1010,38 @@ func (r *McpResource) PatchMcpServerTaint(name string, data map[string]interface
 
 func (r *McpResource) ListMcpTaintRules() (interface{}, error) {
 	return r.client.request("GET", "/api/mcp/taint-rules", nil, nil)
+}
+
+// ── Media Resource
+
+type MediaResource struct{ client *Client }
+
+func (r *MediaResource) GenerateImage(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/image", data, nil)
+}
+
+func (r *MediaResource) GenerateMusic(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/music", data, nil)
+}
+
+func (r *MediaResource) ListMediaProviders() (interface{}, error) {
+	return r.client.request("GET", "/api/media/providers", nil, nil)
+}
+
+func (r *MediaResource) SynthesizeSpeech(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/speech", data, nil)
+}
+
+func (r *MediaResource) TranscribeAudio(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/transcribe", data, nil)
+}
+
+func (r *MediaResource) SubmitVideo(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/media/video", data, nil)
+}
+
+func (r *MediaResource) PollVideoTask(task_id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/media/video/%s", task_id), nil, query)
 }
 
 // ── Memory Resource

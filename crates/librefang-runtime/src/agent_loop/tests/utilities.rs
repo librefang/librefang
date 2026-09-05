@@ -490,6 +490,125 @@ async fn test_streaming_repeated_tool_failures_cap_exits() {
     }
 }
 
+/// A stream that fails with a provider error whose `Display` carries an
+/// endpoint URL and an upstream response body — the shape the note must not
+/// reproduce.
+struct ProviderErrorStreamDriver;
+
+/// Stands in for the endpoint/model/upstream-body detail a real driver error
+/// drags along. A 400 with no "unsupported parameter" wording classifies as
+/// `Format`, which is the branch of `build_user_facing_llm_error` that appends
+/// the raw error verbatim — and also where an unrecognised provider error
+/// lands by default.
+const PROVIDER_ERROR_LEAK_MARKER: &str =
+    "https://internal-gw.example/v1/messages model=acme-secret-v3 body={\"detail\":\"leaked\"}";
+
+#[async_trait]
+impl LlmDriver for ProviderErrorStreamDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        unreachable!("streaming test must use stream")
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        _tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::Api {
+            status: 400,
+            message: PROVIDER_ERROR_LEAK_MARKER.to_string(),
+            code: None,
+        })
+    }
+}
+
+/// A provider failure must leave a visible note so the turn does not die
+/// silently, but the note is a system fact and carries none of the driver
+/// error's `Display`.
+#[tokio::test]
+async fn streaming_provider_failure_note_is_opaque_and_not_assistant_voiced() {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let mut manifest = test_manifest();
+    // Own cooldown key: the circuit breaker is a process-wide static, so a
+    // shared provider name would let this failure leak into sibling tests.
+    manifest.model.provider = "test-provider-failure-note".to_string();
+    let driver: Arc<dyn LlmDriver> = Arc::new(ProviderErrorStreamDriver);
+    let (tx, _rx) = mpsc::channel(64);
+
+    let err = run_agent_loop_streaming(
+        &manifest,
+        "Do something",
+        &mut session,
+        &memory,
+        driver,
+        &[],
+        None,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &LoopOptions::default(),
+    )
+    .await
+    .expect_err("Streaming loop must surface the provider error");
+
+    let note = session
+        .messages
+        .last()
+        .expect("Provider failure must leave a note in the session");
+
+    let text = match &note.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+
+    assert_eq!(
+        note.role,
+        Role::System,
+        "The provider-failure note is a system fact, not the model's own prior output; \
+         an assistant role replays it to the model in its own voice. Got: {text:?}"
+    );
+    assert!(
+        !text.contains(PROVIDER_ERROR_LEAK_MARKER),
+        "The visible note must not reproduce the provider error's endpoint / model / \
+         upstream body. Got: {text:?}"
+    );
+    assert!(
+        !text.contains(&err.to_string()),
+        "The visible note must not contain the provider error's Display. Got: {text:?}"
+    );
+    assert!(
+        !text.trim().is_empty(),
+        "The note must still be there — a turn that dies leaving the chat blank is the \
+         failure this branch exists to prevent"
+    );
+}
+
 // -------------------------------------------------------------------
 // StagedToolUseTurn invariants (closes #2381 by construction)
 //

@@ -655,7 +655,23 @@ pub struct GeneratedImage {
 // ===========================================================================
 
 /// What media capabilities a driver supports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// `Ord` is derived (not just `Eq`) so this can key a `BTreeMap` — capability
+/// routing tables are logged and rendered to operators, and this repo requires
+/// deterministic ordering for anything that gets stringified.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MediaCapability {
@@ -1013,6 +1029,297 @@ pub struct MediaMusicResult {
     pub model: String,
     /// Sample rate in Hz.
     pub sample_rate: Option<u32>,
+}
+
+// ===========================================================================
+// Inbound image description — the marker text that stands in for pixels
+// ===========================================================================
+
+/// Opening of the text block that carries a generated image description.
+///
+/// Shared, not duplicated: the channel bridge writes it when it describes an
+/// inbound photo, and the agent loop reads it to decide an image has *already*
+/// been described and must not be described (and billed) a second time. Two
+/// independently-maintained copies of this string would silently turn that
+/// check into a no-op.
+pub const IMAGE_DESCRIPTION_PREFIX: &str = "[Image description: ";
+
+/// Text used when description was attempted and did not produce anything
+/// usable. Deliberately opaque — the raw provider error is logged, not shown
+/// to the model.
+pub const IMAGE_DESCRIPTION_UNAVAILABLE: &str = "[Image description unavailable]";
+
+/// Render `description` as the canonical description block text.
+pub fn image_description_block_text(description: &str) -> String {
+    format!("{IMAGE_DESCRIPTION_PREFIX}{}]", description.trim())
+}
+
+/// Whether `text` is a description block — either a real description or the
+/// unavailable marker. Both mean "an attempt was already made here".
+///
+/// This reads exactly what [`image_description_block_text`] writes (plus the
+/// `IMAGE_DESCRIPTION_UNAVAILABLE` marker that `agent_loop::media_routing`
+/// emits when a description attempt fails), so the two ends must not drift:
+/// loosening the sniff widens the dedupe rule and can suppress a needed
+/// description, tightening it makes the writer's blocks unrecognisable and
+/// re-describes (and re-bills) what is already on the wire.
+pub fn is_image_description_text(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with(IMAGE_DESCRIPTION_PREFIX) || text.starts_with(IMAGE_DESCRIPTION_UNAVAILABLE)
+}
+
+// ===========================================================================
+// Capability routing — `[capabilities]` in config.toml and agent.toml
+// ===========================================================================
+
+/// Which provider (and optionally which model) services one media capability.
+///
+/// Accepts three TOML spellings so the same value can be typed into a single
+/// text input on the dashboard / TUI and still round-trip:
+///
+/// ```toml
+/// image_understanding = "openai/gpt-4o"                          # provider/model
+/// speech_to_text      = "groq"                                   # provider only
+/// image_generation    = { provider = "openai", model = "gpt-image-1" }
+/// ```
+///
+/// Both fields are independently optional so a per-agent override can change
+/// only the model and inherit the globally configured provider (see
+/// [`CapabilityTarget::merged_over`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+pub struct CapabilityTarget {
+    /// Provider id as registered in the provider registry (`openai`, `groq`,
+    /// `anthropic`, `gemini`, …). `None` inherits the next level down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model id passed to that provider. `None` uses the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl CapabilityTarget {
+    /// Build a target from the `"provider/model"` shorthand.
+    ///
+    /// Splits on the **first** `/` only, because model ids legitimately
+    /// contain slashes (`groq` serves `meta-llama/llama-4-scout-17b-16e-instruct`).
+    pub fn parse(spec: &str) -> Self {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Self::default();
+        }
+        match spec.split_once('/') {
+            Some((provider, model)) => Self {
+                provider: non_empty(provider),
+                model: non_empty(model),
+            },
+            None => Self {
+                provider: non_empty(spec),
+                model: None,
+            },
+        }
+    }
+
+    /// Field-by-field override: `self` wins where it is `Some`, `base` fills
+    /// the rest. This is what makes inheritance the *absence* of a value rather
+    /// than a separate sentinel — an agent that sets only `model` keeps the
+    /// globally configured `provider`.
+    pub fn merged_over(&self, base: &CapabilityTarget) -> CapabilityTarget {
+        CapabilityTarget {
+            provider: self.provider.clone().or_else(|| base.provider.clone()),
+            model: self.model.clone().or_else(|| base.model.clone()),
+        }
+    }
+
+    /// `true` when neither field carries a value — an inert override.
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none()
+    }
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TargetVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TargetVisitor {
+            type Value = CapabilityTarget;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a \"provider/model\" string or a { provider, model } table")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<CapabilityTarget, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(CapabilityTarget::parse(v))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<CapabilityTarget, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut out = CapabilityTarget::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "provider" => out.provider = map.next_value::<Option<String>>()?,
+                        "model" => out.model = map.next_value::<Option<String>>()?,
+                        // Unknown keys are ignored rather than fatal: this
+                        // block is hand-edited by operators and a typo must
+                        // not take the whole config down.
+                        _ => {
+                            let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                out.provider = out.provider.as_deref().and_then(non_empty);
+                out.model = out.model.as_deref().and_then(non_empty);
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_any(TargetVisitor)
+    }
+}
+
+/// The `[capabilities]` block — one target per media capability.
+///
+/// Exists twice, with the *same* shape: kernel-global in `config.toml` and
+/// per-agent in `agent.toml`. Resolution is agent > global > the historical
+/// auto-detection, and inheriting is simply leaving the key out (see
+/// [`CapabilityRouting::merged_over`]).
+///
+/// Field names match [`MediaCapability`]'s serde spellings so the dashboard,
+/// the TUI, and the provider registry all label the same capability the same
+/// way. `vision` / `transcription` are accepted as aliases because those are
+/// the words operators actually use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CapabilityRouting {
+    /// Describing an image the agent's own model cannot see.
+    #[serde(alias = "vision", skip_serializing_if = "Option::is_none")]
+    pub image_understanding: Option<CapabilityTarget>,
+    /// Turning inbound speech into text.
+    #[serde(alias = "transcription", skip_serializing_if = "Option::is_none")]
+    pub speech_to_text: Option<CapabilityTarget>,
+    /// Generating an image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<CapabilityTarget>,
+    /// Generating speech from text.
+    #[serde(alias = "speech", skip_serializing_if = "Option::is_none")]
+    pub text_to_speech: Option<CapabilityTarget>,
+    /// Generating video.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_generation: Option<CapabilityTarget>,
+    /// Generating music.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub music_generation: Option<CapabilityTarget>,
+}
+
+impl CapabilityRouting {
+    /// Every capability this block can address, in a stable order.
+    ///
+    /// Deliberately a `const` slice rather than a `HashMap` iteration: this
+    /// list feeds prompt-adjacent surfaces (dashboard rows, TUI rows, the
+    /// resolved-routing log line) and those must not reorder across
+    /// processes.
+    pub const ALL: [MediaCapability; 6] = [
+        MediaCapability::ImageUnderstanding,
+        MediaCapability::SpeechToText,
+        MediaCapability::ImageGeneration,
+        MediaCapability::TextToSpeech,
+        MediaCapability::VideoGeneration,
+        MediaCapability::MusicGeneration,
+    ];
+
+    /// Look one capability up.
+    pub fn get(&self, capability: MediaCapability) -> Option<&CapabilityTarget> {
+        match capability {
+            MediaCapability::ImageUnderstanding => self.image_understanding.as_ref(),
+            MediaCapability::SpeechToText => self.speech_to_text.as_ref(),
+            MediaCapability::ImageGeneration => self.image_generation.as_ref(),
+            MediaCapability::TextToSpeech => self.text_to_speech.as_ref(),
+            MediaCapability::VideoGeneration => self.video_generation.as_ref(),
+            MediaCapability::MusicGeneration => self.music_generation.as_ref(),
+        }
+    }
+
+    /// Set one capability (used by the API / TUI edit surfaces).
+    pub fn set(&mut self, capability: MediaCapability, target: Option<CapabilityTarget>) {
+        let target = target.filter(|t| !t.is_empty());
+        match capability {
+            MediaCapability::ImageUnderstanding => self.image_understanding = target,
+            MediaCapability::SpeechToText => self.speech_to_text = target,
+            MediaCapability::ImageGeneration => self.image_generation = target,
+            MediaCapability::TextToSpeech => self.text_to_speech = target,
+            MediaCapability::VideoGeneration => self.video_generation = target,
+            MediaCapability::MusicGeneration => self.music_generation = target,
+        }
+    }
+
+    /// Resolve this (more specific) block over `base`.
+    ///
+    /// Per capability: an absent key inherits `base` wholesale; a present key
+    /// merges field-by-field via [`CapabilityTarget::merged_over`].
+    pub fn merged_over(&self, base: &CapabilityRouting) -> CapabilityRouting {
+        let mut out = CapabilityRouting::default();
+        for cap in Self::ALL {
+            let merged = match (self.get(cap), base.get(cap)) {
+                (Some(mine), Some(theirs)) => Some(mine.merged_over(theirs)),
+                (Some(mine), None) => Some(mine.clone()),
+                (None, Some(theirs)) => Some(theirs.clone()),
+                (None, None) => None,
+            };
+            out.set(cap, merged);
+        }
+        out
+    }
+
+    /// `true` when no capability is routed — the caller keeps its historical
+    /// auto-detection path and pays nothing.
+    pub fn is_empty(&self) -> bool {
+        Self::ALL.iter().all(|c| self.get(*c).is_none())
+    }
+}
+
+impl MediaConfig {
+    /// Fold a `[capabilities]` block into the legacy `[media]` provider /
+    /// model selectors.
+    ///
+    /// `[capabilities]` is the newer, capability-oriented surface and wins
+    /// where it carries a value; anything it leaves unset keeps whatever
+    /// `[media] image_provider` / `audio_provider` already said, and only if
+    /// *both* are silent does the engine fall back to env-var auto-detection.
+    pub fn with_capability_routing(mut self, routing: &CapabilityRouting) -> Self {
+        if let Some(t) = routing.get(MediaCapability::ImageUnderstanding) {
+            if let Some(p) = &t.provider {
+                self.image_provider = Some(p.clone());
+            }
+            if let Some(m) = &t.model {
+                self.image_model = Some(m.clone());
+            }
+        }
+        if let Some(t) = routing.get(MediaCapability::SpeechToText) {
+            if let Some(p) = &t.provider {
+                self.audio_provider = Some(p.clone());
+            }
+            if let Some(m) = &t.model {
+                self.audio_model = Some(m.clone());
+            }
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1552,5 +1859,144 @@ mod tests {
             format: Some("mp3".into()),
         };
         assert!(req.validate().is_ok());
+    }
+
+    // ── Capability routing ──────────────────────────────────────────────
+
+    #[test]
+    fn capability_target_parses_provider_slash_model_and_keeps_slashes_in_model() {
+        let t = CapabilityTarget::parse("openai/gpt-4o");
+        assert_eq!(t.provider.as_deref(), Some("openai"));
+        assert_eq!(t.model.as_deref(), Some("gpt-4o"));
+
+        // Model ids legitimately contain `/` — only the first split counts.
+        let t = CapabilityTarget::parse("groq/meta-llama/llama-4-scout-17b-16e-instruct");
+        assert_eq!(t.provider.as_deref(), Some("groq"));
+        assert_eq!(
+            t.model.as_deref(),
+            Some("meta-llama/llama-4-scout-17b-16e-instruct")
+        );
+
+        let t = CapabilityTarget::parse("  anthropic  ");
+        assert_eq!(t.provider.as_deref(), Some("anthropic"));
+        assert_eq!(t.model, None);
+
+        assert!(CapabilityTarget::parse("   ").is_empty());
+    }
+
+    #[test]
+    fn capability_routing_deserializes_string_and_table_forms_from_toml() {
+        let toml_src = r#"
+image_understanding = "openai/gpt-4o"
+speech_to_text = { provider = "groq", model = "whisper-large-v3" }
+image_generation = "openai"
+"#;
+        let routing: CapabilityRouting = toml::from_str(toml_src).expect("parse");
+        assert_eq!(
+            routing
+                .get(MediaCapability::ImageUnderstanding)
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("gpt-4o")
+        );
+        assert_eq!(
+            routing
+                .get(MediaCapability::SpeechToText)
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("groq")
+        );
+        assert_eq!(
+            routing.get(MediaCapability::ImageGeneration).unwrap().model,
+            None
+        );
+        assert!(routing.get(MediaCapability::VideoGeneration).is_none());
+    }
+
+    #[test]
+    fn capability_routing_accepts_vision_and_transcription_aliases() {
+        let routing: CapabilityRouting =
+            toml::from_str("vision = \"gemini/gemini-2.5-flash\"\ntranscription = \"openai\"\n")
+                .expect("parse");
+        assert_eq!(
+            routing
+                .get(MediaCapability::ImageUnderstanding)
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("gemini")
+        );
+        assert_eq!(
+            routing
+                .get(MediaCapability::SpeechToText)
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn capability_routing_absent_key_inherits_and_present_key_merges_per_field() {
+        let global: CapabilityRouting = toml::from_str(
+            "image_understanding = \"openai/gpt-4o\"\nspeech_to_text = \"groq/whisper-large-v3\"\n",
+        )
+        .expect("parse global");
+        // The agent overrides only the vision *model* and says nothing about
+        // transcription: inheriting is the absence of the key.
+        let agent: CapabilityRouting =
+            toml::from_str("image_understanding = { model = \"gpt-4o-mini\" }\n")
+                .expect("parse agent");
+
+        let resolved = agent.merged_over(&global);
+        let vision = resolved.get(MediaCapability::ImageUnderstanding).unwrap();
+        assert_eq!(
+            vision.provider.as_deref(),
+            Some("openai"),
+            "provider inherited"
+        );
+        assert_eq!(
+            vision.model.as_deref(),
+            Some("gpt-4o-mini"),
+            "model overridden"
+        );
+
+        let stt = resolved.get(MediaCapability::SpeechToText).unwrap();
+        assert_eq!(stt.provider.as_deref(), Some("groq"));
+        assert_eq!(stt.model.as_deref(), Some("whisper-large-v3"));
+
+        assert!(CapabilityRouting::default().is_empty());
+        assert!(!resolved.is_empty());
+    }
+
+    #[test]
+    fn media_config_capability_routing_overrides_legacy_media_selectors() {
+        let base = MediaConfig {
+            image_provider: Some("anthropic".into()),
+            image_model: Some("claude-legacy".into()),
+            audio_provider: Some("openai".into()),
+            ..MediaConfig::default()
+        };
+        let routing: CapabilityRouting =
+            toml::from_str("image_understanding = \"openai/gpt-4o\"\n").expect("parse");
+
+        let folded = base.with_capability_routing(&routing);
+        assert_eq!(folded.image_provider.as_deref(), Some("openai"));
+        assert_eq!(folded.image_model.as_deref(), Some("gpt-4o"));
+        // Untouched capability keeps whatever `[media]` already said.
+        assert_eq!(folded.audio_provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn media_config_capability_routing_is_a_noop_when_routing_is_empty() {
+        let base = MediaConfig {
+            image_provider: Some("anthropic".into()),
+            ..MediaConfig::default()
+        };
+        let folded = base.with_capability_routing(&CapabilityRouting::default());
+        assert_eq!(folded.image_provider.as_deref(), Some("anthropic"));
+        assert_eq!(folded.image_model, None);
     }
 }

@@ -873,6 +873,9 @@ impl ToolProfile {
             memory_write: Some(vec!["self.*".into()]),
             ofp_discover: false,
             ofp_connect: vec![],
+            // A tool profile says nothing about which provider services a
+            // modality — that stays inherited from the global block.
+            routing: crate::media::CapabilityRouting::default(),
         }
     }
 }
@@ -1862,6 +1865,21 @@ pub struct ManifestCapabilities {
     /// Allowed OFP peer patterns.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub ofp_connect: Vec<String>,
+    /// Per-agent media capability routing — the same keys the kernel-global
+    /// `[capabilities]` block in `config.toml` accepts, flattened into this
+    /// block so `agent.toml` spells it identically:
+    ///
+    /// ```toml
+    /// [capabilities]
+    /// tools = ["*"]
+    /// image_understanding = "openai/gpt-4o"   # this agent's model can't see
+    /// ```
+    ///
+    /// Absent keys inherit the global block (see
+    /// [`crate::media::CapabilityRouting::merged_over`]); the whole struct
+    /// defaulting to empty is what "inherit everything" looks like on disk.
+    #[serde(flatten)]
+    pub routing: crate::media::CapabilityRouting,
 }
 
 impl ManifestCapabilities {
@@ -3249,6 +3267,61 @@ memory_write = ["self.*"]
             manifest.capabilities.memory_write,
             Some(vec!["self.*".to_string()])
         );
+    }
+
+    /// The per-agent `[capabilities]` block carries both the historical tool /
+    /// memory grants and the flattened media routing keys, and neither side
+    /// may swallow the other. An unknown key must stay non-fatal — this block
+    /// is hand-edited.
+    #[test]
+    fn test_manifest_capabilities_block_holds_grants_and_media_routing_together() {
+        use crate::media::MediaCapability;
+
+        let toml_str = r#"
+name = "profesor"
+module = "builtin:chat"
+
+[capabilities]
+tools = ["memory_recall", "web_fetch"]
+memory_read = ["*"]
+image_understanding = "openai/gpt-4o"
+speech_to_text = { provider = "groq" }
+some_future_key = "ignored"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            manifest.capabilities.tools,
+            vec!["memory_recall".to_string(), "web_fetch".to_string()]
+        );
+        assert_eq!(
+            manifest.capabilities.memory_read,
+            Some(vec!["*".to_string()])
+        );
+
+        let vision = manifest
+            .capabilities
+            .routing
+            .get(MediaCapability::ImageUnderstanding)
+            .expect("vision routed");
+        assert_eq!(vision.provider.as_deref(), Some("openai"));
+        assert_eq!(vision.model.as_deref(), Some("gpt-4o"));
+
+        let stt = manifest
+            .capabilities
+            .routing
+            .get(MediaCapability::SpeechToText)
+            .expect("stt routed");
+        assert_eq!(stt.provider.as_deref(), Some("groq"));
+        assert_eq!(stt.model, None);
+    }
+
+    /// A manifest that says nothing about media must produce an empty routing
+    /// block — that is what inheriting resolves to at the merge step.
+    #[test]
+    fn test_manifest_capabilities_media_routing_defaults_to_inherit() {
+        let manifest: AgentManifest =
+            toml::from_str("name = \"plain\"\nmodule = \"builtin:chat\"\n").unwrap();
+        assert!(manifest.capabilities.routing.is_empty());
     }
 
     #[test]

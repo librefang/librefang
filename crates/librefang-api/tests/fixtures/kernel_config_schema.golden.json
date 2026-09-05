@@ -228,6 +228,15 @@
         }
       ]
     },
+    "capabilities": {
+      "description": "Kernel-global media capability routing — which provider and model services each modality the agent's own model cannot handle.\n\n```toml [capabilities] image_understanding = \"openai/gpt-4o\" speech_to_text = { provider = \"groq\", model = \"whisper-large-v3\" } ```\n\nEvery agent inherits this block; `agent.toml`'s own `[capabilities]` overrides it key by key. Resolution is agent > global > the historical `[media] image_provider` / `audio_provider` selectors > env-var auto-detection.",
+      "default": {},
+      "allOf": [
+        {
+          "$ref": "#/definitions/CapabilityRouting"
+        }
+      ]
+    },
     "channel_role_mapping": {
       "description": "Maps platform-native channel roles (Telegram admin, Discord guild roles, Slack workspace roles) to LibreFang `UserRole`. Used by `AuthManager::resolve_role_for_sender` after explicit `UserConfig.role` is consulted (explicit beats channel-derived; both beat default-deny).",
       "allOf": [
@@ -2415,6 +2424,98 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0.0
+        }
+      }
+    },
+    "CapabilityRouting": {
+      "description": "The `[capabilities]` block — one target per media capability.\n\nExists twice, with the *same* shape: kernel-global in `config.toml` and per-agent in `agent.toml`. Resolution is agent > global > the historical auto-detection, and inheriting is simply leaving the key out (see [`CapabilityRouting::merged_over`]).\n\nField names match [`MediaCapability`]'s serde spellings so the dashboard, the TUI, and the provider registry all label the same capability the same way. `vision` / `transcription` are accepted as aliases because those are the words operators actually use.",
+      "type": "object",
+      "properties": {
+        "image_generation": {
+          "description": "Generating an image.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image_understanding": {
+          "description": "Describing an image the agent's own model cannot see.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "music_generation": {
+          "description": "Generating music.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "speech_to_text": {
+          "description": "Turning inbound speech into text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_to_speech": {
+          "description": "Generating speech from text.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "video_generation": {
+          "description": "Generating video.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CapabilityTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CapabilityTarget": {
+      "description": "Which provider (and optionally which model) services one media capability.\n\nAccepts three TOML spellings so the same value can be typed into a single text input on the dashboard / TUI and still round-trip:\n\n```toml image_understanding = \"openai/gpt-4o\"                          # provider/model speech_to_text      = \"groq\"                                   # provider only image_generation    = { provider = \"openai\", model = \"gpt-image-1\" } ```\n\nBoth fields are independently optional so a per-agent override can change only the model and inherit the globally configured provider (see [`CapabilityTarget::merged_over`]).",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Model id passed to that provider. `None` uses the provider default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "description": "Provider id as registered in the provider registry (`openai`, `groq`, `anthropic`, `gemini`, …). `None` inherits the next level down.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

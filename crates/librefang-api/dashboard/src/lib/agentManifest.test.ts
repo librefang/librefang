@@ -872,6 +872,105 @@ params = { region = "us" }
   });
 });
 
+describe("agentManifest capability routing", () => {
+  it("omits an empty field instead of pinning an empty provider", () => {
+    const form = emptyManifestForm();
+    form.name = "profesor";
+    form.capabilities.image_understanding = "";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    // Omission is what the kernel reads as "inherit the global block"; an
+    // `image_understanding = ""` would pin an empty provider instead.
+    expect(toml).not.toContain("image_understanding");
+  });
+
+  it("writes a filled field into [capabilities]", () => {
+    const form = emptyManifestForm();
+    form.name = "profesor";
+    form.capabilities.image_understanding = "openai/gpt-4o";
+    form.capabilities.speech_to_text = "groq";
+
+    const toml = serializeManifestForm(form, emptyManifestExtras());
+    expect(toml).toContain("[capabilities]");
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    expect(toml).toContain('speech_to_text = "groq"');
+  });
+
+  it("round-trips the string shorthand through parse and serialize", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = "openai/gpt-4o"'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
+    const toml = serializeManifestForm(parsed.form, parsed.extras);
+    expect(toml).toContain('image_understanding = "openai/gpt-4o"');
+    // Exactly once — the key must not survive in `extras` as well, which
+    // would emit two spellings of the same setting.
+    expect(toml.match(/image_understanding/g)).toHaveLength(1);
+  });
+
+  it("normalises the { provider, model } table form to the shorthand", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "profesor"',
+        "",
+        "[capabilities]",
+        'speech_to_text = { provider = "groq", model = "whisper-large-v3" }',
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.speech_to_text).toBe("groq/whisper-large-v3");
+  });
+
+  it("keeps a model-only override inheriting the provider", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'image_understanding = { model = "gpt-4o-mini" }'].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    // "/model" is how an inherited provider survives a round-trip through a
+    // single text field; the kernel parses it back to provider=None.
+    expect(parsed.form.capabilities.image_understanding).toBe("/gpt-4o-mini");
+  });
+
+  it("loads the kernel's aliases into the canonical field", () => {
+    const parsed = parseManifestToml(
+      ['name = "profesor"', "", "[capabilities]", 'vision = "gemini/gemini-2.5-flash"', 'transcription = "openai"'].join(
+        "\n",
+      ),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.image_understanding).toBe("gemini/gemini-2.5-flash");
+    expect(parsed.form.capabilities.speech_to_text).toBe("openai");
+    // The alias must not also linger in extras, or the re-emitted block would
+    // carry both `vision` and `image_understanding`.
+    expect(parsed.extras.capabilities).not.toHaveProperty("vision");
+    expect(parsed.extras.capabilities).not.toHaveProperty("transcription");
+  });
+
+  it("leaves the existing tool and memory grants untouched", () => {
+    const parsed = parseManifestToml(
+      [
+        'name = "profesor"',
+        "",
+        "[capabilities]",
+        'tools = ["memory_recall"]',
+        'memory_read = ["*"]',
+        'image_understanding = "openai/gpt-4o"',
+      ].join("\n"),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.capabilities.tools).toEqual(["memory_recall"]);
+    expect(parsed.form.capabilities.memory_read).toEqual(["*"]);
+    expect(parsed.form.capabilities.image_understanding).toBe("openai/gpt-4o");
+  });
+});
+
 describe("agentManifest — inference parameters (#7781)", () => {
   it("round-trips every preference knob and both endpoint limits", () => {
     const form = emptyManifestForm();

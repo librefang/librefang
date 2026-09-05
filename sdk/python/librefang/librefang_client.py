@@ -58,6 +58,7 @@ class LibreFang:
         self.hands = _HandsResource(self)
         self.inbox = _InboxResource(self)
         self.mcp = _McpResource(self)
+        self.media = _MediaResource(self)
         self.memory = _MemoryResource(self)
         self.models = _ModelsResource(self)
         self.network = _NetworkResource(self)
@@ -760,6 +761,32 @@ class _McpResource(_Resource):
 
     def list_mcp_taint_rules(self):
         return self._c._request("GET", "/api/mcp/taint-rules")
+
+
+# ── Media Resource ─────────────────────────────────────────────
+
+class _MediaResource(_Resource):
+
+    def generate_image(self, **data):
+        return self._c._request("POST", "/api/media/image", data)
+
+    def generate_music(self, **data):
+        return self._c._request("POST", "/api/media/music", data)
+
+    def list_media_providers(self):
+        return self._c._request("GET", "/api/media/providers")
+
+    def synthesize_speech(self, **data):
+        return self._c._request("POST", "/api/media/speech", data)
+
+    def transcribe_audio(self, **data):
+        return self._c._request("POST", "/api/media/transcribe", data)
+
+    def submit_video(self, **data):
+        return self._c._request("POST", "/api/media/video", data)
+
+    def poll_video_task(self, task_id: str, provider: Any = None):
+        return self._c._request("GET", f"/api/media/video/{task_id}", None, query={"provider": provider})
 
 
 # ── Memory Resource ────────────────────────────────────────────

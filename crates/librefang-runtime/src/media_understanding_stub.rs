@@ -9,13 +9,28 @@
 
 #![allow(unused_variables, dead_code)]
 
-use librefang_types::media::MediaConfig;
+use librefang_types::media::{CapabilityRouting, MediaConfig};
 
 pub struct MediaEngine;
 
 impl MediaEngine {
     pub fn new(_config: MediaConfig) -> Self {
         Self
+    }
+
+    pub fn with_capability_routing(&self, _routing: &CapabilityRouting) -> Self {
+        Self
+    }
+
+    /// Always `false` in this build: with the `media` feature off there is no
+    /// engine to describe anything, so callers must take their no-media path
+    /// rather than attempting a call that would only ever error.
+    pub fn image_description_enabled(&self) -> bool {
+        false
+    }
+
+    pub fn audio_transcription_enabled(&self) -> bool {
+        false
     }
 
     pub async fn describe_image(

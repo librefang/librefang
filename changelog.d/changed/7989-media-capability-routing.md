@@ -1,0 +1,4 @@
+Inbound images sent to an agent whose model has no vision support are now routed to the provider the `[capabilities]` block nominates for image understanding, instead of being replaced by an "image omitted" placeholder.
+Before, a text-only model holding nothing but a file path was left to describe the picture from imagination and answer from that invented content.
+Now the nominated vision provider describes the image once, on the inbound turn, and the description is inserted next to the image block that redaction leaves behind, so an existing agent starts receiving descriptions (or the explicit `[Image description unavailable]` marker when the vision provider fails) where it previously received nothing usable.
+Operators who want the old behaviour can turn it off with `[media] image_description = false`, which governs this path exactly as it governs the Telegram channel bridge. (#7989) (@DaBlitzStein)

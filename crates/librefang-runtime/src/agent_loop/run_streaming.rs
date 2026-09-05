@@ -8,6 +8,12 @@
 use super::retry::stream_with_retry;
 use super::*;
 
+/// The note left in session history when a non-timeout provider failure kills a turn.
+///
+/// Deliberately opaque, for the same reason `IMAGE_DESCRIPTION_UNAVAILABLE` is on the media path: the driver error's `Display` carries endpoint URLs, model ids and upstream response bodies, and `build_user_facing_llm_error` appends that raw string verbatim for the `Format` category — which is also where an unrecognised provider error lands by default.
+/// The raw error goes to the `warn!` at the push site and nowhere else.
+const PROVIDER_FAILURE_NOTE: &str = "[System: the model provider failed and the task could not be completed. No response was produced; the provider error is recorded in the daemon log.]";
+
 /// Run the agent execution loop with streaming support.
 ///
 /// Like `run_agent_loop`, but sends `StreamEvent`s to the provided channel
@@ -372,6 +378,17 @@ async fn run_agent_loop_streaming_inner(
             // storage binding is left unused on this branch.
             (user_message, user_content_blocks)
         };
+
+    // Mirror the non-streaming capability-routing hop: describe an inbound
+    // image once, before it enters history, when the agent's model cannot see
+    // it. See `agent_loop::media_routing` for the full contract.
+    let guarded_user_content_blocks = super::media_routing::describe_images_for_text_only_model(
+        guarded_user_content_blocks,
+        manifest,
+        kernel.as_ref(),
+        media_engine,
+    )
+    .await;
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -900,6 +917,37 @@ async fn run_agent_loop_streaming_inner(
                             warn!(
                                 "Failed to persist timeout note to session: {save_err}. \
                                  The timeout marker will not appear on next session load."
+                            );
+                        }
+                    }
+                } else {
+                    // Non-timeout provider failure: the turn is about to end
+                    // with an error, and unless a visible note is saved the
+                    // session shows NOTHING — the operator's message appears
+                    // to vanish from the chat, and there is no trace of why.
+                    // This is the failure mode observed live: the circuit
+                    // breaker opened after a stream error, the turn ended,
+                    // and neither the chat nor the history explained it.
+                    //
+                    // The note is `Role::System`, not `Role::Assistant`, because the failure is a fact about the daemon and an assistant-role note is replayed on the next turn as the model's own prior output, in its own voice.
+                    // That is the role the kernel's context injections already use for system facts written into session history.
+                    warn!(
+                        event = "provider_failure_note",
+                        agent = %manifest.name,
+                        error = %err_str,
+                        "Provider failed on the streaming path — the session gets an opaque note, and this line is the only place the raw provider error appears"
+                    );
+                    session.push_message(Message::system(PROVIDER_FAILURE_NOTE));
+                    repair_session_before_save(
+                        session,
+                        agent_id_str.as_str(),
+                        "streaming_provider_error",
+                    );
+                    if !opts.is_fork && !opts.incognito {
+                        if let Err(save_err) = memory.save_session_async(session).await {
+                            warn!(
+                                "Failed to persist provider-error note to session: {save_err}. \
+                                 The error will not appear on next session load."
                             );
                         }
                     }

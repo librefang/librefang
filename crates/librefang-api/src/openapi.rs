@@ -352,6 +352,15 @@ use crate::types;
         routes::effective_permissions,
         routes::authz::whoami,
 
+        // ── Media generation / understanding ──
+        routes::generate_image,
+        routes::synthesize_speech,
+        routes::submit_video,
+        routes::poll_video_task,
+        routes::generate_music,
+        routes::transcribe_audio,
+        routes::list_media_providers,
+
         // ── Memory (KV) ──
         routes::get_agent_kv,
         routes::get_agent_kv_key,
@@ -594,6 +603,7 @@ use crate::types;
         (name = "openai", description = "OpenAI-compatible API endpoints"),
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
         (name = "groups", description = "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"),
+        (name = "media", description = "Media generation (image, speech, video, music) and transcription; provider selection follows the `[capabilities]` routing block"),
     ),
 )]
 pub struct ApiDoc;

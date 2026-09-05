@@ -1625,14 +1625,25 @@ impl LibreFangKernel {
 
         let browser_ctx = librefang_runtime::browser::BrowserManager::new(config.browser.clone());
 
-        // Initialize media understanding engine
-        let media_engine =
-            librefang_runtime::media_understanding::MediaEngine::new(config.media.clone());
+        // Initialize media understanding engine. The kernel-global
+        // `[capabilities]` block is folded in here so understanding requests
+        // route to the operator-nominated provider/model instead of the
+        // env-var cascade; per-agent `[capabilities]` is layered on top of
+        // this at turn time by the agent loop.
+        let media_engine = librefang_runtime::media_understanding::MediaEngine::new(
+            config
+                .media
+                .clone()
+                .with_capability_routing(&config.capabilities),
+        );
         let tts_engine = librefang_runtime::tts::TtsEngine::new(config.tts.clone());
         let media_drivers =
             librefang_runtime::media::MediaDriverCache::new_with_urls(config.provider_urls.clone());
         // Load media provider order from registry
         media_drivers.load_providers_from_registry(model_catalog.list_providers());
+        // Generation-side routing: a nominated provider is tried before the
+        // registry preference order for that capability.
+        media_drivers.set_capability_routing(&config.capabilities);
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
