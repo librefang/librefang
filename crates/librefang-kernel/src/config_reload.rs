@@ -938,6 +938,16 @@ pub fn build_reload_plan_with_caps(
             field_changed(&old.default_routing, &new.default_routing),
             "default_routing",
         );
+        // Same read-live shape as `default_routing` directly above: the
+        // profile router reads `[model_router]` out of `config_snapshot()` at
+        // the top of every routed turn, so an ArcSwap swap is effective on the
+        // next turn. The profile catalog itself lives in a separate file and
+        // is re-read on mtime change (`ProfileCatalog::load_cached`), so
+        // editing `model_profiles.toml` needs no reload at all.
+        noop_if_changed(
+            field_changed(&old.model_router, &new.model_router),
+            "model_router",
+        );
         // #6459 — the org-wide provider allowlist is read live from
         // `self.config.load()` by `resolve_driver` on every agent turn, and
         // the aux client is rebuilt from the swapped config on reload
@@ -1145,6 +1155,7 @@ pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
         "tool_results",
         "tool_invoke",
         "default_routing",
+        "model_router",
         "prompt_caching",
         "prompt_cache",
         "compaction",

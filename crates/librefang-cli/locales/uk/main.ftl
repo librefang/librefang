@@ -2567,6 +2567,36 @@ tui-event-channels-not-available-in-process = Керування каналам�
 tui-event-channel-save-failed = Не вдалося зберегти екземпляр каналу { $name }: { $error }
 tui-event-channel-delete-failed = Не вдалося видалити екземпляр каналу { $name }: { $error }
 tui-event-channels-reload-failed = Не вдалося перезавантажити канали: { $error }
+# Model routing editor (profile-based routing)
+tui-agents-title-model-routing = Маршрутизація моделей
+tui-agents-label-routing-fixed = фіксований — завжди використовувати власну модель агента
+tui-agents-label-routing-flexible = гнучкий — маршрутизатор обирає модель для кожного завдання
+tui-agents-hint-routing-mode = [Tab] змінити режим
+tui-agents-label-routing-fixed-explainer = Цей агент завжди використовує модель зі свого маніфесту. Натисніть Tab, щоб маршрутизатор обирав модель для кожного завдання.
+tui-agents-label-no-router-profiles = Немає доступних профілів моделей. Додайте їх до ~/.librefang/model_profiles.toml.
+tui-agents-label-routing-any-profile = будь-який
+tui-agents-hints-model-routing = [Tab] Режим  [↑↓] Навігація  [Space] Перемкнути профіль  [+/-] Бюджет витрат  [Enter] Зберегти  [Esc] Скасувати
+tui-event-model-routing-fetch-failed = Не вдалося отримати маршрутизацію моделі
+tui-event-model-routing-update-failed = Не вдалося оновити маршрутизацію моделі
+tui-mod-agent-model-routing-updated = Маршрутизацію моделі оновлено для агента { $id }.
+
+# Model routing CLI commands
+agent-routing-label-mode = Режим
+agent-routing-label-allowed = Дозволені профілі
+agent-routing-label-budget = Бюджет витрат
+agent-routing-label-default = Профіль за замовчуванням
+agent-routing-any-profile = будь-який
+agent-routing-no-cap = без обмежень
+agent-routing-fixed-explainer = Цей агент завжди використовує модель зі свого маніфесту.
+agent-routing-updated = Маршрутизацію моделі для агента { $id } встановлено на { $mode }.
+agent-routing-failed = Не вдалося оновити маршрутизацію моделі: { $error }
+agent-routing-profiles-header = Профілі маршрутизатора моделей (маршрутизатор: { $enabled }):
+tui-agents-line-routing-mode =   Режим: { $mode }
+tui-agents-line-routing-summary =   Бюджет витрат: { $budget }    Дозволені профілі: { $allowed }
+tui-agents-label-routing-no-cap = без обмежень
+tui-agents-label-routing-cheap = дешевий
+tui-agents-label-routing-medium = середній
+tui-agents-label-routing-expensive = дорогий
 
 # --- TUI fetch failures that used to be silent (#8141) ---
 tui-memory-config-requires-daemon = Налаштування пам'яті надходять з API демона — недоступні, коли TUI підключено в межах процесу.

@@ -29,6 +29,7 @@ pub mod media;
 pub mod memory;
 pub mod message;
 pub mod model_catalog;
+pub mod model_profile;
 pub mod oauth;
 pub mod principal;
 pub mod registry_paths;

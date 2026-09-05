@@ -422,6 +422,8 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         context_window,
         max_output_tokens,
         extra_params: _,
+        mode,
+        router_override,
     } = model;
 
     ModelConfig {
@@ -438,6 +440,8 @@ fn reduce_model(model: ModelConfig) -> ModelConfig {
         context_window,
         max_output_tokens,
         extra_params: BTreeMap::new(),
+        mode,
+        router_override,
     }
 }
 

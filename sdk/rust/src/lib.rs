@@ -902,6 +902,30 @@ impl AgentsResource {
         .await
     }
 
+    pub async fn get_agent_model_routing(&self, id: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "agents", id, "model_routing"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn set_agent_model_routing(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "agents", id, "model_routing"],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
     pub async fn push_message(&self, id: &str, data: Value) -> Result<Value> {
         do_req(
             &self.client,
@@ -2870,6 +2894,18 @@ impl ModelsResource {
             &self.base_url,
             reqwest::Method::GET,
             &["api", "credential-pools"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn list_model_router_profiles(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "model-router", "profiles"],
             None,
             &[],
         )

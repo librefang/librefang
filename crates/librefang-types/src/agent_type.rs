@@ -118,6 +118,8 @@ impl AgentTypeSpec {
                 context_window: model_defaults.context_window,
                 max_output_tokens: model_defaults.max_output_tokens,
                 extra_params: model_defaults.extra_params,
+                mode: model_defaults.mode,
+                router_override: model_defaults.router_override,
             },
             skills: self.skills.unwrap_or_default(),
             capabilities: ManifestCapabilities {

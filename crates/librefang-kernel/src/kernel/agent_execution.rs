@@ -74,6 +74,62 @@ pub(crate) fn strip_silent_cron_marker(message: &str, is_internal_cron: bool) ->
     }
 }
 
+/// Which of the mutually exclusive model-selection paths a turn takes.
+///
+/// LibreFang has two routers that both rewrite `manifest.model`, so exactly
+/// one may run per turn. This enum names the outcome so the precedence rule
+/// is a testable value rather than the shape of an if/else chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelSelectionPath {
+    /// Stable mode. `pinned_model` is applied when set, and **no** router runs
+    /// either way — Stable exists precisely to freeze model choice, so a
+    /// router silently overriding it would defeat the mode.
+    Stable,
+    /// The profile router (`[model_router]` plus `mode = "flexible"`).
+    Profile,
+    /// The tier router (`[routing]` / `[default_routing]`).
+    Tier,
+    /// Neither router applies; the agent keeps the model in its own manifest.
+    ManifestModel,
+}
+
+/// Resolve the model-selection path, in precedence order.
+///
+/// Precedence, highest first:
+///
+/// 1. **Stable mode** — an operator who pinned the deployment outranks both
+///    routers.
+/// 2. **Profile router** — opt-in per agent via `mode = "flexible"`, so an
+///    agent that asked for it has made the more specific choice than a
+///    kernel-wide `[default_routing]` block.
+/// 3. **Tier router** — the pre-existing `simple` / `medium` / `complex`
+///    router, which applies to any agent with a `[routing]` block or when
+///    `[default_routing]` is set kernel-wide.
+/// 4. **Manifest model** — nothing applies.
+///
+/// The two routers are complementary rather than redundant: the tier router
+/// scores the assembled `CompletionRequest` (token count, tool count, code
+/// markers, conversation depth) and maps it onto three fixed model slots,
+/// while the profile router matches the task's *tags* against named profiles
+/// that also carry a cost tier and a complexity ceiling. The tier router asks
+/// "how hard is this?"; the profile router also asks "what kind of work is
+/// this, and what may this agent afford?".
+pub(crate) fn model_selection_path(
+    is_stable: bool,
+    profile_router_applies: bool,
+    tier_router_applies: bool,
+) -> ModelSelectionPath {
+    if is_stable {
+        ModelSelectionPath::Stable
+    } else if profile_router_applies {
+        ModelSelectionPath::Profile
+    } else if tier_router_applies {
+        ModelSelectionPath::Tier
+    } else {
+        ModelSelectionPath::ManifestModel
+    }
+}
+
 impl LibreFangKernel {
     // -----------------------------------------------------------------------
     // Module dispatch: WASM / Python / LLM
@@ -340,6 +396,93 @@ impl LibreFangKernel {
         exhausted
             && resolve_effective_fallbacks(&manifest.fallback_models, &cfg.fallback_providers)
                 .is_empty()
+    }
+
+    /// Pick a [`ModelProfile`](librefang_types::model_profile::ModelProfile)
+    /// for this turn, or `None` to leave the agent's own model in place.
+    ///
+    /// Returns `None` — meaning "not routed" — whenever any of these hold:
+    ///
+    /// - `[model_router] enabled = false` in `config.toml` (the default).
+    /// - The agent's manifest is not `mode = "flexible"` (the default).
+    /// - No permitted profile matched and no permitted fallback existed.
+    /// - The selected profile's provider has no API key configured.
+    ///
+    /// The last guard mirrors the tier router a few lines below: routing an
+    /// agent onto a provider the operator never configured would turn a
+    /// cost optimisation into a hard failure on every turn.
+    pub fn route_to_profile(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+        message: &str,
+        cfg: &librefang_types::config::KernelConfig,
+    ) -> Option<librefang_types::model_profile::ModelProfile> {
+        use librefang_types::agent::ModelMode;
+
+        if !cfg.model_router.enabled || manifest.model.mode != ModelMode::Flexible {
+            return None;
+        }
+
+        let complexity = crate::model_router::evaluate_complexity_heuristic(message);
+        let catalog = crate::model_router::ProfileCatalog::load_cached(
+            cfg.home_dir.as_path(),
+            &cfg.model_router,
+        );
+        let (matched, decision) = crate::model_router::match_profile(
+            message,
+            &complexity,
+            catalog.profiles(),
+            &cfg.model_router,
+            manifest.model.router_override.as_ref(),
+        );
+
+        let Some(profile) = matched else {
+            debug!(
+                agent = %manifest.name,
+                ?decision,
+                complexity = complexity.score,
+                "Profile routing declined — keeping the agent's own model"
+            );
+            return None;
+        };
+
+        // Resolve catalog aliases ("sonnet" -> "claude-sonnet-4-…") so the
+        // builtin profiles do not pin dated model snapshots.
+        let mut profile = profile.clone();
+        let model_catalog = self.llm.model_catalog.load();
+        if let Some(resolved) = model_catalog.resolve_alias(&profile.model) {
+            profile.model = resolved.to_string();
+        }
+
+        if profile.provider != manifest.model.provider {
+            let provider = &profile.provider;
+            let is_local = librefang_runtime::provider_health::is_local_provider(provider);
+            let has_pool = self.llm.credential_pools.contains_key(provider.as_str());
+            let has_key = || {
+                let key_env = self.resolve_non_default_api_key_env(cfg, provider);
+                std::env::var(&key_env).is_ok()
+            };
+            if !is_local && !has_pool && !has_key() {
+                warn!(
+                    agent = %manifest.name,
+                    profile = %profile.name,
+                    provider = %profile.provider,
+                    "Profile routing skipped — provider API key not configured, using the agent's own model"
+                );
+                return None;
+            }
+        }
+
+        info!(
+            agent = %manifest.name,
+            profile = %profile.name,
+            provider = %profile.provider,
+            model = %profile.model,
+            complexity = complexity.score,
+            ?decision,
+            "Profile routing applied"
+        );
+        Some(profile)
     }
 
     /// Execute the default LLM-based agent loop.
@@ -923,7 +1066,34 @@ impl LibreFangKernel {
 
         let is_stable = cfg.mode == librefang_types::config::KernelMode::Stable;
 
-        if is_stable {
+        // Resolve both routers' candidates before choosing between them, so
+        // the precedence decision is a single explicit call rather than the
+        // shape of an if/else chain. Neither resolution makes an LLM call:
+        // the profile router scores heuristically against a cached catalog,
+        // and the tier config is a plain struct clone.
+        let routed_profile = if is_stable {
+            None
+        } else {
+            self.route_to_profile(&manifest, message, &cfg)
+        };
+        // Cloned rather than borrowed because the branches below mutate
+        // `manifest`, which `manifest.routing.as_ref()` would keep borrowed.
+        let tier_routing_config = if is_stable {
+            None
+        } else {
+            manifest
+                .routing
+                .clone()
+                .or_else(|| cfg.default_routing.clone())
+        };
+
+        let selection_path = model_selection_path(
+            is_stable,
+            routed_profile.is_some(),
+            tier_routing_config.is_some(),
+        );
+
+        if selection_path == ModelSelectionPath::Stable {
             // In Stable mode: use pinned_model if set, otherwise default model
             if let Some(ref pinned) = manifest.pinned_model {
                 info!(
@@ -933,8 +1103,16 @@ impl LibreFangKernel {
                 );
                 manifest.model.model = pinned.clone();
             }
-        } else if let Some(routing_config) =
-            manifest.routing.as_ref().or(cfg.default_routing.as_ref())
+        } else if let (ModelSelectionPath::Profile, Some(profile)) =
+            (selection_path, routed_profile)
+        {
+            manifest.model.provider = profile.provider;
+            manifest.model.model = profile.model;
+            if profile.context_window.is_some() {
+                manifest.model.context_window = profile.context_window;
+            }
+        } else if let (ModelSelectionPath::Tier, Some(routing_config)) =
+            (selection_path, tier_routing_config)
         {
             let mut router = ModelRouter::new(routing_config.clone());
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
@@ -1590,6 +1768,87 @@ impl LibreFangKernel {
 }
 
 #[cfg(test)]
+mod model_selection_precedence_tests {
+    use super::{model_selection_path, ModelSelectionPath};
+
+    /// Stable mode outranks both routers, even when both would otherwise
+    /// apply. An operator who pinned the deployment gets what they pinned.
+    #[test]
+    fn stable_mode_outranks_both_routers() {
+        for profile in [false, true] {
+            for tier in [false, true] {
+                assert_eq!(
+                    model_selection_path(true, profile, tier),
+                    ModelSelectionPath::Stable,
+                    "stable must win (profile={profile}, tier={tier})"
+                );
+            }
+        }
+    }
+
+    /// The headline precedence rule: when both routers apply to the same
+    /// turn, the profile router wins, because it is opt-in per agent and the
+    /// tier router can be a kernel-wide default the agent never asked for.
+    #[test]
+    fn profile_router_wins_over_the_tier_router() {
+        assert_eq!(
+            model_selection_path(false, true, true),
+            ModelSelectionPath::Profile
+        );
+    }
+
+    /// With the profile router off (disabled kernel-wide, `mode = "fixed"`,
+    /// or no permitted profile matched), the tier router keeps working
+    /// exactly as it did before the profile layer existed.
+    #[test]
+    fn tier_router_still_runs_when_no_profile_applies() {
+        assert_eq!(
+            model_selection_path(false, false, true),
+            ModelSelectionPath::Tier
+        );
+    }
+
+    /// The profile router does not require a tier config to be present.
+    #[test]
+    fn profile_router_runs_without_any_tier_config() {
+        assert_eq!(
+            model_selection_path(false, true, false),
+            ModelSelectionPath::Profile
+        );
+    }
+
+    /// Nothing configured is the untouched-deployment case: the agent keeps
+    /// the model in its own manifest.
+    #[test]
+    fn no_router_leaves_the_manifest_model_alone() {
+        assert_eq!(
+            model_selection_path(false, false, false),
+            ModelSelectionPath::ManifestModel
+        );
+    }
+
+    /// Exhaustive: every input combination maps to exactly one path, and the
+    /// mapping is total. Guards against a future edit that adds a branch and
+    /// accidentally leaves a combination unhandled.
+    #[test]
+    fn every_combination_resolves_to_exactly_one_path() {
+        let mut seen = Vec::new();
+        for stable in [false, true] {
+            for profile in [false, true] {
+                for tier in [false, true] {
+                    seen.push(model_selection_path(stable, profile, tier));
+                }
+            }
+        }
+        assert_eq!(seen.len(), 8);
+        assert!(seen.contains(&ModelSelectionPath::Stable));
+        assert!(seen.contains(&ModelSelectionPath::Profile));
+        assert!(seen.contains(&ModelSelectionPath::Tier));
+        assert!(seen.contains(&ModelSelectionPath::ManifestModel));
+    }
+}
+
+#[cfg(test)]
 mod silent_marker_tests {
     use super::strip_silent_cron_marker;
 
@@ -1689,5 +1948,220 @@ mod billing_attribution_tests {
             entry.id,
             "a parented worker must not also bill to itself"
         );
+    }
+}
+
+/// Regression tests for the credential gate inside `route_to_profile` (#7781 review).
+///
+/// The gate must resolve the env-var name through `resolve_non_default_api_key_env`, which consults the provider catalog's `api_key_env`, instead of deriving the name by convention.
+///
+/// Before the fix, a catalog provider declaring `api_key_env = "UNSLOTH_API_KEY"` was invisible to the gate, which looked for `UNSLOTH_STUDIO_API_KEY` only — so a fully configured provider silently fell back to the agent's own model.
+///
+/// A local provider (`ollama`, `vllm`, `lmstudio`, `lemonade`) is exempt from the check entirely.
+#[cfg(test)]
+mod route_to_profile_credential_gate_tests {
+    use super::*;
+    use librefang_types::agent::{AgentManifest, ModelConfig, ModelMode};
+    use librefang_types::config::KernelConfig;
+    use librefang_types::model_profile::AgentRouterOverride;
+
+    /// Restore-on-drop env guard, mirroring `kernel::tests::set_test_env`.
+    ///
+    /// A dropped guard puts back whatever the variable held before, so a test can neither leak its value into other tests nor erase one the ambient environment had set.
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: callers are annotated `#[serial_test::serial(route_to_profile_env)]`, so no two tests mutate process-global env state concurrently.
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
+        // SAFETY: see `EnvVarGuard::drop`.
+        unsafe { std::env::set_var(key, value) };
+        EnvVarGuard { key, previous }
+    }
+
+    fn unset_test_env(key: &'static str) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
+        // SAFETY: see `EnvVarGuard::drop`.
+        unsafe { std::env::remove_var(key) }
+        EnvVarGuard { key, previous }
+    }
+
+    /// Boot a kernel against a throwaway home dir laid out like the credential-resolver tests in `llm_drivers.rs`: offline registry marker, empty data dir, and any pre-seeded files the caller already wrote into `home`.
+    fn boot_kernel(home: &std::path::Path) -> (LibreFangKernel, KernelConfig) {
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        std::fs::create_dir_all(home.join("skills")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
+        let registry_dir = home.join("registry");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(registry_dir.join(".sync_marker"), "").unwrap();
+
+        let config = KernelConfig {
+            home_dir: home.to_path_buf(),
+            data_dir: home.join("data"),
+            network_enabled: false,
+            model_router: librefang_types::model_profile::ModelRouterConfig {
+                enabled: true,
+                ..librefang_types::model_profile::ModelRouterConfig::default()
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = LibreFangKernel::boot_with_config(config.clone()).expect("kernel boot");
+        (kernel, config)
+    }
+
+    /// A flexible-mode manifest pinned to a single permitted profile, so `route_to_profile` reaches the credential gate deterministically through the `default_profile` fallback instead of the tag heuristics.
+    fn flexible_manifest(default_profile: &str) -> AgentManifest {
+        AgentManifest {
+            name: "router-probe".to_string(),
+            model: ModelConfig {
+                mode: ModelMode::Flexible,
+                provider: "anthropic".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                router_override: Some(AgentRouterOverride {
+                    fixed: false,
+                    allowed_profiles: std::collections::BTreeSet::from([
+                        default_profile.to_string()
+                    ]),
+                    cost_budget: None,
+                    default_profile: Some(default_profile.to_string()),
+                }),
+                ..ModelConfig::default()
+            },
+            ..AgentManifest::default()
+        }
+    }
+
+    /// The routing credential gate must consult the provider catalog's `api_key_env` — here `UNSLOTH_API_KEY` for the custom provider `unsloth-studio` — and not the convention-derived `UNSLOTH_STUDIO_API_KEY`.
+    #[test]
+    #[serial_test::serial(route_to_profile_env)]
+    fn route_to_profile_uses_catalog_api_key_env_for_custom_provider() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+
+        // Catalog entry for the custom provider, stored the same way the dashboard "Upload provider" flow stores one.
+        let providers = home.join("providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(
+            providers.join("unsloth-studio.toml"),
+            r#"
+[provider]
+id = "unsloth-studio"
+display_name = "Unsloth Studio"
+api_key_env = "UNSLOTH_API_KEY"
+base_url = "http://127.0.0.1:8888/v1"
+key_required = true
+"#,
+        )
+        .unwrap();
+
+        // A single profile routed onto the custom provider.
+        std::fs::write(
+            home.join("model_profiles.toml"),
+            r#"
+[[profiles]]
+name = "unsloth-coder"
+tags = ["code"]
+provider = "unsloth-studio"
+model = "unsloth/Llama-3.3-70B-Instruct"
+cost_tier = "medium"
+priority = 30
+max_complexity = 1.0
+description = "Custom-provider profile for the routing credential gate test"
+"#,
+        )
+        .unwrap();
+
+        let (kernel, config) = boot_kernel(home);
+        let manifest = flexible_manifest("unsloth-coder");
+        // No builtin tag is present, so selection is purely the `default_profile` fallback chain — the tag heuristics cannot hijack the assertion.
+        let message = "hello there";
+
+        // Phase 1: no key anywhere — the gate must refuse to route.
+        {
+            let _absent_key = unset_test_env("UNSLOTH_API_KEY");
+            let _absent_conv = unset_test_env("UNSLOTH_STUDIO_API_KEY");
+            assert!(
+                kernel
+                    .route_to_profile(&manifest, message, &config)
+                    .is_none(),
+                "the gate must block when the catalog-named key is absent"
+            );
+        }
+
+        // Phase 2: the convention-derived name alone must NOT satisfy the gate — the catalog value is authoritative.
+        {
+            let _conv = set_test_env("UNSLOTH_STUDIO_API_KEY", "x");
+            let _absent_key = unset_test_env("UNSLOTH_API_KEY");
+            assert!(
+                kernel
+                    .route_to_profile(&manifest, message, &config)
+                    .is_none(),
+                "the convention-derived env name must not satisfy the gate for a catalog provider"
+            );
+        }
+
+        // Phase 3: only the catalog-declared name present — routing must apply.
+        {
+            let _conv_absent = unset_test_env("UNSLOTH_STUDIO_API_KEY");
+            let _key = set_test_env("UNSLOTH_API_KEY", "test-key");
+            let routed = kernel.route_to_profile(&manifest, message, &config);
+            assert_eq!(
+                routed.as_ref().map(|p| p.provider.as_str()),
+                Some("unsloth-studio"),
+                "routing must consult the catalog api_key_env, not the convention name"
+            );
+            assert_eq!(
+                routed.as_ref().map(|p| p.name.as_str()),
+                Some("unsloth-coder")
+            );
+        }
+    }
+
+    /// A keyless local provider is exempt from the credential gate: routing onto it must succeed with no API key configured at all.
+    #[test]
+    #[serial_test::serial(route_to_profile_env)]
+    fn route_to_profile_routes_keyless_local_provider_without_api_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+
+        std::fs::write(
+            home.join("model_profiles.toml"),
+            r#"
+[[profiles]]
+name = "local-fast"
+tags = ["echo"]
+provider = "ollama"
+model = "llama3.2"
+cost_tier = "cheap"
+priority = 5
+max_complexity = 1.0
+description = "Local provider probe"
+"#,
+        )
+        .unwrap();
+
+        let (kernel, config) = boot_kernel(home);
+        let manifest = flexible_manifest("local-fast");
+
+        let _key_absent = unset_test_env("OLLAMA_API_KEY");
+        let routed = kernel.route_to_profile(&manifest, "say hi", &config);
+        assert_eq!(
+            routed.as_ref().map(|p| p.provider.as_str()),
+            Some("ollama"),
+            "a local provider must route with no API key configured"
+        );
+        assert_eq!(routed.as_ref().map(|p| p.name.as_str()), Some("local-fast"));
     }
 }

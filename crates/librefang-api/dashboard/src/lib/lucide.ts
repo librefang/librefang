@@ -120,6 +120,7 @@ export { default as Repeat } from "lucide-react/dist/esm/icons/repeat.mjs";
 export { default as Rocket } from "lucide-react/dist/esm/icons/rocket.mjs";
 export { default as RotateCcw } from "lucide-react/dist/esm/icons/rotate-ccw.mjs";
 export { default as RotateCw } from "lucide-react/dist/esm/icons/rotate-cw.mjs";
+export { default as Route } from "lucide-react/dist/esm/icons/route.mjs";
 export { default as Save } from "lucide-react/dist/esm/icons/save.mjs";
 export { default as Scan } from "lucide-react/dist/esm/icons/scan.mjs";
 export { default as Scissors } from "lucide-react/dist/esm/icons/scissors.mjs";

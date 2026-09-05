@@ -137,6 +137,7 @@ classified differently — the row note spells out which is which.
 | `local_probe_interval_secs` | R | Interval between local-provider reachability probes. |
 | `thinking` | N | Extended-thinking config (read live per message). |
 | `default_routing` | N | Kernel-wide Smart Model Router defaults. |
+| `model_router` | N | Profile router settings, read live from `config_snapshot()` on every routed turn. The profile catalog itself lives in `model_profiles.toml` and is re-read whenever that file's mtime moves, so editing profiles needs no reload at all. |
 
 ### Prompt / caching / context
 
