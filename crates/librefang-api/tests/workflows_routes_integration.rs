@@ -1558,6 +1558,7 @@ async fn cron_job_get_response_has_session_size_fields() {
     let session = Session {
         id: cron_sid,
         agent_id,
+        parent_session_id: None,
         messages: vec![
             Message::user("first user turn"),
             Message::assistant("first assistant turn"),

@@ -1427,6 +1427,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages: vec![Message::user("hello")],
             context_window_tokens: 0,
             label: None,
@@ -1448,6 +1449,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages,
             context_window_tokens: 0,
             label: None,
@@ -1771,6 +1773,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages: vec![Message::user("hello"), Message::assistant("hi")],
             context_window_tokens: 0,
             label: None,
@@ -1878,6 +1881,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages,
             context_window_tokens: 0,
             label: None,
@@ -1963,6 +1967,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages,
             context_window_tokens: 0,
             label: None,
@@ -2101,6 +2106,7 @@ mod tests {
         let session = Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id: librefang_types::agent::AgentId::new(),
+            parent_session_id: None,
             messages,
             context_window_tokens: 0,
             label: None,

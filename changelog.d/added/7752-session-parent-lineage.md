@@ -1,0 +1,1 @@
+Add `sessions.parent_session_id` so a sub-agent run records which session spawned it — the parent can enumerate what it delegated, and deleting the parent cascades to its children. (#7991) (@DaBlitzStein)

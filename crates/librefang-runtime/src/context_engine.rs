@@ -655,6 +655,7 @@ impl ContextEngine for DefaultContextEngine {
         let session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: messages.to_vec(),
             context_window_tokens: context_window_tokens as u64,
             label: None,

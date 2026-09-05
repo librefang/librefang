@@ -936,6 +936,7 @@ mod tests {
         Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,

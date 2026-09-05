@@ -389,6 +389,7 @@ impl LibreFangKernel {
         let mut session = librefang_memory::session::Session {
             id: SessionId::new(),
             agent_id: parent_id,
+            parent_session_id: Some(parent.session_id),
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some(format!("ephemeral mission {mission_name}")),

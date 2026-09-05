@@ -755,6 +755,7 @@ async fn test_summary_engine_compact_called_once_on_threshold_cross() {
     let session = MemSession {
         id: librefang_types::agent::SessionId::new(),
         agent_id: librefang_types::agent::AgentId::new(),
+        parent_session_id: None,
         messages: vec![Message::user("Hello"), Message::assistant("Hi there")],
         context_window_tokens: 0,
         label: None,

@@ -32,6 +32,7 @@ fn make_session(
     librefang_memory::session::Session {
         id: session_id,
         agent_id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,

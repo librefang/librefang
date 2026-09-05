@@ -298,6 +298,7 @@ fn blank_session() -> Session {
         messages: Vec::new(),
         context_window_tokens: 0,
         label: None,
+        parent_session_id: None,
         model_override: None,
         messages_generation: 0,
         last_repaired_generation: None,

@@ -1643,6 +1643,7 @@ async fn test_agent_session_returns_null_summary_for_non_canonical_session() {
     let side_session = Session {
         id: side_sid,
         agent_id: id,
+        parent_session_id: None,
         messages,
         context_window_tokens: 0,
         label: None,

@@ -413,6 +413,7 @@ impl ContextCompressor {
         let temp_session = Session {
             id: SessionId::new(),
             agent_id: AgentId::new(),
+            parent_session_id: None,
             messages: middle.to_vec(),
             context_window_tokens: 0,
             label: None,

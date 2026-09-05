@@ -113,6 +113,14 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+    /// The session this one was spawned from, when it was (#7752).
+    ///
+    /// A sub-agent run hangs off the session that asked for it: the parent can
+    /// enumerate what it delegated, and deleting the parent takes its children
+    /// with it, so a disposable run can leave an audit trail without leaving
+    /// an orphan. `None` for every ordinary session, which is almost all of
+    /// them.
+    pub parent_session_id: Option<SessionId>,
     /// Per-session model override (issue #4898).
     ///
     /// When `Some`, `run_agent_loop` / `run_agent_loop_streaming` shadow
@@ -246,6 +254,20 @@ pub struct SessionStore {
     pool: Pool<SqliteConnectionManager>,
 }
 
+/// Parse the stored `parent_session_id` back into a `SessionId`.
+///
+/// `None` for every ordinary session and for rows written before the column existed (v56 adds it NULL).
+/// A malformed stored value is an error rather than a silent `None`: the INSERT only ever writes rendered UUIDs, so a malformed one means manual surgery or a foreign writer, and re-hydrating it as unparented would hide that.
+fn parse_parent_session_id(value: Option<String>) -> LibreFangResult<Option<SessionId>> {
+    value
+        .map(|s| {
+            uuid::Uuid::parse_str(&s)
+                .map(SessionId)
+                .map_err(LibreFangError::memory)
+        })
+        .transpose()
+}
+
 impl SessionStore {
     /// Create a new session store wrapping the given connection.
     pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
@@ -312,7 +334,7 @@ impl SessionStore {
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -323,6 +345,7 @@ impl SessionStore {
             let model_override: Option<String> = row.get(4).unwrap_or(None);
             let messages_generation: i64 = row.get(5).unwrap_or(0);
             let peer_id: Option<String> = row.get(6).unwrap_or(None);
+            let parent_str: Option<String> = row.get(7).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
@@ -331,6 +354,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             ))
         });
 
@@ -343,6 +367,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
@@ -352,6 +377,7 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
+                    parent_session_id: parse_parent_session_id(parent_str)?,
                     messages,
                     context_window_tokens: tokens as u64,
                     label,
@@ -373,7 +399,7 @@ impl SessionStore {
     ) -> LibreFangResult<Option<(Session, String)>> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
-            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation, peer_id FROM sessions WHERE id = ?1")
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at, model_override, messages_generation, peer_id, parent_session_id FROM sessions WHERE id = ?1")
             .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
@@ -385,6 +411,7 @@ impl SessionStore {
             let model_override: Option<String> = row.get(5).unwrap_or(None);
             let messages_generation: i64 = row.get(6).unwrap_or(0);
             let peer_id: Option<String> = row.get(7).unwrap_or(None);
+            let parent_str: Option<String> = row.get(8).unwrap_or(None);
             Ok((
                 agent_str,
                 messages_blob,
@@ -394,6 +421,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             ))
         });
 
@@ -407,6 +435,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             )) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
@@ -417,6 +446,7 @@ impl SessionStore {
                     Session {
                         id: session_id,
                         agent_id,
+                        parent_session_id: parse_parent_session_id(parent_str)?,
                         messages,
                         context_window_tokens: tokens as u64,
                         label,
@@ -431,6 +461,84 @@ impl SessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(LibreFangError::memory(e)),
         }
+    }
+
+    /// List the sessions this one spawned (#7752).
+    ///
+    /// Reads back `parent_session_id` through `idx_sessions_parent`, so a
+    /// parent can enumerate what it delegated: the child's id, messages, and
+    /// label. Empty for every ordinary session — the column is NULL there.
+    /// Ordered by `created_at` so the delegation order is stable for callers.
+    pub fn children_of(&self, session_id: SessionId) -> LibreFangResult<Vec<Session>> {
+        let conn = self.pool.get().map_err(LibreFangError::memory)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_id, messages, context_window_tokens, label, model_override, messages_generation, peer_id \
+                 FROM sessions WHERE parent_session_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(LibreFangError::memory)?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![session_id.0.to_string()], |row| {
+                let id_str: String = row.get(0)?;
+                let agent_str: String = row.get(1)?;
+                let messages_blob: Vec<u8> = row.get(2)?;
+                let tokens: i64 = row.get(3)?;
+                let label: Option<String> = row.get(4).unwrap_or(None);
+                let model_override: Option<String> = row.get(5).unwrap_or(None);
+                let messages_generation: i64 = row.get(6).unwrap_or(0);
+                let peer_id: Option<String> = row.get(7).unwrap_or(None);
+                Ok((
+                    id_str,
+                    agent_str,
+                    messages_blob,
+                    tokens,
+                    label,
+                    model_override,
+                    messages_generation,
+                    peer_id,
+                ))
+            })
+            .map_err(LibreFangError::memory)?;
+
+        let mut children = Vec::new();
+        for row in rows {
+            let (
+                id_str,
+                agent_str,
+                messages_blob,
+                tokens,
+                label,
+                model_override,
+                messages_generation,
+                peer_id,
+            ) = row.map_err(LibreFangError::memory)?;
+            let child_id = uuid::Uuid::parse_str(&id_str)
+                .map(SessionId)
+                .map_err(LibreFangError::memory)?;
+            let agent_id = uuid::Uuid::parse_str(&agent_str)
+                .map(AgentId)
+                .map_err(LibreFangError::memory)?;
+            let messages: Vec<Message> =
+                rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
+            children.push(Session {
+                id: child_id,
+                agent_id,
+                // The WHERE clause guarantees the parent: every matched row
+                // has parent_session_id = the queried id, and `SessionId`
+                // is `Copy`, so re-stamping it here is exact rather than
+                // re-selecting the column.
+                parent_session_id: Some(session_id),
+                messages,
+                context_window_tokens: tokens as u64,
+                label,
+                model_override,
+                messages_generation: messages_generation.max(0) as u64,
+                last_repaired_generation: None,
+                peer_id,
+            });
+        }
+        Ok(children)
     }
 
     /// Hard ceiling on messages persisted per session, applied as a final
@@ -524,10 +632,13 @@ impl SessionStore {
         // derived sessions now populate it from `SenderContext.chat_id` at
         // construction time, so the `idx_sessions_peer(agent_id, peer_id)`
         // index actually carries something.
+        // `parent_session_id` is written on insert but deliberately NOT
+        // in the DO UPDATE clause: a session's parentage is decided when
+        // it is created and never changes.
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, peer_id = ?8, updated_at = ?9",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, messages_generation, peer_id, parent_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, messages_generation = ?7, peer_id = ?8, updated_at = ?10",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
@@ -537,6 +648,7 @@ impl SessionStore {
                 message_count,
                 session.messages_generation as i64,
                 session.peer_id.as_deref(),
+                session.parent_session_id.as_ref().map(|p| p.0.to_string()),
                 now,
             ],
         )
@@ -610,22 +722,48 @@ impl SessionStore {
     /// regression, not a recoverable hygiene issue, so we now propagate
     /// the FTS error and roll the parent DELETE back. A subsequent retry
     /// re-attempts the whole pair atomically.
+    ///
+    /// The delete also cascades to children (#7752): every session whose
+    /// `parent_session_id` chain leads back to this one is removed, FTS
+    /// rows included, so a disposable run leaves an audit trail without
+    /// leaving an orphan. The cascade is application-side — v56 adds the
+    /// column via `ALTER TABLE`, which SQLite cannot back with a foreign
+    /// key — and the recursion uses `UNION` so a parentage cycle written
+    /// by a foreign tool terminates instead of looping forever.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
             .map_err(LibreFangError::memory)?;
+        // The FTS delete runs FIRST, while the subtree is still intact: the
+        // recursive seed `SELECT id FROM sessions WHERE id = ?1` needs the
+        // parent row present, and re-running the CTE after the sessions
+        // DELETE would seed nothing and leave children's FTS rows behind —
+        // the #3548 privacy regression, in child form. Both statements share
+        // one transaction, so an FTS failure rolls the cascade back.
+        // `UNION` (not `UNION ALL`) so a parentage cycle written by a
+        // foreign tool terminates instead of recursing forever.
         tx.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![id_str],
-        )
-        .map_err(LibreFangError::memory)?;
-        tx.execute(
-            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            "WITH RECURSIVE doomed(id) AS (
+                SELECT id FROM sessions WHERE id = ?1
+                UNION
+                SELECT s.id FROM sessions s JOIN doomed d ON s.parent_session_id = d.id
+            )
+            DELETE FROM sessions_fts WHERE session_id IN (SELECT id FROM doomed)",
             rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        tx.execute(
+            "WITH RECURSIVE doomed(id) AS (
+                SELECT id FROM sessions WHERE id = ?1
+                UNION
+                SELECT s.id FROM sessions s JOIN doomed d ON s.parent_session_id = d.id
+            )
+            DELETE FROM sessions WHERE id IN (SELECT id FROM doomed)",
+            rusqlite::params![id_str],
+        )
+        .map_err(LibreFangError::memory)?;
         tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
@@ -1134,6 +1272,7 @@ impl SessionStore {
         let session = Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
@@ -1194,7 +1333,7 @@ impl SessionStore {
         let conn = self.pool.get().map_err(LibreFangError::memory)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation, peer_id FROM sessions \
+                "SELECT id, messages, context_window_tokens, label, model_override, messages_generation, peer_id, parent_session_id FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
             .map_err(LibreFangError::memory)?;
@@ -1207,6 +1346,7 @@ impl SessionStore {
             let model_override: Option<String> = row.get(4).unwrap_or(None);
             let messages_generation: i64 = row.get(5).unwrap_or(0);
             let peer_id: Option<String> = row.get(6).unwrap_or(None);
+            let parent_str: Option<String> = row.get(7).unwrap_or(None);
             Ok((
                 id_str,
                 messages_blob,
@@ -1215,6 +1355,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             ))
         });
 
@@ -1227,6 +1368,7 @@ impl SessionStore {
                 model_override,
                 messages_generation,
                 peer_id,
+                parent_str,
             )) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
@@ -1236,6 +1378,7 @@ impl SessionStore {
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
+                    parent_session_id: parse_parent_session_id(parent_str)?,
                     messages,
                     context_window_tokens: tokens as u64,
                     label: lbl,
@@ -1312,6 +1455,7 @@ impl SessionStore {
         let session = Session {
             id: SessionId::new(),
             agent_id,
+            parent_session_id: None,
             messages: Vec::new(),
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
@@ -3086,6 +3230,7 @@ mod tests {
         let recreated = Session {
             id,
             agent_id,
+            parent_session_id: None,
             messages: vec![Message::user("second incarnation phrase")],
             context_window_tokens: 0,
             label: None,
@@ -3989,6 +4134,7 @@ mod tests {
         let session = Session {
             id: session_id,
             agent_id,
+            parent_session_id: None,
             messages: vec![Message::user("ciao Ambrogio")],
             context_window_tokens: 0,
             label: Some("whatsapp:+393760105565".to_string()),
@@ -4046,6 +4192,7 @@ mod tests {
         let canonical = Session {
             id: canonical_sid,
             agent_id,
+            parent_session_id: None,
             messages: vec![Message::user("canonical")],
             context_window_tokens: 0,
             label: None,
@@ -4067,6 +4214,252 @@ mod tests {
         assert!(
             canonical_peer.is_none(),
             "canonical / cross-peer sessions must keep peer_id NULL"
+        );
+    }
+
+    /// Regression for #7991 review blocking #1: `parent_session_id` was
+    /// written by the INSERT but every load path hard-coded `None`, so a
+    /// saved parentage could never be observed through `Session`.
+    /// Covers all three hydration sites — `get_session`,
+    /// `get_session_with_created_at`, and `find_session_by_label` —
+    /// because each has its own SELECT list and a fix to one does not
+    /// fix the others.
+    #[test]
+    fn test_parent_session_id_round_trip() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let parent_id = SessionId::new();
+        let child_id = SessionId::new();
+
+        // The parent must exist first: `parent_session_id` has no foreign
+        // key, so nothing enforces the reference — the round-trip only
+        // needs the child row to carry the id.
+        let parent = Session {
+            id: parent_id,
+            agent_id,
+            parent_session_id: None,
+            messages: vec![Message::user("parent")],
+            context_window_tokens: 0,
+            label: Some("parent".to_string()),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+        store.save_session(&parent).expect("save parent ok");
+
+        let child = Session {
+            id: child_id,
+            agent_id,
+            parent_session_id: Some(parent_id),
+            messages: vec![Message::user("child")],
+            context_window_tokens: 0,
+            label: Some("child".to_string()),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+        store.save_session(&child).expect("save child ok");
+
+        // 1. `get_session` must hydrate the column, not hard-code None.
+        let loaded = store
+            .get_session(child_id)
+            .expect("get_session ok")
+            .expect("child session exists");
+        assert_eq!(
+            loaded.parent_session_id,
+            Some(parent_id),
+            "get_session must read parent_session_id back"
+        );
+
+        // 2. `get_session_with_created_at` — second SELECT list.
+        let (loaded2, _) = store
+            .get_session_with_created_at(child_id)
+            .expect("get_session_with_created_at ok")
+            .expect("child session exists");
+        assert_eq!(
+            loaded2.parent_session_id,
+            Some(parent_id),
+            "get_session_with_created_at must read parent_session_id back"
+        );
+
+        // 3. `find_session_by_label` — third SELECT list.
+        let loaded3 = store
+            .find_session_by_label(agent_id, "child")
+            .expect("find_session_by_label ok")
+            .expect("child session exists");
+        assert_eq!(
+            loaded3.parent_session_id,
+            Some(parent_id),
+            "find_session_by_label must read parent_session_id back"
+        );
+
+        // 4. An ordinary (unparented) session still loads as None.
+        let ordinary = store
+            .get_session(parent_id)
+            .expect("get_session ok")
+            .expect("parent session exists");
+        assert!(
+            ordinary.parent_session_id.is_none(),
+            "unparented session must stay None after load"
+        );
+
+        // 5. Raw column check — proves the INSERT carried the value at all
+        // (the same guard shape `test_save_session_persists_peer_id` uses).
+        let raw_parent: Option<String> = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT parent_session_id FROM sessions WHERE id = ?1",
+                rusqlite::params![child_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .expect("child row exists")
+        };
+        assert_eq!(
+            raw_parent.as_deref(),
+            Some(parent_id.0.to_string().as_str()),
+            "INSERT must persist parent_session_id into the SQL column"
+        );
+    }
+
+    /// Review blocking #2: the changelog promised "deleting the parent
+    /// cascades to its children", but no delete path removed children.
+    /// Pins the application-side cascade: deleting a parent removes its
+    /// children (and grandchildren) — `sessions` rows AND their FTS rows,
+    /// the #3548 privacy contract applied to the cascade — while unrelated
+    /// sessions survive.
+    #[test]
+    fn test_delete_session_cascades_to_children() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let parent_id = SessionId::new();
+        let child_id = SessionId::new();
+        let grandchild_id = SessionId::new();
+        let unrelated_id = SessionId::new();
+
+        let mk = |id: SessionId, parent: Option<SessionId>, label: &str| Session {
+            id,
+            agent_id,
+            parent_session_id: parent,
+            messages: vec![Message::user(label)],
+            context_window_tokens: 0,
+            label: Some(label.to_string()),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+
+        store.save_session(&mk(parent_id, None, "parent")).unwrap();
+        store
+            .save_session(&mk(child_id, Some(parent_id), "child"))
+            .unwrap();
+        store
+            .save_session(&mk(grandchild_id, Some(child_id), "grandchild"))
+            .unwrap();
+        store
+            .save_session(&mk(unrelated_id, None, "unrelated"))
+            .unwrap();
+
+        store.delete_session(parent_id).unwrap();
+
+        for gone in [parent_id, child_id, grandchild_id] {
+            let row = store
+                .get_session(gone)
+                .expect("load after delete must not error");
+            assert!(
+                row.is_none(),
+                "deleting the parent must cascade to {gone:?}"
+            );
+        }
+        let survivor = store
+            .get_session(unrelated_id)
+            .expect("load survivor")
+            .expect("unrelated session must survive");
+        assert_eq!(survivor.id, unrelated_id);
+
+        // FTS rows for the cascade must be gone too — the #3548 guard.
+        let fts_orphans: i64 = {
+            let conn = store.pool.get().expect("pool get");
+            conn.query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id IN (?1, ?2)",
+                rusqlite::params![child_id.0.to_string(), grandchild_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .expect("fts count")
+        };
+        assert_eq!(
+            fts_orphans, 0,
+            "cascade must remove children's FTS rows, not leave them searchable"
+        );
+    }
+
+    /// Review blocking #3: `idx_sessions_parent` existed with no reader —
+    /// "the parent can enumerate what it delegated" had no query. Pins
+    /// `children_of`: exactly the sessions whose parent is the queried id,
+    /// in `created_at` order, each stamped with that parent, and empty for
+    /// a childless session.
+    #[test]
+    fn test_children_of_lists_delegated_children() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let parent_id = SessionId::new();
+        let child1 = SessionId::new();
+        let child2 = SessionId::new();
+        let unrelated_id = SessionId::new();
+
+        let mk = |id: SessionId, parent: Option<SessionId>, label: &str| Session {
+            id,
+            agent_id,
+            parent_session_id: parent,
+            messages: vec![Message::user(label)],
+            context_window_tokens: 0,
+            label: Some(label.to_string()),
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        };
+
+        store.save_session(&mk(parent_id, None, "parent")).unwrap();
+        store
+            .save_session(&mk(child1, Some(parent_id), "child-1"))
+            .unwrap();
+        store
+            .save_session(&mk(child2, Some(parent_id), "child-2"))
+            .unwrap();
+        store
+            .save_session(&mk(unrelated_id, None, "unrelated"))
+            .unwrap();
+
+        let children = store.children_of(parent_id).expect("children_of ok");
+        assert_eq!(
+            children.len(),
+            2,
+            "parent must enumerate exactly its two children"
+        );
+        assert!(children
+            .iter()
+            .all(|c| c.parent_session_id == Some(parent_id)));
+        let ids: Vec<SessionId> = children.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&child1) && ids.contains(&child2));
+        assert!(!ids.contains(&unrelated_id));
+
+        // A leaf has no children; an unknown id yields empty, not an error.
+        assert!(
+            store
+                .children_of(child1)
+                .expect("children_of leaf")
+                .is_empty(),
+            "a child session has no children of its own"
+        );
+        assert!(
+            store
+                .children_of(unrelated_id)
+                .expect("children_of unknown id")
+                .is_empty(),
+            "unknown id must yield empty children, not an error"
         );
     }
 }
