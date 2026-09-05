@@ -1475,3 +1475,51 @@ fn current_time_message_absent_when_unset() {
     let ctx = basic_ctx();
     assert_eq!(build_current_time_message(&ctx), None);
 }
+
+// ── channel_send guidance per channel kind (#7995) ──────────────────────────
+// The kernel's synthetic channels have no messaging adapter, so a `channel_send`
+// aimed at them fails and pushes the agent to fall back to a real channel.
+
+#[test]
+fn system_channels_suppress_the_channel_send_recipient_instruction() {
+    let granted = vec!["channel_send".to_string()];
+    for channel in ["webui", "cron", "autonomous"] {
+        let section = build_channel_section(
+            channel,
+            Some("Paco"),
+            Some("127.0.0.1"),
+            false,
+            false,
+            &granted,
+        );
+        assert!(
+            section.contains("do NOT use `channel_send`"),
+            "{channel} should tell the agent not to use channel_send, got: {section}"
+        );
+        assert!(
+            !section.contains("recipient=\"127.0.0.1\""),
+            "{channel} must not hand the agent a recipient for a non-existent adapter, got: {section}"
+        );
+    }
+}
+
+#[test]
+fn real_channels_keep_the_channel_send_recipient_instruction() {
+    let granted = vec!["channel_send".to_string()];
+    let section = build_channel_section(
+        "telegram",
+        Some("Paco"),
+        Some("12345"),
+        false,
+        false,
+        &granted,
+    );
+    assert!(
+        section.contains("recipient=\"12345\""),
+        "telegram should still name the recipient, got: {section}"
+    );
+    assert!(
+        !section.contains("do NOT use `channel_send`"),
+        "telegram must not be told to avoid channel_send, got: {section}"
+    );
+}

@@ -152,6 +152,35 @@ fn should_count_against_circuit_breaker(error: &LlmError) -> bool {
     }
 }
 
+/// Classify a terminal LLM failure into the user-facing error and account it
+/// against the provider circuit breaker when it says something about that
+/// provider's health.
+///
+/// `call_with_retry` and `stream_with_retry` share this so the two cannot drift
+/// apart on which failures the breaker counts — the pairing of the
+/// `should_count_against_circuit_breaker` verdict with the log wording and the
+/// `record_retry_failure` call lives in exactly one place.
+fn classify_terminal_llm_error(
+    error: &LlmError,
+    base_log_message: &str,
+    provider: Option<&str>,
+    cooldown: Option<&ProviderCooldown>,
+) -> LibreFangError {
+    let counts_against_breaker = should_count_against_circuit_breaker(error);
+    let log_message = if counts_against_breaker {
+        base_log_message.to_string()
+    } else {
+        format!(
+            "{base_log_message} (unsupported-parameter rejection, not counted against circuit breaker)"
+        )
+    };
+    let (is_billing, err) = build_user_facing_llm_error(error, &log_message);
+    if counts_against_breaker {
+        record_retry_failure(provider, cooldown, is_billing);
+    }
+    err
+}
+
 fn build_user_facing_llm_error(
     error: &LlmError,
     classification_log_message: &str,
@@ -253,11 +282,12 @@ pub(super) async fn call_with_retry(
                 );
             }
             Err(e) => {
-                let (is_billing, err) = build_user_facing_llm_error(&e, "LLM error classified");
-                if should_count_against_circuit_breaker(&e) {
-                    record_retry_failure(provider, cooldown, is_billing);
-                }
-                return Err(err);
+                return Err(classify_terminal_llm_error(
+                    &e,
+                    "LLM error classified",
+                    provider,
+                    cooldown,
+                ));
             }
         }
     }
@@ -529,12 +559,12 @@ pub(super) async fn stream_with_retry(
                     .await;
                     continue;
                 }
-                let (is_billing, err) =
-                    build_user_facing_llm_error(&e, "LLM stream error classified");
-                if should_count_against_circuit_breaker(&e) {
-                    record_retry_failure(provider, cooldown, is_billing);
-                }
-                return Err(err);
+                return Err(classify_terminal_llm_error(
+                    &e,
+                    "LLM stream error classified",
+                    provider,
+                    cooldown,
+                ));
             }
         }
     }

@@ -1,10 +1,28 @@
 //! Load channel metadata from `~/.librefang/channels/*.toml` (synced from the
 //! librefang-registry). Provides structured data (name, description, icon,
 //! i18n, docs URL) that the API can serve to the Dashboard.
+//!
+//! Also home to [`is_system_channel`], the one runtime-side answer to "is this
+//! channel id a real messaging adapter or a kernel sentinel".
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Whether `channel` is one of the kernel's synthetic channel sentinels rather
+/// than a real messaging adapter.
+///
+/// Keep these literals in sync with the kernel-side constants:
+/// `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`.
+/// Runtime can't import them directly (circular dep — runtime is below kernel),
+/// so a grep-pointer is the best we can do; api / cli / kernel sites reference
+/// the kernel constants by name and stay in lock-step.
+///
+/// Every runtime site that needs the distinction calls this, so adding a fourth
+/// sentinel is a one-line edit rather than a hunt for `matches!` copies.
+pub fn is_system_channel(channel: &str) -> bool {
+    matches!(channel, "webui" | "cron" | "autonomous")
+}
 
 /// Metadata for a single communication channel, parsed from a registry TOML file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

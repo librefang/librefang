@@ -1182,4 +1182,26 @@ key_required = true
              is_provider_allowed (#6484)"
         );
     }
+
+    #[test]
+    fn model_default_resolves_to_configured_default_model() {
+        let (provider, model) =
+            resolve_fallback_target("groq", "default", "anthropic", "claude-sonnet-4-5");
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_ne!(
+            model, "default",
+            "the literal sentinel must never survive resolution"
+        );
+        assert_eq!(
+            provider, "groq",
+            "an explicit provider must not be replaced by the default"
+        );
+    }
+
+    #[test]
+    fn model_empty_inherits_default() {
+        let (provider, model) = resolve_fallback_target("", "", "anthropic", "claude-sonnet-4-5");
+        assert_eq!(model, "claude-sonnet-4-5");
+        assert_eq!(provider, "anthropic");
+    }
 }

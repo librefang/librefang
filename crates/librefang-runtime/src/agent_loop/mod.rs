@@ -384,13 +384,7 @@ fn build_sender_prefix(manifest: &AgentManifest, sender_user_id: Option<&str>) -
         .get("sender_channel")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // Keep these literals in sync with the kernel-side synthetic channel
-    // sentinels: `librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`.
-    // Runtime can't import the constants directly (circular dep — runtime
-    // is below kernel), so a grep-pointer is the best we can do; api / cli
-    // / kernel sites reference the kernel constants by name and stay in
-    // lock-step.
-    if matches!(channel, "webui" | "cron" | "autonomous") {
+    if crate::channel_registry::is_system_channel(channel) {
         return None;
     }
     let raw = manifest
