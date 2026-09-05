@@ -1766,9 +1766,6 @@
     "delete_failed": "Usuwanie nie powiodło się",
     "run_failed": "Uruchomienie nie powiodło się",
     "run_started": "Uruchomienie rozpoczęte",
-    "rerun": "Uruchom ponownie z tymi samymi parametrami",
-    "rerun_started": "Uruchomienie ponowne rozpoczęte z tymi samymi parametrami",
-    "rerun_failed": "Uruchomienie ponowne nie powiodło się",
     "runs_label": "uruchomienia",
     "schedule_failed": "Nie udało się utworzyć harmonogramu",
     "skip": "pomiń",
@@ -1814,7 +1811,18 @@
       "load_failed": "Nie udało się wczytać oczekujących weryfikacji operatora.",
       "review_run": "Zweryfikuj {{workflow}} — {{step}}",
       "more_pending": "+{{count}} oczekujących"
-    }
+    },
+    "console": "Konsola",
+    "console_completed": "Ukończono w {{duration}} — {{tokens}} tokenów",
+    "console_executing": "Wykonywanie… {{done}}/{{total}} kroków ukończono",
+    "console_failed": "Błąd: {{error}}",
+    "rerun_hint": "Uruchom ponownie z tymi parametrami",
+    "rerun_same": "Uruchom ponownie z tymi samymi parametrami",
+    "starting": "Uruchamianie…",
+    "step_executing": "Krok {{current}}/{{total}} w toku…",
+    "step_output": "Wynik",
+    "step_pending": "Oczekiwanie…",
+    "variables": "Zmienne"
   },
   "scheduler": {
     "title": "Harmonogram",
@@ -4182,7 +4190,22 @@
     "status_pending": "Oczekujące",
     "status_in_progress": "W toku",
     "status_completed": "Zakończone",
-    "status_failed": "Nieudane"
+    "status_failed": "Nieudane",
+    "priority_urgent": "Pilne",
+    "priority_high": "Wysoki",
+    "priority_normal": "Normalny",
+    "priority_low": "Niski",
+    "priority_custom": "Priorytet {{value}}",
+    "priority_tooltip": "Kolejność pobierania — wyższy priorytet jest pobierany pierwszy",
+    "timeout_tooltip": "Limit czasu przed zwróceniem zadania do kolejki",
+    "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
+    "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
+    "field_priority": "Priorytet",
+    "field_priority_hint": "Wyższy priorytet pobierany pierwszy; przy równym — starsze.",
+    "field_timeout": "Limit czasu (sekundy)",
+    "field_timeout_placeholder": "Domyślna wartość globalna",
+    "field_timeout_hint": "Zadanie wraca do kolejki po przekroczeniu. Puste = globalne, 0 = nigdy.",
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
   },
   "prompts": {
     "title": "Prompty",

@@ -1763,9 +1763,6 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "rerun": "用相同参数重跑",
-    "rerun_started": "已用相同参数重新运行",
-    "rerun_failed": "重跑失败",
     "schedule_failed": "创建计划失败",
     "skip": "跳过",
     "agent_not_found": "未找到 Agent",
@@ -1808,7 +1805,18 @@
       "load_failed": "无法加载待处理的操作员审查。",
       "review_run": "审查 {{workflow}} — {{step}}",
       "more_pending": "另有 {{count}} 项待处理"
-    }
+    },
+    "console": "控制台",
+    "console_completed": "已完成，耗时 {{duration}} — {{tokens}} 个token",
+    "console_executing": "执行中… 已完成 {{done}}/{{total}} 步",
+    "console_failed": "失败：{{error}}",
+    "rerun_hint": "使用这些参数重新运行",
+    "rerun_same": "使用相同参数重新运行",
+    "starting": "启动中…",
+    "step_executing": "步骤 {{current}}/{{total}} 执行中…",
+    "step_output": "输出",
+    "step_pending": "等待中…",
+    "variables": "变量"
   },
   "scheduler": {
     "title": "调度器",
@@ -4172,7 +4180,22 @@
     "status_pending": "待处理",
     "status_in_progress": "进行中",
     "status_completed": "已完成",
-    "status_failed": "失败"
+    "status_failed": "失败",
+    "priority_urgent": "紧急",
+    "priority_high": "高",
+    "priority_normal": "普通",
+    "priority_low": "低",
+    "priority_custom": "优先级 {{value}}",
+    "priority_tooltip": "认领顺序 — 数值越高越先认领",
+    "timeout_tooltip": "任务被回收前的时限",
+    "assignee_none": "未分配 — 任何智能体都可认领",
+    "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
+    "field_priority": "优先级",
+    "field_priority_hint": "数值越高越先认领；相同则先到先得。",
+    "field_timeout": "时限（秒）",
+    "field_timeout_placeholder": "全局默认值",
+    "field_timeout_hint": "超时未完成将被回收。留空使用全局默认值，0 表示永不回收。",
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
   },
   "prompts": {
     "title": "提示词",

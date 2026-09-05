@@ -168,15 +168,59 @@ function setMutationDefaults(): {
   return { run, rerun, dryRun, del, inst, sched };
 }
 
-function renderPage(): void {
+/** Renders the page and returns a `rerenderPage()` that re-renders it in
+ *  place — same provider, same component instance, so page state survives —
+ *  for tests that change what a mocked hook returns mid-flight. */
+function renderPage(): { rerenderPage: () => void } {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 0 } },
   });
-  render(
+  // A fresh element each time: re-rendering the identical element object
+  // lets React bail out of the subtree, which would defeat the point.
+  const tree = () => (
     <QueryClientProvider client={queryClient}>
       <WorkflowsPage />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const { rerender } = render(tree());
+  return { rerenderPage: () => rerender(tree()) };
+}
+
+/**
+ * Resolve whatever `refetchInterval` the page last handed the run-detail hook
+ * against the data the query would be holding at that moment.
+ *
+ * Accepts both shapes TanStack allows — a literal `number | false` and the
+ * function form `(query) => number | false` — so the assertion states the
+ * behaviour ("does this run poll?") rather than the mechanism the page happens
+ * to use to express it.
+ */
+function pollIntervalFor(data: unknown): number | false | undefined {
+  const calls = useWorkflowRunDetailMock.mock.calls;
+  const options = calls[calls.length - 1]?.[1] as
+    | { refetchInterval?: unknown }
+    | undefined;
+  const interval = options?.refetchInterval;
+  if (typeof interval === "function") {
+    return (interval as (query: { state: { data: unknown } }) => number | false | undefined)({
+      state: { data },
+    });
+  }
+  return interval as number | false | undefined;
+}
+
+/**
+ * Select the Template Library tab.
+ *
+ * The page opens on "My Workflows" and stays there even when the workflow list
+ * is empty — see the comment above the selection effect in `WorkflowsPage.tsx`:
+ * the empty state offers "Create your first workflow" and "Ask an agent"
+ * *before* nudging anyone toward templates. The templates panel is only mounted
+ * while its tab is active, so any assertion about template cards has to open
+ * the tab rather than assume an automatic switch.
+ */
+function showTemplatesTab(): void {
+  fireEvent.click(screen.getByRole("tab", { name: /workflows.template_library/ }));
 }
 
 const sampleWorkflow = {
@@ -214,7 +258,7 @@ describe("WorkflowsPage", () => {
     expect(screen.queryByText("alpha-flow")).not.toBeInTheDocument();
   });
 
-  it("auto-switches to templates tab when there are no workflows", () => {
+  it("stays on the workflows tab when there are no workflows, and opens templates on demand", () => {
     useWorkflowsMock.mockReturnValue(makeQuery([]));
     useWorkflowTemplatesMock.mockReturnValue(
       makeQuery([
@@ -228,11 +272,21 @@ describe("WorkflowsPage", () => {
       ]),
     );
     renderPage();
-    // Templates tab content surfaces the template card.
-    expect(screen.getByText("Sample Template")).toBeInTheDocument();
-    // Templates tab is selected.
+
+    // An empty workflow list must NOT jump the operator to the template
+    // library: the "My Workflows" empty state offers "Create your first
+    // workflow" and "Ask an agent" first, and the page comment above the
+    // selection effect states that intent explicitly.
+    const workflowsTab = screen.getByRole("tab", { name: /workflows.my_workflows/ });
     const templatesTab = screen.getByRole("tab", { name: /workflows.template_library/ });
+    expect(workflowsTab).toHaveAttribute("aria-selected", "true");
+    expect(templatesTab).toHaveAttribute("aria-selected", "false");
+    expect(screen.queryByText("Sample Template")).not.toBeInTheDocument();
+
+    // Choosing the tab is what surfaces the template card.
+    showTemplatesTab();
     expect(templatesTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Sample Template")).toBeInTheDocument();
   });
 
   it("renders workflow rows from the query data", () => {
@@ -350,6 +404,7 @@ describe("WorkflowsPage", () => {
     mutations.inst.mutateAsync.mockResolvedValue({ workflow_id: "wf-new" });
 
     renderPage();
+    showTemplatesTab();
 
     // The Use template button drives instantiation.
     fireEvent.click(screen.getByText("Use template"));
@@ -373,6 +428,7 @@ describe("WorkflowsPage", () => {
     );
     const mutations = setMutationDefaults();
     renderPage();
+    showTemplatesTab();
 
     // The preview button uses the Eye icon — find it as the second button
     // inside the template card footer (the first is "Use template").
@@ -408,6 +464,33 @@ describe("WorkflowsPage", () => {
     expect(
       screen.getByPlaceholderText("Additional context (optional)..."),
     ).toBeInTheDocument();
+  });
+
+  it("prefers the workflow's declared input_schema over scanning the prompts", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowDetailMock.mockReturnValue(
+      makeQuery({
+        ...sampleWorkflow,
+        // The schema declares one parameter; the prompt mentions another.
+        // Scanning would surface `audience`; the authored schema must win,
+        // because only it carries the type, default and description.
+        input_schema: [
+          {
+            name: "topic",
+            param_type: "string",
+            required: true,
+            description: "What to summarize",
+          },
+        ],
+        steps: [
+          { name: "step1", prompt_template: "Summarize {{topic}} for {{audience}}" },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(screen.getByText("topic")).toBeInTheDocument();
+    expect(screen.queryByText("audience")).not.toBeInTheDocument();
   });
 
   it("does not render parameter fields when workflow has no template placeholders", () => {
@@ -494,6 +577,7 @@ describe("WorkflowsPage", () => {
       ]),
     );
     renderPage();
+    showTemplatesTab();
 
     // Both render under the default "all" filter.
     expect(screen.getByText("AlphaTpl")).toBeInTheDocument();
@@ -697,5 +781,105 @@ describe("WorkflowsPage", () => {
     // AND the inspect query produced a pause.
     expect(screen.getByText("workflows.operator.review_required")).toBeInTheDocument();
     expect(screen.getByText("the draft")).toBeInTheDocument();
+  });
+
+  // #7997: `paused` is not a terminal state. A paused run is waiting on an
+  // external signal — an operator approval, a human-supplied input — and
+  // resumes once it arrives, so it is precisely the run someone is sitting
+  // and watching. Stopping the poll there freezes the timeline at the moment
+  // the operator approves the gate, and it stays frozen until a reload.
+  it("keeps polling a run that transitions from running to paused (#7997)", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-1",
+          workflow_name: "gated-run-row",
+          state: "running",
+          steps_completed: 1,
+          started_at: "2026-05-01T12:00:00Z",
+        },
+      ]),
+    );
+    const runDetail = (state: string) => ({
+      id: "run-1",
+      workflow_id: "wf-1",
+      workflow_name: "gated-run-row",
+      input: "seed",
+      state,
+      started_at: "2026-05-01T12:00:00Z",
+      step_results: [],
+    });
+    useWorkflowRunDetailMock.mockReturnValue(makeQuery(runDetail("running")));
+    const { rerenderPage } = renderPage();
+    fireEvent.click(screen.getByText("gated-run-row"));
+    expect(pollIntervalFor(runDetail("running"))).toBe(3000);
+
+    // The run hits its operator gate. The page re-renders with the new state.
+    useWorkflowRunDetailMock.mockReturnValue(makeQuery(runDetail("paused")));
+    rerenderPage();
+
+    expect(pollIntervalFor(runDetail("paused"))).toBe(3000);
+  });
+
+  // #7997: the poll must be a function of the run's own state, not of a
+  // mirrored `useState` that only one of two effects updates. Selecting a
+  // second finished run whose detail React Query already has cached moves
+  // `selectedRunId` (restarting the poll) without moving the state string
+  // (so nothing stops it again) — leaving the page polling a finished run
+  // every 3 s for as long as it stays open.
+  it("does not poll after selecting a second, already-cached completed run (#7997)", () => {
+    useWorkflowsMock.mockReturnValue(makeQuery([sampleWorkflow]));
+    useWorkflowRunsMock.mockReturnValue(
+      makeQuery([
+        {
+          id: "run-a",
+          workflow_name: "finished-run-a",
+          state: "completed",
+          steps_completed: 3,
+          started_at: "2026-05-01T12:00:00Z",
+        },
+        {
+          id: "run-b",
+          workflow_name: "finished-run-b",
+          state: "completed",
+          steps_completed: 3,
+          started_at: "2026-05-01T11:00:00Z",
+        },
+      ]),
+    );
+    const details: Record<string, unknown> = {
+      "run-a": {
+        id: "run-a",
+        workflow_id: "wf-1",
+        workflow_name: "finished-run-a",
+        input: "seed",
+        state: "completed",
+        started_at: "2026-05-01T12:00:00Z",
+        step_results: [],
+      },
+      "run-b": {
+        id: "run-b",
+        workflow_id: "wf-1",
+        workflow_name: "finished-run-b",
+        input: "seed",
+        state: "completed",
+        started_at: "2026-05-01T11:00:00Z",
+        step_results: [],
+      },
+    };
+    // Both details are already in the cache, so `data` is populated on the
+    // very first render after the selection changes — there is no
+    // `undefined` gap for a state-mirroring effect to notice.
+    useWorkflowRunDetailMock.mockImplementation((runId: string) =>
+      makeQuery(details[runId]),
+    );
+    renderPage();
+
+    fireEvent.click(screen.getByText("finished-run-a"));
+    expect(pollIntervalFor(details["run-a"])).toBe(false);
+
+    fireEvent.click(screen.getByText("finished-run-b"));
+    expect(pollIntervalFor(details["run-b"])).toBe(false);
   });
 });

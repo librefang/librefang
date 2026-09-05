@@ -3,6 +3,7 @@ import {
   applyForeignTerminalFrame,
   asText,
   extractAssistantHistoryParts,
+  extractWorkflowJson,
   formatMeta,
   isTerminalFrameType,
   normalizeRole,
@@ -334,5 +335,49 @@ describe("applyForeignTerminalFrame (#6390)", () => {
     const next = applyForeignTerminalFrame([bubbleA, bubbleB], { type: "response", message_id: "bot-missing", content: "x" });
     expect(next[0]).toBe(bubbleA);
     expect(next[1]).toBe(bubbleB);
+  });
+});
+
+describe("extractWorkflowJson", () => {
+  it("returns the body of a json-tagged fence", () => {
+    const content = "Here is the workflow:\n```json\n{\"steps\": [\"a\"]}\n```\nDone.";
+    expect(extractWorkflowJson(content)).toBe('{"steps": ["a"]}');
+  });
+
+  it("still matches a fence with no language tag", () => {
+    const content = "```\n{\"steps\": []}\n```";
+    expect(extractWorkflowJson(content)).toBe('{"steps": []}');
+  });
+
+  it("skips a non-json-tagged fence whose body parses, in favor of a later json fence", () => {
+    // The bug this guards: the old regex captured from the tag of the first fence onward, so a rust block before the JSON block fed the caller `rust\n{...}` and downstream JSON.parse failed.
+    const content = '```rust\n{"steps": ["parses but is not a json fence"]}\n```\nthen:\n```json\n{"steps": []}\n```';
+    expect(extractWorkflowJson(content)).toBe('{"steps": []}');
+  });
+
+  it("ignores a non-json-tagged fence whose body is not JSON", () => {
+    const content = "```rust\nfn main() {}\n```";
+    expect(extractWorkflowJson(content)).toBeNull();
+  });
+
+  it("skips a json-tagged fence whose body does not parse, in favor of a later valid one", () => {
+    const content = '```json\noops, truncated: {"steps": [\n```\nretry:\n```json\n{"steps": []}\n```';
+    expect(extractWorkflowJson(content)).toBe('{"steps": []}');
+  });
+
+  it("falls back to brace matching for unfenced inline JSON with a steps key", () => {
+    const content = 'plan: {"steps": ["x", "y"]} — no fences here.';
+    expect(extractWorkflowJson(content)).toBe('{"steps": ["x", "y"]}');
+  });
+
+  it("returns null when there is no fence and no steps object", () => {
+    expect(extractWorkflowJson("no json here at all")).toBeNull();
+  });
+
+  it("recovers a mislabeled fence's JSON body through the brace-matching fallback", () => {
+    // A lone non-json-tagged fence whose body parses is skipped by the fence scan, but the raw content still reaches the brace-matching fallback, which requires a `"steps"` key — so the mislabelled payload is recovered instead of dropped.
+    // Locks the interplay between the fence scan and the pre-existing fallback.
+    const content = '```rust\n{"steps": ["recovered"]}\n```';
+    expect(extractWorkflowJson(content)).toBe('{"steps": ["recovered"]}');
   });
 });

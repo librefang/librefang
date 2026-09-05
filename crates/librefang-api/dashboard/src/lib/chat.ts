@@ -207,6 +207,55 @@ export interface TerminalFrame {
  * `silent_complete` removes the owning bubble; `error` marks it with the failure.
  * Pure so the #6390 race is unit-testable without mounting the chat page.
  */
+
+export function extractWorkflowJson(content: string): string | null {
+  // Scan every fenced block and return the first whose body parses as JSON.
+  // Skipping non-`json`-tagged fences keeps an explanatory shell/TOML block ahead of the real payload from winning, and the `JSON.parse` probe keeps a prose fence from returning garbage that the caller cannot parse downstream.
+  for (const fence of content.matchAll(/```([^\n]*)\n([\s\S]*?)```/g)) {
+    const lang = fence[1].trim().toLowerCase();
+    if (lang && lang !== "json") continue;
+    const body = fence[2].trim();
+    try {
+      JSON.parse(body);
+    } catch {
+      continue;
+    }
+    return body;
+  }
+
+  const start = content.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const candidate = content.slice(start, i + 1);
+        return candidate.includes('"steps"') ? candidate : null;
+      }
+    }
+  }
+  return null;
+}
+
 export function applyForeignTerminalFrame<M extends TerminalRoutableMessage>(
   messages: M[],
   frame: TerminalFrame,

@@ -17,6 +17,7 @@ export type CanvasNodeData = {
    *  this name rather than a pre-registered instance (#7712). Mutually
    *  exclusive with `agentId` / `agentName`; `stepAgentPayload` sends exactly one. */
   agentType?: string;
+  fresh?: boolean;
   /** Which binding the operator chose for this step's agent: a specific
    *  running instance (`agentId`), a durable agent name (`agentName`), or an
    *  agent type resolved find-or-spawn from a template (`agentType`).
@@ -372,3 +373,63 @@ export function removeEdgeById<E extends Edge>(edges: E[], edgeId: string): E[] 
 export const CANVAS_INPUT_CLASS =
   "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
 export const CANVAS_LABEL_CLASS = "text-[10px] font-bold text-text-dim uppercase";
+
+export type WorkflowCreateStepInput = {
+  name?: string;
+  prompt_template?: string;
+  agent?: string | { id?: string; name?: string; type?: string; fresh?: boolean };
+  depends_on?: string[];
+  [key: string]: unknown;
+};
+
+export function workflowStepsToCanvasState(
+  steps: WorkflowCreateStepInput[],
+): { nodes: CanvasNode[]; edges: Edge[] } {
+  const nodes: CanvasNode[] = steps.map((s, idx) => {
+    const agent = typeof s.agent === "object" && s.agent !== null ? s.agent : undefined;
+    const agentName = typeof s.agent === "string" ? s.agent : agent?.name;
+    return {
+      id: `node-${idx}`,
+      type: "custom",
+      position: { x: 80 + idx * 260, y: 100 },
+      data: {
+        label: s.name || `Step ${idx + 1}`,
+        prompt: s.prompt_template || "",
+        nodeType: "agent",
+        agentId: agent?.id,
+        agentName,
+        agentType: agent?.type,
+        fresh: agent?.fresh,
+      },
+    };
+  });
+
+  const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
+  let edges: Edge[];
+  if (hasDag) {
+    const nameToId: Record<string, string> = {};
+    steps.forEach((step, idx) => {
+      if (step.name) nameToId[step.name] = `node-${idx}`;
+    });
+    edges = [];
+    steps.forEach((step, idx) => {
+      (step.depends_on || []).forEach((dep, depIdx) => {
+        const sourceId = nameToId[dep];
+        if (sourceId) {
+          edges.push({
+            id: `dep-${idx}-${depIdx}`,
+            source: sourceId,
+            target: `node-${idx}`,
+            style: { strokeDasharray: "6 3" },
+            label: "depends",
+            labelStyle: { fontSize: 9, fill: "#6b7280" },
+          });
+        }
+      });
+    });
+  } else {
+    edges = nodes.slice(0, -1).map((_, i) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+  }
+
+  return { nodes, edges };
+}

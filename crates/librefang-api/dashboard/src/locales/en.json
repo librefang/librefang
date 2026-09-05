@@ -1762,9 +1762,6 @@
     "delete_failed": "Delete failed",
     "run_failed": "Run failed",
     "run_started": "Run started",
-    "rerun": "Re-run with same parameters",
-    "rerun_started": "Re-run started with the same parameters",
-    "rerun_failed": "Re-run failed",
     "runs_label": "runs",
     "schedule_failed": "Schedule creation failed",
     "skip": "skip",
@@ -1808,7 +1805,18 @@
       "load_failed": "Failed to load pending operator reviews.",
       "review_run": "Review {{workflow}} — {{step}}",
       "more_pending": "+{{count}} more pending"
-    }
+    },
+    "console": "Console",
+    "console_completed": "Completed in {{duration}} — {{tokens}} tokens",
+    "console_executing": "Executing… {{done}}/{{total}} steps done",
+    "console_failed": "Failed: {{error}}",
+    "rerun_hint": "Re-run with these parameters",
+    "rerun_same": "Re-run with same parameters",
+    "starting": "Starting…",
+    "step_executing": "Step {{current}}/{{total}} executing…",
+    "step_output": "Output",
+    "step_pending": "Pending…",
+    "variables": "Variables"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -4172,7 +4180,22 @@
     "status_pending": "Pending",
     "status_in_progress": "In Progress",
     "status_completed": "Completed",
-    "status_failed": "Failed"
+    "status_failed": "Failed",
+    "priority_urgent": "Urgent",
+    "priority_high": "High",
+    "priority_normal": "Normal",
+    "priority_low": "Low",
+    "priority_custom": "Priority {{value}}",
+    "priority_tooltip": "Claim order — higher is claimed first",
+    "timeout_tooltip": "Time limit before the task is reclaimed",
+    "assignee_none": "Unassigned — any agent may claim it",
+    "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
+    "field_priority": "Priority",
+    "field_priority_hint": "Higher is claimed first; ties broken by age.",
+    "field_timeout": "Time limit (seconds)",
+    "field_timeout_placeholder": "Global default",
+    "field_timeout_hint": "Reclaimed if held longer. Empty = global default, 0 = never.",
+    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
   },
   "prompts": {
     "title": "Prompts",

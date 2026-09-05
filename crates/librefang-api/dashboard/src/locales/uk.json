@@ -1766,9 +1766,6 @@
     "delete_failed": "Не вдалося видалити",
     "run_failed": "Запуск не вдався",
     "run_started": "Запуск розпочато",
-    "rerun": "Повторити з тими самими параметрами",
-    "rerun_started": "Повторний запуск розпочато з тими самими параметрами",
-    "rerun_failed": "Не вдалося повторити запуск",
     "runs_label": "запусків",
     "schedule_failed": "Не вдалося створити розклад",
     "skip": "пропустити",
@@ -1814,7 +1811,18 @@
       "load_failed": "Не вдалося завантажити очікувані перегляди оператором.",
       "review_run": "Переглянути {{workflow}} — {{step}}",
       "more_pending": "+{{count}} очікують"
-    }
+    },
+    "console": "Консоль",
+    "console_completed": "Завершено за {{duration}} — {{tokens}} токенів",
+    "console_executing": "Виконання… {{done}}/{{total}} кроків завершено",
+    "console_failed": "Помилка: {{error}}",
+    "rerun_hint": "Перезапустити з цими параметрами",
+    "rerun_same": "Перезапустити з тими ж параметрами",
+    "starting": "Запуск…",
+    "step_executing": "Крок {{current}}/{{total}} виконується…",
+    "step_output": "Результат",
+    "step_pending": "Очікування…",
+    "variables": "Змінні"
   },
   "scheduler": {
     "title": "Планувальник",
@@ -4182,7 +4190,22 @@
     "status_pending": "В очікуванні",
     "status_in_progress": "У процесі",
     "status_completed": "Завершено",
-    "status_failed": "Провалено"
+    "status_failed": "Провалено",
+    "priority_urgent": "Терміново",
+    "priority_high": "Високий",
+    "priority_normal": "Звичайний",
+    "priority_low": "Низький",
+    "priority_custom": "Пріоритет {{value}}",
+    "priority_tooltip": "Порядок взяття — вищий беруть першим",
+    "timeout_tooltip": "Ліміт часу до повернення таски в чергу",
+    "assignee_none": "Без виконавця — будь-який агент може взяти",
+    "no_agents_hint": "Жодного агента ще не зареєстровано. Створіть агента, перш ніж призначати таски.",
+    "field_priority": "Пріоритет",
+    "field_priority_hint": "Вищий беруть першим; за однакового — старіші.",
+    "field_timeout": "Ліміт часу (секунди)",
+    "field_timeout_placeholder": "Глобальне значення",
+    "field_timeout_hint": "Таску повертають у чергу, якщо утримують довше. Порожньо — глобальне значення, 0 — ніколи.",
+    "field_description_hint": "Агент читає це дослівно. Вкажіть мету, обмеження та критерій завершення."
   },
   "prompts": {
     "title": "Промпти",

@@ -1761,9 +1761,6 @@
     "delete_failed": "삭제 실패",
     "run_failed": "실행 실패",
     "run_started": "실행이 시작되었습니다",
-    "rerun": "동일한 매개변수로 다시 실행",
-    "rerun_started": "동일한 매개변수로 다시 실행 시작됨",
-    "rerun_failed": "재실행 실패",
     "runs_label": "실행",
     "schedule_failed": "일정 생성 실패",
     "skip": "건너뛰기",
@@ -1807,7 +1804,18 @@
       "load_failed": "대기 중인 운영자 검토를 불러오지 못했습니다.",
       "review_run": "{{workflow}} — {{step}} 검토",
       "more_pending": "대기 중 {{count}}개 더 있음"
-    }
+    },
+    "console": "콘솔",
+    "console_completed": "{{duration}}에 완료 — {{tokens}} 토큰",
+    "console_executing": "실행 중… {{done}}/{{total}} 단계 완료",
+    "console_failed": "실패: {{error}}",
+    "rerun_hint": "이 매개변수로 다시 실행",
+    "rerun_same": "같은 매개변수로 다시 실행",
+    "starting": "시작 중…",
+    "step_executing": "단계 {{current}}/{{total}} 실행 중…",
+    "step_output": "출력",
+    "step_pending": "대기 중…",
+    "variables": "변수"
   },
   "scheduler": {
     "title": "스케줄러",
@@ -4171,7 +4179,22 @@
     "status_pending": "보류 중",
     "status_in_progress": "진행 중",
     "status_completed": "완료",
-    "status_failed": "실패"
+    "status_failed": "실패",
+    "priority_urgent": "긴급",
+    "priority_high": "높음",
+    "priority_normal": "보통",
+    "priority_low": "낮음",
+    "priority_custom": "우선순위 {{value}}",
+    "priority_tooltip": "인수 순서 — 높을수록 먼저 인수됨",
+    "timeout_tooltip": "작업이 회수되기 전 시간 제한",
+    "assignee_none": "미지정 — 모든 에이전트가 인수 가능",
+    "no_agents_hint": "등록된 에이전트가 없습니다. 작업을 할당하기 전에 에이전트를 만드세요.",
+    "field_priority": "우선순위",
+    "field_priority_hint": "높을수록 먼저 인수됨; 동일 시 오래된 것 우선.",
+    "field_timeout": "시간 제한 (초)",
+    "field_timeout_placeholder": "전역 기본값",
+    "field_timeout_hint": "초과 시 회수됨. 비어 있으면 전역 기본값, 0이면 회수 안 함.",
+    "field_description_hint": "에이전트가 이 내용을 그대로 읽습니다. 목표, 제약 조건, 완료 기준을 포함하세요."
   },
   "prompts": {
     "title": "프롬프트",

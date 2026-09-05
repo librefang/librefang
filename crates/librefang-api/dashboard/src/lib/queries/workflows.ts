@@ -9,6 +9,7 @@ import {
   listPendingOperatorRuns,
   ApiError,
 } from "../http/client";
+import type { WorkflowRunDetail } from "../http/client";
 import { workflowKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
 
@@ -30,7 +31,7 @@ const TEMPLATE_STALE_MS = 300_000;
 const OPERATOR_PENDING_STALE_MS = 5_000;
 const OPERATOR_PENDING_REFETCH_MS = 15_000;
 
-function requireId(id: string, options: QueryOverrides): QueryOverrides {
+function requireId<TData>(id: string, options: QueryOverrides<TData>): QueryOverrides<TData> {
   return {
     ...options,
     enabled: !!id && options.enabled !== false,
@@ -117,7 +118,10 @@ export function useWorkflowRuns(workflowId: string, options: QueryOverrides = {}
   return useQuery(withOverrides(workflowQueries.runs(workflowId), requireId(workflowId, options)));
 }
 
-export function useWorkflowRunDetail(runId: string, options: QueryOverrides = {}) {
+export function useWorkflowRunDetail(
+  runId: string,
+  options: QueryOverrides<WorkflowRunDetail> = {},
+) {
   return useQuery(withOverrides(workflowQueries.runDetail(runId), requireId(runId, options)));
 }
 

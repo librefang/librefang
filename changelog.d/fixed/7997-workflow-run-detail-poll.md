@@ -1,0 +1,3 @@
+Keep the dashboard's workflow run timeline live while a run sits paused at an operator gate, instead of freezing it at the moment someone is most likely to be watching.
+A paused run is not finished — it is waiting for an approval or a human-supplied input and resumes once that arrives — but the page treated every state other than `running` and `pending` as terminal and stopped refreshing, so an approved run kept rendering its paused snapshot until the operator reloaded.
+The same change stops the opposite failure: the poll is now derived from the run's own state rather than mirrored into component state, so selecting a second already-finished run no longer leaves a 3-second refresh running against it for as long as the page stays open (#7997) (@DaBlitzStein)

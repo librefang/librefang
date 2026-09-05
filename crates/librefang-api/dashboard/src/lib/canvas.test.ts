@@ -6,8 +6,10 @@ import {
   removeNodeAndCascadeEdges,
   resolveDependencyIds,
   resolveDependencyNames,
+  workflowStepsToCanvasState,
   stepAgentPayload,
 } from "./canvas";
+import { extractWorkflowJson } from "./chat";
 
 type N = Node<{ label: string }>;
 type E = Edge;
@@ -244,6 +246,94 @@ describe("canvas dependency references", () => {
       { id: "node-a", label: "Duplicate" },
       { id: "node-b", label: "Duplicate" },
     ])).toEqual([]);
+  });
+});
+
+describe("workflowStepsToCanvasState", () => {
+  it("lays out steps left-to-right and chains them with plain edges when no depends_on is present", () => {
+    const { nodes, edges } = workflowStepsToCanvasState([
+      { name: "fetch", prompt_template: "Fetch the data", agent: "researcher" },
+      { name: "summarize", prompt_template: "Summarize {{input}}", agent: { id: "a-1", name: "writer" } },
+    ]);
+
+    expect(nodes).toHaveLength(2);
+    expect(nodes[0]).toMatchObject({
+      id: "node-0",
+      type: "custom",
+      data: { label: "fetch", prompt: "Fetch the data", nodeType: "agent", agentName: "researcher" },
+    });
+    expect(nodes[1]).toMatchObject({
+      id: "node-1",
+      data: { label: "summarize", agentId: "a-1", agentName: "writer" },
+    });
+
+    expect(edges).toEqual([{ id: "e-0", source: "node-0", target: "node-1" }]);
+  });
+
+  it("builds dashed depends-on edges instead of a linear chain when any step declares depends_on", () => {
+    const { edges } = workflowStepsToCanvasState([
+      { name: "fetch", prompt_template: "Fetch", agent: "researcher" },
+      { name: "analyze", prompt_template: "Analyze", agent: "researcher", depends_on: ["fetch"] },
+    ]);
+
+    expect(edges).toEqual([
+      {
+        id: "dep-1-0",
+        source: "node-0",
+        target: "node-1",
+        style: { strokeDasharray: "6 3" },
+        label: "depends",
+        labelStyle: { fontSize: 9, fill: "#6b7280" },
+      },
+    ]);
+  });
+
+  it("produces no edges for a single step", () => {
+    const { nodes, edges } = workflowStepsToCanvasState([
+      { name: "only-step", prompt_template: "Do it", agent: "assistant" },
+    ]);
+    expect(nodes).toHaveLength(1);
+    expect(edges).toEqual([]);
+  });
+
+  it("round-trips a chat message into a canvas import CanvasPage can load", () => {
+    const workflow = {
+      name: "bug-triage",
+      description: "Triage and summarize a bug report",
+      steps: [
+        { name: "fetch", prompt_template: "Fetch the report", agent: "researcher" },
+        { name: "summarize", prompt_template: "Summarize {{input}}", agent: "writer", depends_on: ["fetch"] },
+      ],
+    };
+    const content = `Sure, here's the workflow:\n\n${JSON.stringify(workflow)}\n\nLet me know if you'd like changes {🙂}`;
+
+    const jsonText = extractWorkflowJson(content);
+    expect(jsonText).not.toBeNull();
+    const parsed = JSON.parse(jsonText!) as typeof workflow;
+    expect(parsed).toEqual(workflow);
+
+    const { nodes, edges } = workflowStepsToCanvasState(parsed.steps);
+    const draft = {
+      nodes,
+      edges,
+      name: parsed.name,
+      description: parsed.description,
+    };
+
+    const imported = parseCanvasImport(draft);
+    expect(imported.nodes.map((n) => n.id)).toEqual(["node-0", "node-1"]);
+    expect(imported.edges).toEqual([
+      {
+        id: "dep-1-0",
+        source: "node-0",
+        target: "node-1",
+        style: { strokeDasharray: "6 3" },
+        label: "depends",
+        labelStyle: { fontSize: 9, fill: "#6b7280" },
+      },
+    ]);
+    expect(imported.name).toBe("bug-triage");
+    expect(imported.description).toBe("Triage and summarize a bug report");
   });
 });
 
