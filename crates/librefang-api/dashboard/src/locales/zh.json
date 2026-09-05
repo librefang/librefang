@@ -512,7 +512,8 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "移除 fallback",
-      "remove_context_injection": "移除上下文注入"
+      "remove_context_injection": "移除上下文注入",
+      "name_locked_hint": "请在智能体标题处重命名——此字段在此处已锁定。"
     },
     "delete_confirm": "确定要删除智能体 \"{{name}}\" 吗？",
     "prompts": "提示词管理",
@@ -840,6 +841,8 @@
       "no_skills_assigned": "未分配技能 — 从下方列表添加，或重置为全部。",
       "skills_available": "可用",
       "tools_saved": "已保存到 agent.toml",
+      "tools_mcp_saved": "MCP 服务器已更新",
+      "tools_mcp_save_failed": "更新 MCP 服务器失败",
       "tools_label": "工具",
       "tools_all": "全部",
       "tools_included": "已包含",
@@ -860,9 +863,21 @@
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
       "crashed_title": "{{name}} 处于错误状态",
-      "proactive_conditions": "条件（逗号分隔）",
-      "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",
-      "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'"
+      "edit_full_manifest": "编辑完整配置",
+      "edit_full_manifest_hint": "所有清单字段——资源、能力、自主性、响应格式等。",
+      "description": "描述",
+      "description_placeholder": "尚未设置描述。",
+      "description_saved": "描述已保存",
+      "channels": "频道",
+      "channels_hint": "留空表示可从所有已配置的频道访问。",
+      "channels_search_placeholder": "搜索频道…",
+      "no_channels_configured": "此实例上未配置任何频道。",
+      "channels_saved": "频道已更新",
+      "manifest_saved": "配置已保存",
+      "manifest_load_failed": "加载当前配置失败。",
+      "proactive_conditions": "条件（以逗号分隔）",
+      "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'",
+      "proactive_conditions_hint": "这将替换整个条件列表——它不会预先填充当前值。请使用完整清单编辑器查看当前生效的内容。"
     },
     "tab": {
       "conversation": "对话",

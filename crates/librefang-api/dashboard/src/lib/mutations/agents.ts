@@ -26,6 +26,8 @@ import {
   resetAgentSession,
   updateAgentTools,
   setAgentSkills,
+  setAgentMcpServers,
+  setAgentChannels,
   getAgentTemplateToml,
 } from "../http/client";
 import type { AgentSchedulePatch, CloneAgentPayload, PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
@@ -170,8 +172,18 @@ export function useResumeAgent() {
 
 /**
  * Manifest-level partial update: name, description, system_prompt,
- * mcp_servers, model. Distinct from `usePatchAgentRuntimeConfig`, which
- * targets the role-appropriate model-tuning endpoint.
+ * mcp_servers, model, schedule — or, via `manifest_toml`, a full-manifest
+ * replacement (#7742: the dashboard's full manifest editor). Distinct from
+ * `usePatchAgentConfig` which targets `/agents/{id}/config` (model-tuning
+ * only).
+ *
+ * `manifest_toml` can touch nearly every manifest field in one request, so
+ * its invalidation fan-out is broader than the other partial fields:
+ * `agentKeys.manifest(id)` (the editor's own seed read), `mcpServers(id)`,
+ * `skills(id)`, and `tools(id)` all derive from the same manifest and would
+ * otherwise show stale state until their own PUT/GET is separately
+ * triggered. Cheap to over-invalidate here since `manifest_toml` PATCHes
+ * are infrequent, user-initiated saves, not a hot path.
  */
 export function usePatchAgent() {
   const qc = useQueryClient();
@@ -190,11 +202,19 @@ export function usePatchAgent() {
         mcp_servers?: string[];
         schedule?: AgentSchedulePatch;
         auto_evolve?: boolean;
+        manifest_toml?: string;
       };
     }) => patchAgent(agentId, body),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.lists() });
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      if (variables.body.manifest_toml !== undefined) {
+        qc.invalidateQueries({ queryKey: agentKeys.manifest(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.skills(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.tools(variables.agentId) });
+        qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      }
     },
   });
 }
@@ -562,8 +582,64 @@ export function useSetAgentSkills() {
   });
 }
 
-export function useAgentTemplateToml() {
+/**
+ * PUT /agents/{id}/mcp_servers — replace the agent's MCP server grant list
+ * (#6565 follow-up). Powers the group-level MCP grant/revoke on the agent
+ * detail Tools tab, which previously could only read MCP grant state and
+ * pointed the operator at a non-existent "MCP servers tab" to change it.
+ * `agentKeys.detail(id)` carries the `mcp_servers` / `mcp_servers_mode`
+ * fields this tab reads, so invalidating it is what actually refreshes the
+ * grant state; `agentKeys.mcpServers(id)` is invalidated too for forward
+ * compatibility with a future dedicated GET hook.
+ */
+export function useSetAgentMcpServers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      mcpServers,
+    }: {
+      agentId: string;
+      mcpServers: string[];
+    }) => setAgentMcpServers(agentId, mcpServers),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.mcpServers(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.lists() });
+    },
+  });
+}
+
+export function useAgentTypeToml() {
   return useMutation({
     mutationFn: getAgentTemplateToml,
+  });
+}
+
+/**
+ * PUT /agents/{id}/channels — replace the agent's channel allowlist (#7742).
+ * Powers the Configure drawer's Channels section, the previously-missing
+ * client for a route that has existed since `config.rs` shipped
+ * `get_agent_channels` / `set_agent_channels` with zero call sites.
+ *
+ * Invalidates:
+ * - `agentKeys.channels(id)` — the section's own read (assigned / available / mode).
+ * - `agentKeys.detail(id)` — forward-compatible with a future `channels` field
+ *   on the curated detail payload, mirroring the `mcpServers` mutation's note.
+ */
+export function useSetAgentChannels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      channels,
+    }: {
+      agentId: string;
+      channels: string[];
+    }) => setAgentChannels(agentId, channels),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: agentKeys.channels(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });
+    },
   });
 }

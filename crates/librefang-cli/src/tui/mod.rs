@@ -626,6 +626,19 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
+            AppEvent::AgentWorkspacesLoaded(id, entries) => {
+                if self.agents.detail.as_ref().map(|d| d.id.clone()) == Some(id) {
+                    self.agents.workspaces = entries;
+                    if !self.agents.workspaces.is_empty() {
+                        self.agents.ws_cursor = 0;
+                    }
+                }
+            }
+            AppEvent::AgentWorkspacesUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-workspaces-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
@@ -1812,6 +1825,21 @@ impl App {
 
     fn handle_agent_action(&mut self, action: agents::AgentAction) {
         match action {
+            agents::AgentAction::FetchAgentWorkspaces(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_workspaces(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateWorkspaces { id, workspaces } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_workspaces(
+                        backend,
+                        id,
+                        workspaces,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
             agents::AgentAction::Continue => {}
             agents::AgentAction::Back => {
                 // In Main phase, Esc from agents just stays on the tab
@@ -3215,4 +3243,31 @@ pub fn run(config: Option<PathBuf>) {
         ratatui::crossterm::event::DisableBracketedPaste
     );
     ratatui::restore();
+}
+
+#[cfg(test)]
+mod agent_workspaces_event_tests {
+    use super::*;
+
+    /// The four `workspaces_tests` live in `screens/agents.rs` and exercise the key
+    /// handler, which deliberately leaves `sub` alone; only the event arm here can
+    /// take the operator out of the editor once the PATCH lands.
+    #[test]
+    fn workspaces_updated_event_returns_to_detail_with_status() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(None, tx);
+        app.agents.sub = agents::AgentSubScreen::EditWorkspaces;
+
+        app.handle_event(AppEvent::AgentWorkspacesUpdated("agent-1".to_string()));
+
+        assert!(
+            matches!(app.agents.sub, agents::AgentSubScreen::AgentDetail),
+            "a successful save must return the operator to the detail view"
+        );
+        assert!(
+            app.agents.status_msg.contains("agent-1"),
+            "status message should name the saved agent, got {:?}",
+            app.agents.status_msg
+        );
+    }
 }

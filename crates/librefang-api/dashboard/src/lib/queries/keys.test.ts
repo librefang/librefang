@@ -55,6 +55,21 @@ describe("query key factories", () => {
       expect(agentKeys.details()).toEqual(["agents", "detail"]);
       expect(agentKeys.detail("abc")).toEqual(["agents", "detail", "abc"]);
       expect(agentKeys.templates()).toEqual(["agents", "templates"]);
+      expect(agentKeys.mcpServers("abc")).toEqual([
+        "agents",
+        "mcpServers",
+        "abc",
+      ]);
+      expect(agentKeys.manifest("abc")).toEqual([
+        "agents",
+        "manifest",
+        "abc",
+      ]);
+      expect(agentKeys.channels("abc")).toEqual([
+        "agents",
+        "channels",
+        "abc",
+      ]);
       expect(agentKeys.sessions("abc")).toEqual([
         "agents",
         "sessions",
@@ -358,6 +373,11 @@ describe("query key factories", () => {
       expect(agentKeys.lists().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.mcpServers("x").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+      expect(agentKeys.manifest("x").slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.channels("x").slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
         prefix,
       );

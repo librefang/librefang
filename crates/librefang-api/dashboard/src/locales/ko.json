@@ -512,7 +512,8 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "대체 제거",
-      "remove_context_injection": "컨텍스트 주입 제거"
+      "remove_context_injection": "컨텍스트 주입 제거",
+      "name_locked_hint": "이름 변경은 에이전트 헤더에서 해주세요 — 이 필드는 잠겨 있습니다."
     },
     "delete_confirm": "\"{{name}}\" 에이전트를 삭제하시겠습니까?",
     "prompts": "프롬프트",
@@ -839,6 +840,8 @@
       "no_skills_assigned": "할당된 기술이 없습니다. 아래 목록에서 추가하거나 모두 재설정하세요.",
       "skills_available": "사용 가능",
       "tools_saved": "Agent.toml에 저장됨",
+      "tools_mcp_saved": "MCP 서버가 업데이트되었습니다",
+      "tools_mcp_save_failed": "MCP 서버 업데이트에 실패했습니다",
       "tools_label": "도구",
       "tools_all": "모두",
       "tools_included": "포함됨",
@@ -859,9 +862,21 @@
       "events_tail": "이벤트 · 꼬리",
       "no_logs": "이 에이전트에 대해서는 아직 기록된 회전이 없습니다.",
       "crashed_title": "{{name}}이(가) 오류 상태입니다.",
+      "edit_full_manifest": "전체 설정 편집",
+      "edit_full_manifest_hint": "모든 매니페스트 필드 — 리소스, 기능, 자율성, 응답 형식 등.",
+      "description": "설명",
+      "description_placeholder": "설명이 설정되지 않았습니다.",
+      "description_saved": "설명이 저장되었습니다",
+      "channels": "채널",
+      "channels_hint": "비어 있으면 설정된 모든 채널에서 접근 가능합니다.",
+      "channels_search_placeholder": "채널 검색…",
+      "no_channels_configured": "이 인스턴스에 설정된 채널이 없습니다.",
+      "channels_saved": "채널이 업데이트되었습니다",
+      "manifest_saved": "설정이 저장되었습니다",
+      "manifest_load_failed": "현재 설정을 불러오지 못했습니다.",
       "proactive_conditions": "조건 (쉼표로 구분)",
-      "proactive_conditions_hint": "이것은 전체 조건 목록을 대체합니다 — 현재 항목으로 미리 채워지지 않습니다. 현재 활성화된 내용을 보려면 전체 매니페스트 편집기를 사용하세요.",
-      "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'"
+      "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'",
+      "proactive_conditions_hint": "이 목록은 전체 조건 목록을 대체합니다 — 현재 값으로 미리 채워지지 않습니다. 현재 적용된 값을 보려면 전체 매니페스트 편집기를 사용하세요."
     },
     "tab": {
       "conversation": "대화",

@@ -174,6 +174,10 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The agent's `[workspaces]` table, as `(name, path, mode)` rows.
+    AgentWorkspacesLoaded(String, Vec<(String, String, String)>),
+    /// The shared-folders write came back 2xx.
+    AgentWorkspacesUpdated(String),
     /// The memory config could not be read — see [`FetchFailure`].
     ///
     /// Sent instead of staying silent: without it the Memory screen keeps
@@ -1888,7 +1892,212 @@ pub fn spawn_fetch_agent_mcp_servers(
     });
 }
 
-/// Update an agent's skills.
+/// Read the agent's `[workspaces]` table out of its manifest TOML.
+///
+/// Goes through `GET /api/agents/{id}/manifest` rather than the JSON agent
+/// detail, because the detail response does not carry the workspace
+/// declarations at all.
+///
+/// Only `path`-based declarations become rows: a `mount` entry is not a
+/// shared folder under `workspaces_dir` and the editor has no field for it,
+/// so it is hidden here and carried through verbatim by
+/// [`spawn_update_agent_workspaces`] instead of being silently rewritten as
+/// an empty `path`.
+pub fn spawn_fetch_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // A failed GET, an unreadable body and a manifest that does not
+            // parse each reach the operator as an error instead of an empty
+            // editor that reads as "no shared folders".
+            let parsed: Result<toml::Value, String> = daemon_response(
+                client
+                    .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                    .send(),
+                || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+            )
+            .and_then(|r| {
+                r.text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            })
+            .and_then(|text| {
+                toml::from_str::<toml::Value>(&text)
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))
+            });
+            match parsed {
+                Ok(value) => {
+                    let entries = workspaces_editor_rows(&value);
+                    let _ = tx.send(AppEvent::AgentWorkspacesLoaded(agent_id, entries));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Path-based workspace rows for the editor, as `(name, path, mode)`.
+///
+/// Declarations without a string `path` (mount-based, or malformed) are not
+/// rows the editor can render, so they are skipped here and preserved
+/// verbatim on save. A manifest without a `[workspaces]` table yields no
+/// rows.
+fn workspaces_editor_rows(manifest: &toml::Value) -> Vec<(String, String, String)> {
+    manifest
+        .get("workspaces")
+        .and_then(|w| w.as_table())
+        .map(|t| {
+            t.iter()
+                .filter_map(|(name, decl)| {
+                    let path = decl.get("path").and_then(toml::Value::as_str)?;
+                    let mode = decl
+                        .get("mode")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("rw");
+                    Some((name.clone(), path.to_string(), mode.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Write the edited shared folders back.
+///
+/// `PATCH /api/agents/{id}` with `manifest_toml` replaces the whole manifest,
+/// so the current one is fetched first and only its `[workspaces]` table is
+/// replaced. Sending a manifest built from the editor alone would silently
+/// drop every field the editor does not render.
+///
+/// The read-modify-write has no lost-update protection: `PATCH
+/// /api/agents/{id}` carries no version or ETag precondition, so a manifest
+/// written between the GET and the PATCH is overwritten with a stale base.
+/// Any surface adopting this pattern inherits that limitation — closing it
+/// needs a manifest generation counter on the endpoint.
+pub fn spawn_update_agent_workspaces(
+    backend: BackendRef,
+    agent_id: String,
+    workspaces: Vec<(String, String, String)>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome: Result<(), String> = (|| {
+                let resp = daemon_response(
+                    client
+                        .get(format!("{base_url}/api/agents/{agent_id}/manifest"))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-manifest-read-failed"),
+                )?;
+                let text = resp
+                    .text()
+                    .map_err(|_| crate::i18n::t("tui-event-workspaces-manifest-read-failed"))?;
+                let toml_content =
+                    rebuild_manifest_with_workspaces(&text, &workspaces).map_err(|e| match e {
+                        WorkspacesRebuildError::ManifestUnreadable => {
+                            crate::i18n::t("tui-event-workspaces-manifest-read-failed")
+                        }
+                        WorkspacesRebuildError::DuplicateName(name) => crate::i18n::t_args(
+                            "tui-event-workspaces-duplicate-name",
+                            &[("name", &name)],
+                        ),
+                    })?;
+                daemon_response(
+                    client
+                        .patch(format!("{base_url}/api/agents/{agent_id}"))
+                        .json(&serde_json::json!({"manifest_toml": toml_content}))
+                        .send(),
+                    || crate::i18n::t("tui-event-workspaces-update-failed"),
+                )?;
+                Ok(())
+            })();
+            match outcome {
+                Ok(()) => {
+                    let _ = tx.send(AppEvent::AgentWorkspacesUpdated(agent_id));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-workspaces-not-available-in-process",
+            )));
+        }
+    });
+}
+
+/// Why a manifest could not be rebuilt with the editor's `[workspaces]` rows.
+#[derive(Debug)]
+enum WorkspacesRebuildError {
+    /// The fetched manifest is not valid TOML.
+    ManifestUnreadable,
+    /// Two rows (or a row and a preserved declaration) claim the same name;
+    /// saving would make one silently win, so the write is refused.
+    DuplicateName(String),
+}
+
+/// Rebuild the manifest with its `[workspaces]` table replaced by the
+/// editor's rows, leaving every other table untouched.
+///
+/// Declarations the editor does not render — anything without a string
+/// `path` (mount-based, or malformed) — are carried over verbatim rather
+/// than dropped, so a save cannot turn a mount into an empty `path`.
+/// `mode` is written only when it is not the kernel default `rw`, so a
+/// manifest that relies on the default does not gain an explicit key.
+/// Duplicate folder names are refused instead of silently last-wins.
+fn rebuild_manifest_with_workspaces(
+    manifest_toml: &str,
+    workspaces: &[(String, String, String)],
+) -> Result<String, WorkspacesRebuildError> {
+    let mut value: toml::Value =
+        toml::from_str(manifest_toml).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)?;
+    let table = value
+        .as_table_mut()
+        .ok_or(WorkspacesRebuildError::ManifestUnreadable)?;
+    // Copy the declarations the editor does not render before replacing the
+    // table, so they survive the save untouched.
+    let preserved: Vec<(String, toml::Value)> = table
+        .get("workspaces")
+        .and_then(toml::Value::as_table)
+        .map(|t| {
+            t.iter()
+                .filter(|(_, decl)| decl.get("path").and_then(toml::Value::as_str).is_none())
+                .map(|(name, decl)| (name.clone(), decl.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut ws = toml::map::Map::new();
+    for (name, path, mode) in workspaces {
+        let mut entry = toml::map::Map::new();
+        entry.insert("path".to_string(), toml::Value::String(path.clone()));
+        if mode != "rw" {
+            entry.insert("mode".to_string(), toml::Value::String(mode.clone()));
+        }
+        if ws.insert(name.clone(), toml::Value::Table(entry)).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name.clone()));
+        }
+    }
+    for (name, decl) in preserved {
+        if ws.insert(name.clone(), decl).is_some() {
+            return Err(WorkspacesRebuildError::DuplicateName(name));
+        }
+    }
+    table.insert("workspaces".to_string(), toml::Value::Table(ws));
+    toml::to_string(&value).map_err(|_| WorkspacesRebuildError::ManifestUnreadable)
+}
+
 pub fn spawn_update_agent_skills(
     backend: BackendRef,
     agent_id: String,
@@ -5076,6 +5285,136 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn workspace_rows_skip_mount_declarations() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+mode = "r"
+
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "r".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn workspace_rows_default_mode_to_rw() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[workspaces.library]
+path = "shared/library"
+"#,
+        )
+        .unwrap();
+        let rows = workspaces_editor_rows(&manifest);
+        assert_eq!(
+            rows,
+            vec![(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "rw".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn rebuild_preserves_mount_declarations_and_other_tables() {
+        let manifest = r#"
+name = "deanna"
+[skills]
+review = true
+[workspaces.library]
+path = "shared/library"
+[workspaces.vault]
+mount = "/data/vault"
+mode = "r"
+"#;
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "rw".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        // Every table the editor does not render survives the save.
+        assert_eq!(value["skills"]["review"].as_bool(), Some(true));
+        let vault = &value["workspaces"]["vault"];
+        assert_eq!(
+            vault.get("mount").and_then(toml::Value::as_str),
+            Some("/data/vault")
+        );
+        assert_eq!(vault.get("mode").and_then(toml::Value::as_str), Some("r"));
+        // The edited row is written through.
+        assert_eq!(
+            value["workspaces"]["library"]["path"].as_str(),
+            Some("shared/library")
+        );
+        // The default mode is not materialized as an explicit key.
+        assert_eq!(value["workspaces"]["library"].get("mode"), None);
+    }
+
+    #[test]
+    fn rebuild_writes_explicit_mode_when_not_the_default() {
+        let manifest = "name = \"deanna\"\n";
+        let rebuilt = rebuild_manifest_with_workspaces(
+            manifest,
+            &[(
+                "library".to_string(),
+                "shared/library".to_string(),
+                "r".to_string(),
+            )],
+        )
+        .unwrap();
+        let value: toml::Value = toml::from_str(&rebuilt).unwrap();
+        assert_eq!(value["workspaces"]["library"]["mode"].as_str(), Some("r"));
+    }
+
+    #[test]
+    fn rebuild_refuses_duplicate_folder_names() {
+        let manifest = "name = \"deanna\"\n";
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[
+                ("library".to_string(), "a".to_string(), "rw".to_string()),
+                ("library".to_string(), "b".to_string(), "rw".to_string()),
+            ],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "library"));
+    }
+
+    #[test]
+    fn rebuild_refuses_a_row_that_collides_with_a_preserved_mount() {
+        let manifest = r#"
+[workspaces.vault]
+mount = "/data/vault"
+"#;
+        let err = rebuild_manifest_with_workspaces(
+            manifest,
+            &[("vault".to_string(), "shared".to_string(), "rw".to_string())],
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, WorkspacesRebuildError::DuplicateName(n) if n == "vault"));
+    }
 
     // ── fetch helpers must never exit silently (#8141) ─────────────────────
 

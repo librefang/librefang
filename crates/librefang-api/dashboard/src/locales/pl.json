@@ -512,7 +512,8 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "mój_schemat",
       "remove_fallback": "usuń opcję awaryjną",
-      "remove_context_injection": "usuń wstrzykiwanie kontekstu"
+      "remove_context_injection": "usuń wstrzykiwanie kontekstu",
+      "name_locked_hint": "Zmień nazwę w nagłówku agenta — to pole jest tutaj zablokowane."
     },
     "delete_confirm": "Czy na pewno chcesz usunąć agenta \"{{name}}\"?",
     "prompts": "Prompty",
@@ -842,6 +843,8 @@
       "no_skills_assigned": "Brak przypisanych umiejętności — dodaj z poniższej listy lub zresetuj do wszystkich.",
       "skills_available": "Dostępne",
       "tools_saved": "Zapisano do agent.toml",
+      "tools_mcp_saved": "Zaktualizowano serwery MCP",
+      "tools_mcp_save_failed": "Nie udało się zaktualizować serwerów MCP",
       "tools_label": "Narzędzia",
       "tools_all": "wszystkie",
       "tools_included": "dołączone",
@@ -862,9 +865,21 @@
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
-      "proactive_conditions": "Warunki (oddzielone przecinkami)",
-      "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",
-      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'"
+      "edit_full_manifest": "Edytuj pełną konfigurację",
+      "edit_full_manifest_hint": "Wszystkie pola manifestu — zasoby, uprawnienia, autonomia, format odpowiedzi i więcej.",
+      "description": "Opis",
+      "description_placeholder": "Nie ustawiono opisu.",
+      "description_saved": "Opis zapisany",
+      "channels": "Kanały",
+      "channels_hint": "Puste oznacza dostępność ze wszystkich skonfigurowanych kanałów.",
+      "channels_search_placeholder": "Szukaj kanałów…",
+      "no_channels_configured": "Na tej instancji nie skonfigurowano żadnych kanałów.",
+      "channels_saved": "Kanały zaktualizowane",
+      "manifest_saved": "Konfiguracja zapisana",
+      "manifest_load_failed": "Nie udało się wczytać bieżącej konfiguracji.",
+      "proactive_conditions": "Warunki (rozdzielone przecinkami)",
+      "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'",
+      "proactive_conditions_hint": "To zastępuje całą listę warunków — nie jest wstępnie wypełnione bieżącą wartością. Użyj pełnego edytora manifestu, aby zobaczyć aktualny stan."
     },
     "tab": {
       "conversation": "Rozmowa",

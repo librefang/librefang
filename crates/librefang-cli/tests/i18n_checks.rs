@@ -344,7 +344,7 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
     {
         return false;
     }
-    if trimmed.contains("{name:<28}") {
+    if trimmed.contains("{name:<28}") || trimmed.contains("{path:<28}") {
         return false;
     }
 

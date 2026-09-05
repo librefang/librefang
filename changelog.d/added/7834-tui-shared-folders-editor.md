@@ -1,0 +1,4 @@
+The terminal gains a shared-folders editor for an agent: `w` in the agent detail lists the declared `[workspaces]` and can add, edit and delete them.
+The table was editable from the dashboard and by hand in `agent.toml` and nowhere else, which made a missing declaration — the reason an agent cannot see a directory the operator expects it to work in — undiagnosable without opening the manifest in another window.
+Saving replaces only the `[workspaces]` table inside the fetched manifest, so the round-trip preserves every field the editor does not render, and rows with an empty name or path are dropped rather than written as entries the kernel cannot resolve.
+Folders declared with a `mount` instead of a `path` are preserved verbatim on save rather than rewritten as an empty `path` (#7834, #7835) (@DaBlitzStein)

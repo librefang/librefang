@@ -512,7 +512,8 @@
       "complex_threshold_placeholder": "2048",
       "schema_name_placeholder": "my_schema",
       "remove_fallback": "remove fallback",
-      "remove_context_injection": "remove context injection"
+      "remove_context_injection": "remove context injection",
+      "name_locked_hint": "Rename from the agent header instead — this field is locked here."
     },
     "delete_confirm": "Are you sure you want to delete agent \"{{name}}\"?",
     "prompts": "Prompts",
@@ -843,6 +844,8 @@
       "no_skills_assigned": "No skills assigned — add from the list below, or reset to all.",
       "skills_available": "Available",
       "tools_saved": "Saved to agent.toml",
+      "tools_mcp_saved": "MCP servers updated",
+      "tools_mcp_save_failed": "Failed to update MCP servers",
       "tools_label": "Tools",
       "tools_all": "all",
       "tools_included": "included",
@@ -862,7 +865,22 @@
       "tools_reset_to_all": "Reset to use all tools",
       "events_tail": "events · tail",
       "no_logs": "No turns recorded yet for this agent.",
-      "crashed_title": "{{name}} is in error state"
+      "crashed_title": "{{name}} is in error state",
+      "edit_full_manifest": "Edit full configuration",
+      "edit_full_manifest_hint": "Every manifest field — resources, capabilities, autonomy, response format, and more.",
+      "description": "Description",
+      "description_placeholder": "No description set.",
+      "description_saved": "Description saved",
+      "channels": "Channels",
+      "channels_hint": "Empty means reachable from every configured channel.",
+      "channels_search_placeholder": "Search channels…",
+      "no_channels_configured": "No channels configured on this instance.",
+      "channels_saved": "Channels updated",
+      "manifest_saved": "Configuration saved",
+      "manifest_load_failed": "Failed to load the current configuration.",
+      "proactive_conditions": "Conditions (comma-separated)",
+      "proactive_conditions_placeholder": "e.g. agent.tags contains 'urgent'",
+      "proactive_conditions_hint": "This replaces the full condition list — it isn't pre-filled with the current one. Use the full manifest editor to see what's live today."
     },
     "tab": {
       "conversation": "Conversation",

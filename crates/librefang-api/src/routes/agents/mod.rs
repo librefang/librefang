@@ -220,6 +220,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::post(reload_agent_manifest),
         )
         .route(
+            "/agents/{id}/manifest",
+            axum::routing::get(get_agent_manifest_toml),
+        )
+        .route(
             "/agents/{id}/files",
             axum::routing::get(list_agent_files),
         )
