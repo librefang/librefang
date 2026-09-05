@@ -292,12 +292,12 @@ function ChannelQrSection({ channelName, t }: { channelName: string; t: (key: st
   // channels that don't use QR auth at all — silently hide.
   if (qrQuery.isError) return null;
 
-  // 204 — sidecar running, no QR session. Most likely the channel
-  // doesn't need QR (telegram, slack, …) or wechat authenticated from
-  // a cached token. Hide the section entirely.
-  if (qrQuery.data === null) return null;
+  // Nothing to render. `null` is the 204 — sidecar running, no QR session, most likely a channel that doesn't need QR (telegram, slack, …) or a wechat that authenticated from a cached token.
+  // `undefined` is a query that has not run: `noQrSession` is component state and survives a `channelName` change (the reset effect above only fires after the render that already saw the new prop), so one render observes `enabled: false` against a cache entry the new channel has never filled.
+  // That render is neither loading (`fetchStatus` is idle) nor errored, so it used to fall through to `qrQuery.data!` and throw on the first field access.
+  if (!qrQuery.data) return null;
 
-  const qr = qrQuery.data!;
+  const qr = qrQuery.data;
 
   return (
     <div className="space-y-3">

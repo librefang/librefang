@@ -921,6 +921,42 @@ describe("ChannelsPage", () => {
       ));
   });
 
+  it("hides the section instead of crashing when the drawer switches to a channel whose query never ran", async () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "telegram", display_name: "Telegram" }),
+        makeChannel({ name: "wechat", display_name: "WeChat" }),
+      ]),
+    );
+    const wechatQr: QrState = {
+      status: "pending",
+      qr_code: "wechat-qr",
+      updated_at: "2030-01-01T00:00:00Z",
+    };
+    // Mirrors react-query's own shapes: telegram's 204 stays in the cache as `null`, while a disabled query on a key that was never fetched reports `data === undefined` with `isLoading === false`.
+    useChannelQrMock.mockImplementation(
+      (channelName: string, options: { enabled?: boolean }) => {
+        if (channelName === "telegram") return makeQuery<QrState | null>(null);
+        return makeQuery<QrState | undefined>(options.enabled ? wechatQr : undefined);
+      },
+    );
+    renderPage();
+
+    // Telegram's 204 arms the self-disable latch.
+    fireEvent.click(screen.getByText("Telegram"));
+    await waitFor(() =>
+      expect(useChannelQrMock).toHaveBeenLastCalledWith(
+        "telegram",
+        expect.objectContaining({ enabled: false }),
+      ));
+
+    // The latch is component state and the drawer body is reconciled rather than remounted, so the first render for wechat still asks for a disabled query — one whose cache entry holds no data at all, not the 204's `null`.
+    fireEvent.click(screen.getByText("WeChat"));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("mobile_pairing.qr_aria_label")).toBeInTheDocument());
+  });
+
   it("does NOT expose `bot_token` in the QrState type surface", () => {
     // Type-level invariant: a future refactor must not add `bot_token`
     // back without re-reviewing the partial-save data-loss issue
