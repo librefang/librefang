@@ -626,6 +626,9 @@ impl App {
                 self.memory.config = Some(config);
                 self.memory.loading = false;
             }
+            AppEvent::MemoryConfigSaved(result) => {
+                self.memory.apply_save_result(result);
+            }
             AppEvent::MemoryConfigFailed(failure) => {
                 // Clear `loading` on the failure path too, or the screen sits
                 // on its spinner forever and the message never gets read.
@@ -2120,6 +2123,21 @@ impl App {
             memory::MemoryUIAction::DeleteKv { agent_id, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_delete_memory_kv(backend, agent_id, key, self.event_tx.clone());
+                }
+            }
+            memory::MemoryUIAction::SaveConfig {
+                auto_memorize,
+                auto_retrieve,
+                extraction_model,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_save_memory_config(
+                        backend,
+                        auto_memorize,
+                        auto_retrieve,
+                        extraction_model,
+                        self.event_tx.clone(),
+                    );
                 }
             }
         }

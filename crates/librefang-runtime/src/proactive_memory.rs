@@ -31,6 +31,21 @@ impl librefang_memory::proactive::EmbeddingFn for EmbeddingBridge {
     }
 }
 
+/// Wall-clock ceiling on the single extraction call that turns a conversation
+/// slice into candidate memories.
+///
+/// Named rather than inlined because the caller in `agent_loop::end_turn` has
+/// to budget for it: a ceiling here that the end-of-turn budget does not cover
+/// would cut off extractions that were about to succeed.
+pub const EXTRACTION_TIMEOUT_SECS: u64 = 30;
+
+/// Wall-clock ceiling on the follow-up call that decides whether a candidate
+/// is new, an update of an existing memory, or a duplicate to drop.
+///
+/// Shorter than [`EXTRACTION_TIMEOUT_SECS`] because it is a small
+/// classification over text the model has already been given.
+pub const DECISION_TIMEOUT_SECS: u64 = 15;
+
 /// Initialize proactive memory system.
 ///
 /// Creates a `ProactiveMemoryStore` if either auto_retrieve or auto_memorize is enabled.
@@ -563,7 +578,7 @@ impl LlmMemoryExtractor {
             cache_ttl: None,
             prompt_cache_strategy: None,
             response_format: Some(ResponseFormat::Json),
-            timeout_secs: Some(30),
+            timeout_secs: Some(EXTRACTION_TIMEOUT_SECS),
             extra_body: None,
             agent_id: None,
             session_id: None,
@@ -688,7 +703,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             // — tell JSON-mode-capable providers to honour it so weak models
             // can't drift into prose.
             response_format: Some(ResponseFormat::Json),
-            timeout_secs: Some(15),
+            timeout_secs: Some(DECISION_TIMEOUT_SECS),
             extra_body: None,
             agent_id: None,
             session_id: None,
