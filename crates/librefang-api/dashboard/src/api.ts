@@ -3855,6 +3855,42 @@ export async function revokePasskey(
   return response.json();
 }
 
+// --- Credential vault write surface (#8164) ---
+
+/**
+ * One allowlisted vault key and whether the daemon currently holds a value for
+ * it. There is deliberately no `value` field: `/api/vault/keys` reports names
+ * and a boolean, and the API has no read-back endpoint at all, so nothing on
+ * this side of the wire can ever display a stored secret.
+ */
+export interface VaultKeyStatus {
+  key: string;
+  set: boolean;
+}
+
+/**
+ * The set of keys a surface may manage, straight from the daemon's
+ * `WRITABLE_KEYS` allowlist. Never hard-code the list client-side — adding a
+ * key server-side must be enough to make it appear here.
+ */
+export async function listVaultKeys(): Promise<VaultKeyStatus[]> {
+  const data = await get<{ keys: VaultKeyStatus[] }>("/api/vault/keys");
+  return data.keys ?? [];
+}
+
+export async function setVaultKey(
+  key: string,
+  value: string,
+): Promise<VaultKeyStatus> {
+  return put<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`, {
+    value,
+  });
+}
+
+export async function deleteVaultKey(key: string): Promise<VaultKeyStatus> {
+  return del<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`);
+}
+
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/reject`, {});
 }

@@ -800,6 +800,25 @@ impl App {
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
             }
+            AppEvent::VaultKeysLoaded(keys) => {
+                self.settings.vault_keys = keys;
+                if !self.settings.vault_keys.is_empty()
+                    && self.settings.vault_list.selected().is_none()
+                {
+                    self.settings.vault_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
+            AppEvent::VaultKeySaved(key) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-vault-key-saved", &[("key", &key)]);
+                self.refresh_settings_vault();
+            }
+            AppEvent::VaultKeyDeleted(key) => {
+                self.settings.status_msg =
+                    crate::i18n::t_args("tui-mod-vault-key-deleted", &[("key", &key)]);
+                self.refresh_settings_vault();
+            }
             AppEvent::ModelCatalogLoaded(list) => {
                 self.models.models = list;
                 if !self.models.models.is_empty() && self.models.list_state.selected().is_none() {
@@ -1606,6 +1625,13 @@ impl App {
         }
     }
 
+    fn refresh_settings_vault(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_vault_keys(backend, self.event_tx.clone());
+        }
+    }
+
     fn refresh_groups(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.groups.loading = true;
@@ -2285,6 +2311,17 @@ impl App {
             settings::SettingsAction::RefreshModels => self.refresh_settings_models(),
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
+            settings::SettingsAction::RefreshVault => self.refresh_settings_vault(),
+            settings::SettingsAction::SetVaultKey { key, value } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_vault_key(backend, key, value, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::DeleteVaultKey(key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_vault_key(backend, key, self.event_tx.clone());
+                }
+            }
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());

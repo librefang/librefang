@@ -1,4 +1,4 @@
-//! Settings screen: provider key management, model catalog, tools list, backup archives.
+//! Settings screen: provider key management, model catalog, tools list, backup archives, vault keys.
 
 use crate::tui::theme;
 use crate::tui::widgets;
@@ -38,6 +38,17 @@ pub struct ModelInfo {
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
+}
+
+/// One writable vault key as `GET /api/vault/keys` reports it (#8164).
+///
+/// There is no `value` field and there must never be one: the API has no
+/// read-back endpoint, so the only thing any surface can know about a stored
+/// secret is that it exists.
+#[derive(Clone, Default)]
+pub struct VaultKeyInfo {
+    pub key: String,
+    pub set: bool,
 }
 
 #[derive(Clone)]
@@ -144,6 +155,19 @@ pub enum SettingsSub {
     Models,
     Tools,
     Backups,
+    /// Bound to `7`, not to the next free digit.
+    ///
+    /// `5` is claimed by the Auxiliary panel (#8059) and `6` by the
+    /// configuration editor (#8184); both land after this branch, and whichever
+    /// arrived second would have silently lost its key. Pick the next unclaimed
+    /// digit when adding a tab here, and check the open PRs before assuming one
+    /// is free.
+    ///
+    /// The digit also lives inside the translated label
+    /// (`tui-settings-tab-vault = 7 Vault`) in all four locales, so renumbering
+    /// means editing the match arm, the four labels, and any test that presses
+    /// the key.
+    Vault,
 }
 
 pub struct SettingsState {
@@ -152,10 +176,12 @@ pub struct SettingsState {
     pub models: Vec<ModelInfo>,
     pub tools: Vec<ToolInfo>,
     pub backups: Vec<BackupInfo>,
+    pub vault_keys: Vec<VaultKeyInfo>,
     pub provider_list: ListState,
     pub model_list: ListState,
     pub tool_list: ListState,
     pub backup_list: ListState,
+    pub vault_list: ListState,
     /// Open restore form, if any. While it is open the sub-tab number keys are
     /// inert, so `Esc` is the documented way back out.
     pub restore: Option<RestoreForm>,
@@ -163,6 +189,10 @@ pub struct SettingsState {
     pub input_buf: String,
     pub input_mode: bool,
     pub editing_provider: Option<String>,
+    /// Vault key currently being retyped, if any. Mutually exclusive with
+    /// `editing_provider` because `handle_key` routes every keystroke to
+    /// `handle_input` while `input_mode` is set, so no second edit can start.
+    pub editing_vault_key: Option<String>,
     pub test_result: Option<TestResult>,
     pub loading: bool,
     pub tick: usize,
@@ -175,7 +205,18 @@ pub enum SettingsAction {
     RefreshModels,
     RefreshTools,
     RefreshBackups,
-    SaveProviderKey { name: String, key: String },
+    RefreshVault,
+    /// Store `value` under vault key `key`. The value is moved straight into
+    /// the request and never kept on the screen state.
+    SetVaultKey {
+        key: String,
+        value: String,
+    },
+    DeleteVaultKey(String),
+    SaveProviderKey {
+        name: String,
+        key: String,
+    },
     DeleteProviderKey(String),
     TestProvider(String),
     CreateBackup,
@@ -191,15 +232,18 @@ impl SettingsState {
             models: Vec::new(),
             tools: Vec::new(),
             backups: Vec::new(),
+            vault_keys: Vec::new(),
             provider_list: ListState::default(),
             model_list: ListState::default(),
             tool_list: ListState::default(),
             backup_list: ListState::default(),
+            vault_list: ListState::default(),
             restore: None,
             confirm_delete: false,
             input_buf: String::new(),
             input_mode: false,
             editing_provider: None,
+            editing_vault_key: None,
             test_result: None,
             loading: false,
             tick: 0,
@@ -222,6 +266,7 @@ impl SettingsState {
         self.switch_sub(SettingsSub::Providers);
         self.input_mode = false;
         self.editing_provider = None;
+        self.editing_vault_key = None;
         self.input_buf.clear();
     }
 
@@ -266,6 +311,10 @@ impl SettingsState {
                     self.switch_sub(SettingsSub::Backups);
                     return SettingsAction::RefreshBackups;
                 }
+                KeyCode::Char('7') => {
+                    self.switch_sub(SettingsSub::Vault);
+                    return SettingsAction::RefreshVault;
+                }
                 _ => {}
             }
         }
@@ -275,6 +324,7 @@ impl SettingsState {
             SettingsSub::Models => self.handle_models(key),
             SettingsSub::Tools => self.handle_tools(key),
             SettingsSub::Backups => self.handle_backups(key),
+            SettingsSub::Vault => self.handle_vault(key),
         }
     }
 
@@ -283,10 +333,21 @@ impl SettingsState {
             KeyCode::Esc => {
                 self.input_mode = false;
                 self.editing_provider = None;
+                self.editing_vault_key = None;
                 self.input_buf.clear();
             }
             KeyCode::Enter => {
                 self.input_mode = false;
+                // Vault first: a typed secret is drained out of `input_buf`
+                // into the action in one move, so nothing is left on the
+                // screen state for a later draw to reach.
+                if let Some(key) = self.editing_vault_key.take() {
+                    let value = std::mem::take(&mut self.input_buf);
+                    if !value.trim().is_empty() {
+                        return SettingsAction::SetVaultKey { key, value };
+                    }
+                    return SettingsAction::Continue;
+                }
                 if let Some(name) = self.editing_provider.take() {
                     if !self.input_buf.is_empty() {
                         let api_key = self.input_buf.clone();
@@ -388,6 +449,61 @@ impl SettingsState {
             _ => {}
         }
         SettingsAction::Continue
+    }
+
+    /// Vault sub-tab (#8164).
+    ///
+    /// `e` starts retyping a key's value, `d` clears it behind a confirmation.
+    /// There is no "view" binding, because there is no endpoint that could
+    /// serve one.
+    fn handle_vault(&mut self, key: KeyEvent) -> SettingsAction {
+        if self.confirm_delete {
+            self.confirm_delete = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                if let Some(entry) = self.selected_vault_key() {
+                    return SettingsAction::DeleteVaultKey(entry.key.clone());
+                }
+            }
+            return SettingsAction::Continue;
+        }
+
+        let total = self.vault_keys.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                let i = self.vault_list.selected().unwrap_or(0);
+                let next = if i == 0 { total - 1 } else { i - 1 };
+                self.vault_list.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                let i = self.vault_list.selected().unwrap_or(0);
+                let next = (i + 1) % total;
+                self.vault_list.select(Some(next));
+            }
+            KeyCode::Char('e') => {
+                if let Some(entry) = self.selected_vault_key() {
+                    self.editing_vault_key = Some(entry.key.clone());
+                    self.editing_provider = None;
+                    self.input_mode = true;
+                    self.input_buf.clear();
+                    self.status_msg.clear();
+                }
+            }
+            KeyCode::Char('d') => {
+                // Only offer to clear a key that holds something.
+                if self.selected_vault_key().is_some_and(|entry| entry.set) {
+                    self.confirm_delete = true;
+                }
+            }
+            KeyCode::Char('r') => return SettingsAction::RefreshVault,
+            _ => {}
+        }
+        SettingsAction::Continue
+    }
+
+    fn selected_vault_key(&self) -> Option<&VaultKeyInfo> {
+        self.vault_list
+            .selected()
+            .and_then(|i| self.vault_keys.get(i))
     }
 
     fn handle_backups(&mut self, key: KeyEvent) -> SettingsAction {
@@ -512,6 +628,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Models => draw_models(f, chunks[2], state),
         SettingsSub::Tools => draw_tools(f, chunks[2], state),
         SettingsSub::Backups => draw_backups(f, chunks[2], state),
+        SettingsSub::Vault => draw_vault(f, chunks[2], state),
     }
 
     // Hints
@@ -524,9 +641,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             crate::i18n::t("tui-settings-hints-restore")
         }
         SettingsSub::Backups => crate::i18n::t("tui-settings-hints-backups"),
+        SettingsSub::Vault if state.input_mode => crate::i18n::t("tui-settings-hints-input"),
+        SettingsSub::Vault => crate::i18n::t("tui-settings-hints-vault"),
     };
-    if state.sub == SettingsSub::Backups {
-        f.render_widget(
+    match state.sub {
+        SettingsSub::Backups => f.render_widget(
             widgets::confirm_or_status_or_hint(
                 state.confirm_delete,
                 &crate::i18n::t("tui-settings-backups-delete-confirm"),
@@ -534,9 +653,17 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
                 &hint_text,
             ),
             chunks[3],
-        );
-    } else {
-        f.render_widget(widgets::hint_bar(&hint_text), chunks[3]);
+        ),
+        SettingsSub::Vault => f.render_widget(
+            widgets::confirm_or_status_or_hint(
+                state.confirm_delete,
+                &crate::i18n::t("tui-settings-vault-delete-confirm"),
+                &state.status_msg,
+                &hint_text,
+            ),
+            chunks[3],
+        ),
+        _ => f.render_widget(widgets::hint_bar(&hint_text), chunks[3]),
     }
 }
 
@@ -555,6 +682,7 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
             SettingsSub::Backups,
             crate::i18n::t("tui-settings-tab-backups"),
         ),
+        (SettingsSub::Vault, crate::i18n::t("tui-settings-tab-vault")),
     ];
     let mut spans = vec![Span::raw("  ")];
     for (i, (sub, label)) in tabs.iter().enumerate() {
@@ -568,6 +696,112 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
         }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Vault sub-tab (#8164).
+///
+/// Renders the key name and a set/not-set badge and nothing else. The stored
+/// value is never drawn, not even as a mask sized to it — the daemon does not
+/// hand it over, and a mask at the real length would disclose the length. The
+/// only bullets on this pane belong to the operator's own live keystrokes,
+/// which are cleared the moment `Enter` hands them to the request.
+fn draw_vault(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Min(3),    // list
+        Constraint::Length(2), // input
+    ])
+    .split(area);
+
+    let key_hdr = crate::i18n::t("tui-settings-vault-header-key");
+    let status_hdr = crate::i18n::t("tui-settings-vault-header-status");
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {:<32} {}", key_hdr, status_hdr),
+            theme::table_header(),
+        )])),
+        chunks[0],
+    );
+
+    if state.loading && state.vault_keys.is_empty() {
+        f.render_widget(
+            widgets::spinner(state.tick, &crate::i18n::t("tui-settings-vault-loading")),
+            chunks[1],
+        );
+    } else if state.vault_keys.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-settings-vault-empty")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .vault_keys
+            .iter()
+            .map(|entry| {
+                let (badge, badge_style) = if entry.set {
+                    (
+                        format!("● {}", crate::i18n::t("tui-settings-vault-status-set")),
+                        Style::default().fg(theme::GREEN),
+                    )
+                } else {
+                    (
+                        format!("○ {}", crate::i18n::t("tui-settings-vault-status-notset")),
+                        theme::dim_style(),
+                    )
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<32}", entry.key),
+                        Style::default().fg(theme::CYAN),
+                    ),
+                    Span::styled(format!(" {}", badge), badge_style),
+                ]))
+            })
+            .collect();
+
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, chunks[1], &mut state.vault_list);
+    }
+
+    if state.input_mode {
+        let key_name = state.editing_vault_key.as_deref().unwrap_or("?");
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![Span::styled(
+                    format!(
+                        "  🔑 {}",
+                        crate::i18n::t_args(
+                            "tui-settings-vault-input-prompt",
+                            &[("key", key_name)]
+                        )
+                    ),
+                    Style::default().fg(theme::YELLOW),
+                )]),
+                Line::from(vec![
+                    Span::raw("  ▸ "),
+                    Span::styled(
+                        "•".repeat(state.input_buf.chars().count().min(40)),
+                        theme::input_style(),
+                    ),
+                    Span::styled(
+                        "█",
+                        Style::default()
+                            .fg(theme::GREEN)
+                            .add_modifier(Modifier::SLOW_BLINK),
+                    ),
+                ]),
+            ]),
+            chunks[2],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                format!("  {}", crate::i18n::t("tui-settings-vault-note")),
+                theme::dim_style(),
+            )])),
+            chunks[2],
+        );
+    }
 }
 
 fn draw_providers(f: &mut Frame, area: Rect, state: &mut SettingsState) {
@@ -1254,6 +1488,141 @@ mod tests {
         assert_eq!(format_size(2048), "2.0KiB");
         assert_eq!(format_size(3 * 1024 * 1024), "3.0MiB");
         assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0GiB");
+    }
+
+    // ── Vault sub-tab (#8164) ───────────────────────────────────────────────
+
+    fn on_vault_tab(set: bool) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Vault;
+        state.vault_keys = vec![VaultKeyInfo {
+            key: "GITHUB_TOKEN".to_string(),
+            set,
+        }];
+        state.vault_list.select(Some(0));
+        state
+    }
+
+    fn typed(state: &mut SettingsState, text: &str) {
+        for c in text.chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn the_seventh_number_key_opens_the_vault_tab_and_loads_it() {
+        let mut state = SettingsState::new();
+        let action = state.handle_key(key(KeyCode::Char('7')));
+        assert!(state.sub == SettingsSub::Vault);
+        assert!(matches!(action, SettingsAction::RefreshVault));
+    }
+
+    #[test]
+    fn the_vault_list_does_not_swallow_the_sub_tab_switch_keys() {
+        let mut state = on_vault_tab(true);
+        let action = state.handle_key(key(KeyCode::Char('2')));
+        assert!(state.sub == SettingsSub::Models);
+        assert!(matches!(action, SettingsAction::RefreshModels));
+    }
+
+    /// `e` opens the editor for the selected key and starts from an empty
+    /// buffer — there is no stored value to prefill it with, and pretending
+    /// otherwise would be the UI claiming knowledge it does not have.
+    #[test]
+    fn editing_a_vault_key_starts_from_an_empty_buffer() {
+        let mut state = on_vault_tab(true);
+        state.handle_key(key(KeyCode::Char('e')));
+        assert!(state.input_mode);
+        assert_eq!(state.editing_vault_key.as_deref(), Some("GITHUB_TOKEN"));
+        assert!(state.input_buf.is_empty());
+    }
+
+    /// The typed value leaves the screen state entirely on `Enter`: it is
+    /// carried by the action and the buffer is emptied in the same move, so no
+    /// later draw of any sub-tab can reach it.
+    #[test]
+    fn submitting_a_vault_key_drains_the_buffer_into_the_action() {
+        let mut state = on_vault_tab(false);
+        state.handle_key(key(KeyCode::Char('e')));
+        typed(&mut state, "ghp_fixture");
+        let action = state.handle_key(key(KeyCode::Enter));
+
+        match action {
+            SettingsAction::SetVaultKey { key: k, value } => {
+                assert_eq!(k, "GITHUB_TOKEN");
+                assert_eq!(value, "ghp_fixture");
+            }
+            _ => panic!("expected SetVaultKey"),
+        }
+        assert!(
+            state.input_buf.is_empty(),
+            "typed value outlived the submit"
+        );
+        assert!(state.editing_vault_key.is_none());
+        assert!(!state.input_mode);
+    }
+
+    #[test]
+    fn escaping_a_vault_edit_discards_the_typed_value() {
+        let mut state = on_vault_tab(false);
+        state.handle_key(key(KeyCode::Char('e')));
+        typed(&mut state, "ghp_fixture");
+        let action = state.handle_key(key(KeyCode::Esc));
+
+        assert!(action.is_noop());
+        assert!(state.input_buf.is_empty());
+        assert!(state.editing_vault_key.is_none());
+        assert!(!state.input_mode);
+    }
+
+    /// While the editor is open, every digit is text, not a tab switch —
+    /// otherwise a digit inside a token would teleport the operator mid-entry.
+    /// `7` is in the fixture because it is this tab's own switch key.
+    #[test]
+    fn digits_typed_into_a_vault_value_do_not_switch_sub_tabs() {
+        let mut state = on_vault_tab(false);
+        state.handle_key(key(KeyCode::Char('e')));
+        typed(&mut state, "1234567");
+        assert!(state.sub == SettingsSub::Vault);
+        assert_eq!(state.input_buf, "1234567");
+    }
+
+    #[test]
+    fn clearing_a_vault_key_needs_a_confirmation() {
+        let mut state = on_vault_tab(true);
+        assert!(state.handle_key(key(KeyCode::Char('d'))).is_noop());
+        assert!(state.confirm_delete);
+
+        let action = state.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(
+            action,
+            SettingsAction::DeleteVaultKey(k) if k == "GITHUB_TOKEN"
+        ));
+        assert!(!state.confirm_delete);
+    }
+
+    /// Nothing to clear on a key that holds nothing, so `d` must not put a
+    /// confirmation prompt in front of the operator.
+    #[test]
+    fn an_unset_vault_key_offers_no_clear_confirmation() {
+        let mut state = on_vault_tab(false);
+        assert!(state.handle_key(key(KeyCode::Char('d'))).is_noop());
+        assert!(!state.confirm_delete);
+    }
+
+    /// Leaving and re-entering the Settings tab must not resurrect a
+    /// half-typed secret.
+    #[test]
+    fn resetting_the_screen_drops_a_pending_vault_edit() {
+        let mut state = on_vault_tab(true);
+        state.handle_key(key(KeyCode::Char('e')));
+        typed(&mut state, "ghp_fixture");
+        state.reset_sub();
+
+        assert!(state.sub == SettingsSub::Providers);
+        assert!(state.input_buf.is_empty());
+        assert!(state.editing_vault_key.is_none());
+        assert!(!state.input_mode);
     }
 
     impl SettingsAction {

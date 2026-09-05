@@ -56,6 +56,7 @@ type Client struct {
 	System *SystemResource
 	Tools *ToolsResource
 	Users *UsersResource
+	Vault *VaultResource
 	Webhooks *WebhooksResource
 	Workflows *WorkflowsResource
 }
@@ -92,6 +93,7 @@ func New(baseURL string) *Client {
 		c.System = &SystemResource{client: c}
 		c.Tools = &ToolsResource{client: c}
 		c.Users = &UsersResource{client: c}
+		c.Vault = &VaultResource{client: c}
 		c.Webhooks = &WebhooksResource{client: c}
 		c.Workflows = &WorkflowsResource{client: c}
 	return c
@@ -1820,6 +1822,22 @@ func (r *UsersResource) DeleteUserProviderKey(name string, provider string) (int
 
 func (r *UsersResource) RotateUserKey(name string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/users/%s/rotate-key", name), nil, nil)
+}
+
+// ── Vault Resource
+
+type VaultResource struct{ client *Client }
+
+func (r *VaultResource) VaultListKeys() (interface{}, error) {
+	return r.client.request("GET", "/api/vault/keys", nil, nil)
+}
+
+func (r *VaultResource) VaultPutKey(key string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/vault/keys/%s", key), data, nil)
+}
+
+func (r *VaultResource) VaultDeleteKey(key string) (interface{}, error) {
+	return r.client.request("DELETE", fmt.Sprintf("/api/vault/keys/%s", key), nil, nil)
 }
 
 // ── Webhooks Resource

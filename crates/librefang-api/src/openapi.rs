@@ -310,6 +310,9 @@ use crate::types;
         routes::update_agent_budget,
         routes::user_budget_ranking,
         routes::user_budget_detail,
+        routes::vault_list_keys,
+        routes::vault_put_key,
+        routes::vault_delete_key,
         routes::update_user_budget,
         routes::delete_user_budget,
         routes::usage_stats,
@@ -570,6 +573,7 @@ use crate::types;
         routes::channels::ConfigureSidecarBody,
         routes::sidecar_describe::SidecarSchema,
         routes::sidecar_describe::SidecarSchemaField,
+        routes::vault::VaultSetRequest,
     )),
     tags(
         (name = "system", description = "Health checks, status, version, config, and system management"),
@@ -594,6 +598,7 @@ use crate::types;
         (name = "openai", description = "OpenAI-compatible API endpoints"),
         (name = "users", description = "RBAC user management — CRUD over UserConfig entries plus bulk CSV import"),
         (name = "groups", description = "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"),
+        (name = "vault", description = "Credential vault writes — store, list presence of, and delete the secrets the daemon resolves at runtime. Values are never returned"),
     ),
 )]
 pub struct ApiDoc;

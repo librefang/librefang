@@ -993,6 +993,27 @@ impl LibreFangKernel {
             .map_err(|e| format!("Vault write failed: {e}"))
     }
 
+    /// Remove a secret from the encrypted vault, returning whether the key
+    /// was present.
+    ///
+    /// Goes through the same cached handle as `vault_get` / `vault_set`
+    /// (#3598), so the deletion is visible to subsequent reads in this
+    /// process without a restart.
+    ///
+    /// A vault that does not exist holds no secrets, so removing from one
+    /// is `Ok(false)` rather than an error — the caller asked for the key
+    /// to be absent and it is.
+    pub fn vault_remove(&self, key: &str) -> Result<bool, String> {
+        let handle = self.vault_handle()?;
+        let mut guard = write_accessor_state(&handle, "credential_vault");
+        if !guard.is_unlocked() {
+            return Ok(false);
+        }
+        guard
+            .remove(key)
+            .map_err(|e| format!("Vault remove failed: {e}"))
+    }
+
     /// Install an MCP catalog template into the configured server set,
     /// using the kernel's cached vault and catalog.
     ///

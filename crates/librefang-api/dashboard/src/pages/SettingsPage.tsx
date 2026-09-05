@@ -22,6 +22,7 @@ import {
 } from "../lib/mutations/passkeys";
 import { getRawConfigToml, isPasskeySupported } from "../api";
 import { ApiError } from "../lib/http/client";
+import { VaultKeysSection } from "../components/VaultKeysSection";
 
 interface SegmentOption<T extends string> {
   value: T;
@@ -189,6 +190,9 @@ export function SettingsPage() {
 
       {/* Passkeys (WebAuthn/FIDO2) */}
       <PasskeysSection />
+
+      {/* Daemon credential vault (#8164) */}
+      <VaultKeysSection />
 
       {/* Config Backup */}
       <ConfigBackupSection />

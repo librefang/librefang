@@ -288,6 +288,7 @@ pub struct LibreFang {
     pub system: Arc<SystemResource>,
     pub tools: Arc<ToolsResource>,
     pub users: Arc<UsersResource>,
+    pub vault: Arc<VaultResource>,
     pub webhooks: Arc<WebhooksResource>,
     pub workflows: Arc<WorkflowsResource>,
     _base_url: String,
@@ -337,6 +338,7 @@ impl LibreFang {
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
+            vault: Arc::new(VaultResource::new(base_url.clone(), client.clone())),
             webhooks: Arc::new(WebhooksResource::new(base_url.clone(), client.clone())),
             workflows: Arc::new(WorkflowsResource::new(base_url.clone(), client.clone())),
             _base_url: base_url,
@@ -5284,6 +5286,56 @@ impl UsersResource {
             &self.base_url,
             reqwest::Method::POST,
             &["api", "users", name, "rotate-key"],
+            None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Vault ──
+
+#[derive(Debug, Clone)]
+pub struct VaultResource {
+    base_url: String,
+    client: Client,
+}
+
+impl VaultResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn vault_list_keys(&self) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::GET,
+            &["api", "vault", "keys"],
+            None,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn vault_put_key(&self, key: &str, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::PUT,
+            &["api", "vault", "keys", key],
+            Some(data),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn vault_delete_key(&self, key: &str) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::DELETE,
+            &["api", "vault", "keys", key],
             None,
             &[],
         )

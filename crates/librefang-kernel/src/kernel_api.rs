@@ -243,6 +243,7 @@ pub trait KernelApi: KernelHandle + Send + Sync {
 
     fn vault_get(&self, key: &str) -> Option<String>;
     fn vault_set(&self, key: &str, value: &str) -> Result<(), String>;
+    fn vault_remove(&self, key: &str) -> Result<bool, String>;
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String>;
 
     // ====================================================================
@@ -1074,6 +1075,9 @@ impl KernelApi for LibreFangKernel {
     }
     fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         Self::vault_set(self, key, value)
+    }
+    fn vault_remove(&self, key: &str) -> Result<bool, String> {
+        Self::vault_remove(self, key)
     }
     fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
         Self::vault_redeem_recovery_code(self, code)

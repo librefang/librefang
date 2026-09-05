@@ -53,6 +53,7 @@ class LibreFang {
     this.system = new SystemResource(this);
     this.tools = new ToolsResource(this);
     this.users = new UsersResource(this);
+    this.vault = new VaultResource(this);
     this.webhooks = new WebhooksResource(this);
     this.workflows = new WorkflowsResource(this);
   }
@@ -1728,6 +1729,24 @@ class UsersResource {
 
   async rotateUserKey(name) {
     return this._c._request("POST", `/api/users/${name}/rotate-key`);
+  }
+}
+
+// ── Vault Resource
+
+class VaultResource {
+  constructor(client) { this._c = client; }
+
+  async vaultListKeys() {
+    return this._c._request("GET", "/api/vault/keys");
+  }
+
+  async vaultPutKey(key, data) {
+    return this._c._request("PUT", `/api/vault/keys/${key}`, data, undefined);
+  }
+
+  async vaultDeleteKey(key) {
+    return this._c._request("DELETE", `/api/vault/keys/${key}`);
   }
 }
 
