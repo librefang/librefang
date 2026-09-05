@@ -164,7 +164,7 @@ classified differently — the row note spells out which is which.
 | `tool_timeouts` | N | Per-tool timeout overrides. |
 | `tool_invoke` | N | `POST /api/tools/{name}/invoke` allowlist. |
 | `exec_policy` | R | Shell/exec security policy. |
-| `tool_exec` | R | Pluggable tool-execution backend selection. |
+| `tool_exec` | R | Pluggable tool-execution backend selection, plus `default_timeout_secs` — the local backend's per-command timeout, which falls back to `tool_timeout_secs` when unset. The backend object is built once per agent, so a changed timeout reaches an agent only after it respawns. |
 | `parallel_tools` | R | Parallel-tool dispatcher config. |
 | `docker` | R | Docker container sandbox config. |
 | `terminal` | R | Terminal / CLI access control (tmux wiring is boot-captured). |

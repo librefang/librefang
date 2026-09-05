@@ -12,7 +12,7 @@
 //! from a downstream consumer's perspective (the API crate is the
 //! highest-level workspace consumer of the kernel + runtime).
 
-use librefang_runtime::tool_exec_backend::{build_backend, ExecError};
+use librefang_runtime::tool_exec_backend::{build_backend, ExecError, LOCAL_DEFAULT_TIMEOUT_SECS};
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::KernelConfig;
 use librefang_types::tool_exec::{resolve_backend_kind, BackendKind, ToolExecConfig};
@@ -192,6 +192,7 @@ fn build_backend_local_dispatches_to_local_impl() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("local backend always builds");
     assert_eq!(backend.kind(), BackendKind::Local);
@@ -209,6 +210,7 @@ fn build_backend_docker_dispatches_to_docker_impl() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("docker backend builds even when daemon absent");
     assert_eq!(backend.kind(), BackendKind::Docker);
@@ -226,6 +228,7 @@ fn build_backend_ssh_without_feature_returns_not_configured() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     );
     match result {
         Err(ExecError::NotConfigured(message)) => {
@@ -249,6 +252,7 @@ fn build_backend_daytona_without_feature_returns_not_configured() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     );
     match result {
         Err(ExecError::NotConfigured(message)) => {
@@ -289,6 +293,7 @@ async fn end_to_end_resolution_local_runs_command() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("local backend always builds");
 

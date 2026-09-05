@@ -7435,6 +7435,15 @@
             }
           ]
         },
+        "default_timeout_secs": {
+          "description": "Default per-command timeout for the local backend, in seconds, applied when an `ExecSpec` carries no timeout of its own.\n\nUnset inherits the global `tool_timeout_secs`, so raising that one knob moves both tool-timeout paths instead of only the `ToolPolicy` one (#8171). Set it to pin the local backend independently of the tool-dispatch timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "kind": {
           "description": "Active backend kind. Default: `local`.",
           "default": "local",

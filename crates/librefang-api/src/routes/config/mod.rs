@@ -627,6 +627,10 @@ const WRITABLE_EXACT_PATHS: &[&str] = &[
     "max_request_body_bytes",
     "workflow_stale_timeout_minutes",
     "tool_timeout_secs",
+    // The local backend's per-command default, sibling of `tool_timeout_secs`
+    // (#8171). Listed leaf-by-leaf rather than as a `tool_exec.` prefix because
+    // the same section carries the SSH / Daytona credential knobs.
+    "tool_exec.default_timeout_secs",
     "local_probe_interval_secs",
     "prompt_caching",
     "stable_prefix_mode",

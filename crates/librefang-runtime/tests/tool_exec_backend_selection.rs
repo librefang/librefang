@@ -11,7 +11,7 @@
 //! in `librefang-api/tests/` so the API crate exercises the same
 //! seam from its build.
 
-use librefang_runtime::tool_exec_backend::build_backend;
+use librefang_runtime::tool_exec_backend::{build_backend, ExecError, LOCAL_DEFAULT_TIMEOUT_SECS};
 use librefang_types::agent::AgentManifest;
 use librefang_types::config::{DockerSandboxConfig, KernelConfig};
 use librefang_types::tool_exec::{resolve_backend_kind, BackendKind, ToolExecConfig};
@@ -71,6 +71,7 @@ fn build_backend_local_dispatches_to_local_impl() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("local backend always builds");
     assert_eq!(backend.kind(), BackendKind::Local);
@@ -88,6 +89,7 @@ fn build_backend_docker_dispatches_to_docker_impl() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("docker backend builds even when daemon absent");
     assert_eq!(backend.kind(), BackendKind::Docker);
@@ -105,6 +107,7 @@ fn build_backend_ssh_without_subtable_or_feature_errors() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     );
     assert!(result.is_err());
 }
@@ -121,6 +124,7 @@ fn build_backend_daytona_without_subtable_or_feature_errors() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     );
     assert!(result.is_err());
 }
@@ -149,6 +153,7 @@ async fn end_to_end_local_dispatch_runs_command() {
         std::env::temp_dir(),
         vec![],
         vec![],
+        LOCAL_DEFAULT_TIMEOUT_SECS,
     )
     .expect("local backend always builds");
 
@@ -164,5 +169,71 @@ async fn end_to_end_local_dispatch_runs_command() {
         outcome.stdout.contains("end-to-end-3332"),
         "stdout was: {:?}",
         outcome.stdout
+    );
+}
+
+/// `tool_exec.default_timeout_secs` has to reach the executed command, not
+/// merely parse.
+/// A default that is never overridden compiles and behaves plausibly, which is
+/// how #8171 survived: the parameter was threaded through `build_backend` and
+/// filled with the same constant on every path.
+#[tokio::test]
+#[cfg(unix)]
+async fn configured_default_timeout_reaches_the_executed_command() {
+    let cfg: KernelConfig =
+        toml::from_str("[tool_exec]\nkind = \"local\"\ndefault_timeout_secs = 1").unwrap();
+    let backend = build_backend(
+        BackendKind::Local,
+        &cfg.tool_exec,
+        &DockerSandboxConfig::default(),
+        "agent-1",
+        std::env::temp_dir(),
+        vec![],
+        vec![],
+        cfg.tool_timeout_secs,
+    )
+    .expect("local backend always builds");
+
+    let err = backend
+        .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
+            "sleep 30",
+        ))
+        .await
+        .expect_err("the 1s default timeout fires before the 30s sleep returns");
+    assert!(
+        matches!(&err, ExecError::Timeout(msg) if msg.contains("after 1s")),
+        "expected the configured 1s timeout, got: {err:?}"
+    );
+}
+
+/// An unset `tool_exec.default_timeout_secs` inherits the global
+/// `tool_timeout_secs` rather than a private constant, so the two tool-timeout
+/// paths agree instead of merely both being configurable.
+#[tokio::test]
+#[cfg(unix)]
+async fn unset_default_timeout_inherits_the_global_tool_timeout() {
+    let cfg: KernelConfig = toml::from_str("tool_timeout_secs = 1").unwrap();
+    assert!(cfg.tool_exec.default_timeout_secs.is_none());
+    let backend = build_backend(
+        BackendKind::Local,
+        &cfg.tool_exec,
+        &DockerSandboxConfig::default(),
+        "agent-1",
+        std::env::temp_dir(),
+        vec![],
+        vec![],
+        cfg.tool_timeout_secs,
+    )
+    .expect("local backend always builds");
+
+    let err = backend
+        .run_command(librefang_runtime::tool_exec_backend::ExecSpec::new(
+            "sleep 30",
+        ))
+        .await
+        .expect_err("the inherited 1s timeout fires before the 30s sleep returns");
+    assert!(
+        matches!(&err, ExecError::Timeout(msg) if msg.contains("after 1s")),
+        "expected the inherited 1s timeout, got: {err:?}"
     );
 }

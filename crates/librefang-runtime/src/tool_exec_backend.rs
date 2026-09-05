@@ -38,10 +38,14 @@ use tokio::io::AsyncReadExt;
 // Public trait + DTOs
 // ---------------------------------------------------------------------------
 
-/// Default `LocalBackend` per-command timeout when neither the spec nor
-/// the operator config supplies one. Matches the legacy `tool_runner`
-/// shell-class default at `tool_runner.rs:2896` so behaviour is
-/// preserved across the trait migration.
+/// `LocalBackend` per-command timeout for constructions that have no config
+/// to read — [`LocalBackend::with_defaults`], used by tests and the resolver
+/// fallback. Matches the legacy `tool_runner` shell-class default at
+/// `tool_runner.rs:2896` so behaviour is preserved across the trait migration.
+///
+/// **Not** the default an operator gets: [`build_backend`] resolves
+/// `tool_exec.default_timeout_secs`, falling back to the global
+/// `tool_timeout_secs` (#8171).
 pub const LOCAL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// Default `DockerBackend` `max_output_bytes` cap when callers omit
@@ -263,9 +267,11 @@ pub struct LocalBackend {
     /// Mirrors the existing `tool_runner.rs` env plumbing.
     untrusted_env: Vec<String>,
     /// Default per-command timeout when `ExecSpec::limits.timeout` is unset.
-    /// Source-of-truth: kernel config / agent manifest. Falls back to
-    /// [`LOCAL_DEFAULT_TIMEOUT_SECS`] when constructed via
-    /// [`LocalBackend::with_defaults`].
+    /// Source-of-truth: `tool_exec.default_timeout_secs`, falling back to the
+    /// global `tool_timeout_secs` — resolved by [`build_backend`], which is the
+    /// only non-test construction.
+    /// [`LocalBackend::with_defaults`] uses [`LOCAL_DEFAULT_TIMEOUT_SECS`]
+    /// instead, because it has no config to read.
     default_timeout: Duration,
 }
 
@@ -616,6 +622,14 @@ impl ToolExecBackend for DockerBackend {
 /// (operator's `exec_policy.allowed_env_vars` vs. a hand's assembled
 /// passthrough list); see [`crate::subprocess_sandbox::sandbox_command`]
 /// for the trust split (#6458).
+///
+/// `tool_timeout_secs` is the global `KernelConfig` knob, used as the local
+/// backend's default timeout whenever `cfg.default_timeout_secs` is unset —
+/// so the two tool-timeout paths agree rather than drifting silently (#8171).
+// A factory over four backends: every argument feeds a different one, and
+// bundling them into a params struct would only move the same list one file
+// away.
+#[allow(clippy::too_many_arguments)]
 pub fn build_backend(
     kind: BackendKind,
     cfg: &ToolExecConfig,
@@ -624,12 +638,13 @@ pub fn build_backend(
     workspace: PathBuf,
     operator_env: Vec<String>,
     untrusted_env: Vec<String>,
+    tool_timeout_secs: u64,
 ) -> Result<Box<dyn ToolExecBackend>, ExecError> {
     match kind {
         BackendKind::Local => Ok(Box::new(LocalBackend::new(
             operator_env,
             untrusted_env,
-            Duration::from_secs(LOCAL_DEFAULT_TIMEOUT_SECS),
+            Duration::from_secs(cfg.default_timeout_secs.unwrap_or(tool_timeout_secs)),
         ))),
         BackendKind::Docker => Ok(Box::new(DockerBackend::new(
             docker_cfg.clone(),
@@ -846,6 +861,7 @@ mod tests {
             std::env::temp_dir(),
             vec![],
             vec![],
+            LOCAL_DEFAULT_TIMEOUT_SECS,
         )
         .expect("local backend always builds");
         assert_eq!(backend.kind(), BackendKind::Local);
@@ -863,6 +879,7 @@ mod tests {
             std::env::temp_dir(),
             vec![],
             vec![],
+            LOCAL_DEFAULT_TIMEOUT_SECS,
         )
         .expect("docker backend builds even when daemon absent");
         assert_eq!(backend.kind(), BackendKind::Docker);
@@ -880,6 +897,7 @@ mod tests {
             std::env::temp_dir(),
             vec![],
             vec![],
+            LOCAL_DEFAULT_TIMEOUT_SECS,
         );
         assert!(
             res.is_err(),
@@ -899,6 +917,7 @@ mod tests {
             std::env::temp_dir(),
             vec![],
             vec![],
+            LOCAL_DEFAULT_TIMEOUT_SECS,
         );
         assert!(
             res.is_err(),

@@ -113,6 +113,16 @@ pub struct ToolExecConfig {
     /// Daytona-backend knobs. Required when `kind = "daytona"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daytona: Option<DaytonaBackendConfig>,
+    /// Default per-command timeout for the local backend, in seconds, applied
+    /// when an `ExecSpec` carries no timeout of its own.
+    ///
+    /// Unset inherits the global `tool_timeout_secs`, so raising that one knob
+    /// moves both tool-timeout paths instead of only the `ToolPolicy` one
+    /// (#8171).
+    /// Set it to pin the local backend independently of the tool-dispatch
+    /// timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_timeout_secs: Option<u64>,
 }
 
 impl ToolExecConfig {
@@ -482,6 +492,7 @@ mod tests {
             kind: BackendKind::Ssh,
             ssh: None,
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("tool_exec.ssh"), "got: {err}");
@@ -496,6 +507,7 @@ mod tests {
                 ..Default::default()
             }),
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("host"), "got: {err}");
@@ -507,6 +519,7 @@ mod tests {
             kind: BackendKind::Daytona,
             ssh: None,
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("tool_exec.daytona"), "got: {err}");
