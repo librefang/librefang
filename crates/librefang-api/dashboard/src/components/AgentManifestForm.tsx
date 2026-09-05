@@ -1249,6 +1249,77 @@ export function AgentManifestForm({
           />
         </div>
       </CollapsibleSection>
+
+      <CollapsibleSection title={t("agents.form.shared_folders")} defaultOpen={false}>
+        <p className="text-[10px] text-text-dim/70 mb-2">
+          {t("agents.form.shared_folders_hint")}
+        </p>
+        {value.workspaces.map((ws, idx) => {
+          const nameInvalid = invalidFields.has(`workspaces.${ws._uid}.name`);
+          const pathInvalid = invalidFields.has(`workspaces.${ws._uid}.path`);
+          return (
+            <div
+              key={ws._uid}
+              className="rounded-lg border border-border-subtle/60 bg-main/40 p-2 mb-2"
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={ws.name}
+                  onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, name: e.target.value }) })}
+                  placeholder={t("agents.form.folder_name")}
+                  className={`${inputClass} flex-1`}
+                  aria-invalid={nameInvalid || undefined}
+                />
+                <input
+                  type="text"
+                  value={ws.path}
+                  onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, path: e.target.value }) })}
+                  placeholder={t("agents.form.folder_path")}
+                  className={`${inputClass} flex-[2]`}
+                  aria-invalid={pathInvalid || undefined}
+                />
+                <select
+                  value={ws.mode}
+                  onChange={(e) => update({ workspaces: patchListItem(value.workspaces, idx, { ...ws, mode: e.target.value as "rw" | "r" }) })}
+                  className={`${inputClass} w-20`}
+                >
+                  <option value="rw">rw</option>
+                  <option value="r">r</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => update({ workspaces: value.workspaces.filter((_, i) => i !== idx) })}
+                  className="text-text-dim hover:text-error"
+                  aria-label={t("agents.form.remove_folder")}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              {(nameInvalid || pathInvalid) && (
+                <p className="text-[10px] text-error mt-1">
+                  {t(nameInvalid ? "agents.form.duplicate_folder_name" : "agents.form.folder_path_invalid")}
+                </p>
+              )}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() =>
+            update({
+              workspaces: [
+                ...value.workspaces,
+                { _uid: generateUid(), name: "", path: "", mode: "rw" },
+              ],
+            })
+          }
+          className="flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          {t("agents.form.add_folder")}
+        </button>
+      </CollapsibleSection>
     </div>
   );
 }

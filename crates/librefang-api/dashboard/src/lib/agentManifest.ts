@@ -142,6 +142,13 @@ export interface ManifestFormState {
   tools_disabled: boolean;
   inherit_parent_context: boolean;
   generate_identity_files: boolean;
+
+  workspaces: Array<{
+    _uid: string;
+    name: string;
+    path: string;
+    mode: "rw" | "r";
+  }>;
 }
 
 export interface ManifestExtras {
@@ -245,6 +252,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   tools_disabled: false,
   inherit_parent_context: true,
   generate_identity_files: true,
+  workspaces: [],
 });
 
 // Keys the form fully owns within each scope. Anything else is preserved
@@ -282,6 +290,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "context_injection",
   "response_format",
   "exec_policy",
+  "workspaces",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -515,17 +524,33 @@ export const serializeManifestForm = (
   if (form.response_format.mode !== "text") {
     filteredTopExtras = omitKey(filteredTopExtras, "response_format");
   }
+
   const { inline: topInlineExtras, tables: topTableExtras } =
     splitTopLevelExtras(filteredTopExtras);
   for (const line of renderExtraScalars(topInlineExtras)) lines.push(line);
 
+  const deferredSectionExtras: Record<string, TomlTable | TomlTable[]> = {};
   // Section-extras that contain nested tables must NOT be inlined inside
   // the [section] block — a stray `[name]` header would re-anchor TOML
   // scoping for everything that follows. Defer them and emit later with
   // their full dotted key path, e.g. `[model.exotic_subtable]`.
-  const deferredSectionExtras: Record<string, TomlTable | TomlTable[]> = {};
+  // Preserved `[workspaces]` entries (mount-based declarations, or malformed
+  // non-path rows) re-emit as `[workspaces.<name>]` sub-tables beside the
+  // form's rows — routed here rather than through the trailer, which would
+  // emit a duplicate `[workspaces]` header.
+  if (isTomlTable(topTableExtras.workspaces)) {
+    for (const [name, decl] of Object.entries(topTableExtras.workspaces)) {
+      // Non-table garbage under a preserved entry is skipped rather than
+      // emitted as a header it cannot legally have.
+      if (!isTomlTable(decl)) continue;
+      deferredSectionExtras[`workspaces.${name}`] = decl;
+    }
+    delete topTableExtras.workspaces;
+  }
+
   const safeModelExtras = pluckSafeExtras(extras.model, deferredSectionExtras, "model");
   const safeResourceExtras = pluckSafeExtras(extras.resources, deferredSectionExtras, "resources");
+
   const safeCapabilityExtras = pluckSafeExtras(
     extras.capabilities,
     deferredSectionExtras,
@@ -537,6 +562,23 @@ export const serializeManifestForm = (
   const safeThinkingExtras = form.thinking.enabled
     ? pluckSafeExtras(extras.thinking, deferredSectionExtras, "thinking")
     : {};
+
+  // [workspaces] — table header, so it is emitted here, after every
+  // top-level scalar; a header inside the scalar block would scope the
+  // remaining bare keys into the table and silently delete them.
+
+  if (form.workspaces.length) {
+    const wsBody: string[] = [];
+    for (const ws of form.workspaces) {
+      const n = ws.name.trim();
+      const p = ws.path.trim();
+      if (!n || !p) continue;
+      const parts = [`path = ${escapeTomlString(p)}`];
+      if (ws.mode === "r") parts.push(`mode = "r"`);
+      wsBody.push(`${tomlBareKeyOrQuoted(n)} = { ${parts.join(", ")} }`);
+    }
+    if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
+  }
 
   // [model]
   const modelBody: string[] = [];
@@ -860,8 +902,18 @@ const parseSupportedJsonSchema = (raw: string): boolean | Record<string, unknown
   return undefined;
 };
 
+// Mirrors `Path::is_absolute` on the platforms the daemon runs on: POSIX
+// root, Windows drive letter, or UNC prefix.
+const isAbsoluteWorkspacePath = (path: string): boolean =>
+  path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path);
+
 // Form-validation errors. Returns an empty array when submittable.
-export const validateManifestForm = (form: ManifestFormState): string[] => {
+export const validateManifestForm = (
+  form: ManifestFormState,
+  // Names already present as preserved declarations (e.g. mount-based
+  // entries), so a form row cannot silently collide with them.
+  preservedWorkspaceNames: Iterable<string> = [],
+): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
   if (!form.model.provider.trim()) errors.push("model.provider");
@@ -881,6 +933,23 @@ export const validateManifestForm = (form: ManifestFormState): string[] => {
       errors.push("response_format.schema");
     }
   }
+  // Folder rows: duplicate names produce a duplicate TOML key (hard parse
+  // failure on the daemon), and `path` mirrors the kernel's rule — relative
+  // to workspaces_dir, no `..`. A mount row carries an absolute host path
+  // and is not authored here, so only rows are checked.
+  const seenWorkspaceNames = new Set<string>(preservedWorkspaceNames);
+  for (const ws of form.workspaces) {
+    const name = ws.name.trim();
+    if (name) {
+      if (seenWorkspaceNames.has(name)) errors.push(`workspaces.${ws._uid}.name`);
+      seenWorkspaceNames.add(name);
+    }
+    const wsPath = ws.path.trim();
+    if (wsPath && (isAbsoluteWorkspacePath(wsPath) || wsPath.split(/[\\/]/).includes(".."))) {
+      errors.push(`workspaces.${ws._uid}.path`);
+    }
+  }
+
   return errors;
 };
 
@@ -1098,6 +1167,30 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
         position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
         condition: asString(ci.condition),
       }));
+  }
+
+  // Only `path`-based declarations become rows. A `mount` entry points at an
+  // absolute host directory; rewriting it as an empty `path` and dropping it
+  // in the incomplete-row filter would silently delete the declaration on
+  // save, so the entry is preserved verbatim in extras instead (mirrors the
+  // TUI editor, #7835).
+  if (isTomlTable(parsed.workspaces)) {
+    const preservedWorkspaces: TomlTable = {};
+    for (const [name, v] of Object.entries(parsed.workspaces)) {
+      if (isTomlTable(v) && typeof (v as TomlTable).path === "string") {
+        form.workspaces.push({
+          _uid: generateParsedUid(),
+          name,
+          path: (v as TomlTable).path as string,
+          mode: asString((v as TomlTable).mode) === "r" ? ("r" as const) : ("rw" as const),
+        });
+      } else {
+        preservedWorkspaces[name] = v;
+      }
+    }
+    if (Object.keys(preservedWorkspaces).length) {
+      extras.topLevel.workspaces = preservedWorkspaces;
+    }
   }
 
   return { ok: true, form, extras };

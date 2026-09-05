@@ -966,3 +966,99 @@ describe("agentManifest — inference parameters (#7781)", () => {
     expect(toml).toContain("max_tokens = 4096");
   });
 });
+
+describe("agentManifest workspaces", () => {
+  // #8013: `[workspaces]` is a table header — if the serializer emitted it
+  // inside the top-level scalar block, every bare key after it (tags, skills,
+  // mcp_servers, schedule, …) would be scoped INTO the table and silently
+  // deleted from the manifest.
+  it("emits [workspaces] after the top-level scalars so tags survive a round-trip", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.tags = ["ops"];
+    form.workspaces.push({ _uid: "w1", name: "shared", path: "shared", mode: "rw" });
+
+    const toml = serializeManifestForm(form);
+
+    expect(toml).toContain("[workspaces]");
+    expect(toml).toContain('tags = ["ops"]');
+    expect(toml.indexOf("tags = ")).toBeLessThan(toml.indexOf("[workspaces]"));
+
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.form.tags).toEqual(["ops"]);
+    expect(parsed.form.workspaces).toHaveLength(1);
+    const { _uid: _ignored, ...ws } = parsed.form.workspaces[0];
+    expect(ws).toEqual({ name: "shared", path: "shared", mode: "rw" });
+  });
+
+  it("emits no [workspaces] header for an empty or blank-row list", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    expect(serializeManifestForm(form)).not.toContain("[workspaces]");
+
+    form.workspaces.push({ _uid: "blank", name: "  ", path: "  ", mode: "rw" });
+    expect(serializeManifestForm(form)).not.toContain("[workspaces]");
+  });
+
+  it("preserves a mount-based declaration verbatim instead of dropping it", () => {
+    const parsed = parseManifestToml(`name = "agent"
+[workspaces]
+vault = { mount = "/data/vault" }
+shared = { path = "shared" }
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    // Only the path-based row becomes editable; the mount survives in extras.
+    expect(parsed.form.workspaces.map((ws) => ws.name)).toEqual(["shared"]);
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    expect(reserialized).toContain("[workspaces.vault]");
+    expect(reserialized).toContain('mount = "/data/vault"');
+    // ...and the whole thing parses again.
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+  });
+
+  it("flags duplicate folder names, including against a preserved declaration", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.workspaces.push(
+      { _uid: "w1", name: "shared", path: "shared", mode: "rw" },
+      { _uid: "w2", name: "shared", path: "other", mode: "r" },
+    );
+    expect(validateManifestForm(form)).toContain("workspaces.w2.name");
+    expect(validateManifestForm(form, ["vault"])).not.toContain("workspaces.w1.name");
+
+    form.workspaces[1].name = "vault";
+    expect(validateManifestForm(form, ["vault"])).toContain("workspaces.w2.name");
+  });
+
+  it.each(["/etc/passwd", "\\\\host\\share", "C:\\data", "../escape", "a/../b"])(
+    "rejects a workspace path that escapes workspaces_dir: %j",
+    (wsPath) => {
+      const form = emptyManifestForm();
+      form.name = "agent";
+      form.model.provider = "openai";
+      form.model.model = "gpt-4o";
+      form.workspaces.push({ _uid: "w1", name: "shared", path: wsPath, mode: "rw" });
+      expect(validateManifestForm(form)).toContain("workspaces.w1.path");
+    },
+  );
+
+  it("accepts a plain relative workspace path", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.workspaces.push({ _uid: "w1", name: "shared", path: "shared/library", mode: "rw" });
+    expect(validateManifestForm(form)).toEqual([]);
+  });
+});
