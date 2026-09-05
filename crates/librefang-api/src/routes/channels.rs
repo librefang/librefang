@@ -966,6 +966,37 @@ fn sidecar_discovery_rows() -> Vec<serde_json::Value> {
     rows
 }
 
+/// Remove the `[[sidecar_channels]]` entry named `name` from the root config,
+/// or from whichever `include = [...]` file actually declares it.
+///
+/// The kernel merges every included file into the live config
+/// (`librefang_kernel::config::load_config`), so a sidecar declared only in an
+/// included file is a fully live channel: it spawns, it supervises, and
+/// `list_channels` renders it as `configured` — which is the only state in
+/// which the dashboard offers the delete button at all. Removing exclusively
+/// from the root config.toml therefore answered "no configured sidecar
+/// channel named X" for a channel that was running at that very moment.
+///
+/// Root first, so a shadowing root entry (which is what the live config
+/// resolves to) is the one that goes — but the walk does not stop there: a
+/// name can be declared in the root AND an included file at once, and leaving
+/// either behind means the reload re-merges the survivor and the delete
+/// reports `removed` while the channel comes back. Every file that declares
+/// the name is stripped; `false` still means "declared nowhere", which is the
+/// only case that deserves a 404.
+fn remove_sidecar_block_anywhere(
+    config_path: &std::path::Path,
+    name: &str,
+) -> Result<bool, String> {
+    // Scan the includes before the first write: an unreadable include file then fails the whole delete, instead of leaving the root block already stripped behind a 500 the operator cannot retry out of.
+    let included_files = included_files_with_sidecars_blocking(config_path)?;
+    let mut removed = super::sidecar_toml::remove_sidecar_block(config_path, name)?;
+    for included in included_files {
+        removed |= super::sidecar_toml::remove_sidecar_block(&included, name)?;
+    }
+    Ok(removed)
+}
+
 /// Request body for `POST /api/channels/sidecar/{name}/configure`.
 ///
 /// `values` is a flat `key → string` map where each key matches a
@@ -1797,7 +1828,7 @@ pub async fn delete_sidecar_channel(
         // blocking task instead of cloning; `name` is still needed below for the 404 message.
         let remove_name = name.clone();
         tokio::task::spawn_blocking(move || {
-            super::sidecar_toml::remove_sidecar_block(&config_path, &remove_name)
+            remove_sidecar_block_anywhere(&config_path, &remove_name)
         })
         .await
         .map_err(|e| {
@@ -1806,11 +1837,40 @@ pub async fn delete_sidecar_channel(
         })?
         .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?
     };
-    if !removed {
+    // Nothing left on disk is NOT the same as "no such channel". The daemon
+    // answers `GET /api/channels` from the config it holds in memory and the
+    // supervisor owns the child process, so a config.toml edited (or rewritten
+    // by another writer) out from under a running daemon leaves a channel that
+    // the dashboard still renders as configured / supervised / connected —
+    // with the delete button enabled — and no block left to strip. Answering
+    // 404 there tells the operator the channel does not exist while its
+    // sidecar is delivering messages. Reconcile instead: fall through to the
+    // reload, which drops the row and stops the orphaned child.
+    let in_live_config = state
+        .kernel
+        .config_ref()
+        .sidecar_channels
+        .iter()
+        .any(|sc| sc.name == name);
+    let has_adapter = state.kernel.channel_adapters_ref().contains_key(&name);
+    let live = !removed && (in_live_config || has_adapter);
+    if !removed && !live {
         return Err(ApiErrorResponse::not_found(format!(
             "no configured sidecar channel named `{name}`"
         ))
         .into_json_tuple());
+    }
+    if live {
+        // Two genuinely different reconciliation states; naming which one
+        // tripped makes the next rodela-style incident diagnosable from the
+        // log alone.
+        tracing::warn!(
+            channel = %name,
+            in_live_config = in_live_config,
+            has_orphan_adapter = has_adapter,
+            "sidecar delete: no config block on disk but the channel is live — \
+             reconciling the running daemon with config.toml"
+        );
     }
 
     let plan = state
@@ -1820,17 +1880,24 @@ pub async fn delete_sidecar_channel(
         .map_err(|e| ApiErrorResponse::internal_scrub(e).into_json_tuple())?;
 
     // Re-enter the bridge so the removed sidecar child is actually stopped, not just dropped from disk.
-    if plan
-        .hot_actions
-        .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
+    // The reconcile path forces the restart: its whole point is the live child,
+    // and the plan diff can legitimately come back empty when the in-memory
+    // config already matched disk and only the supervisor was out of step.
+    if live
+        || plan
+            .hot_actions
+            .contains(&librefang_kernel::config_reload::HotAction::ReloadChannels)
     {
         if let Err(e) = crate::channel_bridge::reload_channels_from_disk(&state).await {
             tracing::error!("sidecar delete: bridge restart failed: {e}");
-            // Surface the actionable partial-failure signal (config WAS removed) but
-            // not the raw error chain — the full `e` is already logged above.
-            return Err(ApiErrorResponse::internal(
-                "removed from config.toml but bridge restart failed",
-            )
+            // Surface the actionable partial-failure signal (what did happen to
+            // the config) but not the raw error chain — the full `e` is already
+            // logged above.
+            return Err(ApiErrorResponse::internal(if live {
+                "config.toml had no block to remove and the bridge restart failed — the sidecar is still running; a daemon restart will drop it"
+            } else {
+                "removed from config.toml but bridge restart failed"
+            })
             .into_json_tuple());
         }
     }

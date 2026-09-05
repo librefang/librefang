@@ -1,0 +1,4 @@
+`DELETE /api/channels/sidecar/{name}` used to look for the channel's `[[sidecar_channels]]` block in the root config.toml only, so a sidecar declared through an `include = [...]` file was deleted from nowhere and the endpoint answered 404 for a channel that was running at that moment.
+The delete now walks every config file that declares the name — root and all includes — because a name declared in both at once made the early return leave the survivor behind and the reload re-merge it, reporting `removed` while the channel came back.
+A running daemon that outlived its config edit still holds the channel in memory with nothing left to strip; that state is now reconciled with a config reload plus a forced bridge restart (which stops the orphaned child process) instead of 404, and only a name declared nowhere still answers 404.
+(#7971) (@DaBlitzStein)
