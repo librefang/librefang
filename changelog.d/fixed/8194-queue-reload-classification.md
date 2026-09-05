@@ -1,0 +1,3 @@
+Classify the `[queue]` fields other than `concurrency` on config reload, which previously matched no branch of the reload planner at all.
+Because the plan then carried no change, the reloaded config was never swapped in: `POST /api/config/reload` answered "no changes detected" and `GET /api/queue/status` went on reporting the old depth and TTL limits, while `queue.task_queue_retention_days` — captured once by the retention sweep at boot — needed a restart the operator was never told about.
+Depth and TTL limits are now recorded as effective on the next request, and a retention-days edit reports restart-required (#8194) (@houko)

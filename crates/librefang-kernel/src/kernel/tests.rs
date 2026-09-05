@@ -13672,6 +13672,85 @@ async fn reload_config_with_invalid_toml_preserves_live_config() {
     kernel.shutdown();
 }
 
+/// The `[triggers] cooldown_secs` / `max_per_event` hot-reload has three parts: the planner emitting `HotAction::UpdateTriggersConfig`, `TriggerEngine::apply_config` adopting the pair, and the arm in `apply_hot_actions_inner` that carries one to the other.
+/// The unit tests cover the two ends, so this one covers the wire — an action that reaches no apply arm leaves the engine on its boot-time budget and cooldown while every other test still passes.
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_pushes_trigger_cooldown_and_per_event_budget_into_the_live_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    // Clamp first so the on-disk file matches what `boot_with_config` holds in memory, exactly as the #4664 regression above does.
+    let mut baseline = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    baseline.clamp_bounds();
+    let config_path = home_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&baseline).expect("serialize baseline config"),
+    )
+    .expect("write baseline config.toml");
+
+    let kernel =
+        LibreFangKernel::boot_with_config(baseline.clone()).expect("kernel boot with baseline");
+    assert_eq!(kernel.config_ref().triggers.max_per_event, 10);
+    assert_eq!(kernel.config_ref().triggers.cooldown_secs, 5);
+
+    // Five triggers, none carrying a per-trigger `cooldown_secs`, so each inherits whatever default the engine is holding.
+    for _ in 0..5 {
+        kernel
+            .workflows
+            .triggers
+            .register(
+                AgentId::new(),
+                TriggerPattern::All,
+                "Event: {{event}}".to_string(),
+                0,
+            )
+            .expect("register trigger");
+    }
+
+    let event = Event::new(
+        AgentId::new(),
+        EventTarget::Broadcast,
+        EventPayload::System(SystemEvent::HealthCheck {
+            status: "ok".to_string(),
+        }),
+    );
+    assert_eq!(
+        kernel.workflows.triggers.evaluate(&event).0.len(),
+        5,
+        "the boot-time per-event budget of 10 lets all five fire"
+    );
+
+    // Rewrite the same baseline with only `[triggers]` changed.
+    let mut updated = baseline;
+    updated.triggers.cooldown_secs = 0;
+    updated.triggers.max_per_event = 2;
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&updated).expect("serialize updated config"),
+    )
+    .expect("write updated config.toml");
+
+    kernel
+        .reload_config()
+        .await
+        .expect("reload of a triggers-only edit must succeed");
+
+    // Both edits are in force on the engine the kernel actually runs: the new budget caps the matches at two, and the reloaded cooldown of 0 is what lets any of them fire a second time at all — the boot-time 5 s window would have suppressed all five.
+    assert_eq!(
+        kernel.workflows.triggers.evaluate(&event).0.len(),
+        2,
+        "the reloaded per-event budget and cooldown must reach the live trigger engine"
+    );
+
+    kernel.shutdown();
+}
+
 // ─── #5117: kill_agent_with_purge propagates DB delete failure ───────────────
 
 /// Happy-path regression for #5117: `kill_agent_with_purge` previously

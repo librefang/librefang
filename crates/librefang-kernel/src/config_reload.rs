@@ -1,6 +1,6 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
-//! **Hot-reload safe**: channels, skills, usage footer, web config, approval policy, cron settings, webhook triggers, extensions, tool policy, api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys, sanitize, default model, language, mode, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
+//! **Hot-reload safe**: channels, skills, usage footer, web config, approval policy, cron settings, webhook triggers, trigger cooldown / per-event budget, extensions, tool policy, api_key, dashboard credentials, stable_prefix_mode, proxy, provider_api_keys, sanitize, default model, language, mode, log_level (when a [`crate::log_reload::LogLevelReloader`] is installed by the binary).
 //!
 //! **Restart required**: api_listen, network, memory, home_dir, data_dir, vault, browser.
 
@@ -69,6 +69,12 @@ pub enum HotAction {
     /// previous policy is still being enforced. Supersedes the M6
     /// `ReloadUsers` action that only rebuilt the channel-binding index.
     ReloadAuth,
+    /// `[triggers] cooldown_secs` / `max_per_event` changed — push both into the running [`crate::triggers::TriggerEngine`].
+    ///
+    /// The engine copies these two values into its own fields when it is built at boot and is owned by the workflow subsystem rather than held behind the config `ArcSwap`, so it cannot be replaced by a reload.
+    /// Without this action the swap left triggers firing on the boot-time cooldown and the boot-time per-event budget while the reload response reported the edit as already effective.
+    /// The section's other two fields (`max_depth`, `max_workflow_secs`) genuinely are read from the live config per event and per workflow run, so they stay a bare swap.
+    UpdateTriggersConfig,
     /// `[queue.concurrency]` changed — resize the global lane semaphores
     /// so a smaller `trigger_lane` actually rate-limits new work (#3628).
     /// Per-agent caps are NOT touched — see
@@ -558,6 +564,43 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateQueueConcurrency);
     }
 
+    // `queue` minus `concurrency`, which #3628 classified alone.
+    // `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are reported straight off the live config by `GET /api/queue/status` and `GET /api/config`, so the swap itself is the whole of applying them; `task_queue_retention_days` is captured once by the retention sweep at boot (`kernel/background_lifecycle.rs`) and genuinely needs a restart.
+    // Classifying neither left a queue-only edit matching no branch at all, so the plan carried no change, `should_store_config` discarded the whole reloaded config and `POST /api/config/reload` answered "no changes detected" — the same defect the `registry` split further down fixes.
+    if old.queue.task_queue_retention_days != new.queue.task_queue_retention_days {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "queue.task_queue_retention_days changed (the task-queue retention sweep captures it at boot; restart required)"
+                .to_string(),
+        );
+    }
+    if old.queue.max_depth_per_agent != new.queue.max_depth_per_agent
+        || old.queue.max_depth_global != new.queue.max_depth_global
+        || old.queue.task_ttl_secs != new.queue.task_ttl_secs
+    {
+        plan.noop_changes.push(
+            "queue depth / TTL limits changed (effective on next request via config swap)"
+                .to_string(),
+        );
+    }
+
+    // `[triggers]` was classified as a whole-section live read, which is true of only half of it.
+    // `max_depth` and `max_workflow_secs` are read from `self.config.load_full()` per event and per workflow run (`kernel/triggers_and_workflow.rs`), so for those the swap is the whole of applying them.
+    // `cooldown_secs` and `max_per_event` were copied into `TriggerEngine`'s own fields at boot and never re-read, so the reload reported "effective on next message/request" while triggers went on firing at the boot-time cooldown and per-event budget until the daemon restarted.
+    if old.triggers.cooldown_secs != new.triggers.cooldown_secs
+        || old.triggers.max_per_event != new.triggers.max_per_event
+    {
+        plan.hot_actions.push(HotAction::UpdateTriggersConfig);
+    }
+    if old.triggers.max_depth != new.triggers.max_depth
+        || old.triggers.max_workflow_secs != new.triggers.max_workflow_secs
+    {
+        plan.noop_changes.push(
+            "triggers depth / workflow timeout changed (effective on next event via config swap)"
+                .to_string(),
+        );
+    }
+
     // #4797 — `[budget]` is held in `MeteringSubsystem.budget_config` (an
     // ArcSwap snapshot built at boot from `KernelConfig.budget`), separate
     // from `self.config`. A bare config swap leaves the metering snapshot
@@ -899,7 +942,6 @@ pub fn build_reload_plan_with_caps(
             "tool_timeouts",
         );
         noop_if_changed(field_changed(&old.thinking, &new.thinking), "thinking");
-        noop_if_changed(field_changed(&old.triggers, &new.triggers), "triggers");
         noop_if_changed(
             field_changed(&old.notification, &new.notification),
             "notification",
@@ -1613,6 +1655,101 @@ mod tests {
                 .contains(&HotAction::UpdateQueueConcurrency),
             "expected UpdateQueueConcurrency in {:?}",
             plan.hot_actions,
+        );
+    }
+
+    /// A `[queue]` edit that touched anything but `concurrency` matched no branch at all, so the plan carried no change, `should_store_config` discarded the reloaded config and the reload answered "no changes detected".
+    #[test]
+    fn queue_fields_other_than_concurrency_reach_the_config_store() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.task_ttl_secs = a.queue.task_ttl_secs + 3600;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(
+            !plan.restart_required,
+            "depth / TTL limits are reported off the live config; restart_reasons: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            plan.noop_changes.iter().any(|r| r.contains("queue")),
+            "a depth / TTL edit must be recorded as a live-read change: {:?}",
+            plan.noop_changes
+        );
+        for mode in [ReloadMode::Hot, ReloadMode::Hybrid] {
+            assert!(
+                should_store_config(mode, &plan),
+                "the reloaded config must be stored in {mode:?} mode, or the queue edit is thrown away"
+            );
+        }
+    }
+
+    /// `task_queue_retention_days` is captured by the retention sweep at boot, so the operator has to be told a restart is needed rather than told nothing at all.
+    #[test]
+    fn queue_retention_days_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.task_queue_retention_days = a.queue.task_queue_retention_days + 30;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(plan.restart_required);
+        assert!(
+            plan.restart_reasons
+                .iter()
+                .any(|r| r.contains("queue.task_queue_retention_days")),
+            "the reason must name the field: {:?}",
+            plan.restart_reasons
+        );
+    }
+
+    /// `[triggers] cooldown_secs` / `max_per_event` are copied into `TriggerEngine`'s own fields at boot, so classifying the whole section as a live read told the operator the edit was already effective while triggers kept firing on the boot-time values.
+    #[test]
+    fn trigger_cooldown_and_per_event_budget_emit_update_triggers_action() {
+        for label in ["cooldown_secs", "max_per_event"] {
+            let a = default_cfg();
+            let mut b = default_cfg();
+            if label == "cooldown_secs" {
+                b.triggers.cooldown_secs = a.triggers.cooldown_secs + 295;
+            } else {
+                b.triggers.max_per_event = a.triggers.max_per_event + 40;
+            }
+            let plan = build_reload_plan(&a, &b);
+
+            assert!(
+                !plan.restart_required,
+                "`triggers.{label}` is hot-reloadable; restart_reasons: {:?}",
+                plan.restart_reasons
+            );
+            assert!(
+                plan.hot_actions.contains(&HotAction::UpdateTriggersConfig),
+                "`triggers.{label}` must push the new value into the running engine: {:?}",
+                plan.hot_actions
+            );
+        }
+    }
+
+    /// The two fields that genuinely are read live must stay a bare swap — no restart, no action — while still counting as a change so the new config is stored.
+    #[test]
+    fn trigger_depth_and_workflow_timeout_stay_a_live_read() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.triggers.max_depth = a.triggers.max_depth + 1;
+        let plan = build_reload_plan(&a, &b);
+
+        assert!(
+            !plan.restart_required,
+            "max_depth is read per event: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            !plan.hot_actions.contains(&HotAction::UpdateTriggersConfig),
+            "max_depth needs no engine update: {:?}",
+            plan.hot_actions
+        );
+        assert!(
+            plan.noop_changes.iter().any(|r| r.contains("triggers")),
+            "the change must still be recorded so the config is stored: {:?}",
+            plan.noop_changes
         );
     }
 

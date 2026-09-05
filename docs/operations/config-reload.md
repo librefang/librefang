@@ -177,8 +177,8 @@ classified differently — the row note spells out which is which.
 | `sidecar_channels` | H | Sidecar (external-process) channel adapters (same hot action). |
 | `webhook_triggers` | H | Webhook trigger (external event injection) config. |
 | `max_cron_jobs` | H | Cron scheduler max total jobs across agents. |
-| `queue` | H | Message-queue config — resizes the lane semaphores. |
-| `triggers` | N | Event-trigger system config (cooldowns, depth limits). |
+| `queue` | H/N/R | Message-queue config. `concurrency` is **H**: the reload resizes the live lane semaphores. `max_depth_per_agent` / `max_depth_global` / `task_ttl_secs` are **N**: they are reported straight off the live config by `GET /api/queue/status` and `GET /api/config`, so the swap is the whole of applying them. `task_queue_retention_days` is **R**: the retention sweep captures it at boot. Splitting the section this way is what makes a queue edit land at all — while only `concurrency` was classified, an edit to any other field matched no branch, so the plan carried no change, `should_store_config` discarded the reloaded config and the reload answered "no changes detected". |
+| `triggers` | H/N | Event-trigger system config. `cooldown_secs` / `max_per_event` are **H**: `TriggerEngine` copies them into its own fields when it is built at boot, so the reload pushes the new pair into the running engine (`HotAction::UpdateTriggersConfig`). `max_depth` / `max_workflow_secs` are **N**: they are read from the live config on every event and every workflow run. While the whole section was classified **N**, a cooldown or per-event-budget edit was reported as already effective and triggers went on firing at the boot-time values until the daemon restarted. |
 | `auto_reply` | R | Auto-reply background engine config. |
 | `broadcast` | R | Broadcast routing config. |
 | `cron_session_max_tokens` | N | Cron session token-prune threshold. |

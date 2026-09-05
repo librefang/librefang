@@ -1,0 +1,3 @@
+Make `strict_config = true` actually refuse to start when the config contains an unknown or misspelled field, which is what the setting has always documented.
+It previously logged an error and returned `KernelConfig::default()`, so one mistyped key discarded the whole file: `api_key` came back empty, which admits any local process as Owner through the empty-credential loopback branch, `home_dir` / `data_dir` reverted to `~/.librefang` so the daemon ran against an empty state tree, and every channel, provider key, budget cap and tool policy went unset.
+The reload path already returned an error for the identical input, so boot and reload now agree on what strict mode means for a given file (#8194) (@houko)
