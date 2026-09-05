@@ -1,0 +1,3 @@
+Apply `[triggers] cooldown_secs` and `max_per_event` to the running trigger engine on config reload.
+The whole section was classified as read-live, but the engine copies those two values into its own fields when it is built at boot and is owned by the workflow subsystem rather than held behind the config swap, so a reload reported the edit as effective while triggers went on firing at the boot-time cooldown and per-event budget until the daemon restarted.
+The reload now pushes the new pair into the live engine; `max_depth` and `max_workflow_secs` genuinely are read from the live config per event and per workflow run and stay a bare swap (#8194) (@houko)

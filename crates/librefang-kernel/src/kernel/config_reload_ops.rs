@@ -613,6 +613,15 @@ impl LibreFangKernel {
                         .command_queue
                         .resize_lane(Lane::Trigger, cc.trigger_lane as u32);
                 }
+                HotAction::UpdateTriggersConfig => {
+                    // The engine keeps its own copy of these two fields, so the config swap alone leaves it firing on the boot-time values.
+                    info!(
+                        cooldown_secs = new_config.triggers.cooldown_secs,
+                        max_per_event = new_config.triggers.max_per_event,
+                        "Hot-reload: updating trigger cooldown / per-event budget"
+                    );
+                    self.workflows.triggers.apply_config(&new_config.triggers);
+                }
             }
         }
 

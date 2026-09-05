@@ -89,6 +89,9 @@ fn atomic_write_config(path: &Path, content: &str) -> std::io::Result<()> {
 /// substitute `KernelConfig::default()` on `Err`; doing so would hide the
 /// real problem and produce a misleading downstream error (see issue #5186).
 ///
+/// Also returns `Err` when the file sets `strict_config = true` and contains an
+/// unknown or misspelled field, which is the refusal that setting promises.
+///
 /// Returns `Ok(KernelConfig::default())` when the config file is absent or
 /// unreadable due to an I/O error (file not found, permission denied), because
 /// that is a deployment-time condition where defaults are a safe starting point.
@@ -104,6 +107,14 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
         match std::fs::read_to_string(&config_path) {
             Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
                 Ok(mut root_value) => {
+                    // Whether the primary file composes its configuration out of an `include = [...]` chain.
+                    // Captured here because resolution folds the included files' tables into `root_value` and drops the key, leaving nothing later to tell a single-file config from a composed one.
+                    let declares_includes = root_value
+                        .as_table()
+                        .and_then(|t| t.get("include"))
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|entries| !entries.is_empty());
+
                     // Process includes before deserializing
                     let config_dir = config_path
                         .parent()
@@ -191,15 +202,16 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 
                     if !all_unknown.is_empty() {
                         if is_strict {
-                            tracing::error!(
-                                path = %config_path.display(),
-                                fields = %all_unknown.join(", "),
-                                "strict_config is enabled and config contains unknown fields, using defaults"
+                            // `strict_config` documents itself as "the daemon refuses to start if the config file contains unknown or unrecognised fields", and returning defaults instead failed open on exactly the input it exists to catch.
+                            // One mistyped key discarded the whole file: `api_key` came back empty (which admits any local process as Owner through the empty-credential loopback branch), `home_dir` / `data_dir` reverted to `~/.librefang` so the daemon ran against an empty state tree, and every channel, provider key, budget cap and tool policy went unset.
+                            // `try_load_config` already returns `Err` for the same input, so boot and reload now agree on what strict mode means for a given file.
+                            let msg = format!(
+                                "strict_config is enabled and config contains unknown fields (path={}): {}",
+                                config_path.display(),
+                                all_unknown.join(", ")
                             );
-                            return Ok(KernelConfig {
-                                strict_config: true,
-                                ..KernelConfig::default()
-                            });
+                            eprintln!("error: {msg}");
+                            return Err(msg);
                         }
                         for field in &all_unknown {
                             tracing::warn!(field, "Unknown config field (ignored)");
@@ -289,6 +301,19 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                                     "Config was migrated in memory but NOT written back: the file is deployment-managed (LIBREFANG_CONFIG_MODE=managed). \
                                      This migration re-runs on every boot until the managed source is updated to the new schema."
                                 );
+                            } else if migrated && file_version < CONFIG_VERSION && declares_includes
+                            {
+                                // The write-back serializes the deserialized `KernelConfig`, which is the *merged* result of the whole include chain — so running it against a composed config rewrites the primary file with every included file's values inlined, API keys and shared secrets among them, at whatever permissions the primary file happens to carry rather than the included file's.
+                                // It also erases the composition itself: `include` serialize-skips when empty and the merge leaves it empty, so the directive disappears and every later edit to an included file is silently ignored.
+                                // The in-memory config is fully migrated either way, so skipping costs only the on-disk persistence — the same trade deployment-managed mode already makes above.
+                                tracing::warn!(
+                                    path = %config_path.display(),
+                                    from_version = file_version,
+                                    to_version = CONFIG_VERSION,
+                                    "Config was migrated in memory but NOT written back: the file composes its configuration from an include chain. \
+                                     Writing the migrated result would inline the included files' values (API keys and shared secrets among them) into this file and drop the `include` directive, after which edits to the included files would be ignored. \
+                                     This migration re-runs on every load until the primary file declares the current config_version itself."
+                                );
                             } else if migrated && file_version < CONFIG_VERSION {
                                 let toml_str = toml::to_string_pretty(&config);
                                 match toml_str {
@@ -371,11 +396,8 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 ///   own the file, and a partial migration that fails downstream would
 ///   leave the disk file in a half-migrated state. The next initial-boot
 ///   `load_config` call still does the write-back.
-/// - Unknown fields under `strict_config = true` produce `Err` instead of
-///   "return defaults with `strict_config: true`" — same intent, but
-///   surfaced as an error so the reload path can refuse to apply it.
-/// - Unknown fields under `strict_config = false` (or unset) still warn
-///   and proceed, matching `load_config`'s tolerant behaviour.
+///
+/// Unknown-field handling is identical in both paths: `strict_config = true` refuses the load with `Err`, and `strict_config = false` (or unset) warns and proceeds.
 pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
     if !path.exists() {
         return Err(format!("Config file not found: {}", path.display()));
@@ -1137,6 +1159,42 @@ mod tests {
         assert_eq!(config.api_listen, "0.0.0.0:9999"); // from base
     }
 
+    /// The migration write-back serializes the deserialized `KernelConfig`, which is the merged result of the whole include chain.
+    /// Running it against a composed config therefore rewrote the primary file with the included files' values inlined — secrets included — and dropped the `include` directive permanently, because it serialize-skips once the merge has emptied it.
+    #[test]
+    fn migration_write_back_is_skipped_for_an_include_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+        let secrets = dir.path().join("secrets.toml");
+
+        // No `config_version`, so the v1 → v2 migration runs and would write its result back.
+        std::fs::write(
+            &root,
+            "include = [\"secrets.toml\"]\nlog_level = \"warn\"\n",
+        )
+        .unwrap();
+        std::fs::write(&secrets, "api_key = \"include-only-secret\"\n").unwrap();
+        let before = std::fs::read(&root).unwrap();
+
+        let config = load_config(Some(&root)).unwrap();
+        assert_eq!(config.api_key, "include-only-secret");
+        assert_eq!(config.log_level, "warn");
+        assert_eq!(config.config_version, CONFIG_VERSION);
+
+        let after = std::fs::read(&root).unwrap();
+        assert_eq!(
+            after,
+            before,
+            "a composed config must not be rewritten by the migration; got:\n{}",
+            String::from_utf8_lossy(&after)
+        );
+        assert!(
+            !String::from_utf8_lossy(&after).contains("include-only-secret"),
+            "an included file's secret must never be inlined into the primary config; got:\n{}",
+            String::from_utf8_lossy(&after)
+        );
+    }
+
     #[test]
     fn test_nested_include() {
         let dir = tempfile::tempdir().unwrap();
@@ -1316,11 +1374,12 @@ mod tests {
         writeln!(f, "bogus_field = \"oops\"").unwrap();
         drop(f);
 
-        // Strict mode: should reject and return defaults (with strict_config=true)
-        let config = load_config(Some(&root)).unwrap();
-        // Falls back to defaults because strict mode rejected unknown fields
-        assert_eq!(config.log_level, "info"); // default, not "debug"
-        assert!(config.strict_config);
+        // Strict mode: refuses the load outright rather than handing back defaults.
+        let err = load_config(Some(&root)).expect_err("strict_config must refuse an unknown field");
+        assert!(
+            err.contains("strict_config") && err.contains("bogus_field"),
+            "the refusal must name the offending field; got: {err}"
+        );
     }
 
     #[test]
@@ -1573,10 +1632,36 @@ mod tests {
         writeln!(f, "max_hourly_usdd = 5.0").unwrap(); // typo
         drop(f);
 
-        let config = load_config(Some(&root)).unwrap();
-        // Falls back to defaults because strict mode rejected the typo.
-        assert_eq!(config.log_level, "info");
-        assert!(config.strict_config);
+        let err = load_config(Some(&root)).expect_err("strict_config must refuse a nested typo");
+        assert!(
+            err.contains("max_hourly_usdd"),
+            "the refusal must name the offending nested field; got: {err}"
+        );
+    }
+
+    /// `strict_config = true` promises the daemon refuses to start on an unknown field.
+    /// Returning `Ok(KernelConfig::default())` instead meant one mistyped key started a daemon with the operator's `api_key` empty — which admits any local process as Owner through the empty-credential loopback branch — and with `home_dir` back at `~/.librefang`, so agents, the memory DB and the vault all appeared to have vanished.
+    #[test]
+    fn strict_config_unknown_field_fails_closed_instead_of_returning_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        std::fs::write(
+            &root,
+            "strict_config = true\napi_key = \"operator-key\"\ntrusted_hostss = [\"example.invalid\"]\n",
+        )
+        .unwrap();
+
+        let err = load_config(Some(&root)).expect_err("strict mode must refuse to boot");
+        assert!(
+            err.contains("trusted_hostss"),
+            "the refusal must name the typo so the operator can fix it; got: {err}"
+        );
+
+        // Boot and reload must agree on what strict mode means for one file.
+        let reload_err =
+            try_load_config(&root).expect_err("the reload path already refuses this file");
+        assert!(reload_err.contains("trusted_hostss"), "got: {reload_err}");
     }
 
     #[test]
@@ -1708,9 +1793,7 @@ mod tests {
 
     #[test]
     fn test_try_load_config_strict_mode_rejects_unknown_field() {
-        // Mirrors the tolerant `load_config` behaviour test, but the strict
-        // variant returns `Err` instead of "defaults with strict_config=true"
-        // so the reload path can refuse to swap rather than silently zeroing.
+        // Mirrors `load_config`'s strict behaviour rather than diverging from it: both paths return `Err` for this input, so the reload path refuses to swap for exactly the file that boot refuses to start on.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("config.toml");
 
