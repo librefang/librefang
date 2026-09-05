@@ -180,7 +180,8 @@
     "select_options": "Select options",
     "error_loading_data": "Failed to load memories",
     "reload": "Reload",
-    "save_changes": "Save changes"
+    "save_changes": "Save changes",
+    "save_failed": "Save failed"
   },
   "status": {
     "active": "Active",
@@ -2772,7 +2773,22 @@
     "reset_all": "Reset all",
     "reset_section": "Reset section",
     "searching_all": "Searching all sections...",
-    "comma_separated_values": "comma-separated values"
+    "comma_separated_values": "comma-separated values",
+    "auxiliary_llm_title": "Auxiliary LLM Chains",
+    "auxiliary_llm_description": "Route internal side-tasks to cheaper models. Empty = uses primary model.",
+    "auxiliary_task_compression": "Compression",
+    "auxiliary_task_title": "Title generation",
+    "auxiliary_task_search": "Search",
+    "auxiliary_task_vision": "Vision",
+    "auxiliary_task_browser_vision": "Browser vision",
+    "auxiliary_task_fold": "History fold",
+    "auxiliary_task_skill_review": "Skill review",
+    "auxiliary_task_skill_workshop_review": "Skill workshop review",
+    "auxiliary_task_session_summary": "Session summary",
+    "auxiliary_chain_default": "Primary (default)",
+    "auxiliary_chain_placeholder": "provider:model",
+    "auxiliary_chain_add": "Add model",
+    "auxiliary_chain_unknown_provider": "Unknown provider in \"{{bad}}\". Registered: {{known}}."
   },
   "chat": {
     "title": "Chat",

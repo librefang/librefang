@@ -180,7 +180,8 @@
     "error_loading_data": "Не вдалося завантажити пам'ять",
     "select_options": "Виберіть опції",
     "reload": "Перезавантажити",
-    "save_changes": "Зберегти зміни"
+    "save_changes": "Зберегти зміни",
+    "save_failed": "Не вдалося зберегти"
   },
   "status": {
     "active": "Активний",
@@ -2778,7 +2779,22 @@
     "reset_all": "Скинути все",
     "reset_section": "Скинути розділ",
     "searching_all": "Пошук по всіх розділах...",
-    "comma_separated_values": "значення через кому"
+    "comma_separated_values": "значення через кому",
+    "auxiliary_llm_title": "Допоміжні ланцюжки LLM",
+    "auxiliary_llm_description": "Маршрутизація внутрішніх підзадач на дешевші моделі. Порожнє = основна модель.",
+    "auxiliary_task_compression": "Стиснення",
+    "auxiliary_task_title": "Генерація назви",
+    "auxiliary_task_search": "Пошук",
+    "auxiliary_task_vision": "Зір",
+    "auxiliary_task_browser_vision": "Зір браузера",
+    "auxiliary_task_fold": "Згортання історії",
+    "auxiliary_task_skill_review": "Огляд навичок",
+    "auxiliary_task_skill_workshop_review": "Огляд майстерні навичок",
+    "auxiliary_task_session_summary": "Підсумок сеансу",
+    "auxiliary_chain_default": "Основна (за замовчуванням)",
+    "auxiliary_chain_placeholder": "провайдер:модель",
+    "auxiliary_chain_add": "Додати модель",
+    "auxiliary_chain_unknown_provider": "Невідомий провайдер у \"{{bad}}\". Зареєстровані: {{known}}."
   },
   "chat": {
     "title": "Чат",

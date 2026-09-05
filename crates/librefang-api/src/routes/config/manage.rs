@@ -1239,6 +1239,13 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "x-ui-options".into(),
             ui_options_overlay(provider_options, model_options),
         );
+        obj.insert(
+            "x-aux-tasks".into(),
+            serde_json::json!(librefang_types::config::AuxTask::ALL
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()),
+        );
         obj.insert("x-non-writable".into(), serde_json::json!(non_writable));
     }
 

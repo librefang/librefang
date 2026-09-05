@@ -132,7 +132,7 @@ classified differently — the row note spells out which is which.
 | `provider_max_retries` | R | Per-provider in-driver retry-count overrides (captured by cached drivers at creation). |
 | `vertex_ai` | R | Vertex AI provider config. |
 | `azure_openai` | R | Azure OpenAI provider config. |
-| `llm` | R | `[llm]` section (auxiliary side-task chain config). |
+| `llm` | N | `[llm]` section (auxiliary side-task chain config). AuxClient rebuilt on config swap. |
 | `qwen_code_path` | N | Override path to the Qwen Code CLI binary. |
 | `local_probe_interval_secs` | R | Interval between local-provider reachability probes. |
 | `thinking` | N | Extended-thinking config (read live per message). |

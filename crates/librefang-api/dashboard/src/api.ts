@@ -3600,6 +3600,8 @@ export interface ConfigSectionDescriptor {
 export interface ConfigSchemaRoot extends JsonSchema {
   "x-sections"?: ConfigSectionDescriptor[];
   "x-ui-options"?: Record<string, UiFieldOptions>;
+  /** Auxiliary side-task slugs, served from `AuxTask::ALL` so the UI editors never carry a hand-copied list (#8059). */
+  "x-aux-tasks"?: string[];
   /**
    * Dotted paths `POST /api/config/set` rejects with 403.
    *

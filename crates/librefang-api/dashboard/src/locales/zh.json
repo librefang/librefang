@@ -180,7 +180,8 @@
     "select_options": "选择选项",
     "error_loading_data": "加载记忆失败",
     "reload": "重新加载",
-    "save_changes": "保存更改"
+    "save_changes": "保存更改",
+    "save_failed": "保存失败"
   },
   "status": {
     "active": "活跃",
@@ -2738,7 +2739,22 @@
     "reset_all": "全部重置",
     "reset_section": "重置本节",
     "searching_all": "搜索所有配置项...",
-    "comma_separated_values": "逗号分隔的值"
+    "comma_separated_values": "逗号分隔的值",
+    "auxiliary_llm_title": "辅助 LLM 链",
+    "auxiliary_llm_description": "将内部子任务路由到更便宜的模型。留空 = 使用主模型。",
+    "auxiliary_task_compression": "压缩",
+    "auxiliary_task_title": "标题生成",
+    "auxiliary_task_search": "搜索",
+    "auxiliary_task_vision": "视觉",
+    "auxiliary_task_browser_vision": "浏览器视觉",
+    "auxiliary_task_fold": "历史折叠",
+    "auxiliary_task_skill_review": "技能审查",
+    "auxiliary_task_skill_workshop_review": "技能工坊审查",
+    "auxiliary_task_session_summary": "会话摘要",
+    "auxiliary_chain_default": "主模型（默认）",
+    "auxiliary_chain_placeholder": "供应商:模型",
+    "auxiliary_chain_add": "添加模型",
+    "auxiliary_chain_unknown_provider": "“{{bad}}”中的供应商未知。已注册：{{known}}。"
   },
   "chat": {
     "title": "对话",

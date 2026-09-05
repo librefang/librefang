@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useBlocker } from "@tanstack/react-router";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -28,6 +28,7 @@ import {
 import { copyToClipboard } from "../lib/clipboard";
 import { useUIStore } from "../lib/store";
 import { TomlViewer } from "../components/TomlViewer";
+import { AuxiliaryLlmSection } from "../components/AuxiliaryLlmSection";
 import { StringMapEditor } from "../components/config/StringMapEditor";
 import { StructListEditor } from "../components/config/StructListEditor";
 
@@ -1230,7 +1231,8 @@ export function ConfigPage({ category }: { category: string }) {
           const showSectionHeader = isSearching || hasBadges;
 
           return (
-            <div key={sKey} className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
+            <React.Fragment key={sKey}>
+            <div className="rounded-2xl border border-border-subtle bg-surface overflow-hidden">
               {showSectionHeader && (
                 <div className="flex items-center gap-2 px-5 py-2.5 border-b border-border-subtle/50">
                   {isSearching && (
@@ -1428,6 +1430,8 @@ export function ConfigPage({ category }: { category: string }) {
                 })}
               </div>
             </div>
+            {sKey === "llm" && <AuxiliaryLlmSection />}
+            </React.Fragment>
           );
         })}
       </div>

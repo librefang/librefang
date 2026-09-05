@@ -796,7 +796,12 @@ pub fn build_reload_plan_with_caps(
         );
         restart_if_changed(old.log_dir != new.log_dir, "log_dir");
         restart_if_changed(old.workspaces_dir != new.workspaces_dir, "workspaces_dir");
-        restart_if_changed(field_changed(&old.llm, &new.llm), "llm");
+        // Reclassifying the whole section as a no-op is safe exactly because `LlmConfig` has a single field (`auxiliary`): the blanket classification stops being safe the day a second field is added that genuinely needs a restart.
+        // The AuxClient rebuild (see `kernel/config_reload_ops.rs`) only runs when `should_store_config` accepts the plan, and a restart-only plan is discarded — the same failure the `registry` row in docs/operations/config-reload.md records.
+        if field_changed(&old.llm, &new.llm) {
+            plan.noop_changes
+                .push("llm.auxiliary changed (AuxClient rebuilt on config swap)".to_string());
+        }
         restart_if_changed(field_changed(&old.reload, &new.reload), "reload");
         restart_if_changed(
             old.max_request_body_bytes != new.max_request_body_bytes,
@@ -1485,6 +1490,41 @@ mod tests {
             .noop_changes
             .iter()
             .any(|r| r.contains("stable_prefix_mode")));
+    }
+
+    /// Regression test for the #8059 hot-reload fix: an `[llm.auxiliary]`-only
+    /// edit must be classified as a no-op change, never as restart-required.
+    /// The doc drift guard only checks that the field name appears in the doc table, not the R/H/N letter, so nothing else fails if `llm` slips back under `restart_if_changed`.
+    /// When it did, the plan carried neither a hot action nor a no-op change, `should_store_config` discarded the new config, and the AuxClient rebuild never ran — the operator's chain edit silently did nothing until restart.
+    #[test]
+    fn test_llm_auxiliary_noop_classification_stores_config() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.llm.auxiliary.tasks.insert(
+            librefang_types::config::AuxTask::Compression,
+            vec!["groq:llama-3.1-8b-instant".to_string()],
+        );
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "[llm.auxiliary] edits must not require a restart"
+        );
+        assert!(
+            plan.restart_reasons.iter().all(|r| !r.contains("llm")),
+            "no restart reason may name llm: {:?}",
+            plan.restart_reasons
+        );
+        assert!(
+            plan.noop_changes
+                .iter()
+                .any(|c| c.contains("llm.auxiliary")),
+            "plan must record the noop change: {:?}",
+            plan.noop_changes
+        );
+        assert!(
+            should_store_config(ReloadMode::Hot, &plan),
+            "a Hot reload of [llm.auxiliary] must store the new config — a discarded plan means the AuxClient rebuild never runs"
+        );
     }
 
     #[test]

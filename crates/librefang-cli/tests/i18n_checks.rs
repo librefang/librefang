@@ -1093,4 +1093,7 @@ fn test_locales_cover_used_i18n_keys() {
     assert_locale_covers_required_i18n_keys(manifest_dir, "en", "English", &required_keys);
     assert_locale_covers_required_i18n_keys(manifest_dir, "uk", "Ukrainian", &required_keys);
     assert_locale_covers_required_i18n_keys(manifest_dir, "zh-CN", "Chinese", &required_keys);
+    // ko was the one shipped locale this assertion did not cover, which is why the
+    // eight Auxiliary-tab keys reached a branch without anything failing.
+    assert_locale_covers_required_i18n_keys(manifest_dir, "ko", "Korean", &required_keys);
 }

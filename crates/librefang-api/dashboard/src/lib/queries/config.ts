@@ -67,8 +67,35 @@ export const configQueries = {
 
 
 
+/**
+ * Narrow `GET /api/config` to the `[llm.auxiliary]` chain map.
+ *
+ * One home for the `Record<string, unknown>` casting the raw config needs
+ * (the response is intentionally untyped so the page can render fields the
+ * compiled-in types have not caught up with), plus the empty-object fallback
+ * for deployments that have no `[llm]` section at all (#8059 review).
+ */
+export function selectAuxiliaryChains(data: unknown): Record<string, string[]> {
+  const llm = (data as Record<string, unknown> | undefined)?.llm;
+  if (llm === null || typeof llm !== "object") return {};
+  const auxiliary = (llm as Record<string, unknown>).auxiliary;
+  if (auxiliary === null || typeof auxiliary !== "object") return {};
+  const out: Record<string, string[]> = {};
+  for (const [task, chain] of Object.entries(auxiliary as Record<string, unknown>)) {
+    if (Array.isArray(chain)) {
+      out[task] = chain.filter((s): s is string => typeof s === "string");
+    }
+  }
+  return out;
+}
+
 export function useFullConfig(options: QueryOverrides = {}) {
   return useQuery(withOverrides(configQueries.full(), options));
+}
+
+/** `[llm.auxiliary]` chain map, narrowed off the shared full-config cache entry. */
+export function useAuxiliaryChains() {
+  return useQuery({ ...configQueries.full(), select: selectAuxiliaryChains });
 }
 
 /**

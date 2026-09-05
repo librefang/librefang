@@ -8,6 +8,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use std::collections::BTreeMap;
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -144,6 +145,7 @@ pub enum SettingsSub {
     Models,
     Tools,
     Backups,
+    Auxiliary,
 }
 
 pub struct SettingsState {
@@ -167,6 +169,11 @@ pub struct SettingsState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    pub auxiliary: BTreeMap<String, Vec<String>>,
+    pub aux_tasks: Vec<String>,
+    pub aux_list: ListState,
+    pub aux_editing: Option<String>,
+    pub aux_input: String,
 }
 
 pub enum SettingsAction {
@@ -175,12 +182,14 @@ pub enum SettingsAction {
     RefreshModels,
     RefreshTools,
     RefreshBackups,
+    RefreshAuxiliary,
     SaveProviderKey { name: String, key: String },
     DeleteProviderKey(String),
     TestProvider(String),
     CreateBackup,
     DeleteBackup(String),
     RestoreBackup(serde_json::Value),
+    SaveAuxChain { task: String, chain: Vec<String> },
 }
 
 impl SettingsState {
@@ -204,6 +213,11 @@ impl SettingsState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            auxiliary: BTreeMap::new(),
+            aux_tasks: Vec::new(),
+            aux_list: ListState::default(),
+            aux_editing: None,
+            aux_input: String::new(),
         }
     }
 
@@ -233,6 +247,8 @@ impl SettingsState {
         self.restore = None;
         self.confirm_delete = false;
         self.status_msg.clear();
+        self.aux_editing = None;
+        self.aux_input.clear();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -266,6 +282,10 @@ impl SettingsState {
                     self.switch_sub(SettingsSub::Backups);
                     return SettingsAction::RefreshBackups;
                 }
+                KeyCode::Char('5') => {
+                    self.switch_sub(SettingsSub::Auxiliary);
+                    return SettingsAction::RefreshAuxiliary;
+                }
                 _ => {}
             }
         }
@@ -275,6 +295,7 @@ impl SettingsState {
             SettingsSub::Models => self.handle_models(key),
             SettingsSub::Tools => self.handle_tools(key),
             SettingsSub::Backups => self.handle_backups(key),
+            SettingsSub::Auxiliary => self.handle_auxiliary(key),
         }
     }
 
@@ -283,7 +304,9 @@ impl SettingsState {
             KeyCode::Esc => {
                 self.input_mode = false;
                 self.editing_provider = None;
+                self.aux_editing = None;
                 self.input_buf.clear();
+                self.aux_input.clear();
             }
             KeyCode::Enter => {
                 self.input_mode = false;
@@ -294,13 +317,31 @@ impl SettingsState {
                         return SettingsAction::SaveProviderKey { name, key: api_key };
                     }
                 }
+                if let Some(task) = self.aux_editing.take() {
+                    let chain: Vec<String> = self
+                        .aux_input
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    self.aux_input.clear();
+                    return SettingsAction::SaveAuxChain { task, chain };
+                }
                 self.input_buf.clear();
             }
             KeyCode::Backspace => {
-                self.input_buf.pop();
+                if self.aux_editing.is_some() {
+                    self.aux_input.pop();
+                } else {
+                    self.input_buf.pop();
+                }
             }
             KeyCode::Char(c) => {
-                self.input_buf.push(c);
+                if self.aux_editing.is_some() {
+                    self.aux_input.push(c);
+                } else {
+                    self.input_buf.push(c);
+                }
             }
             _ => {}
         }
@@ -436,6 +477,39 @@ impl SettingsState {
         SettingsAction::Continue
     }
 
+    fn handle_auxiliary(&mut self, key: KeyEvent) -> SettingsAction {
+        let total = self.aux_tasks.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                let i = self.aux_list.selected().unwrap_or(0);
+                let next = if i == 0 { total - 1 } else { i - 1 };
+                self.aux_list.select(Some(next));
+            }
+            KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                let i = self.aux_list.selected().unwrap_or(0);
+                let next = (i + 1) % total;
+                self.aux_list.select(Some(next));
+            }
+            KeyCode::Enter => {
+                if let Some(sel) = self.aux_list.selected() {
+                    if let Some(task) = self.aux_tasks.get(sel) {
+                        let current = self
+                            .auxiliary
+                            .get(task)
+                            .map(|v| v.join(", "))
+                            .unwrap_or_default();
+                        self.aux_editing = Some(task.clone());
+                        self.aux_input = current;
+                        self.input_mode = true;
+                    }
+                }
+            }
+            KeyCode::Char('r') => return SettingsAction::RefreshAuxiliary,
+            _ => {}
+        }
+        SettingsAction::Continue
+    }
+
     fn handle_restore_form(&mut self, key: KeyEvent) -> SettingsAction {
         match key.code {
             KeyCode::Esc => {
@@ -512,6 +586,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Models => draw_models(f, chunks[2], state),
         SettingsSub::Tools => draw_tools(f, chunks[2], state),
         SettingsSub::Backups => draw_backups(f, chunks[2], state),
+        SettingsSub::Auxiliary => draw_auxiliary(f, chunks[2], state),
     }
 
     // Hints
@@ -524,6 +599,8 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             crate::i18n::t("tui-settings-hints-restore")
         }
         SettingsSub::Backups => crate::i18n::t("tui-settings-hints-backups"),
+        SettingsSub::Auxiliary if state.input_mode => crate::i18n::t("tui-settings-hints-input"),
+        SettingsSub::Auxiliary => crate::i18n::t("tui-settings-hints-auxiliary"),
     };
     if state.sub == SettingsSub::Backups {
         f.render_widget(
@@ -554,6 +631,10 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
         (
             SettingsSub::Backups,
             crate::i18n::t("tui-settings-tab-backups"),
+        ),
+        (
+            SettingsSub::Auxiliary,
+            crate::i18n::t("tui-settings-tab-auxiliary"),
         ),
     ];
     let mut spans = vec![Span::raw("  ")];
@@ -930,6 +1011,96 @@ fn draw_backups(f: &mut Frame, area: Rect, state: &mut SettingsState) {
 
     let list = widgets::themed_list(items);
     f.render_stateful_widget(list, chunks[1], &mut state.backup_list);
+}
+
+fn draw_auxiliary(f: &mut Frame, area: Rect, state: &mut SettingsState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Min(3),    // list
+        Constraint::Length(2), // input area
+    ])
+    .split(area);
+
+    let task_hdr = crate::i18n::t("tui-settings-auxiliary-header-task");
+    let chain_hdr = crate::i18n::t("tui-settings-auxiliary-header-chain");
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!("  {:<24} {}", task_hdr, chain_hdr),
+            theme::table_header(),
+        )])),
+        chunks[0],
+    );
+
+    if state.loading && state.aux_tasks.is_empty() {
+        f.render_widget(
+            widgets::spinner(
+                state.tick,
+                &crate::i18n::t("tui-settings-auxiliary-loading"),
+            ),
+            chunks[1],
+        );
+    } else if state.aux_tasks.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-settings-auxiliary-empty")),
+            chunks[1],
+        );
+    } else {
+        let empty_label = crate::i18n::t("tui-settings-auxiliary-not-configured");
+        let items: Vec<ListItem> = state
+            .aux_tasks
+            .iter()
+            .map(|task| {
+                let chain = state
+                    .auxiliary
+                    .get(task)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.join(", "))
+                    .unwrap_or_else(|| empty_label.clone());
+                let chain_style = if state.auxiliary.get(task).is_some_and(|v| !v.is_empty()) {
+                    Style::default().fg(theme::GREEN)
+                } else {
+                    theme::dim_style()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("  {:<24}", task), Style::default().fg(theme::CYAN)),
+                    Span::styled(format!(" {}", widgets::truncate(&chain, 50)), chain_style),
+                ]))
+            })
+            .collect();
+
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, chunks[1], &mut state.aux_list);
+    }
+
+    if state.input_mode {
+        if let Some(task) = &state.aux_editing {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![Span::styled(
+                        format!(
+                            "  {}",
+                            crate::i18n::t_args(
+                                "tui-settings-auxiliary-editing",
+                                &[("task", task.as_str())]
+                            )
+                        ),
+                        Style::default().fg(theme::YELLOW),
+                    )]),
+                    Line::from(vec![
+                        Span::raw("  ▸ "),
+                        Span::styled(&state.aux_input, theme::input_style()),
+                        Span::styled(
+                            "█",
+                            Style::default()
+                                .fg(theme::GREEN)
+                                .add_modifier(Modifier::SLOW_BLINK),
+                        ),
+                    ]),
+                ]),
+                chunks[2],
+            );
+        }
+    }
 }
 
 fn draw_restore_form(f: &mut Frame, area: Rect, form: &RestoreForm) {

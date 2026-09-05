@@ -180,7 +180,8 @@
     "select_options": "옵션 선택",
     "error_loading_data": "메모리를 불러오지 못했습니다.",
     "reload": "새로고침",
-    "save_changes": "변경사항 저장"
+    "save_changes": "변경사항 저장",
+    "save_failed": "저장 실패"
   },
   "status": {
     "active": "활성",
@@ -2771,7 +2772,22 @@
     "reset_all": "모두 재설정",
     "reset_section": "섹션 재설정",
     "searching_all": "모든 섹션 검색 중...",
-    "comma_separated_values": "쉼표로 구분된 값"
+    "comma_separated_values": "쉼표로 구분된 값",
+    "auxiliary_llm_title": "보조 LLM 체인",
+    "auxiliary_llm_description": "내부 보조 작업을 더 저렴한 모델로 라우팅합니다. 비어 있으면 기본 모델을 사용합니다.",
+    "auxiliary_task_compression": "압축",
+    "auxiliary_task_title": "제목 생성",
+    "auxiliary_task_search": "검색",
+    "auxiliary_task_vision": "비전",
+    "auxiliary_task_browser_vision": "브라우저 비전",
+    "auxiliary_task_fold": "기록 접기",
+    "auxiliary_task_skill_review": "스킬 리뷰",
+    "auxiliary_task_skill_workshop_review": "스킬 워크숍 리뷰",
+    "auxiliary_task_session_summary": "세션 요약",
+    "auxiliary_chain_default": "기본 모델 (기본값)",
+    "auxiliary_chain_placeholder": "공급자:모델",
+    "auxiliary_chain_add": "모델 추가",
+    "auxiliary_chain_unknown_provider": "\"{{bad}}\"에 알 수 없는 공급자가 있습니다. 등록됨: {{known}}."
   },
   "chat": {
     "title": "채팅",

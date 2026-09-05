@@ -236,6 +236,8 @@ pub enum AppEvent {
     SettingsModelsLoaded(Vec<ModelInfo>),
     /// Settings tools loaded.
     SettingsToolsLoaded(Vec<ToolInfo>),
+    /// Settings auxiliary LLM chains loaded.
+    SettingsAuxiliaryLoaded(std::collections::BTreeMap<String, Vec<String>>),
     /// Provider key saved.
     ProviderKeySaved(String),
     /// Provider key deleted.
@@ -3686,6 +3688,128 @@ pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-backups-need-daemon",
             )));
+        }
+    });
+}
+
+/// Fetch auxiliary LLM chains from `GET /api/config`.
+pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            if let Ok(resp) = client.get(format!("{base_url}/api/config")).send() {
+                if let Ok(body) = resp.json::<serde_json::Value>() {
+                    // Enumerate the task list from the kernel (#8059 review): the
+                    // config document only carries configured tasks, so a list
+                    // hand-maintained in event.rs would go stale when a new
+                    // `AuxTask` variant lands. The schema's `x-aux-tasks` is
+                    // compile-guarded by the `AuxTask::ALL` completeness test.
+                    // A failed or malformed schema fetch used to fall through to an
+                    // empty list in silence, leaving the operator looking at only the
+                    // tasks they had already configured with nothing to say a task is
+                    // missing rather than absent (same class of bug as #8144). Report
+                    // it and still render what the config document does carry.
+                    let known_tasks: Vec<String> = match client
+                        .get(format!("{base_url}/api/config/schema"))
+                        .send()
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(schema) => match schema.get("x-aux-tasks").and_then(|v| v.as_array()) {
+                            Some(a) => a
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect(),
+                            None => {
+                                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                                    "tui-event-aux-tasks-schema-missing",
+                                )));
+                                Vec::new()
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                                "tui-event-aux-tasks-fetch-failed",
+                                &[("error", &e.to_string())],
+                            )));
+                            Vec::new()
+                        }
+                    };
+                    let mut aux = std::collections::BTreeMap::new();
+                    if let Some(obj) = body
+                        .get("llm")
+                        .and_then(|l| l.get("auxiliary"))
+                        .and_then(|a| a.as_object())
+                    {
+                        for (task, chain) in obj {
+                            if let Some(arr) = chain.as_array() {
+                                let entries: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                aux.insert(task.clone(), entries);
+                            }
+                        }
+                    }
+                    // Serve the kernel's task list: fill in every task the
+                    // schema enumerates but the operator has not configured,
+                    // so a new AuxTask variant appears without a code change
+                    // here (#8059 review).
+                    for task in known_tasks {
+                        aux.entry(task).or_default();
+                    }
+                    let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            let mut aux = std::collections::BTreeMap::new();
+            let config = kernel.config_ref();
+            for (task, chain) in &config.llm.auxiliary.tasks {
+                aux.insert(task.as_str().to_string(), chain.clone());
+            }
+            // Same enumeration source as the daemon path
+            // (schema `x-aux-tasks`): compile-guarded `AuxTask::ALL`.
+            for task in librefang_types::config::AuxTask::ALL {
+                aux.entry(task.as_str().to_string()).or_default();
+            }
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+        }
+    });
+}
+
+/// Save an auxiliary LLM chain via `POST /api/config/set`.
+pub fn spawn_save_aux_chain(
+    backend: BackendRef,
+    task: String,
+    chain: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon {
+            ref base_url,
+            ref api_key,
+        } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "path": format!("llm.auxiliary.{task}"),
+                "value": chain,
+            });
+            let _ = client
+                .post(format!("{base_url}/api/config/set"))
+                .json(&body)
+                .send();
+            spawn_fetch_auxiliary(
+                BackendRef::Daemon {
+                    base_url: base_url.clone(),
+                    api_key: api_key.clone(),
+                },
+                tx,
+            );
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(
+                std::collections::BTreeMap::new(),
+            ));
         }
     });
 }

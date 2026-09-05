@@ -180,7 +180,8 @@
     "select_options": "Wybierz opcje",
     "error_loading_data": "Nie udało się załadować pamięci",
     "reload": "Przeładuj",
-    "save_changes": "Zapisz zmiany"
+    "save_changes": "Zapisz zmiany",
+    "save_failed": "Nie udało się zapisać"
   },
   "status": {
     "active": "Aktywny",
@@ -2778,7 +2779,22 @@
     "reset_all": "Zresetuj wszystko",
     "reset_section": "Zresetuj sekcję",
     "searching_all": "Przeszukiwanie wszystkich sekcji...",
-    "comma_separated_values": "wartości rozdzielane przecinkami"
+    "comma_separated_values": "wartości rozdzielane przecinkami",
+    "auxiliary_llm_title": "Łańcuchy pomocniczego LLM",
+    "auxiliary_llm_description": "Kieruj wewnętrzne zadania dodatkowe do tańszych modeli. Puste = używa modelu głównego.",
+    "auxiliary_task_compression": "Kompresja",
+    "auxiliary_task_title": "Generowanie tytułu",
+    "auxiliary_task_search": "Wyszukiwanie",
+    "auxiliary_task_vision": "Wizja",
+    "auxiliary_task_browser_vision": "Wizja przeglądarki",
+    "auxiliary_task_fold": "Zwijanie historii",
+    "auxiliary_task_skill_review": "Przegląd umiejętności",
+    "auxiliary_task_skill_workshop_review": "Przegląd pracowni umiejętności",
+    "auxiliary_task_session_summary": "Podsumowanie sesji",
+    "auxiliary_chain_default": "Model główny (domyślnie)",
+    "auxiliary_chain_placeholder": "dostawca:model",
+    "auxiliary_chain_add": "Dodaj model",
+    "auxiliary_chain_unknown_provider": "Nieznany dostawca w \"{{bad}}\". Zarejestrowane: {{known}}."
   },
   "chat": {
     "title": "Czat",

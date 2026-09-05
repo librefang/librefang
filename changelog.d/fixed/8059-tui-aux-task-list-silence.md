@@ -1,0 +1,3 @@
+The TUI's Auxiliary settings tab now says why the task list came back short instead of quietly rendering only the tasks that were already configured.
+The list of available auxiliary tasks is served by the daemon as `x-aux-tasks` on the config schema, and a failed request or a schema without that field both fell through to an empty list with nothing on screen to distinguish "the daemon could not be reached" from "you have configured everything there is".
+The two cases are now reported separately on the status line, and the tasks the config document does carry are still rendered, so a transport hiccup does not blank the pane. (#8059) (@DaBlitzStein)
