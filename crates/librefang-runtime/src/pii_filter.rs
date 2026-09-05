@@ -96,15 +96,20 @@ const BUILTIN_PATTERNS: &[(&str, &str)] = &[
     ),
     // Email addresses
     ("email", r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
+    // Credit card: Visa(4), MC(51-55), Amex(34/37), Discover(6011/65) with spaces/dashes.
+    //
+    // Must come BEFORE `phone`, for the same reason `whatsapp_jid` does: `phone` matches the leading twelve digits of any 16-digit PAN and would leave the last four digits and their separator in the text (`[REDACTED] 1111`).
+    // That made this pattern unreachable for every PAN format and leaked exactly the partial-match residue the ordering rule exists to prevent.
+    //
+    // The first alternative carries Amex's native 4-6-5 grouping and its 15-digit unseparated form, which the 4-4-4-4(+3) shape below cannot express at all.
+    (
+        "credit_card",
+        r"\b(?:3[47]\d{2}[\s\-]?\d{6}[\s\-]?\d{5}|3[47]\d{13}|(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}(?:\d{3})?)\b",
+    ),
     // Phone numbers: E.164 (+1234567890), US formats, international with spaces/dashes
     (
         "phone",
         r"(?:\+\d{1,3}[\s\-]?)?\(?\d{2,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}",
-    ),
-    // Credit card: Visa(4), MC(51-55), Amex(34/37), Discover(6011/65) with spaces/dashes
-    (
-        "credit_card",
-        r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}(?:\d{3})?\b",
     ),
     // US Social Security Numbers (123-45-6789 or 123456789)
     ("ssn", r"\b\d{3}[\-\s]?\d{2}[\-\s]?\d{4}\b"),
@@ -428,6 +433,40 @@ mod tests {
         let result = filter.filter_message(text, &PrivacyMode::Redact);
         assert!(!result.contains("4111 1111 1111 1111"));
         assert!(result.contains(REDACTED_PLACEHOLDER));
+    }
+
+    /// Regression: `phone` used to run before `credit_card` and consumed the leading twelve digits of every 16-digit PAN, so redaction shipped the last four digits and their separator to the provider (`[REDACTED] 1111`) and the `credit_card` pattern never fired for any PAN format at all.
+    /// Asserted the way `test_jid_redact_is_atomic_not_partial` asserts the same class for JIDs: no digit of the card may survive.
+    #[test]
+    fn test_credit_card_redact_is_atomic_not_partial() {
+        let filter = make_filter();
+        for card in [
+            "4111 1111 1111 1111",
+            "4111111111111111",
+            "4111-1111-1111-1111",
+            "5500 0000 0000 0004",
+            "6011 1111 1111 1117",
+            // Amex is 15 digits in 4-6-5 groups, which the 4-4-4-4 shape could not express — before the added alternative it leaked five digits.
+            "3782 822463 10005",
+            "378282246310005",
+            "3714-496353-98431",
+        ] {
+            let text = format!("Card {card} on file");
+            let result = filter.filter_message(&text, &PrivacyMode::Redact);
+            assert!(
+                !result.chars().any(|c| c.is_ascii_digit()),
+                "no digit of card `{card}` may survive redaction, got: {result}"
+            );
+            let pseudo = filter.filter_message(&text, &PrivacyMode::Pseudonymize);
+            assert!(
+                !pseudo.chars().any(|c| c.is_ascii_digit()),
+                "no digit of card `{card}` may survive pseudonymization, got: {pseudo}"
+            );
+            assert!(
+                pseudo.contains("[Credit_card-"),
+                "card `{card}` must be pseudonymized by the `credit_card` pattern, not partial-matched by `phone`, got: {pseudo}"
+            );
+        }
     }
 
     // -- Pseudonym stability --

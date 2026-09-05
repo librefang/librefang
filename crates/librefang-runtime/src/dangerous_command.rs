@@ -271,8 +271,8 @@ impl DangerousCommandChecker {
         }
 
         // Normalise before matching.
-        // Besides case and NULs, model the shell's common `$IFS` whitespace expansion.
-        // Otherwise a Full-policy command can spell `rm -rf /` as `rm${IFS}-rf${IFS}/` and evade every regex even though the shell executes the same destructive argv.
+        // Besides case and NULs, model the shell's quote removal and its common `$IFS` whitespace expansion.
+        // Otherwise a Full-policy command can spell `rm -rf /` as `"rm" -rf /` or `rm${IFS}-rf${IFS}/` and evade every regex even though the shell executes the same destructive argv.
         let normalised = normalize_for_detection(command);
 
         for pat in DANGEROUS_PATTERNS {
@@ -312,7 +312,7 @@ impl DangerousCommandChecker {
 }
 
 fn normalize_for_detection(command: &str) -> String {
-    let lower = command.replace('\x00', "").to_lowercase();
+    let lower = strip_shell_quoting(&command.replace('\x00', "").to_lowercase());
     let bytes = lower.as_bytes();
     let mut out = String::with_capacity(lower.len());
     let mut index = 0;
@@ -354,6 +354,58 @@ fn normalize_for_detection(command: &str) -> String {
     }
 
     normalize_simple_brace_lists(&out)
+}
+
+/// Model the shell's quote removal, so a quoted program name cannot hide a dangerous command.
+/// Every filesystem-destruction, git and find pattern above is anchored on a word boundary at the binary name, and the command is handed to `sh -c`: without this pass `"rm" -rf /`, `'rm' -rf /`, `r"m" -rf /` and `r\m -rf /` all score `Safe` here and then execute the same destructive argv the shell builds after it strips the quotes.
+/// Single quotes take their whole run literally; inside double quotes a backslash only escapes the characters a POSIX shell lets it escape there and stays literal otherwise; outside quotes a backslash escapes the next character.
+fn strip_shell_quoting(command: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum Quoting {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars();
+    let mut quoting = Quoting::None;
+
+    while let Some(ch) = chars.next() {
+        match quoting {
+            Quoting::None => match ch {
+                '\'' => quoting = Quoting::Single,
+                '"' => quoting = Quoting::Double,
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                }
+                _ => out.push(ch),
+            },
+            Quoting::Single => {
+                if ch == '\'' {
+                    quoting = Quoting::None;
+                } else {
+                    out.push(ch);
+                }
+            }
+            Quoting::Double => match ch {
+                '"' => quoting = Quoting::None,
+                '\\' => match chars.next() {
+                    Some(escaped @ ('"' | '\\' | '$' | '`' | '\n')) => out.push(escaped),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                },
+                _ => out.push(ch),
+            },
+        }
+    }
+
+    out
 }
 
 /// Model simple shell brace lists such as `{rm,-rf,/}` as whitespace-separated words.
@@ -462,6 +514,34 @@ mod tests {
         assert!(dangerous("{rm,-rf,/}"));
         assert!(dangerous("{rm,--recursive,/var}"));
         assert_eq!(normalize_for_detection("echo {a,b}"), "echo a b");
+    }
+
+    /// Quoting is quote removal to the shell but not to a regex anchored on the binary name, so `"rm" -rf /` used to score `Safe` here and then run the destructive argv through `sh -c`.
+    /// The same one-character evasion applied to every other program-anchored pattern, which is why `git` and `find` are pinned alongside `rm`.
+    #[test]
+    fn shell_quoting_cannot_hide_destructive_commands() {
+        assert!(dangerous(r#""rm" -rf /"#));
+        assert!(dangerous("'rm' -rf /"));
+        assert!(dangerous(r#"r"m" -rf /"#));
+        assert!(dangerous(r#"rm"" -rf /"#));
+        assert!(dangerous(r#"rm "-rf" /"#));
+        assert!(dangerous(r"r\m -rf /"));
+        assert!(dangerous(r#"'git' push --force"#));
+        assert!(dangerous(r#""find" /tmp -delete"#));
+        // Quoting and `$IFS` combine, so the two normalisation passes have to compose.
+        assert!(dangerous(r#""rm"${IFS}-rf${IFS}/"#));
+        assert_eq!(normalize_for_detection(r#""rm" -rf /"#), "rm -rf /");
+    }
+
+    /// Quote removal must not turn ordinary quoted arguments into matches of their own.
+    #[test]
+    fn quote_removal_keeps_safe_commands_safe() {
+        assert!(safe(r#"grep -r "pattern" ."#));
+        assert!(safe("echo 'it is safe'"));
+        assert_eq!(
+            normalize_for_detection(r#"echo "hello world""#),
+            "echo hello world"
+        );
     }
 
     #[test]

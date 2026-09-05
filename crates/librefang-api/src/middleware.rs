@@ -1342,6 +1342,9 @@ pub enum PublicMatch {
     Exact,
     /// The normalised request path must start with `path`.
     Prefix,
+    /// The normalised request path must be `path` plus exactly one more segment: a collection's item read (`/api/hands/{id}`) without the sub-resources hanging off that item (`/api/hands/{id}/manifest`, `/api/hands/instances/{id}/session`).
+    /// `Prefix` cannot express that distinction, and reaching for it anyway is how a whole sub-tree ends up in a public group one item read at a time.
+    SingleSegment,
 }
 
 /// A single entry in the public-route allowlist.
@@ -1389,6 +1392,14 @@ impl PublicRoute {
             method: PublicMethod::GetOnly,
             path,
             match_kind: PublicMatch::Prefix,
+        }
+    }
+    /// `path` must end in `/`; the request is public only when exactly one non-empty segment follows it.
+    const fn single_segment_get(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::GetOnly,
+            path,
+            match_kind: PublicMatch::SingleSegment,
         }
     }
 }
@@ -1523,7 +1534,7 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
 /// Routes in the "dashboard reads" group — public when `require_auth_for_reads`
 /// is NOT enabled (or no auth is configured), authenticated otherwise.
 ///
-/// All entries are GET-only. Prefix entries are marked `PublicMatch::Prefix`.
+/// All entries are GET-only. Prefix entries are marked `PublicMatch::Prefix`, and `PublicMatch::SingleSegment` publishes an item read (`/api/hands/{id}`) without the sub-resources below it.
 pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/a2a/agents"),
     PublicRoute::exact_get("/api/agents"),
@@ -1549,7 +1560,10 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     // gating these reads is not a UX regression.
     PublicRoute::exact_get("/api/hands"),
     PublicRoute::exact_get("/api/hands/active"),
-    PublicRoute::prefix_get("/api/hands/"),
+    // Same class as the `/api/cron/` removal above.
+    // `prefix_get("/api/hands/")` also published `GET /api/hands/instances/{id}/session` (every message of the linked agent session, including `tool_use` inputs and `tool_result` content), `/api/hands/{id}/manifest` (raw HAND.toml, authored prompt included), `/api/hands/{id}/settings` (the instance config verbatim) and `/api/hands/instances/{id}/browser` (a live screenshot plus page text, which the handler produces by driving the agent's browser on a GET) — and `/api/hands/active`, public right above, hands out the instance ids needed to address them.
+    // Narrowed to the item read the dashboard renders before credentials are entered: `/api/hands/{id}` returns the same catalogue metadata as `/api/hands`.
+    PublicRoute::single_segment_get("/api/hands/"),
     PublicRoute::exact_get("/api/mcp/catalog"),
     PublicRoute::exact_get("/api/mcp/health"),
     PublicRoute::exact_get("/api/mcp/servers"),
@@ -1576,6 +1590,12 @@ fn matches_route(route: &PublicRoute, path: &str, is_get: bool) -> bool {
     match route.match_kind {
         PublicMatch::Exact => path == route.path,
         PublicMatch::Prefix => path.starts_with(route.path),
+        PublicMatch::SingleSegment => route
+            .path
+            .strip_suffix('/')
+            .and_then(|base| path.strip_prefix(base))
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|segment| !segment.is_empty() && !segment.contains('/')),
     }
 }
 
@@ -4612,6 +4632,85 @@ mod tests {
                 "{path} must be auth-gated (leaks user-authored cron prompts)"
             );
         }
+    }
+
+    /// Same class as `cron_reads_require_auth` (#5139): the dashboard-read group published everything under `/api/hands/`, because the entry was a broad prefix.
+    /// `GET /api/hands/instances/{id}/session` returns every message of the linked agent session with its `tool_use` inputs and `tool_result` content, `/manifest` returns the raw HAND.toml with its authored prompt, `/settings` the instance config, and `/browser` a live screenshot the handler takes by driving the agent's browser on a GET — while the sibling public `/api/hands/active` hands out the instance ids.
+    /// Only the item read, whose payload is the same catalogue metadata as `/api/hands`, belongs in the pre-auth group.
+    #[tokio::test]
+    async fn hand_subresource_reads_require_auth() {
+        // api_key configured, require_auth_for_reads OFF — the default posture.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            master_key: Default::default(),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/hands/{id}", get(|| async { "hand metadata" }))
+            .route("/api/hands/{id}/manifest", get(|| async { "HAND.toml" }))
+            .route("/api/hands/{id}/settings", get(|| async { "config" }))
+            .route(
+                "/api/hands/instances/{id}/session",
+                get(|| async { "full conversation + tool traffic" }),
+            )
+            .route(
+                "/api/hands/instances/{id}/browser",
+                get(|| async { "screenshot + page text" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        for path in &[
+            "/api/hands/my-hand/manifest",
+            "/api/hands/my-hand/settings",
+            "/api/hands/instances/inst-abc/session",
+            "/api/hands/instances/inst-abc/browser",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must be auth-gated (leaks session transcripts, prompts, and instance config)"
+            );
+        }
+
+        // The item read the pre-auth dashboard renders must stay reachable.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/hands/my-hand")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/hands/{{id}} is a dashboard read and must not start requiring a token"
+        );
+    }
+
+    /// `/api/hands/` must not come back as a broad prefix — pins the data-level invariant the way `cron_prefix_absent_from_dashboard_reads` does, so a re-add is caught even if the routing test above is refactored.
+    #[test]
+    fn hands_prefix_absent_from_dashboard_reads() {
+        assert!(
+            !PUBLIC_ROUTES_DASHBOARD_READS.iter().any(|r| matches!(
+                r.match_kind,
+                PublicMatch::Prefix if r.path == "/api/hands/"
+            )),
+            "/api/hands/ must not be a prefix entry — it publishes the linked agent session, the HAND.toml prompt, the instance config and the live browser view"
+        );
     }
 
     /// `/api/cron/` must not be present in the dashboard-reads allowlist —

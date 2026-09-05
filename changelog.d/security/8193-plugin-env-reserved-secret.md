@@ -1,0 +1,3 @@
+Refuse to resolve a plugin manifest's `[env]` `${VAR}` reference to one of the daemon's own reserved secrets.
+A plugin shipping `X = "${LIBREFANG_VAULT_KEY}"` or `${ANTHROPIC_API_KEY}` received the live vault master key or provider key in its own hook script, defeating the `env_clear()` hardening and the reserved-name contract that those variables never reach a child process no matter who asks — the existing filter guarded only `allowed_env_vars`, which no production path populates.
+Both hook spawn paths now share one expansion helper that skips reserved names with a warning, while the documented `QDRANT_API_KEY = "${QDRANT_API_KEY}"` form keeps working because the broader ends-in-`KEY` heuristic is deliberately not applied here (#8193) (@houko)

@@ -589,6 +589,62 @@ async fn wasm_hook_agent_send_is_denied_pure_compute() {
     );
 }
 
+/// Regression: the reserved-secret filter guarded only `allowed_env_vars`, which no production path ever populates, while the manifest's own `[env]` table — which every plugin populates — was expanded unchecked in both spawn paths.
+/// A plugin shipping `X = "${NPM_TOKEN}"` (or `${LIBREFANG_VAULT_KEY}`) therefore received the daemon's live secret in its own hook script, after `env_clear()` had been called precisely to stop that.
+/// The reserved list is absolute — those names must not resolve no matter who asks — while a name the broader `is_blocked_env_var` heuristic would reject must still pass, because the documented purpose of `[env]` is exactly `QDRANT_API_KEY = "${QDRANT_API_KEY}"`.
+/// The passthrough side is asserted under the test-private `HOOK_TEST_QDRANT_API_KEY` rather than the documented name itself: it lands in the same `is_blocked_env_var`-but-not-reserved class (`_KEY` suffix, absent from `BLOCKED_ENV_EXACT`), and the `remove_var` below would otherwise unset a developer's real `QDRANT_API_KEY` for the remainder of the test binary.
+#[test]
+fn plugin_env_refuses_to_expand_reserved_daemon_secrets() {
+    std::env::set_var("NPM_TOKEN", "daemon-npm-secret");
+    std::env::set_var("HOOK_TEST_QDRANT_API_KEY", "qdrant-passthrough-ok");
+
+    assert_eq!(
+        expand_env_value("${NPM_TOKEN}"),
+        "",
+        "a reserved daemon secret must never be resolved from a plugin [env] reference"
+    );
+    assert_eq!(
+        expand_env_value("${HOOK_TEST_QDRANT_API_KEY}"),
+        "qdrant-passthrough-ok",
+        "the documented credential-passthrough form must keep working"
+    );
+    assert_eq!(expand_env_value("plain-value"), "plain-value");
+    // The documented contract for a name the daemon does not have: empty string plus a `warn`, so the operator can tell an unexported variable from an intentionally blank one.
+    assert_eq!(
+        expand_env_value("${HOOK_TEST_DEFINITELY_UNSET_VALUE}"),
+        "",
+        "an unset reference expands to empty, as docs/src/app/agent/plugins/page.mdx states"
+    );
+
+    let config = HookConfig {
+        plugin_env: vec![
+            ("SMUGGLED".to_string(), "${NPM_TOKEN}".to_string()),
+            (
+                "QDRANT_API_KEY".to_string(),
+                "${HOOK_TEST_QDRANT_API_KEY}".to_string(),
+            ),
+        ],
+        ..HookConfig::default()
+    };
+    let env = hook_baseline_env(&PluginRuntime::Python, &config);
+    std::env::remove_var("NPM_TOKEN");
+    std::env::remove_var("HOOK_TEST_QDRANT_API_KEY");
+
+    assert!(
+        !env.iter().any(|(_, v)| v == "daemon-npm-secret"),
+        "the secret must not reach the hook env under any name: {env:?}"
+    );
+    assert!(
+        env.iter().any(|(k, v)| k == "SMUGGLED" && v.is_empty()),
+        "the declared key stays, expanded to empty: {env:?}"
+    );
+    assert!(
+        env.iter()
+            .any(|(k, v)| k == "QDRANT_API_KEY" && v == "qdrant-passthrough-ok"),
+        "a non-reserved credential declared in [env] must still be passed: {env:?}"
+    );
+}
+
 /// Regression: the persistent hook subprocess must NOT inherit the daemon's
 /// full environment. Before the fix `PersistentProcess::spawn` did
 /// `for (k, v) in std::env::vars() { cmd.env(k, v); }`, so a plugin that set
