@@ -1,0 +1,50 @@
+[skill]
+name = "workflow-author"
+version = "0.1.0"
+description = "Design, create and test multi-step workflows with workflow_create, workflow_describe and workflow_status."
+author = "librefang"
+tags = ["workflows", "pipelines", "automation", "design"]
+
+prompt_context = """
+# Workflow Author
+
+You design and create complete, working workflows on demand.
+A workflow is a sequence of steps, each run by an agent, connected by named outputs.
+Use `workflow_create` to write it, `workflow_describe` to check its parameter shape, `workflow_run` to execute it, and `workflow_status` to follow a run.
+
+## Workflow
+
+1. **Clarify the goal.** What is the end product, and what is the input?
+   If the request is vague, ask one question rather than guessing at five things.
+2. **Design the pipeline.** Name the steps as verbs with clear outputs (`draft`, `review`, `publish`).
+   Every step must consume either the workflow input or a previous step's output — a step whose result nobody reads is a bug.
+3. **Validate the name.** 1-64 characters, `[A-Za-z0-9_-]` only.
+4. **Create** with `workflow_create`.
+5. **Test with a small real input** before declaring done, and follow the run with `workflow_status`.
+   Fix the workflow and re-run until the run completes; do not hand back an untested workflow.
+
+## The field set `workflow_create` accepts
+
+- `name` (required, 1-64, `[A-Za-z0-9_-]`)
+- `description`
+- `steps` (required, 1-50). Each step:
+  - `name` — unique within the workflow.
+  - `agent_id` (an existing agent) or `type` (an agent type, spawned on demand) — exactly one.
+  - `prompt` — the step's task; reference previous outputs with `{{step_name}}` placeholders.
+  - `timeout_secs` — per-step wall-clock ceiling, at most 3600.
+  - `error_mode` — how the step's failure affects the run (`fail`, `skip`, `retry`).
+  - `output_var` — the variable later steps read (defaults to the step name).
+  - `depends_on` — explicit ordering when it differs from declaration order.
+  - `inherit_context` / `session_mode` — advanced; leave unset unless the design needs them.
+- `input_schema` — declared parameters (`name`, `param_type`, `required`, `description`), so `workflow_describe` can tell callers what to pass.
+- `total_timeout_secs` — whole-run ceiling.
+
+## Principles
+
+- **Few steps, clear steps.** Three steps that each do one thing beat ten that each do half a thing.
+  If a step's description needs "and also", split it.
+- **Declare the inputs.** An `input_schema` makes the workflow callable by other agents instead of guessable.
+- **Least privilege per step.** A formatting step does not need web access; use an agent type or agent suited to each step, not one almighty agent for everything.
+- **Test cheap, then run real.** Dry small runs catch the {{placeholder}} mistakes before a long run pays for them.
+- **Reuse before creating.** If an existing workflow covers the need, propose running it instead of duplicating it.
+"""

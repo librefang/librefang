@@ -1,12 +1,12 @@
-# Agent 模板目录
+# Agent 类型目录
 
-LibreFang 提供 **32 个 Agent 模板**，来自 [registry](https://github.com/librefang/librefang-registry/tree/main/agents)。`assistant` 模板已预装，其他模板可从 Dashboard 安装。每个模板都是一个可直接生成的 `agent.toml` 清单文件，位于 `agents/` 目录下。
+LibreFang 提供 **32 个 Agent 类型**，来自 [registry](https://github.com/librefang/librefang-registry/tree/main/agents)。`assistant` 类型已预装，其他类型可从 Dashboard 安装。每个 Agent 类型都是一个可直接生成的 `agent.toml` 清单文件，位于 `agents/` 目录下。
 
-所有模板均使用 `provider = "default"` 和 `model = "default"`，即继承你在 `config.toml` 中配置的默认供应商和模型。你可以在生成时覆盖这些设置。
+所有 Agent 类型均使用 `provider = "default"` 和 `model = "default"`，即继承你在 `config.toml` 中配置的默认供应商和模型。你可以在生成时覆盖这些设置。
 
 ## 快速开始
 
-通过 CLI 生成任意模板：
+通过 CLI 生成任意 Agent 类型：
 
 ```bash
 librefang spawn orchestrator
@@ -16,7 +16,7 @@ librefang spawn --template agents/writer/agent.toml
 
 通过 REST API 生成：
 
-通过内置模板名称生成：
+通过内置 Agent 类型名称生成：
 
 ```bash
 curl -X POST http://localhost:4545/api/agents \
@@ -42,13 +42,13 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ---
 
-## 模板分类
+## Agent 类型分类
 
-模板按使用场景组织。所有模板都使用默认模型供应商。下表列出每个 Agent 的描述、标签、temperature 和最大输出 token 数。点击 Agent 名称可在 registry 中查看完整的 `agent.toml` 清单。
+Agent 类型按使用场景组织。所有 Agent 类型都使用默认模型供应商。下表列出每个 Agent 的描述、标签、temperature 和最大输出 token 数。点击 Agent 名称可在 registry 中查看完整的 `agent.toml` 清单。
 
 ### 软件工程
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [coder](https://github.com/librefang/librefang-registry/tree/main/agents/coder) | 资深软件工程师。读、写、分析代码。 | python、write code、implement feature | 0.3 | 8192 |
 | [code-reviewer](https://github.com/librefang/librefang-registry/tree/main/agents/code-reviewer) | 资深代码评审员。按生产标准审查 PR、识别问题、给出改进建议。 | best-practices、code review、review this pr | 0.3 | 4096 |
@@ -62,7 +62,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ### 研究与分析
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [researcher](https://github.com/librefang/librefang-registry/tree/main/agents/researcher) | 调研 Agent。抓取网页内容并综合信息。 | web、web research、investigate topic | 0.5 | 4096 |
 | [academic-researcher](https://github.com/librefang/librefang-registry/tree/main/agents/academic-researcher) | 学术调研 Agent。检索学术论文、总结发现、生成文献综述。 | science、academic research、paper search | 0.3 | 8192 |
@@ -71,7 +71,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ### 写作与文档
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [writer](https://github.com/librefang/librefang-registry/tree/main/agents/writer) | 内容作者。创作文档、文章和技术写作。 | -- | 0.7 | 4096 |
 | [doc-writer](https://github.com/librefang/librefang-registry/tree/main/agents/doc-writer) | 技术作者。编写文档、README、API 文档、教程和架构指南。 | -- | 0.4 | 8192 |
@@ -79,7 +79,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ### 商业与沟通
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [customer-support](https://github.com/librefang/librefang-registry/tree/main/agents/customer-support) | 客户支持 Agent，负责工单处理、问题解决与客户沟通。 | support、customer-service、tickets、helpdesk、communication | 0.3 | 4096 |
 | [sales-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/sales-assistant) | 销售助手 Agent，负责 CRM 更新、外联起草、销售漏斗管理与商机跟踪。 | deals、deal tracking、leads | 0.5 | 4096 |
@@ -90,7 +90,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ### 个人与生活
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [personal-finance](https://github.com/librefang/librefang-registry/tree/main/agents/personal-finance) | 个人理财 Agent，负责预算追踪、支出分析、储蓄目标与财务规划。 | money、budget planning、expense analysis | 0.2 | 8192 |
 | [legal-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/legal-assistant) | 法律助手 Agent，负责合同审查、法律研究、合规检查与文件起草。 | documents、legal review、contract review | 0.2 | 8192 |
@@ -102,7 +102,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ### 系统
 
-| 模板 | 描述 | 标签 | Temp | Max Tokens |
+| Agent 类型 | 描述 | 标签 | Temp | Max Tokens |
 |------|------|------|------|------------|
 | [assistant](https://github.com/librefang/librefang-registry/tree/main/agents/assistant) | 通用助手 Agent。日常任务、问答与对话的默认 Agent。 | general、assistant、default、multipurpose、conversation | 0.5 | 8192 |
 | [hello-world](https://github.com/librefang/librefang-registry/tree/main/agents/hello-world) | 友好的问候 Agent，可读取文件、搜索网页、回答日常问题。 | -- | 0.6 | 4096 |
@@ -112,7 +112,7 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ## 理解 Temperature
 
-`temperature` 参数控制 Agent 响应的确定性与创造性。模板会根据每个 Agent 的用途设置合适的值：
+`temperature` 参数控制 Agent 响应的确定性与创造性。Agent 类型会根据每个 Agent 的用途设置合适的值：
 
 - **0.2** -- 精确且确定。用于对准确性要求最高的 Agent：`debugger`、`ops`、`security-auditor`、`devops-lead`、`personal-finance`、`legal-assistant`、`home-automation`。
 - **0.3** -- 分析型，略带灵活性。大部分工程与研究类 Agent：`coder`、`code-reviewer`、`test-engineer`、`architect`、`planner`、`data-scientist`、`academic-researcher`、`customer-support`、`translator`、`health-tracker`、`meeting-assistant`、`orchestrator`。
@@ -123,9 +123,9 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ---
 
-## 自定义模板
+## 自定义 Agent 类型
 
-`agents/custom/` 目录保留给你自己的 Agent 模板。按照以下清单格式创建新的 `agent.toml` 文件。
+`agents/custom/` 目录保留给你自己的 Agent 类型。按照以下清单格式创建新的 `agent.toml` 文件。
 
 ### 清单格式
 
@@ -209,7 +209,7 @@ shell = ["python *", "cargo *"]     # 允许的 Shell 命令模式（白名单�
 ### 自定义 Agent 提示
 
 1. **从最小配置开始**。仅授予 Agent 实际需要的工具和能力。之后随时可以添加更多。
-2. **编写清晰的系统提示**。系统提示是模板中最重要的部分。明确说明 Agent 的角色、方法论、输出格式和限制。
+2. **编写清晰的系统提示**。系统提示是 Agent 类型中最重要的部分。明确说明 Agent 的角色、方法论、输出格式和限制。
 3. **设置合适的 temperature**。精确/分析类任务使用 0.2，均衡任务使用 0.5，创意类任务使用 0.7 及以上。
 4. **使用 Shell 白名单**。永远不要授予 `shell = ["*"]`。白名单指定具体的命令模式，如 `shell = ["python *", "cargo test *"]`。
 5. **设置 Token 预算**。使用 `max_llm_tokens_per_hour` 防止成本失控。从 100,000 开始，根据使用情况调整。
@@ -336,7 +336,7 @@ lazy_tools = false
 ### CLI
 
 ```bash
-# 按模板名称生成
+# 按 Agent 类型名称生成
 librefang spawn coder
 
 # 使用自定义名称生成
@@ -358,7 +358,7 @@ librefang kill <agent-id>
 ### REST API
 
 ```bash
-# 从模板生成
+# 从 Agent 类型生成
 POST /api/agents
 {"template": "coder"}
 
@@ -413,7 +413,7 @@ Orchestrator：
 
 ## 环境变量
 
-所有 Agent 模板都使用 `provider = "default"` 和 `model = "default"`。Agent 实际使用的模型取决于你在 `~/.librefang/config.toml` 中配置的供应商和模型。
+所有 Agent 类型都使用 `provider = "default"` 和 `model = "default"`。Agent 实际使用的模型取决于你在 `~/.librefang/config.toml` 中配置的供应商和模型。
 
 根据要使用的供应商，设置以下一个或多个 API 密钥：
 
@@ -440,7 +440,7 @@ api_key_env = "GROQ_API_KEY"         # 保存 API 密钥的环境变量
 
 ## Agent Manifest 字段参考
 
-`agent.toml` 接受不少在标准 quick-start 模板里看不到的顶层字段。把完整集列出来,知道字段名时就能找到。除非标"必填",否则全部可选。
+`agent.toml` 接受不少在标准 quick-start Agent 类型里看不到的顶层字段。把完整集列出来,知道字段名时就能找到。除非标"必填",否则全部可选。
 
 ### 工具 / skill 范围
 

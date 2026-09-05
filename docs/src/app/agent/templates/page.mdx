@@ -1,12 +1,12 @@
-# Agent Templates Catalog
+# Agent Types Catalog
 
-LibreFang provides **32 agent templates** from the [registry](https://github.com/librefang/librefang-registry/tree/main/agents). The `assistant` template is pre-installed; others can be installed from the dashboard. Each template is a ready-to-spawn `agent.toml` manifest located in the `agents/` directory. Templates cover software engineering, research, writing, business operations, personal productivity, and system tasks.
+LibreFang provides **32 agent types** from the [registry](https://github.com/librefang/librefang-registry/tree/main/agents). The `assistant` agent type is pre-installed; others can be installed from the dashboard. Each agent type is a ready-to-spawn `agent.toml` manifest located in the `agents/` directory. Agent types cover software engineering, research, writing, business operations, personal productivity, and system tasks.
 
-All templates use `provider = "default"` and `model = "default"`, which means every agent inherits whichever model you have configured as your default in `~/.librefang/config.toml`. You can override the model at spawn time if needed.
+All agent types use `provider = "default"` and `model = "default"`, which means every agent inherits whichever model you have configured as your default in `~/.librefang/config.toml`. You can override the model at spawn time if needed.
 
 ## Quick Start
 
-Spawn any template from the CLI:
+Spawn any agent type from the CLI:
 
 ```bash
 librefang spawn orchestrator
@@ -16,7 +16,7 @@ librefang spawn --template agents/writer/agent.toml
 
 Spawn via the REST API:
 
-Spawn from a built-in template:
+Spawn from a built-in agent type:
 
 ```bash
 curl -X POST http://localhost:4545/api/agents \
@@ -42,13 +42,13 @@ curl -X POST http://localhost:4545/api/agents/{id}/message \
 
 ---
 
-## Templates by Category
+## Agent Types by Category
 
-Templates are organized by use case. Every template uses the default model provider. The table below lists each agent's description, tags, temperature, and max output tokens. Click an agent name to view its full `agent.toml` manifest in the registry.
+Agent types are organized by use case. Every agent type uses the default model provider. The table below lists each agent's description, tags, temperature, and max output tokens. Click an agent name to view its full `agent.toml` manifest in the registry.
 
 ### Software Engineering
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [coder](https://github.com/librefang/librefang-registry/tree/main/agents/coder) | Expert software engineer. Reads, writes, and analyzes code. | python, write code, implement feature | 0.3 | 8192 |
 | [code-reviewer](https://github.com/librefang/librefang-registry/tree/main/agents/code-reviewer) | Senior code reviewer. Reviews PRs, identifies issues, suggests improvements with production standards. | best-practices, code review, review this pr | 0.3 | 4096 |
@@ -62,7 +62,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ### Research and Analysis
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [researcher](https://github.com/librefang/librefang-registry/tree/main/agents/researcher) | Research agent. Fetches web content and synthesizes information. | web, web research, investigate topic | 0.5 | 4096 |
 | [academic-researcher](https://github.com/librefang/librefang-registry/tree/main/agents/academic-researcher) | Academic research agent. Searches scholarly papers, summarizes findings, and generates literature reviews. | science, academic research, paper search | 0.3 | 8192 |
@@ -71,7 +71,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ### Writing and Documentation
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [writer](https://github.com/librefang/librefang-registry/tree/main/agents/writer) | Content writer. Creates documentation, articles, and technical writing. | -- | 0.7 | 4096 |
 | [doc-writer](https://github.com/librefang/librefang-registry/tree/main/agents/doc-writer) | Technical writer. Creates documentation, README files, API docs, tutorials, and architecture guides. | -- | 0.4 | 8192 |
@@ -79,7 +79,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ### Business and Communication
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [customer-support](https://github.com/librefang/librefang-registry/tree/main/agents/customer-support) | Customer support agent for ticket handling, issue resolution, and customer communication. | support, customer-service, tickets, helpdesk, communication | 0.3 | 4096 |
 | [sales-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/sales-assistant) | Sales assistant agent for CRM updates, outreach drafting, pipeline management, and deal tracking. | deals, deal tracking, leads | 0.5 | 4096 |
@@ -90,7 +90,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ### Personal and Lifestyle
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [personal-finance](https://github.com/librefang/librefang-registry/tree/main/agents/personal-finance) | Personal finance agent for budget tracking, expense analysis, savings goals, and financial planning. | money, budget planning, expense analysis | 0.2 | 8192 |
 | [legal-assistant](https://github.com/librefang/librefang-registry/tree/main/agents/legal-assistant) | Legal assistant agent for contract review, legal research, compliance checking, and document drafting. | documents, legal review, contract review | 0.2 | 8192 |
@@ -102,7 +102,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ### System
 
-| Template | Description | Tags | Temp | Max Tokens |
+| Agent Type | Description | Tags | Temp | Max Tokens |
 |----------|-------------|------|------|------------|
 | [assistant](https://github.com/librefang/librefang-registry/tree/main/agents/assistant) | General-purpose assistant agent. The default agent for everyday tasks, questions, and conversations. | general, assistant, default, multipurpose, conversation | 0.5 | 8192 |
 | [hello-world](https://github.com/librefang/librefang-registry/tree/main/agents/hello-world) | A friendly greeting agent that can read files, search the web, and answer everyday questions. | -- | 0.6 | 4096 |
@@ -112,7 +112,7 @@ Templates are organized by use case. Every template uses the default model provi
 
 ## Understanding Temperature
 
-The `temperature` setting controls how deterministic or creative an agent's responses are. Templates set this value based on what each agent does:
+The `temperature` setting controls how deterministic or creative an agent's responses are. Agent types set this value based on what each agent does:
 
 - **0.2** -- Precise and deterministic. Used by agents where accuracy matters most: `debugger`, `ops`, `security-auditor`, `devops-lead`, `personal-finance`, `legal-assistant`, `home-automation`.
 - **0.3** -- Analytical with slight flexibility. Used by most engineering and research agents: `coder`, `code-reviewer`, `test-engineer`, `architect`, `planner`, `data-scientist`, `academic-researcher`, `customer-support`, `translator`, `health-tracker`, `meeting-assistant`, `orchestrator`.
@@ -123,9 +123,9 @@ The `temperature` setting controls how deterministic or creative an agent's resp
 
 ---
 
-## Custom Templates
+## Custom Agent Types
 
-The `agents/custom/` directory is reserved for your own agent templates. Create a new `agent.toml` file following the manifest format below.
+The `agents/custom/` directory is reserved for your own agent types. Create a new `agent.toml` file following the manifest format below.
 
 ### Manifest Format
 
@@ -213,7 +213,7 @@ shell = ["python *", "cargo *"]     # Allowed shell command patterns (whitelist)
 ### Tips for Custom Agents
 
 1. **Start minimal**. Grant only the tools and capabilities the agent actually needs. You can always add more later.
-2. **Write a clear system prompt**. The system prompt is the most important part of the template. Be specific about the agent's role, methodology, output format, and limitations.
+2. **Write a clear system prompt**. The system prompt is the most important part of the agent type. Be specific about the agent's role, methodology, output format, and limitations.
 3. **Set appropriate temperature**. Use 0.2 for precise/analytical tasks, 0.5 for balanced tasks, 0.7+ for creative tasks.
 4. **Use shell whitelists**. Never grant `shell = ["*"]`. Whitelist specific command patterns like `shell = ["python *", "cargo test *"]`.
 5. **Set token budgets**. Use `max_llm_tokens_per_hour` to prevent runaway costs. Start with 100,000 and adjust based on usage.
@@ -340,7 +340,7 @@ lazy_tools = false
 ### CLI
 
 ```bash
-# Spawn by template name
+# Spawn by agent type name
 librefang spawn coder
 
 # Spawn with a custom name
@@ -362,7 +362,7 @@ librefang kill <agent-id>
 ### REST API
 
 ```bash
-# Spawn from template
+# Spawn from agent type
 POST /api/agents
 {"template": "coder"}
 
@@ -417,7 +417,7 @@ Orchestrator:
 
 ## Environment Variables
 
-All agent templates use `provider = "default"` and `model = "default"`. The model that agents actually use depends on which provider and model you configure in `~/.librefang/config.toml`.
+All agent types use `provider = "default"` and `model = "default"`. The model that agents actually use depends on which provider and model you configure in `~/.librefang/config.toml`.
 
 Set one or more of the following API keys depending on which provider you want to use:
 
@@ -444,7 +444,7 @@ Any agent spawned without an explicit model override will use this default confi
 
 ## Agent Manifest Field Reference
 
-`agent.toml` accepts a number of top-level fields that aren't shown in the standard quick-start templates. Listing the full set so you can find the field name when you need it. All fields are optional unless marked otherwise.
+`agent.toml` accepts a number of top-level fields that aren't shown in the standard quick-start agent types. Listing the full set so you can find the field name when you need it. All fields are optional unless marked otherwise.
 
 ### Tool / skill scoping
 

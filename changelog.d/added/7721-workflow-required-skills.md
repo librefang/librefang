@@ -1,0 +1,2 @@
+Workflow steps can declare `required_skills`; a step whose resolved agent (or spawned agent type) cannot provide one fails before dispatch with a precise error distinguishing "not declared" from "declared but not installed" (via the pending-declarations plumbing).
+All resolver surfaces (kernel sync/async, API background/resume/operator, channel bridge) carry the check, so a step cannot slip past it by being started from a different entry point (#7863) (@DaBlitzStein)

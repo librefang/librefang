@@ -1,0 +1,9 @@
+Editing an agent type from the WebUI Agent Types page no longer silently discards data.
+Two bugs compounded into one another.
+First, the function that flattens a manifest into the JSON the dashboard reads never emitted `channels` or `routing`, even though the dashboard's `AgentType` interface and its edit form both expect them.
+Because the fields came back `undefined`, the form rendered them empty, and saving sent `channels: []` and `routing: undefined` straight back — so the channel allowlist and model-tier routing a user configured were wiped out on the very next save.
+Second, and far worse, `PUT /api/templates/{name}` rebuilt the entire manifest from that same flat, 9-key JSON shape and overwrote the file on disk with `std::fs::write`.
+Every field outside those 9 keys — `[compaction]`, `max_history_messages`, `[[triggers]]`, `[resources]`, `[autonomous]`, `mcp_servers`, `tool_allowlist`, `session_mode`, `workspaces`, and everything else in `AgentManifest` — was silently reset to its default on every single save made through the WebUI editor, with the endpoint still returning 200.
+Fixed both: the flattening function now includes `channels` and `routing` in its output, and the update route reads the existing manifest off disk first, then applies only the fields the request body actually supplies through `AgentTypeSpec::apply_to`, leaving every other field untouched.
+A manifest that fails to parse is now refused outright rather than falling back to a blank one, because overwriting a file the daemon could not read is exactly the data loss this handler exists to prevent.
+The create path (`POST /api/templates`, and the agent-facing `agent_type_create` tool) is unaffected — building a brand-new manifest from a flat JSON body was always the correct behavior there; the bug was reusing that same rebuild-from-scratch logic for updates (#7859) (@DaBlitzStein)

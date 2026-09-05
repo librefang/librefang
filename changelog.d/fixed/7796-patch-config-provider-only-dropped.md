@@ -1,0 +1,3 @@
+`PATCH /api/agents/{id}/config` silently ignored the `provider` field whenever the request omitted (or emptied) `model`.
+The handler only ever called `set_agent_model` inside the `if let Some(model) = req.model` branch, so a request like `{"provider": "litellm"}` returned 200 while changing nothing — the same #2380 failure class (a field the OpenAPI schema advertises, silently discarded), just on `provider` instead of `api_key_env` / `base_url`.
+A provider-only PATCH now falls back to the agent's current model so `set_agent_model` still runs its provider-change cleanup (prefix stripping, canonical-session reset, and clearing of stale per-agent `api_key_env` / `base_url`), leaving the model untouched (#7796) (@DaBlitzStein)

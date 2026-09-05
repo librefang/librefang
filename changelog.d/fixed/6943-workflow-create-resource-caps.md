@@ -1,0 +1,4 @@
+`workflow_create` now rejects an oversized workflow instead of accepting it unbounded.
+The tool is always-native — every agent has it without configuration — and neither its JSON schema nor the workflow engine capped step count or timeout length; a schema `maxItems` is advisory only, so a model driving the call could simply ignore it.
+A single call could previously register an arbitrarily long `steps` array, or a `total_timeout_secs` up to the one-year panic-safety clamp already enforced elsewhere in the engine, tying up engine-tracked state and an async-task slot indefinitely.
+The handler now enforces a 50-step cap, a 3600-second per-step timeout ceiling, and an 86400-second total-timeout ceiling, returning `InvalidParameter` when exceeded; the schema also documents the same limits as `maxItems` / `maximum` hints (#7857) (@DaBlitzStein)

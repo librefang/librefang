@@ -330,6 +330,58 @@ ffmpeg_timeout_secs = 30
 
 ---
 
+### `[capabilities]`
+
+Capability routing — which provider and model service each modality, so an agent whose own model cannot see, hear, draw or speak can still handle a message that requires it.
+
+Without this block, a text-only model handed an image had the image replaced by a note about a file path, and the agent would describe a picture it never saw.
+With it, the image is sent to the provider nominated for `image_understanding` and the description is inserted into the turn.
+
+```toml
+[capabilities]
+image_understanding = "openai/gpt-4o"                          # provider/model shorthand
+speech_to_text      = { provider = "groq", model = "whisper-large-v3" }
+image_generation    = "openai"                                 # provider only — model comes from the request
+text_to_speech      = "elevenlabs"
+video_generation    = "minimax"
+```
+
+Each value accepts three spellings: `"provider/model"`, `"provider"`, or a `{ provider, model }` table.
+The split is on the **first** `/` only, so model ids that contain slashes work: `"groq/meta-llama/llama-4-scout-17b-16e-instruct"`.
+
+| Field | Alias | Description |
+|-------|-------|-------------|
+| `image_understanding` | `vision` | Describes an image the agent's own model cannot see. |
+| `speech_to_text` | `transcription` | Turns inbound speech into text. |
+| `image_generation` | — | Services the `media_generate_image` tool and `POST /api/media/image`. |
+| `text_to_speech` | `speech` | Services TTS generation. |
+| `video_generation` | — | Services video generation. |
+| `music_generation` | — | Services music generation. |
+
+#### Per-agent override
+
+The **same block** is accepted inside an agent's `[capabilities]` in `agent.toml`, next to the existing tool and memory grants:
+
+```toml
+# ~/.librefang/workspaces/agents/profesor/agent.toml
+[capabilities]
+tools = ["*"]
+image_understanding = { model = "gpt-4o-mini" }   # cheaper model, inherits the global provider
+```
+
+Resolution is **agent > global > `[media] image_provider` / `audio_provider` > env-var auto-detection**, merged field by field.
+"Inherit" is simply leaving the key out — and because the merge is per field, an agent that sets only `model` keeps the globally configured `provider`.
+
+Notes:
+
+- Understanding routing (`image_understanding`, `speech_to_text`) is honoured per agent.
+  Generation routing is currently applied kernel-wide from the global block only.
+- A nomination that names a provider which is not configured, or which does not advertise that capability, logs a warning and falls back to the registry preference order rather than failing the call.
+- The global block is folded into the boot-captured media engine, so changing it needs a daemon restart (see `docs/operations/config-reload.md`).
+  A per-agent block is read from the manifest on every turn and does not.
+
+---
+
 ### `[links]`
 
 Configures automatic link understanding — fetching and summarizing URLs found in incoming messages.

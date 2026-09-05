@@ -328,6 +328,58 @@ ffmpeg_timeout_secs = 30
 
 ---
 
+### `[capabilities]`
+
+能力路由——指定由哪个提供商和模型来处理该智能体自身模型无法处理的模态，使不会「看」「听」「画」「说」的模型也能应对需要这些能力的消息。
+
+在没有这个配置块之前，把图片发给纯文本模型时，图片会被替换成一条关于文件路径的说明，于是智能体会去描述一张它从未看到过的图片。
+配置之后，图片会被发送给 `image_understanding` 指定的提供商，并把生成的描述插入到该轮对话中。
+
+```toml
+[capabilities]
+image_understanding = "openai/gpt-4o"                          # 「提供商/模型」简写
+speech_to_text      = { provider = "groq", model = "whisper-large-v3" }
+image_generation    = "openai"                                 # 仅提供商——模型由请求指定
+text_to_speech      = "elevenlabs"
+video_generation    = "minimax"
+```
+
+每个取值支持三种写法：`"提供商/模型"`、`"提供商"`，或 `{ provider, model }` 表。
+只按**第一个** `/` 拆分，因此包含斜杠的模型 id 同样可用：`"groq/meta-llama/llama-4-scout-17b-16e-instruct"`。
+
+| 字段 | 别名 | 说明 |
+|------|------|------|
+| `image_understanding` | `vision` | 为看不见图片的模型描述图片。 |
+| `speech_to_text` | `transcription` | 将收到的语音转换为文字。 |
+| `image_generation` | — | 服务 `media_generate_image` 工具与 `POST /api/media/image`。 |
+| `text_to_speech` | `speech` | 服务语音合成。 |
+| `video_generation` | — | 服务视频生成。 |
+| `music_generation` | — | 服务音乐生成。 |
+
+#### 按智能体覆盖
+
+**同一个配置块**也可以写在智能体 `agent.toml` 的 `[capabilities]` 里，与已有的工具和记忆授权并列：
+
+```toml
+# ~/.librefang/workspaces/agents/profesor/agent.toml
+[capabilities]
+tools = ["*"]
+image_understanding = { model = "gpt-4o-mini" }   # 更便宜的模型，提供商沿用全局设置
+```
+
+解析顺序为**智能体 > 全局 > `[media] image_provider` / `audio_provider` > 环境变量自动检测**，并且逐字段合并。
+「继承」就是不写这个键——由于是逐字段合并，只覆盖 `model` 的智能体仍会沿用全局配置的 `provider`。
+
+注意事项：
+
+- 理解类能力（`image_understanding`、`speech_to_text`）支持按智能体路由。
+  生成类能力目前只按全局配置块在内核范围内生效。
+- 若指定的提供商未配置，或并不具备该能力，则记录一条警告并回退到注册表的优先级顺序，而不是直接让调用失败。
+- 全局配置块在启动时会被并入媒体引擎，因此修改后需要重启守护进程（见 `docs/operations/config-reload.md`）。
+  按智能体的配置块则在每轮对话时从清单中读取，无需重启。
+
+---
+
 ### `[links]`
 
 配置自动链接理解功能——自动抓取并总结传入消息中的 URL。

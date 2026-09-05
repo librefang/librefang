@@ -1,6 +1,6 @@
 # Built-in Tool Reference
 
-LibreFang ships with a wide built-in tool catalog beyond the file / shell / web tools that show up in standard agent templates. This page covers the families that historically lived only in source code — browser automation, subprocess lifecycle, runtime scheduling, knowledge graphs, media, and inter-agent messaging.
+LibreFang ships with a wide built-in tool catalog beyond the file / shell / web tools that show up in standard agent types. This page covers the families that historically lived only in source code — browser automation, subprocess lifecycle, runtime scheduling, knowledge graphs, media, and inter-agent messaging.
 
 Per-agent capability grants control which families an agent can actually call. Use `agent.toml` `[capabilities]` (or the `librefang agent grant` CLI) to opt agents into the tool families below.
 
@@ -13,7 +13,7 @@ Two meta-tools let an agent discover and load tools on demand instead of carryin
 | `tool_search(query)` | Returns tools matching `query` (name, description, tag). Cheap to call — no side effects. |
 | `tool_load(name)` | Pulls a tool's full schema into the active session. Subsequent turns can call it. |
 
-Lazy loading is opt-in per agent via `lazy_tools = true` in the manifest. Disable to restore the legacy "all tools always loaded" behaviour. This is what the **Lazy Tool Loading** mention on [Agent Templates](/agent/templates) refers to.
+Lazy loading is opt-in per agent via `lazy_tools = true` in the manifest. Disable to restore the legacy "all tools always loaded" behaviour. This is what the **Lazy Tool Loading** mention on [Agent Types](/agent/templates) refers to.
 
 ---
 

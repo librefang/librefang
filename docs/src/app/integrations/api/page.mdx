@@ -245,9 +245,9 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/channels/registry` | Channel metadata from the registry sync |
 | POST | `/api/channels/sidecar/{name}/configure` | Save a `[[sidecar_channels]]` entry (schema-driven) |
 | POST | `/api/channels/reload` | Hot-reload channels from disk |
-| **Templates** | | |
-| GET | `/api/templates` | List templates |
-| GET | `/api/templates/{name}` | Get template |
+| **Agent Types** | | |
+| GET | `/api/agent-types` | List agent types (`/api/templates` is a deprecated alias) |
+| GET | `/api/agent-types/{name}` | Get agent type (`/api/templates/{name}` is a deprecated alias) |
 | **Sessions** | | |
 | GET | `/api/sessions` | List all sessions |
 | POST | `/api/sessions/cleanup` | Cleanup orphaned sessions |
@@ -484,7 +484,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/config/export` | Export full effective config |
 | GET | `/api/registry/schema` | Config JSON schema for editor tooling |
 | GET | `/api/models/{*id}` | Wildcard model lookup (handles slash-bearing model IDs like `vendor/model-name`) |
-| GET | `/api/templates/{name}/toml` | Raw agent-template TOML (for editor use) |
+| GET | `/api/agent-types/{name}/toml` | Raw agent-type TOML (for editor use); `/api/templates/{name}/toml` is a deprecated alias |
 | **Goals & Inbox** | | |
 | GET | `/api/goals/templates` | List goal templates |
 | GET | `/api/inbox/status` | Inbox summary (pending counts by source) |
