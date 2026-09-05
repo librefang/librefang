@@ -10077,13 +10077,9 @@ id = "{id}"
         assert!(reg.remove("r1").await.is_none());
     }
 
-    /// Instantiation bakes its result into the persisted workflow, so an order-dependent
-    /// expansion there is not a transient wobble — the same template and the same parameters
-    /// could be stored as two different prompts, each of which then goes on to drive an agent.
+    /// Instantiation bakes its result into the persisted workflow, so an order-dependent expansion there is not a transient wobble — the same template and the same parameters could be stored as two different prompts, each of which then goes on to drive an agent.
     ///
-    /// The mutually-referential pair pins this independently of iteration order: the old
-    /// per-entry `String::replace` loop yields `{{lang}} {{lang}}` for one order and
-    /// `{{topic}} {{topic}}` for the other, and neither is the expected output.
+    /// The mutually-referential pair pins this independently of iteration order: the old per-entry `String::replace` loop yields `{{lang}} {{lang}}` for one order and `{{topic}} {{topic}}` for the other, and neither is the expected output.
     #[test]
     fn instantiate_does_not_rescan_substituted_parameter_values() {
         let reg = WorkflowTemplateRegistry::new();

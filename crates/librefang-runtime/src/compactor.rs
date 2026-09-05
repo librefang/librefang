@@ -816,10 +816,8 @@ async fn summarize_messages(
         ..Default::default()
     };
 
-    // Retry logic for transient failures. `max_retries` counts *retries*, so the
-    // inclusive range always makes one attempt — `max_retries = 0` means "try once,
-    // do not retry", never "do not call the LLM at all", which would drop straight to
-    // the fallback placeholder and discard the history it was meant to summarize.
+    // Retry logic for transient failures.
+    // `max_retries` counts *retries*, so the inclusive range always makes one attempt — `max_retries = 0` means "try once, do not retry", never "do not call the LLM at all", which would drop straight to the fallback placeholder and discard the history it was meant to summarize.
     let mut last_error = String::new();
     for attempt in 0..=config.max_retries {
         match driver.complete(request.clone()).await {

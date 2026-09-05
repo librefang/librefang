@@ -227,9 +227,7 @@ async fn test_assemble_leaves_history_starting_with_user_after_stage_1_trim() {
     let config = ContextEngineConfig::default();
     let engine = DefaultContextEngine::new(config, make_memory(), None);
 
-    // 21 alternating turns, each 30 estimated tokens + 4 framing = 34, plus a 2-token
-    // system prompt: 716 estimated tokens against a 1000-token window sits between the
-    // 70% and 90% thresholds, so overflow recovery takes Stage 1 (keep the last 10).
+    // 21 alternating turns, each 30 estimated tokens + 4 framing = 34, plus a 2-token system prompt: 716 estimated tokens against a 1000-token window sits between the 70% and 90% thresholds, so overflow recovery takes Stage 1 (keep the last 10).
     // The drain boundary then lands on message 11, an assistant turn.
     let mut messages: Vec<Message> = (0..21)
         .map(|i| {

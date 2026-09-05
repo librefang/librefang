@@ -492,13 +492,8 @@ impl CronScheduler {
         match self.jobs.get_mut(&id) {
             Some(mut entry) => {
                 let meta = entry.value_mut();
-                // The candidate is a snapshot taken before validation, and `CronJob` carries
-                // three fields that the tick loop and the fire tasks write without going
-                // through this method: `last_run` and `next_run` (`due_jobs`, `record_success`,
-                // `record_failure`) and `enabled` (auto-disable after repeated failures).
-                // Swapping the whole snapshot in would roll those back to their pre-validation
-                // values, re-firing a job whose next_run had already been advanced, discarding
-                // a failure backoff, or resurrecting a job the scheduler just auto-disabled.
+                // The candidate is a snapshot taken before validation, and `CronJob` carries three fields that the tick loop and the fire tasks write without going through this method: `last_run` and `next_run` (`due_jobs`, `record_success`, `record_failure`) and `enabled` (auto-disable after repeated failures).
+                // Swapping the whole snapshot in would roll those back to their pre-validation values, re-firing a job whose next_run had already been advanced, discarding a failure backoff, or resurrecting a job the scheduler just auto-disabled.
                 // Carry the live values across unless this update deliberately set them.
                 candidate.last_run = meta.job.last_run;
                 if !next_run_recomputed {
@@ -2907,14 +2902,9 @@ mod tests {
         assert!(after.delivery_targets.is_empty());
     }
 
-    /// `update_job` clones the job, releases the shard guard to validate, then swaps the
-    /// candidate back in. `CronJob` also carries runtime state that the tick loop and the
-    /// fire tasks write without going through `update_job` — `due_jobs` pre-advances
-    /// `next_run`, `record_success` / `record_failure` stamp `last_run` — so the wholesale
-    /// swap used to roll those back to their pre-validation values, re-firing a job whose
-    /// `next_run` had already been advanced and reporting a job as never having run.
-    /// The scheduler only ever moves `last_run` forwards, so an observation of it moving
-    /// backwards is the signature of that clobber.
+    /// `update_job` clones the job, releases the shard guard to validate, then swaps the candidate back in.
+    /// `CronJob` also carries runtime state that the tick loop and the fire tasks write without going through `update_job` — `due_jobs` pre-advances `next_run`, `record_success` / `record_failure` stamp `last_run` — so the wholesale swap used to roll those back to their pre-validation values, re-firing a job whose `next_run` had already been advanced and reporting a job as never having run.
+    /// The scheduler only ever moves `last_run` forwards, so an observation of it moving backwards is the signature of that clobber.
     #[test]
     fn update_job_does_not_roll_back_concurrently_written_last_run() {
         use std::sync::atomic::AtomicBool;
