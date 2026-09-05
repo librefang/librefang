@@ -103,7 +103,7 @@ type DashboardRoute =
 type NavItem = { to: DashboardRoute; label: string; icon: NavIcon };
 type NavGroup = { key: string; label: string; items: NavItem[] };
 
-export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
+export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: (user?: string) => void }) {
   const { t } = useTranslation();
   const [key, setKey] = useState("");
   const [username, setUsername] = useState("");
@@ -178,7 +178,7 @@ export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthen
           setErrorKey("invalid_totp");
           return;
         }
-        onAuthenticated();
+        onAuthenticated(username.trim());
         return;
       }
 
@@ -198,7 +198,7 @@ export function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthen
         return;
       }
 
-      onAuthenticated();
+      onAuthenticated(username.trim());
     } catch {
       setErrorKey("invalid");
     } finally {
@@ -613,9 +613,7 @@ function UserMenuPanel({
   t,
 }: UserMenuPanelProps) {
   const initials = (username || "U").slice(0, 2).toUpperCase();
-  const roleLine = [authMode !== "none" ? authMode : null, hostname]
-    .filter(Boolean)
-    .join(" · ");
+  const roleLine = hostname || "";
 
   return (
     <div className="rounded-xl border border-border-subtle bg-surface shadow-2xl backdrop-blur-md p-1.5 w-[260px]">
@@ -1162,7 +1160,8 @@ function DashboardApp() {
       <div className="flex h-screen items-center justify-center bg-main text-slate-900 dark:text-slate-100">
         <AuthDialog
           mode={authMode}
-          onAuthenticated={() => {
+          onAuthenticated={(user) => {
+            if (user) setUsername(user);
             setAuthNeeded(false);
             void navigate({ to: "/overview", replace: true });
           }}
@@ -1373,12 +1372,10 @@ function DashboardApp() {
                 <span className="hidden xl:inline">{t("nav.console", { defaultValue: "Console" })}</span>
               </Link>
             ) : null}
-            {/* Avatar button — top-right pattern from the design canvas
-                (`shell.jsx::TopBar`, "user-menu" variant). Visible on every
-                breakpoint so the menu is always one click away from the
-                topbar; the sidebar's user-row dropdown is the secondary
-                "user-menu-sidebar" variant. */}
-            <div className="relative">
+            {/* Avatar button — top-right, visible only below lg where the
+                sidebar is off-screen. On lg+ the sidebar's user-row provides
+                the same menu. */}
+            <div className="relative lg:hidden">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors duration-200 active:scale-95 ${
