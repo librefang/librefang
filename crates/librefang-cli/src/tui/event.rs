@@ -208,6 +208,17 @@ pub enum AppEvent {
         name: String,
         toml: Option<String>,
     },
+    /// Result of restoring an agent type from the registry.
+    RegistryRestoreResult {
+        name: String,
+        ok: bool,
+        message: String,
+    },
+    /// Template version history loaded — rows on success, a localized failure message otherwise.
+    TemplateHistoryLoaded {
+        name: String,
+        result: Result<Vec<TemplateVersionRow>, String>,
+    },
     /// Result of promoting an agent type to the registry.
     AgentTypePromoted {
         name: String,
@@ -3036,6 +3047,110 @@ pub fn spawn_fetch_template_toml(backend: BackendRef, name: String, tx: mpsc::Se
     });
 }
 
+/// One row of a template's version history, as served by `GET /api/templates/{name}/history`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateVersionRow {
+    pub id: String,
+    pub timestamp: String,
+    pub change_source: String,
+}
+
+/// Parse the body of `GET /api/templates/{name}/history` into display rows.
+/// The endpoint answers `{"versions": [{id, template_name, timestamp, manifest_toml, change_source}, …]}` —
+/// every deviation from that shape is an error, not an empty list, because a failed request must
+/// not render the same "no history" state as an empty list.
+pub(crate) fn parse_template_history(
+    body: &serde_json::Value,
+) -> Result<Vec<TemplateVersionRow>, String> {
+    let items = body
+        .get("versions")
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?
+        .as_array()
+        .ok_or_else(|| crate::i18n::t("tui-templates-history-shape"))?;
+    items
+        .iter()
+        .map(|v| {
+            Ok(TemplateVersionRow {
+                // The id is an integer in the current API but the row type is display-only,
+                // so both a JSON number and a string are accepted without printing quotes.
+                id: match v.get("id") {
+                    Some(serde_json::Value::Number(n)) => n.to_string(),
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => "?".to_string(),
+                },
+                timestamp: v
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                change_source: v
+                    .get("change_source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn spawn_restore_from_registry(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let (ok, message) = if !is_safe_template_name(&name) {
+            (false, crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .post(format!("{base_url}/api/templates/{name}/restore"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-restore-failed")
+                    }) {
+                        Ok(_) => (true, crate::i18n::t("tui-templates-restore-success")),
+                        Err(message) => (false, message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    (false, crate::i18n::t("tui-templates-restore-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::RegistryRestoreResult { name, ok, message });
+    });
+}
+
+pub fn spawn_fetch_template_history(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let result = if !is_safe_template_name(&name) {
+            Err(crate::i18n::t("tui-templates-restore-invalid-name"))
+        } else {
+            match backend {
+                BackendRef::Daemon { base_url, api_key } => {
+                    let client = make_daemon_client(api_key.as_deref());
+                    let outcome = client
+                        .get(format!("{base_url}/api/templates/{name}/history"))
+                        .send();
+                    match daemon_response(outcome, || {
+                        crate::i18n::t("tui-templates-history-failed")
+                    }) {
+                        Ok(resp) => match resp.json::<serde_json::Value>() {
+                            Ok(body) => parse_template_history(&body),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(message) => Err(message),
+                    }
+                }
+                BackendRef::InProcess(_) => {
+                    Err(crate::i18n::t("tui-templates-history-daemon-only"))
+                }
+            }
+        };
+        let _ = tx.send(AppEvent::TemplateHistoryLoaded { name, result });
+    });
+}
+
 /// Promote an agent type to the registry via `POST /api/templates/{name}/promote`.
 pub fn spawn_promote_agent_type(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
@@ -5710,5 +5825,27 @@ mod tests {
             message.contains("skill not found on registry"),
             "why it failed: {message}"
         );
+    }
+
+    /// The reviewer's regression: the endpoint answers an object with a
+    /// `versions` array, but the old code deserialized the body straight into
+    /// `Vec<Value>` and let `unwrap_or_default()` swallow the mismatch — the
+    /// screen showed "no history" against a populated response.
+    #[test]
+    fn history_parse_reads_the_real_envelope_and_rows() {
+        let body = serde_json::json!({
+            "versions": [{
+                "id": 7,
+                "template_name": "payroll",
+                "timestamp": "2026-09-02T08:34:21Z",
+                "manifest_toml": "name = \"payroll\"\n",
+                "change_source": "update"
+            }]
+        });
+        let rows = parse_template_history(&body).expect("the served shape must parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "7");
+        assert_eq!(rows[0].timestamp, "2026-09-02T08:34:21Z");
+        assert_eq!(rows[0].change_source, "update");
     }
 }

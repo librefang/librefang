@@ -1,5 +1,6 @@
 //! Templates screen: browse agent templates and spawn with one click.
 
+use crate::tui::event::TemplateVersionRow;
 use crate::tui::{theme, widgets};
 use librefang_types::agent::ToolProfile;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -205,6 +206,11 @@ pub struct TemplatesState {
     pub loading: bool,
     pub tick: usize,
     pub status_msg: String,
+    pub version_history: Vec<TemplateVersionRow>,
+    pub history_error: Option<String>,
+    pub showing_history: bool,
+    pub history_list: ListState,
+    pub history_name: String,
 }
 
 pub enum TemplatesAction {
@@ -213,6 +219,12 @@ pub enum TemplatesAction {
     SpawnTemplate {
         name: String,
         source: TemplateSource,
+    },
+    RestoreFromRegistry {
+        name: String,
+    },
+    ShowVersionHistory {
+        name: String,
     },
     /// Promote the selected manifest-backed agent type to the registry.
     PromoteTemplate {
@@ -233,6 +245,11 @@ impl TemplatesState {
             loading: false,
             tick: 0,
             status_msg: String::new(),
+            version_history: Vec::new(),
+            history_error: None,
+            showing_history: false,
+            history_list: ListState::default(),
+            history_name: String::new(),
         };
         state.list_state.select(Some(0));
         state
@@ -292,6 +309,28 @@ impl TemplatesState {
             return TemplatesAction::Continue;
         }
 
+        if self.showing_history {
+            let total = self.version_history.len();
+            match key.code {
+                KeyCode::Esc => {
+                    self.showing_history = false;
+                    self.history_error = None;
+                }
+                KeyCode::Up | KeyCode::Char('k') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = if i == 0 { total - 1 } else { i - 1 };
+                    self.history_list.select(Some(next));
+                }
+                KeyCode::Down | KeyCode::Char('j') if total > 0 => {
+                    let i = self.history_list.selected().unwrap_or(0);
+                    let next = (i + 1) % total;
+                    self.history_list.select(Some(next));
+                }
+                _ => {}
+            }
+            return TemplatesAction::Continue;
+        }
+
         let total = self.filtered.len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') if total > 0 => {
@@ -340,6 +379,29 @@ impl TemplatesState {
                 }
             }
             KeyCode::Char('r') => return TemplatesAction::Refresh,
+            KeyCode::Char('R') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        if t.source == TemplateSource::Manifest {
+                            return TemplatesAction::RestoreFromRegistry {
+                                name: t.name.clone(),
+                            };
+                        }
+                        self.status_msg = crate::i18n::t("tui-templates-restore-custom-only");
+                    }
+                }
+            }
+            KeyCode::Char('v') => {
+                if let Some(sel) = self.list_state.selected() {
+                    if let Some(&idx) = self.filtered.get(sel) {
+                        let t = &self.templates[idx];
+                        return TemplatesAction::ShowVersionHistory {
+                            name: t.name.clone(),
+                        };
+                    }
+                }
+            }
             _ => {}
         }
         TemplatesAction::Continue
@@ -354,6 +416,11 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
         area,
         &format!("{} {}", "\u{25a2}", crate::i18n::t("tui-templates-title")),
     );
+
+    if state.showing_history {
+        draw_version_history(f, inner, state);
+        return;
+    }
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // header + category filter
@@ -523,6 +590,85 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
             chunks[3],
         );
     }
+}
+
+fn draw_version_history(f: &mut Frame, area: Rect, state: &mut TemplatesState) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(area);
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                format!(
+                    "  {}",
+                    crate::i18n::t_args(
+                        "tui-templates-history-title",
+                        &[("name", &state.history_name)],
+                    )
+                ),
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                format!(
+                    "  {:<40} {:<24} {}",
+                    crate::i18n::t("tui-templates-history-col-id"),
+                    crate::i18n::t("tui-templates-history-col-created"),
+                    crate::i18n::t("tui-templates-history-col-source")
+                ),
+                theme::table_header(),
+            )]),
+        ]),
+        chunks[0],
+    );
+
+    if let Some(err) = &state.history_error {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t_args(
+                "tui-templates-history-error",
+                &[("detail", err)],
+            )),
+            chunks[1],
+        );
+    } else if state.version_history.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-templates-history-empty")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .version_history
+            .iter()
+            .map(|row| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<40}", widgets::truncate(&row.id, 39)),
+                        Style::default().fg(theme::YELLOW),
+                    ),
+                    Span::styled(
+                        format!(" {:<24}", widgets::truncate(&row.timestamp, 23)),
+                        theme::dim_style(),
+                    ),
+                    Span::styled(
+                        format!(" {}", row.change_source),
+                        Style::default().fg(theme::BLUE),
+                    ),
+                ]))
+            })
+            .collect();
+        let list = widgets::themed_list(items);
+        f.render_stateful_widget(list, chunks[1], &mut state.history_list);
+    }
+
+    f.render_widget(
+        widgets::hint_bar(&crate::i18n::t("tui-templates-history-hints")),
+        chunks[2],
+    );
 }
 
 /// `i18n::t` renders an unknown key as `[key]`, so a bare `rendered == key` comparison never fires.
@@ -750,5 +896,91 @@ mod tests {
             "\"default\" means \"inherit the daemon's provider\", not a provider id"
         );
         assert!(!state.provider_configured("openai"));
+    }
+
+    #[test]
+    fn restore_key_on_a_builtin_refuses_and_stays() {
+        let mut state = TemplatesState::new();
+        // `new()` selects the first row, and every builtin row refuses the restore.
+        assert_eq!(
+            state.templates[state.filtered[0]].source,
+            TemplateSource::Builtin
+        );
+        let action = state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(matches!(action, TemplatesAction::Continue));
+        assert_eq!(
+            state.status_msg,
+            crate::i18n::t("tui-templates-restore-custom-only")
+        );
+    }
+
+    #[test]
+    fn restore_key_on_a_manifest_row_returns_the_restore_action() {
+        let mut state = TemplatesState::new();
+        state.set_manifest_templates(vec![TemplateInfo {
+            name: "payroll".to_string(),
+            description: "operator type".to_string(),
+            category: MANIFEST_CATEGORY.to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            source: TemplateSource::Manifest,
+        }]);
+        let idx = state
+            .templates
+            .iter()
+            .position(|t| t.name == "payroll")
+            .expect("manifest row exists");
+        let pos = state
+            .filtered
+            .iter()
+            .position(|&i| i == idx)
+            .expect("payroll is reachable");
+        state.list_state.select(Some(pos));
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)),
+            TemplatesAction::RestoreFromRegistry { .. }
+        ));
+    }
+
+    #[test]
+    fn version_history_key_returns_the_history_action() {
+        let mut state = TemplatesState::new();
+        assert!(matches!(
+            state.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)),
+            TemplatesAction::ShowVersionHistory { .. }
+        ));
+    }
+
+    #[test]
+    fn escape_leaves_history_and_clears_the_error() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.history_error = Some("boom".to_string());
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!state.showing_history);
+        assert!(state.history_error.is_none());
+    }
+
+    #[test]
+    fn j_and_k_wrap_inside_version_history() {
+        let mut state = TemplatesState::new();
+        state.showing_history = true;
+        state.version_history = vec![
+            TemplateVersionRow {
+                id: "1".to_string(),
+                timestamp: "t1".to_string(),
+                change_source: "create".to_string(),
+            },
+            TemplateVersionRow {
+                id: "2".to_string(),
+                timestamp: "t2".to_string(),
+                change_source: "update".to_string(),
+            },
+        ];
+        state.history_list.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(state.history_list.selected(), Some(1));
+        state.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(state.history_list.selected(), Some(0));
     }
 }

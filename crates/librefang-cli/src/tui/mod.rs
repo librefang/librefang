@@ -718,6 +718,41 @@ impl App {
                     );
                 }
             },
+            AppEvent::RegistryRestoreResult { name, ok, message } => {
+                self.templates.status_msg = if ok {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-ok",
+                        &[("name", &name), ("message", &message)],
+                    )
+                } else {
+                    crate::i18n::t_args(
+                        "tui-templates-restore-fail",
+                        &[("name", &name), ("message", &message)],
+                    )
+                };
+                if ok {
+                    self.refresh_templates();
+                }
+            }
+            AppEvent::TemplateHistoryLoaded { name, result } => {
+                self.templates.history_name = name;
+                self.templates.version_history.clear();
+                self.templates.history_error = None;
+                match result {
+                    Ok(rows) => {
+                        self.templates.version_history = rows;
+                    }
+                    Err(message) => {
+                        self.templates.history_error = Some(message);
+                    }
+                }
+                self.templates.showing_history = true;
+                self.templates.history_list = ratatui::widgets::ListState::default();
+                if !self.templates.version_history.is_empty() {
+                    self.templates.history_list.select(Some(0));
+                }
+                self.templates.loading = false;
+            }
             AppEvent::AgentTypePromoted { name, result } => match result {
                 Ok(pr_url) => {
                     self.templates.status_msg =
@@ -2236,6 +2271,25 @@ impl App {
                     }
                 }
             },
+            templates::TemplatesAction::RestoreFromRegistry { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-restoring", &[("name", &name)]);
+                    event::spawn_restore_from_registry(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-restore-daemon-only");
+                }
+            }
+            templates::TemplatesAction::ShowVersionHistory { name } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    self.templates.status_msg =
+                        crate::i18n::t_args("tui-templates-history-loading", &[("name", &name)]);
+                    self.templates.loading = true;
+                    event::spawn_fetch_template_history(backend, name, self.event_tx.clone());
+                } else {
+                    self.templates.status_msg = crate::i18n::t("tui-templates-history-daemon-only");
+                }
+            }
             templates::TemplatesAction::PromoteTemplate { name } => {
                 self.templates.status_msg =
                     crate::i18n::t_args("tui-templates-promoting", &[("name", &name)]);
