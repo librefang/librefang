@@ -16700,7 +16700,7 @@
           },
           "has_policy": {
             "type": "boolean",
-            "description": "True when the user has any per-user tool policy configured —\neither an allow/deny list, tool-category overrides, or\nper-channel rules. Summary only; the contents stay behind\n`/api/users/{name}/policy`."
+            "description": "True when the user has any per-user tool policy configured — either an allow/deny list, tool-category overrides, or per-channel rules.\nSummary only; the contents are served by `GET /api/users/{name}/policy`, which is on the same generic GET rule as this list rather than behind a higher role floor — see the module docs."
           },
           "name": {
             "type": "string"
