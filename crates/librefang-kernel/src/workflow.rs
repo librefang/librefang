@@ -8061,6 +8061,93 @@ prompt_template = "go"
         );
     }
 
+    /// Same property as `concurrent_register_unique_name_admits_exactly_one`
+    /// but with persistence enabled: exactly one definition must survive on
+    /// disk, no `.tmp` stragglers, and a reload must see only the winner.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_unique_name_persists_exactly_one() {
+        const CALLERS: usize = 32;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = WorkflowEngine::new_with_persistence(tmp.path());
+        let mut handles = Vec::with_capacity(CALLERS);
+        for _ in 0..CALLERS {
+            let engine = engine.clone();
+            handles.push(tokio::spawn(async move {
+                engine.register_unique_name(named_workflow("deploy")).await
+            }));
+        }
+
+        let mut winners = Vec::new();
+        let mut loser_incumbents = Vec::new();
+        for h in handles {
+            match h.await.expect("registration task must not panic") {
+                Ok(id) => winners.push(id),
+                Err(RegisterWorkflowError::NameTaken(taken)) => {
+                    assert_eq!(taken.name, "deploy");
+                    loser_incumbents.push(taken.existing_id);
+                }
+                Err(other) => panic!("unexpected error variant: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            winners.len(),
+            1,
+            "exactly one caller may win, got {winners:?}"
+        );
+        assert_eq!(
+            loser_incumbents.len(),
+            CALLERS - 1,
+            "every other caller must be rejected with a collision"
+        );
+        assert!(
+            loser_incumbents.iter().all(|id| *id == winners[0]),
+            "every rejected caller must point at the same incumbent"
+        );
+        assert_eq!(
+            count_named(&engine, "deploy").await,
+            1,
+            "the registry must hold exactly one 'deploy'"
+        );
+
+        let workflows_dir = tmp.path().join("workflows");
+        let on_disk: Vec<_> = std::fs::read_dir(&workflows_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let json_files: Vec<_> = on_disk
+            .iter()
+            .filter(|e| {
+                e.path()
+                    .to_str()
+                    .is_some_and(|s| s.ends_with(".workflow.json"))
+            })
+            .collect();
+        assert_eq!(
+            json_files.len(),
+            1,
+            "exactly one definition file on disk, got: {json_files:?}"
+        );
+        let tmp_files: Vec<_> = on_disk
+            .iter()
+            .filter(|e| e.path().to_str().is_some_and(|s| s.ends_with(".tmp")))
+            .collect();
+        assert!(
+            tmp_files.is_empty(),
+            "no .tmp stragglers after the race: {tmp_files:?}"
+        );
+
+        let reloaded = WorkflowEngine::new_with_persistence(tmp.path());
+        let loaded = tokio::task::block_in_place(|| reloaded.load_from_dir_sync(&workflows_dir));
+        assert_eq!(loaded, 1, "reload must find exactly one workflow");
+        assert_eq!(
+            reloaded.get_workflow(winners[0]).await.map(|w| w.name),
+            Some("deploy".to_string()),
+            "the reloaded workflow must be the winner"
+        );
+    }
+
     // Multi-thread flavor because `load_from_dir_sync` uses
     // `blocking_write` on the workflows RwLock, which panics on the default
     // current-thread runtime ("Cannot block the current thread from within
