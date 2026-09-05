@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     Arc, MutexGuard as StdMutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, warn};
@@ -536,6 +536,12 @@ impl StderrTranslator {
     }
 }
 
+/// Wall-clock budget for pushing one command line into the child's stdin.
+///
+/// The write itself is bounded, not just a later reply wait: a sidecar that stays alive but stops draining its stdin fills the OS pipe buffer (64 KiB on Linux and macOS), and an unbounded `write_all` would then block forever while holding the shared stdin mutex — wedging every later `send`, `send_in_thread`, `typing` and even the `Shutdown` that `stop()` writes, so a channel reload could not recover the adapter either.
+/// Ten seconds is far beyond the microseconds a healthy adapter needs and well inside the bridge's own dispatch budgets.
+const STDIN_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Write one newline-delimited JSON command to the child's stdin.
 /// Shared by `SidecarAdapter::send_command` and the stdout reader
 /// (which needs to emit `ReadyAck` without a `&self`).
@@ -543,15 +549,38 @@ async fn write_command(
     stdin_tx: &StdinHandle,
     cmd: &SidecarCommand,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    write_command_with_timeout(stdin_tx, cmd, STDIN_WRITE_TIMEOUT).await
+}
+
+/// `write_command` with an explicit write budget, so the timeout path is testable without waiting out [`STDIN_WRITE_TIMEOUT`].
+async fn write_command_with_timeout(
+    stdin_tx: &StdinHandle,
+    cmd: &SidecarCommand,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut guard = stdin_tx.lock().await;
     let stdin = guard
         .as_mut()
         .ok_or("Sidecar process stdin not available")?;
     let mut line = serde_json::to_string(cmd)?;
     line.push('\n');
-    stdin.write_all(line.as_bytes()).await?;
-    stdin.flush().await?;
-    Ok(())
+    // Bound to a `let` first: a `match` on the awaited call would extend the future temporary — and with it the mutable borrow of `guard` — across the arms, so the timeout arm could not clear the handle.
+    let outcome = librefang_subprocess::write_line_timeout(stdin, line.as_bytes(), timeout).await;
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                // Drop the wedged pipe rather than leave it in place: the child sees EOF and, if it exits on that, the supervisor's `ReaderExit::ChildClosed` path respawns it.
+                // A child that ignores EOF too is still no longer able to wedge the adapter — every later command fails fast on the missing handle instead of queueing behind a mutex that never unlocks.
+                *guard = None;
+                warn!(
+                    timeout_secs = timeout.as_secs_f64(),
+                    "Sidecar stdin write timed out; closing stdin so later commands fail fast instead of queueing behind the write lock — the supervisor respawns the adapter only if the child exits on that EOF"
+                );
+            }
+            Err(Box::new(e))
+        }
+    }
 }
 
 /// Extract the lowercased host from a URL string, stripping scheme,
@@ -3684,6 +3713,55 @@ mod tests {
 
         assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
         assert!(adapter.supervisor.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_command_times_out_and_closes_a_wedged_stdin() {
+        // A sidecar that stays alive but never drains its stdin used to wedge the adapter permanently: once the pipe buffer filled, the unbounded `write_all` blocked while holding the stdin mutex, so every later command — including the `Shutdown` that `stop()` writes — queued behind a lock that never unlocked.
+        let Some(python) = which_python() else {
+            return;
+        };
+        let mut child = Command::new(&python)
+            .arg("-c")
+            .arg("import time; time.sleep(30)")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn a child that ignores its stdin");
+        let stdin_tx: StdinHandle =
+            Arc::new(Mutex::new(Some(child.stdin.take().expect("child stdin"))));
+
+        // Comfortably past any platform pipe buffer (64 KiB on Linux and macOS), so the write cannot complete into the buffer alone.
+        let cmd = SidecarCommand::Send {
+            params: SidecarSendParams {
+                channel_id: "c".to_string(),
+                text: "x".repeat(4 * 1024 * 1024),
+                content: None,
+                thread_id: None,
+                user: ChannelUser {
+                    platform_id: "c".to_string(),
+                    display_name: "U".to_string(),
+                    librefang_user: None,
+                },
+            },
+        };
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            write_command_with_timeout(&stdin_tx, &cmd, std::time::Duration::from_millis(200)),
+        )
+        .await
+        .expect("the write must give up rather than block on a full stdin pipe");
+        assert!(
+            outcome.is_err(),
+            "a write that never drains must surface as an error"
+        );
+
+        // The wedged pipe is closed, so the next command fails fast on the missing handle instead of parking on the mutex.
+        assert!(stdin_tx.lock().await.is_none());
+        let _ = child.kill().await;
     }
 
     #[tokio::test]

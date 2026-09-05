@@ -190,6 +190,11 @@ Backpressure: the inbound stream is a bounded `mpsc(message_buffer)`;
 user message) or `"drop_newest"` (shed load for high-volume
 notification adapters).
 
+That backpressure reaches the child, and it is worth knowing how far.
+The bridge's per-adapter dispatch cap holds a permit before it pulls the next message off the stream, so a saturated adapter stops being read, `message_buffer` fills, and under `"block"` the stdout reader parks in the channel send — which means it stops draining the child's stdout.
+A child that multiplexes (any SDK-based adapter, or anything with a reader thread) simply blocks on its own stdout write and resumes; a strictly single-threaded child that stops reading stdin while blocked on stdout will instead see its next inbound command hit the ten-second stdin write timeout, which closes stdin rather than wedging the adapter behind the write lock forever.
+`"block"` is still the right default for chat — slowing the producer beats dropping a user message — and `"drop_newest"` remains the escape hatch for adapters that are high-volume and loss-tolerant.
+
 All tunables are per-adapter `[[sidecar_channels]]` config fields
 (`restart`, `restart_initial_backoff_ms`, `restart_max_backoff_ms`,
 `restart_max_retries`, `restart_reset_after_secs`,

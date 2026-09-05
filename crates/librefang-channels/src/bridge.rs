@@ -1151,6 +1151,33 @@ fn sanitizer_text_to_check(content: &ChannelContent) -> Option<String> {
     }
 }
 
+/// Acquire one per-adapter dispatch permit, giving up if the bridge shuts down first.
+///
+/// The permit is taken on the intake loop, *before* a message is handed to a spawned dispatch task, and moved into that task.
+/// That is what makes the per-adapter cap real backpressure: while every permit is out, the intake loop stops polling the adapter stream, so the adapter's own bounded channel and its configured overflow policy decide what happens to the excess.
+/// Acquiring the permit inside the spawned task instead bounded only how many tasks were simultaneously inside `dispatch_message` — the loop still drained the stream at line rate, so every inbound message became a detached, untracked task parked on the permit queue, answered minutes late and lost without a journal entry if the daemon stopped first.
+///
+/// Returns `None` when the shutdown signal fires (or its sender is gone), so the caller breaks out of its loop rather than parking on a queue that shutdown will not drain.
+async fn acquire_dispatch_permit(
+    semaphore: &Arc<tokio::sync::Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    // Checked before the select, not only inside it: a caller that keeps looping after a `None` (the debounce loop's flush arm does) would otherwise park on the semaphore with no escape, because `changed()` only resolves on a *new* value and this receiver has already observed the shutdown.
+    if *shutdown.borrow() {
+        return None;
+    }
+    loop {
+        tokio::select! {
+            acquired = semaphore.clone().acquire_owned() => return acquired.ok(),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush_debounced(
     debouncer: &MessageDebouncer,
@@ -1161,7 +1188,8 @@ fn flush_debounced(
     adapter: &Arc<dyn ChannelAdapter>,
     rate_limiter: &ChannelRateLimiter,
     sanitizer: &Arc<InputSanitizer>,
-    semaphore: &Arc<tokio::sync::Semaphore>,
+    // Dispatch permit acquired by the caller before the flush is spawned, so the per-adapter cap applies before the work exists rather than after (see `acquire_dispatch_permit`).
+    permit: tokio::sync::OwnedSemaphorePermit,
     journal: &Option<crate::message_journal::MessageJournal>,
     thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -1173,14 +1201,11 @@ fn flush_debounced(
     let rate_limiter = rate_limiter.clone();
     let sanitizer = Arc::clone(sanitizer);
     let journal = journal.clone();
-    let sem = semaphore.clone();
     let thread_ownership = Arc::clone(thread_ownership);
 
     let join_handle = tokio::spawn(async move {
-        let _permit = match sem.acquire().await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
+        // Held for the whole flush; released when this task ends.
+        let _permit = permit;
 
         if !media.is_empty() {
             // Finish each coalesced attachment's deferred enrichment (image description / audio transcription — LLM round-trips kept off the ingest loop) and concatenate, in arrival order.
@@ -1478,14 +1503,9 @@ impl BridgeManager {
 
     /// Start an adapter: subscribe to its message stream and spawn a dispatch task.
     ///
-    /// Each incoming message is dispatched as a concurrent task so that slow LLM
-    /// calls (10-30s) don't block subsequent messages. This prevents voice/media
-    /// messages sent in quick succession from appearing "lost" — all messages
-    /// begin processing immediately. Per-agent serialization (to prevent session
-    /// corruption) is handled by the kernel's `agent_msg_locks`.
-    ///
-    /// A semaphore limits concurrent dispatch tasks to prevent unbounded memory
-    /// growth under burst traffic.
+    /// Each message is dispatched on its own task, so a slow LLM turn (10-30s) does not stall the messages behind it and voice/media sent in quick succession does not appear "lost"; per-agent serialization, which is what prevents session corruption, is left to the kernel's `agent_msg_locks`.
+    /// Concurrency is capped per adapter at 32 permits, and the permit is taken *before* the next message is pulled off the stream, which makes the cap backpressure rather than a queue: while all 32 are out the adapter stops being read at all, and its own bounded channel plus its configured overflow policy (for a sidecar, `SidecarOverflowPolicy`, default `Block`) decide what happens to the excess.
+    /// So under saturation a message does *not* begin processing immediately — it waits where the platform or the adapter can still see it, instead of becoming a detached task that answers minutes late and is lost without a journal entry if the daemon stops first (see `acquire_dispatch_permit`).
     pub async fn start_adapter(
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
@@ -1569,6 +1589,15 @@ impl BridgeManager {
             let task = tokio::spawn(async move {
                 let mut stream = std::pin::pin!(stream);
                 loop {
+                    // Hold a dispatch permit before pulling the next message off the adapter stream.
+                    // Taking it here rather than inside the spawned task is what turns the cap into backpressure — the loop stops draining the stream while all permits are out, so the adapter's bounded channel and overflow policy handle the excess instead of the daemon accumulating detached tasks that answer minutes late.
+                    let permit = match acquire_dispatch_permit(&semaphore, &mut shutdown).await {
+                        Some(p) => p,
+                        None => {
+                            info!("Shutting down channel adapter {}", adapter_clone.name());
+                            break;
+                        }
+                    };
                     tokio::select! {
                         msg = stream.next() => {
                             match msg {
@@ -1579,13 +1608,10 @@ impl BridgeManager {
                                     let rate_limiter = rate_limiter.clone();
                                     let sanitizer = sanitizer.clone();
                                     let journal = journal.clone();
-                                    let sem = semaphore.clone();
                                     let thread_ownership = Arc::clone(&thread_ownership);
                                     tokio::spawn(async move {
-                                        let _permit = match sem.acquire().await {
-                                            Ok(p) => p,
-                                            Err(_) => return,
-                                        };
+                                        // Held for the whole dispatch; released when this task ends.
+                                        let _permit = permit;
                                         dispatch_message(
                                             &message,
                                             &handle,
@@ -1621,6 +1647,8 @@ impl BridgeManager {
             let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
 
             let mut typing_rx = adapter_clone.typing_events();
+            // A second receiver for the flush arm: the select's own shutdown branch holds `&mut shutdown` for as long as the loop lives, so the permit wait cannot borrow it.
+            let mut shutdown_for_flush = shutdown.clone();
 
             let task = tokio::spawn(async move {
                 let mut stream = std::pin::pin!(stream);
@@ -1643,7 +1671,10 @@ impl BridgeManager {
                                     let keys: Vec<String> = buffers.keys().cloned().collect();
                                     let mut handles = Vec::new();
                                     for key in keys {
-                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership) {
+                                        let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                                            break;
+                                        };
+                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, permit, &journal, &thread_ownership) {
                                             handles.push(handle);
                                         }
                                     }
@@ -1678,14 +1709,22 @@ impl BridgeManager {
                             debouncer.on_typing(&sender_key, event.is_typing, &mut buffers);
                         }
                         Some(key) = flush_rx.recv() => {
-                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership);
+                            // Same ordering as the fast path: the permit is taken before the flush task exists, so a saturated adapter stops draining its stream instead of stacking up detached tasks.
+                            // The wait has to be shutdown-aware, because awaiting the permit here parks the whole `select!` — including the shutdown branch below — and `stop()` joins this task with no timeout, so an inline wait would let a saturated adapter hold a channel reload for a full dispatch turn.
+                            if let Some(permit) = acquire_dispatch_permit(&semaphore, &mut shutdown_for_flush).await {
+                                let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, permit, &journal, &thread_ownership);
+                            }
+                            // On `None` the flush is skipped and the loop re-enters the select, where this task's own `shutdown` receiver still has the unobserved change and takes the drain path.
                         }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 let keys: Vec<String> = buffers.keys().cloned().collect();
                                 let mut handles = Vec::new();
                                 for key in keys {
-                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership) {
+                                    let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                                        break;
+                                    };
+                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, permit, &journal, &thread_ownership) {
                                         handles.push(handle);
                                     }
                                 }
