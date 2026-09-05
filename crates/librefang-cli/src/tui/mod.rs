@@ -543,6 +543,14 @@ impl App {
                     Tab::Hands => self.hands.status_msg = err,
                     Tab::Extensions => self.extensions.status_msg = err,
                     Tab::Templates => self.templates.status_msg = err,
+                    // The config editor draws its own status line and its own
+                    // spinner, so a refused write or a failed fetch has to land
+                    // there — on `settings.status_msg` it would be invisible
+                    // behind a spinner that never stops.
+                    Tab::Settings if self.settings.sub == settings::SettingsSub::Config => {
+                        self.settings.config.loading = false;
+                        self.settings.config.status_msg = err;
+                    }
                     Tab::Settings => self.settings.status_msg = err,
                     Tab::Channels => {
                         // `draw_list` renders its spinner unconditionally while
@@ -823,6 +831,17 @@ impl App {
                     self.groups.list_state.select(Some(0));
                 }
                 self.groups.loading = false;
+            }
+            AppEvent::ConfigSectionsLoaded(sections) => {
+                self.settings.config.set_sections(sections);
+            }
+            AppEvent::ConfigValueSaved(path) => {
+                self.settings.config.status_msg =
+                    crate::i18n::t_args("tui-mod-config-value-saved", &[("path", &path)]);
+                // Re-read rather than trust the local copy: `POST /api/config/set`
+                // merges into `config.toml`, and the value that comes back is the
+                // one the daemon actually kept.
+                self.refresh_settings_config();
             }
             AppEvent::BackupsLoaded(backups) => {
                 self.settings.backups = backups;
@@ -1606,6 +1625,13 @@ impl App {
         }
     }
 
+    fn refresh_settings_config(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.config.loading = true;
+            event::spawn_fetch_config_sections(backend, self.event_tx.clone());
+        }
+    }
+
     fn refresh_groups(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.groups.loading = true;
@@ -2313,6 +2339,12 @@ impl App {
             settings::SettingsAction::RestoreBackup(body) => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_restore_backup(backend, body, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::RefreshConfig => self.refresh_settings_config(),
+            settings::SettingsAction::SaveConfigValue { path, value } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_config_value(backend, path, value, self.event_tx.clone());
                 }
             }
         }

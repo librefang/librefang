@@ -2550,3 +2550,27 @@ tui-memory-config-requires-daemon = 메모리 설정은 데몬 API에서 가져�
 tui-memory-config-fetch-failed = 메모리 설정을 읽을 수 없습니다: { $error }
 tui-goals-run-requires-daemon = 실행 상태는 데몬 API에서 가져옵니다 — TUI가 인프로세스로 연결된 경우 사용할 수 없습니다.
 tui-goals-run-fetch-failed = { $id }의 실행 상태를 읽을 수 없습니다: { $error }
+
+# config_editor.rs — 범용 설정 섹션 편집기 (#8165)
+tui-settings-tab-config = 5 구성
+tui-settings-hints-config =   [↑↓] 탐색  [Enter] 섹션 열기  [r] 새로고침
+tui-settings-hints-config-fields =   [↑↓] 탐색  [Enter] 편집 / 전환  [Esc] 뒤로  [r] 새로고침
+tui-settings-config-loading = 구성을 불러오는 중…
+tui-settings-config-empty = 사용할 수 있는 구성 섹션이 없습니다. 데몬이 실행 중이어야 합니다.
+tui-settings-config-select-section = 왼쪽에서 섹션을 고른 뒤 [Enter]를 눌러 설정을 확인하세요.
+tui-settings-config-header-section = 섹션
+tui-settings-config-header-setting = 설정
+tui-settings-config-header-value = 값
+tui-settings-config-unset = 설정되지 않음
+tui-settings-config-on = 켬
+tui-settings-config-off = 끔
+tui-settings-config-readonly = 읽기 전용
+tui-settings-config-readonly-msg = { $path }은(는) 여기서 읽기 전용입니다 — ~/.librefang/config.toml을 직접 편집하세요.
+tui-settings-config-complex = { $path }은(는) 목록 또는 테이블입니다 — ~/.librefang/config.toml을 직접 편집하세요.
+tui-settings-config-invalid = { $path }에 유효한 값이 아닙니다.
+tui-settings-config-prompt = { $path } 설정 (비우면 삭제):
+tui-mod-config-value-saved = { $path } 저장됨
+tui-event-config-schema-failed = 구성 스키마를 불러오지 못했습니다
+tui-event-config-failed = 현재 구성을 불러오지 못했습니다
+tui-event-config-set-failed = { $path }을(를) 저장하지 못했습니다
+tui-event-config-need-daemon = 구성 편집에는 실행 중인 데몬이 필요합니다

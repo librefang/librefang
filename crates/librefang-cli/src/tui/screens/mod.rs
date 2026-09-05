@@ -7,6 +7,10 @@ pub mod audit;
 pub mod channels;
 pub mod chat;
 pub mod comms;
+// Generic config-section editor, driven by `GET /api/config/schema` and
+// `POST /api/config/set` — the same pair the dashboard's ConfigPage uses
+// (#8165). Rendered as a sub-tab of `settings`, which owns its state.
+pub mod config_editor;
 pub mod dashboard;
 pub mod extensions;
 pub mod free_provider_guide;

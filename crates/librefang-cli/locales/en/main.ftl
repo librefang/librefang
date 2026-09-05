@@ -2551,3 +2551,27 @@ tui-memory-config-requires-daemon = Memory settings come from the daemon API —
 tui-memory-config-fetch-failed = Could not read the memory settings: { $error }
 tui-goals-run-requires-daemon = Run state comes from the daemon API — not available when the TUI is attached in-process.
 tui-goals-run-fetch-failed = Could not read the run state for { $id }: { $error }
+
+# config_editor.rs — generic config-section editor (#8165)
+tui-settings-tab-config = 5 Configuration
+tui-settings-hints-config =   [↑↓] Navigate  [Enter] Open section  [r] Refresh
+tui-settings-hints-config-fields =   [↑↓] Navigate  [Enter] Edit / Toggle  [Esc] Back  [r] Refresh
+tui-settings-config-loading = Loading configuration…
+tui-settings-config-empty = No configuration sections available. The daemon must be running.
+tui-settings-config-select-section = Pick a section on the left and press [Enter] to see its settings.
+tui-settings-config-header-section = Section
+tui-settings-config-header-setting = Setting
+tui-settings-config-header-value = Value
+tui-settings-config-unset = not set
+tui-settings-config-on = on
+tui-settings-config-off = off
+tui-settings-config-readonly = read-only
+tui-settings-config-readonly-msg = { $path } is read-only here — edit ~/.librefang/config.toml directly to change it.
+tui-settings-config-complex = { $path } holds a list or a table — edit ~/.librefang/config.toml directly to change it.
+tui-settings-config-invalid = That is not a valid value for { $path }.
+tui-settings-config-prompt = Set { $path } (empty clears it):
+tui-mod-config-value-saved = Saved { $path }
+tui-event-config-schema-failed = Failed to load the configuration schema
+tui-event-config-failed = Failed to load the current configuration
+tui-event-config-set-failed = Failed to save { $path }
+tui-event-config-need-daemon = Editing configuration needs a running daemon

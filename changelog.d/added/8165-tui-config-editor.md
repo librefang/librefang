@@ -1,0 +1,5 @@
+The TUI can now edit configuration sections, under a new **Configuration** sub-tab of the Settings screen (`5`).
+It holds no field list of its own: sections, field names, types and the writable/read-only verdict all come from `GET /api/config/schema`, and every write goes to `POST /api/config/set` — the same pair the dashboard's ConfigPage uses — so a field added to `KernelConfig` appears in the terminal without a TUI change, and the two surfaces cannot drift on which paths are writable.
+This closes a gap that was easiest to see with registry promotion: `skills.registry_repo` steers the "Propose to Registry" flow and was settable from the dashboard and from `POST /api/config/set`, while an operator working over SSH had no way to set it short of hand-editing `config.toml` and reloading the daemon.
+Settings the server marks non-writable render read-only rather than offering an edit that comes back `403`, lists and tables stay edit-on-disk, and clearing a value removes the key so the field falls back to its compiled default.
+(#8184) (@DaBlitzStein)

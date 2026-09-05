@@ -16,6 +16,7 @@ use std::time::Duration;
 use super::screens::{
     audit::AuditEntry,
     channels::{ChannelAdapterInfo, ChannelFieldInfo, ChannelInstance, ConfigureRequest},
+    config_editor::{parse_config_sections, ConfigSection},
     dashboard::AuditRow,
     extensions::{ExtensionHealthInfo, ExtensionInfo},
     goals::GoalInfo,
@@ -249,6 +250,10 @@ pub enum AppEvent {
     ModelLimitsSaved(String),
     /// One model's operator capacity limits were dropped back to the catalog.
     ModelLimitsReset(String),
+    /// Config sections resolved from the schema plus the live values (#8165).
+    ConfigSectionsLoaded(Vec<ConfigSection>),
+    /// One `POST /api/config/set` write landed; carries the config path.
+    ConfigValueSaved(String),
     /// Backup archives listed.
     BackupsLoaded(Vec<BackupInfo>),
     /// A new archive was written.
@@ -3664,6 +3669,87 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 }
 
 /// Fetch the backup archives the daemon holds.
+/// Load the config editor: the schema that says which sections and fields
+/// exist, and the redacted config that says what they currently hold (#8165).
+///
+/// Both in one thread and one event, because a section list without values
+/// (or values without the writable verdict) is not a state the screen can draw.
+pub fn spawn_fetch_config_sections(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let schema = daemon_response(
+                client.get(format!("{base_url}/api/config/schema")).send(),
+                || crate::i18n::t("tui-event-config-schema-failed"),
+            );
+            let schema: serde_json::Value = match schema {
+                Ok(resp) => resp.json().unwrap_or_default(),
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            let values =
+                daemon_response(client.get(format!("{base_url}/api/config")).send(), || {
+                    crate::i18n::t("tui-event-config-failed")
+                });
+            let values: serde_json::Value = match values {
+                Ok(resp) => resp.json().unwrap_or_default(),
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            let _ = tx.send(AppEvent::ConfigSectionsLoaded(parse_config_sections(
+                &schema, &values,
+            )));
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-config-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Write one config leaf through `POST /api/config/set`.
+///
+/// The path allowlist, the secret scrub and the on-disk merge all live behind
+/// that endpoint, so this is the same write the dashboard performs — including
+/// its refusals, which arrive here as the error text the daemon wrote.
+pub fn spawn_set_config_value(
+    backend: BackendRef,
+    path: String,
+    value: serde_json::Value,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/config/set"))
+                    .json(&serde_json::json!({"path": path, "value": value}))
+                    .send(),
+                || crate::i18n::t_args("tui-event-config-set-failed", &[("path", &path)]),
+            );
+            match outcome {
+                Ok(_) => {
+                    let _ = tx.send(AppEvent::ConfigValueSaved(path));
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-config-need-daemon",
+            )));
+        }
+    });
+}
+
 pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {

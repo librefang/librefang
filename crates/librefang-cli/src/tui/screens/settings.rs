@@ -1,5 +1,6 @@
 //! Settings screen: provider key management, model catalog, tools list, backup archives.
 
+use crate::tui::screens::config_editor;
 use crate::tui::theme;
 use crate::tui::widgets;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -144,6 +145,7 @@ pub enum SettingsSub {
     Models,
     Tools,
     Backups,
+    Config,
 }
 
 pub struct SettingsState {
@@ -156,6 +158,9 @@ pub struct SettingsState {
     pub model_list: ListState,
     pub tool_list: ListState,
     pub backup_list: ListState,
+    /// Generic config-section editor (#8165). Its own sub-tab, and its own
+    /// state, so nothing here has to know which settings exist.
+    pub config: config_editor::ConfigEditorState,
     /// Open restore form, if any. While it is open the sub-tab number keys are
     /// inert, so `Esc` is the documented way back out.
     pub restore: Option<RestoreForm>,
@@ -175,12 +180,22 @@ pub enum SettingsAction {
     RefreshModels,
     RefreshTools,
     RefreshBackups,
-    SaveProviderKey { name: String, key: String },
+    SaveProviderKey {
+        name: String,
+        key: String,
+    },
     DeleteProviderKey(String),
     TestProvider(String),
     CreateBackup,
     DeleteBackup(String),
     RestoreBackup(serde_json::Value),
+    /// Fetch `GET /api/config/schema` + `GET /api/config` for the config editor.
+    RefreshConfig,
+    /// One `POST /api/config/set` write. `value` is `Null` to remove the key.
+    SaveConfigValue {
+        path: String,
+        value: serde_json::Value,
+    },
 }
 
 impl SettingsState {
@@ -195,6 +210,7 @@ impl SettingsState {
             model_list: ListState::default(),
             tool_list: ListState::default(),
             backup_list: ListState::default(),
+            config: config_editor::ConfigEditorState::new(),
             restore: None,
             confirm_delete: false,
             input_buf: String::new(),
@@ -233,6 +249,7 @@ impl SettingsState {
         self.restore = None;
         self.confirm_delete = false;
         self.status_msg.clear();
+        self.config.reset();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
@@ -248,7 +265,7 @@ impl SettingsState {
         // form and the delete confirmation both bind `Esc` (and the
         // confirmation, any other key) to close, so the switch keys are never
         // unreachable for more than one keystroke.
-        if self.restore.is_none() && !self.confirm_delete {
+        if self.restore.is_none() && !self.confirm_delete && !self.config.is_editing() {
             match key.code {
                 KeyCode::Char('1') => {
                     self.switch_sub(SettingsSub::Providers);
@@ -266,6 +283,10 @@ impl SettingsState {
                     self.switch_sub(SettingsSub::Backups);
                     return SettingsAction::RefreshBackups;
                 }
+                KeyCode::Char('5') => {
+                    self.switch_sub(SettingsSub::Config);
+                    return SettingsAction::RefreshConfig;
+                }
                 _ => {}
             }
         }
@@ -275,6 +296,7 @@ impl SettingsState {
             SettingsSub::Models => self.handle_models(key),
             SettingsSub::Tools => self.handle_tools(key),
             SettingsSub::Backups => self.handle_backups(key),
+            SettingsSub::Config => self.config.handle_key(key),
         }
     }
 
@@ -512,6 +534,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
         SettingsSub::Models => draw_models(f, chunks[2], state),
         SettingsSub::Tools => draw_tools(f, chunks[2], state),
         SettingsSub::Backups => draw_backups(f, chunks[2], state),
+        SettingsSub::Config => config_editor::draw(f, chunks[2], &mut state.config, state.tick),
     }
 
     // Hints
@@ -524,8 +547,20 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut SettingsState) {
             crate::i18n::t("tui-settings-hints-restore")
         }
         SettingsSub::Backups => crate::i18n::t("tui-settings-hints-backups"),
+        SettingsSub::Config if state.config.is_editing() => {
+            crate::i18n::t("tui-settings-hints-input")
+        }
+        SettingsSub::Config if state.config.expanded.is_some() => {
+            crate::i18n::t("tui-settings-hints-config-fields")
+        }
+        SettingsSub::Config => crate::i18n::t("tui-settings-hints-config"),
     };
-    if state.sub == SettingsSub::Backups {
+    if state.sub == SettingsSub::Config {
+        f.render_widget(
+            widgets::status_or_hint(&state.config.status_msg, &hint_text),
+            chunks[3],
+        );
+    } else if state.sub == SettingsSub::Backups {
         f.render_widget(
             widgets::confirm_or_status_or_hint(
                 state.confirm_delete,
@@ -554,6 +589,10 @@ fn draw_sub_tabs(f: &mut Frame, area: Rect, active: SettingsSub) {
         (
             SettingsSub::Backups,
             crate::i18n::t("tui-settings-tab-backups"),
+        ),
+        (
+            SettingsSub::Config,
+            crate::i18n::t("tui-settings-tab-config"),
         ),
     ];
     let mut spans = vec![Span::raw("  ")];
@@ -1187,6 +1226,70 @@ mod tests {
             _ => panic!("y must confirm the delete"),
         }
         assert!(!state.confirm_delete);
+    }
+
+    #[test]
+    fn the_fifth_number_key_opens_the_config_tab_and_loads_it() {
+        let mut state = SettingsState::new();
+        let action = state.handle_key(key(KeyCode::Char('5')));
+        assert!(state.sub == SettingsSub::Config);
+        assert!(matches!(action, SettingsAction::RefreshConfig));
+    }
+
+    /// The config editor's value prompt takes typed characters, so `1`-`5`
+    /// must reach the buffer rather than switching sub-tab out from under it.
+    #[test]
+    fn an_open_config_prompt_holds_the_sub_tab_switch_keys() {
+        let mut state = SettingsState::new();
+        state.handle_key(key(KeyCode::Char('5')));
+        state
+            .config
+            .set_sections(vec![config_editor::ConfigSection {
+                key: "skills".to_string(),
+                fields: vec![config_editor::ConfigField {
+                    name: "registry_repo".to_string(),
+                    path: "skills.registry_repo".to_string(),
+                    kind: config_editor::FieldKind::Text,
+                    value: serde_json::Value::Null,
+                    writable: true,
+                    options: Vec::new(),
+                }],
+            }]);
+        state.handle_key(key(KeyCode::Enter));
+        state.handle_key(key(KeyCode::Enter));
+        assert!(
+            state.config.is_editing(),
+            "Enter must open the value prompt"
+        );
+
+        state.handle_key(key(KeyCode::Char('1')));
+        assert!(
+            state.sub == SettingsSub::Config,
+            "the open prompt must keep the keystroke"
+        );
+        assert_eq!(state.config.input.as_deref(), Some("1"));
+    }
+
+    /// `Esc` is the one keystroke that gives the switch keys back, exactly as
+    /// it is for the restore form — and `switch_sub` then drops the editor's
+    /// modal state so the next visit lands on the group list.
+    #[test]
+    fn esc_closes_the_config_prompt_and_returns_the_switch_keys() {
+        let mut state = SettingsState::new();
+        state.sub = SettingsSub::Config;
+        state.config.expanded = Some(0);
+        state.config.input = Some("half-typed".to_string());
+
+        state.handle_key(key(KeyCode::Esc));
+        assert!(!state.config.is_editing(), "Esc must close the prompt");
+
+        let action = state.handle_key(key(KeyCode::Char('1')));
+        assert!(state.sub == SettingsSub::Providers);
+        assert!(matches!(action, SettingsAction::RefreshProviders));
+        assert!(
+            state.config.expanded.is_none(),
+            "leaving must return the editor to its group list"
+        );
     }
 
     #[test]

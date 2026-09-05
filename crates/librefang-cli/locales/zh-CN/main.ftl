@@ -2505,3 +2505,27 @@ tui-memory-config-requires-daemon = 记忆设置来自守护进程 API —— TU
 tui-memory-config-fetch-failed = 无法读取记忆设置：{ $error }
 tui-goals-run-requires-daemon = 运行状态来自守护进程 API —— TUI 以进程内方式接入时不可用。
 tui-goals-run-fetch-failed = 无法读取 { $id } 的运行状态：{ $error }
+
+# config_editor.rs —— 通用配置分区编辑器 (#8165)
+tui-settings-tab-config = 5 配置
+tui-settings-hints-config =   [↑↓] 导航  [Enter] 打开分区  [r] 刷新
+tui-settings-hints-config-fields =   [↑↓] 导航  [Enter] 编辑 / 切换  [Esc] 返回  [r] 刷新
+tui-settings-config-loading = 正在加载配置…
+tui-settings-config-empty = 没有可用的配置分区。守护进程必须正在运行。
+tui-settings-config-select-section = 在左侧选择一个分区并按 [Enter] 查看其设置。
+tui-settings-config-header-section = 分区
+tui-settings-config-header-setting = 设置项
+tui-settings-config-header-value = 值
+tui-settings-config-unset = 未设置
+tui-settings-config-on = 开
+tui-settings-config-off = 关
+tui-settings-config-readonly = 只读
+tui-settings-config-readonly-msg = { $path } 在此处为只读 —— 请直接编辑 ~/.librefang/config.toml。
+tui-settings-config-complex = { $path } 保存的是列表或表 —— 请直接编辑 ~/.librefang/config.toml。
+tui-settings-config-invalid = 这不是 { $path } 的有效值。
+tui-settings-config-prompt = 设置 { $path }（留空则清除）：
+tui-mod-config-value-saved = 已保存 { $path }
+tui-event-config-schema-failed = 无法加载配置架构
+tui-event-config-failed = 无法加载当前配置
+tui-event-config-set-failed = 无法保存 { $path }
+tui-event-config-need-daemon = 编辑配置需要正在运行的守护进程
