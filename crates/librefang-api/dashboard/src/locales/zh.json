@@ -860,6 +860,8 @@
       "events_tail": "事件 · 尾部",
       "no_logs": "此智能体还没有记录的轮次。",
       "crashed_title": "{{name}} 处于错误状态",
+      "manifest_history": "清单历史",
+      "no_history": "尚未记录配置更改。",
       "proactive_conditions": "条件（逗号分隔）",
       "proactive_conditions_hint": "这将替换完整的条件列表——不会预填当前内容。使用完整的清单编辑器查看当前生效的内容。",
       "proactive_conditions_placeholder": "例如 agent.tags contains 'urgent'"
@@ -870,7 +872,8 @@
       "skills": "技能",
       "tools": "工具",
       "schedule": "计划",
-      "logs": "日志"
+      "logs": "日志",
+      "history": "历史"
     },
     "configure": "配置",
     "select_an_agent": "选择智能体",

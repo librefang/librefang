@@ -862,7 +862,9 @@
       "tools_reset_to_all": "Reset to use all tools",
       "events_tail": "events · tail",
       "no_logs": "No turns recorded yet for this agent.",
-      "crashed_title": "{{name}} is in error state"
+      "crashed_title": "{{name}} is in error state",
+      "manifest_history": "Manifest history",
+      "no_history": "No config changes recorded yet."
     },
     "tab": {
       "conversation": "Conversation",
@@ -870,7 +872,8 @@
       "skills": "Skills",
       "tools": "Tools",
       "schedule": "Schedule",
-      "logs": "Logs"
+      "logs": "Logs",
+      "history": "History"
     },
     "configure": "Configure",
     "select_an_agent": "Select an agent",

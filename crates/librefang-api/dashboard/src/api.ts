@@ -1518,6 +1518,26 @@ export async function listAgentEvents(
   return data.events ?? [];
 }
 
+/** One snapshot in the agent manifest version history. */
+export interface ManifestVersionEntry {
+  id: number;
+  agent_id: string;
+  agent_name: string;
+  timestamp: string;
+  manifest_toml: string;
+  change_source: string;
+}
+
+export async function getAgentManifestHistory(
+  agentId: string,
+  limit = 30,
+): Promise<ManifestVersionEntry[]> {
+  const data = await get<{ versions?: ManifestVersionEntry[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/manifest-history?limit=${limit}`,
+  );
+  return data.versions ?? [];
+}
+
 /**
  * PATCH /api/agents/{id}/config.
  *

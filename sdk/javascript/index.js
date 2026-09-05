@@ -270,6 +270,10 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
   }
 
+  async listAgentManifestHistory(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/manifest-history`, undefined, query);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }

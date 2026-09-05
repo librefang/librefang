@@ -143,6 +143,7 @@ export {
   getAgentSkills,
   // per-agent MCP server assignment — read (#7713)
   getAgentMcpServers,
+  getAgentManifestHistory,
   getAgentTemplateToml,
   getTemplateHistory,
   // overview

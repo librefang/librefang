@@ -114,8 +114,13 @@ impl LibreFangKernel {
                 }
                 if let Err(error) = atomic_write_toml(toml_path, &toml_str) {
                     warn!(agent = %entry.name, "Failed to persist manifest to disk: {error}");
+                    // History must not go silent exactly when an operator needs it: the
+                    // in-memory manifest has already changed, so snapshot it with a
+                    // change_source that marks the disk write as failed.
+                    self.record_manifest_version(entry, &toml_str, "update-persist-failed");
                 } else {
                     debug!(agent = %entry.name, path = %toml_path.display(), "Persisted manifest to disk");
+                    self.record_manifest_version(entry, &toml_str, "update");
                 }
             }
             // Not a cosmetic warning: boot reconciliation re-syncs each agent from its on-disk
@@ -959,6 +964,42 @@ impl LibreFangKernel {
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
         Ok(())
+    }
+
+    /// Best-effort record of a manifest snapshot for version history.
+    ///
+    /// `change_source` vocabulary: the persist path is shared by every control-plane write (API routes, TUI commands, and the MCP-servers fallback all funnel through the same kernel setters), so the call site cannot tell who triggered the persist.
+    /// It records two values:
+    /// - `update` — the `agent.toml` write succeeded.
+    /// - `update-persist-failed` — the in-memory manifest changed but the disk write failed, so disk and memory now disagree.
+    fn record_manifest_version(
+        &self,
+        entry: &librefang_types::agent::AgentEntry,
+        toml_str: &str,
+        change_source: &str,
+    ) {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        if let Err(e) =
+            store.record_version(&entry.id.to_string(), &entry.name, toml_str, change_source)
+        {
+            warn!(
+                agent = %entry.name,
+                error = %e,
+                "Failed to record manifest version snapshot"
+            );
+        }
+    }
+
+    /// List manifest version history for an agent, newest first.
+    pub fn manifest_versions_for_agent(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> KernelResult<Vec<librefang_memory::ManifestVersionRow>> {
+        let store = librefang_memory::ManifestVersionStore::new(self.memory.substrate.pool());
+        store
+            .list_for_agent(&agent_id.to_string(), limit)
+            .map_err(KernelError::LibreFang)
     }
 }
 

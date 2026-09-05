@@ -1693,6 +1693,7 @@ fn remove_agent_inner(conn: &Connection, agent_id: AgentId) -> LibreFangResult<(
     // An ephemeral worker's run record is owned by the agent that spawned it (#7752).
     // Deleting the parent takes its workers with it in this same transaction — "retention follows the parent, no orphans by construction" is the entire claim `ephemeral_runs` makes.
     crate::ephemeral_run_store::execute_ephemeral_run_agent_deletes(&tx, &id)?;
+    crate::manifest_version_store::execute_manifest_version_agent_deletes(&tx, &id)?;
     tx.commit().map_err(LibreFangError::memory)?;
     Ok(())
 }

@@ -871,6 +871,7 @@ pub(crate) fn execute_structured_agent_deletes(
         // goal_runs (v42) persists per-agent goal-run state; purge it on
         // agent removal so deleting an agent doesn't orphan its runs.
         "DELETE FROM goal_runs WHERE agent_id = ?1",
+        "DELETE FROM manifest_versions WHERE agent_id = ?1",
         "DELETE FROM agents WHERE id = ?1",
     ] {
         tx.execute(stmt, rusqlite::params![agent_id])

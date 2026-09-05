@@ -859,6 +859,8 @@
       "events_tail": "이벤트 · 꼬리",
       "no_logs": "이 에이전트에 대해서는 아직 기록된 회전이 없습니다.",
       "crashed_title": "{{name}}이(가) 오류 상태입니다.",
+      "manifest_history": "매니페스트 기록",
+      "no_history": "아직 기록된 구성 변경 사항이 없습니다.",
       "proactive_conditions": "조건 (쉼표로 구분)",
       "proactive_conditions_hint": "이것은 전체 조건 목록을 대체합니다 — 현재 항목으로 미리 채워지지 않습니다. 현재 활성화된 내용을 보려면 전체 매니페스트 편집기를 사용하세요.",
       "proactive_conditions_placeholder": "예: agent.tags contains 'urgent'"
@@ -869,7 +871,8 @@
       "skills": "기술",
       "tools": "도구",
       "schedule": "일정",
-      "logs": "로그"
+      "logs": "로그",
+      "history": "기록"
     },
     "configure": "구성",
     "select_an_agent": "에이전트를 선택하세요",

@@ -862,6 +862,8 @@
       "events_tail": "zdarzenia · tail",
       "no_logs": "Nie zarejestrowano jeszcze żadnych tur dla tego agenta.",
       "crashed_title": "{{name}} jest w stanie błędu",
+      "manifest_history": "Historia manifestu",
+      "no_history": "Nie zarejestrowano jeszcze żadnych zmian konfiguracji.",
       "proactive_conditions": "Warunki (oddzielone przecinkami)",
       "proactive_conditions_hint": "To zastępuje pełną listę warunków — nie jest wstępnie wypełnione bieżącymi. Użyj pełnego edytora manifestu, aby zobaczyć, co jest aktywne.",
       "proactive_conditions_placeholder": "np. agent.tags contains 'urgent'"
@@ -872,7 +874,8 @@
       "skills": "Umiejętności",
       "tools": "Narzędzia",
       "schedule": "Harmonogram",
-      "logs": "Logi"
+      "logs": "Logi",
+      "history": "Historia"
     },
     "configure": "Konfiguruj",
     "select_an_agent": "Wybierz agenta",
