@@ -314,6 +314,22 @@ pub(crate) enum Commands {
         #[arg(long)]
         watch: bool,
     },
+    /// Purge every trace of an agent: roster entry, sessions, memories,
+    /// workspace directory and any agent-type with the same name. For agents
+    /// the operator already deleted but whose data lingers. Prompts for
+    /// confirmation; pass `--yes` to skip (required when stdin is not a TTY),
+    /// or `--dry-run` to preview without changing anything.
+    Purge {
+        /// Agent name to purge.
+        #[arg(long)]
+        agent: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would be purged without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
         subcommand,

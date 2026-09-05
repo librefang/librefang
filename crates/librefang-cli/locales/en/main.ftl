@@ -2497,6 +2497,21 @@ tui-groups-hints = ↑/↓ navigate · r refresh
 
 tui-goals-judge-label = { "  " }Goal Judge:{ " " }
 tui-goals-phase-label = { "  " }Run Phase:{ " " }
+# purge command
+purge-failed-no-database = Purge failed: no database at { $path }
+purge-failed-open-database = Purge failed: open database: { $error }
+purge-nothing-to-purge = Nothing to purge: '{ $agent }' left no trace in this installation.
+purge-purged-header = Purged '{ $agent }':
+purge-removed-roster-entry =   - roster entry, sessions, memories and KV rows
+purge-removed-orphaned-data =   - orphaned sessions, memories and KV rows (roster entry was already gone)
+purge-removed-identity-record =   - canonical UUID record in agent_identities.toml
+purge-removed-workspace =   - workspace directory
+purge-workspace-unresolved =   - NOTE: the workspace directory could not be located. No manifest survives for this agent, so a custom workspace path would not have been found; check the workspaces directory yourself.
+purge-removed-agent-type =   - agent-type template
+purge-failure-line =   - FAILED: { $error }
+purge-confirm-header = About to permanently purge '{ $agent }':
+purge-confirm-warning = This cannot be undone.
+purge-dry-run-header = Dry run — nothing was changed. Would purge '{ $agent }':
 
 # --- Channels screen (#8044) ---
 tui-tab-channels = Channels

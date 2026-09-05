@@ -2447,6 +2447,21 @@ tui-groups-hints = ↑/↓ навігація · r оновити
 
 tui-goals-judge-label = { "  " }Суддя цілі:{ " " }
 tui-goals-phase-label = { "  " }Фаза запуску:{ " " }
+# purge command
+purge-failed-no-database = Не вдалося очистити: немає бази даних за шляхом { $path }
+purge-failed-open-database = Не вдалося очистити: відкриття бази даних: { $error }
+purge-nothing-to-purge = Нічого очищати: '{ $agent }' не залишив слідів у цій інсталяції.
+purge-purged-header = Очищено '{ $agent }':
+purge-removed-roster-entry =   - запис у реєстрі, сесії, спогади та рядки KV
+purge-removed-orphaned-data =   - осиротілі сесії, спогади та рядки KV (запис у реєстрі вже зник)
+purge-removed-identity-record =   - запис канонічного UUID у agent_identities.toml
+purge-removed-workspace =   - каталог робочого простору
+purge-workspace-unresolved =   - ПРИМІТКА: не вдалося визначити каталог робочого простору. Маніфест цього агента не зберігся, тому власний шлях робочого простору знайти неможливо; перевірте каталог робочих просторів самостійно.
+purge-removed-agent-type =   - шаблон типу агента
+purge-failure-line =   - НЕ ВДАЛОСЯ: { $error }
+purge-confirm-header = Зараз буде остаточно видалено '{ $agent }':
+purge-confirm-warning = Це незворотно.
+purge-dry-run-header = Пробний запуск — нічого не змінено. Буде очищено '{ $agent }':
 
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ Цілі

@@ -2355,6 +2355,21 @@ tui-groups-hints = ↑/↓ 导航 · r 刷新
 
 tui-goals-judge-label = { "  " }目标裁判:{ " " }
 tui-goals-phase-label = { "  " }运行阶段:{ " " }
+# purge command
+purge-failed-no-database = 清除失败：{ $path } 处无数据库
+purge-failed-open-database = 清除失败：打开数据库：{ $error }
+purge-nothing-to-purge = 无需清除：'{ $agent }' 在此安装中未留下痕迹。
+purge-purged-header = 已清除 '{ $agent }'：
+purge-removed-roster-entry =   - 名册条目、会话、记忆和 KV 行
+purge-removed-orphaned-data =   - 孤立会话、记忆和 KV 行（名册条目已消失）
+purge-removed-identity-record =   - agent_identities.toml 中的规范 UUID 记录
+purge-removed-workspace =   - 工作区目录
+purge-workspace-unresolved =   - 注意：无法定位工作区目录。该代理的清单已不存在，因此无法找到自定义的工作区路径；请自行检查工作区目录。
+purge-removed-agent-type =   - 代理类型模板
+purge-failure-line =   - 失败：{ $error }
+purge-confirm-header = 即将永久清除 '{ $agent }'：
+purge-confirm-warning = 此操作无法撤销。
+purge-dry-run-header = 试运行 — 未更改任何内容。将清除 '{ $agent }'：
 
 # --- Goals screen (TUI) ---
 tui-goals-title = ⌖ 目标

@@ -8,6 +8,7 @@
 //! and inter-agent communication.
 
 pub mod agent_identity_registry;
+pub mod agent_purge;
 pub mod agent_template;
 pub mod approval;
 pub mod auth;

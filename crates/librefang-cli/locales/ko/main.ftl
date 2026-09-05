@@ -2496,6 +2496,21 @@ tui-groups-hints = ↑/↓ 이동 · r 새로고침
 
 tui-goals-judge-label = { "  " }목표 심사자:{ " " }
 tui-goals-phase-label = { "  " }실행 단계:{ " " }
+# purge command
+purge-failed-no-database = 삭제 실패: { $path }에 데이터베이스가 없습니다
+purge-failed-open-database = 삭제 실패: 데이터베이스 열기: { $error }
+purge-nothing-to-purge = 삭제할 항목이 없습니다: '{ $agent }'은(는) 이 설치에 흔적을 남기지 않았습니다.
+purge-purged-header = '{ $agent }' 삭제됨:
+purge-removed-roster-entry =   - 로스터 항목, 세션, 기억 및 KV 행
+purge-removed-orphaned-data =   - 고아가 된 세션, 기억 및 KV 행 (로스터 항목이 이미 사라짐)
+purge-removed-identity-record =   - agent_identities.toml의 정식 UUID 레코드
+purge-removed-workspace =   - 작업 공간 디렉터리
+purge-workspace-unresolved =   - 참고: 작업 공간 디렉터리를 찾을 수 없습니다. 이 에이전트의 매니페스트가 남아 있지 않아 사용자 지정 작업 공간 경로는 찾을 수 없습니다. 작업 공간 디렉터리를 직접 확인하세요.
+purge-removed-agent-type =   - 에이전트 유형 템플릿
+purge-failure-line =   - 실패: { $error }
+purge-confirm-header = '{ $agent }'을(를) 영구 삭제하려 합니다:
+purge-confirm-warning = 되돌릴 수 없습니다.
+purge-dry-run-header = 드라이 런 — 아무것도 변경되지 않았습니다. '{ $agent }'을(를) 삭제할 예정입니다:
 
 # --- Channels screen (#8044) ---
 tui-tab-channels = 채널
