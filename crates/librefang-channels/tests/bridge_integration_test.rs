@@ -77,7 +77,27 @@ impl MockAdapter {
         channel_type: ChannelType,
         overrides: Option<ChannelOverrides>,
     ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
-        let (tx, rx) = mpsc::channel(256);
+        Self::build(name, channel_type, overrides, 256)
+    }
+
+    /// Like `new`, but the adapter's inbound channel is bounded at `capacity`
+    /// rather than 256, so a test can observe the bridge's dispatch cap
+    /// pushing back on the stream instead of the queue absorbing the burst.
+    fn new_with_capacity(
+        name: &str,
+        channel_type: ChannelType,
+        capacity: usize,
+    ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        Self::build(name, channel_type, None, capacity)
+    }
+
+    fn build(
+        name: &str,
+        channel_type: ChannelType,
+        overrides: Option<ChannelOverrides>,
+        capacity: usize,
+    ) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        let (tx, rx) = mpsc::channel(capacity);
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
         let adapter = Arc::new(Self {
@@ -3209,4 +3229,115 @@ async fn broadcast_dispatch_carries_the_per_chat_session_scope() {
     );
 
     manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch cap must be backpressure, not a cap on parked tasks
+// ---------------------------------------------------------------------------
+
+/// A handle whose turns never finish, so every dispatch that reaches it keeps
+/// its dispatch permit for the duration of the test.
+struct SaturatingHandle {
+    agent_id: AgentId,
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Created with zero permits and never topped up — acquiring it pends forever.
+    never_released: tokio::sync::Semaphore,
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for SaturatingHandle {
+    async fn send_message(&self, _agent_id: AgentId, _message: &str) -> Result<String, String> {
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _forever = self.never_released.acquire().await;
+        Ok("unreachable".to_string())
+    }
+
+    async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+        Ok(Some(self.agent_id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(vec![(self.agent_id, "coder".to_string())])
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
+}
+
+/// The per-adapter dispatch cap must bound how many messages leave the adapter
+/// stream, not merely how many are simultaneously inside `dispatch_message`.
+///
+/// The permit used to be acquired inside the spawned task, so the intake loop
+/// drained the stream at line rate and turned every inbound message into a
+/// detached task parked on the permit queue: memory and reply latency grew with
+/// the burst, and the adapter's own bounded channel never applied any pressure.
+/// With the permit taken before the message is handed off, a saturated adapter
+/// stops being read and its bounded channel fills, which is what lets the
+/// adapter's overflow policy decide what happens to the excess.
+#[tokio::test]
+async fn test_dispatch_cap_backpressures_the_adapter_stream() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Mirrors the bridge's per-adapter `Semaphore::new(32)`.
+    const CAP: usize = 32;
+    const QUEUE: usize = 4;
+    const TOTAL: usize = CAP + QUEUE + 16;
+
+    let agent_id = AgentId::new();
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let handle = Arc::new(SaturatingHandle {
+        agent_id,
+        in_flight: Arc::clone(&in_flight),
+        never_released: tokio::sync::Semaphore::new(0),
+    });
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = MockAdapter::new_with_capacity("saturating", ChannelType::Telegram, QUEUE);
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    // Feed from a separate task so the test can see how far the producer gets:
+    // once the cap is saturated the intake loop stops pulling, the adapter's
+    // bounded channel fills, and `send` stops completing.
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_by_producer = Arc::clone(&accepted);
+    let producer = tokio::spawn(async move {
+        for i in 0..TOTAL {
+            let msg = make_text_msg(ChannelType::Telegram, "user1", &format!("burst {i}"));
+            if tx.send(msg).await.is_err() {
+                break;
+            }
+            accepted_by_producer.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    wait_until("every dispatch permit taken", || {
+        in_flight.load(Ordering::SeqCst) >= CAP
+    })
+    .await;
+
+    // Unfixed, the loop keeps spawning one parked task per message and the
+    // producer runs to completion in this window.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let taken = accepted.load(Ordering::SeqCst);
+    assert!(
+        taken <= CAP + QUEUE + 1,
+        "the dispatch cap must stop the intake loop from draining the stream, \
+         but {taken} of {TOTAL} messages were accepted",
+    );
+    assert!(
+        !producer.is_finished(),
+        "the producer must still be blocked on the adapter's bounded channel",
+    );
+
+    manager.abort();
+    producer.abort();
 }

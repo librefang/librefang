@@ -154,6 +154,25 @@ fn roster_member_json(member: librefang_memory::roster_store::RosterMember) -> s
     })
 }
 
+/// Decide the exact text an outbound send puts on the wire.
+///
+/// An adapter that declares [`ChannelAdapter::owns_formatting`] converts Markdown itself and must therefore receive raw Markdown — the same gate `librefang_channels::bridge::send_response` applies on the inbound reply path.
+/// Formatting here as well converted `**bold**` into `<b>bold</b>`, and the Telegram sidecar then escaped the angle brackets on both of its send paths, so the recipient saw the markup as literal text; ordinary prose containing `<`, `>` or `&` was entity-escaped twice for the same reason.
+///
+/// For an adapter that does not own formatting, a per-channel `output_format` override wins (#6445), falling back to the channel default.
+fn outbound_wire_text(adapter: &dyn ChannelAdapter, channel: &str, message: &str) -> String {
+    if adapter.owns_formatting() {
+        return message.to_string();
+    }
+    let format = adapter
+        .channel_overrides()
+        .and_then(|ov| ov.output_format)
+        .unwrap_or_else(|| {
+            librefang_channels::formatter::default_output_format_for_channel(channel)
+        });
+    librefang_channels::formatter::format_for_channel(message, format)
+}
+
 #[async_trait::async_trait]
 impl kernel_handle::ChannelSender for LibreFangKernel {
     async fn send_channel_message(
@@ -176,22 +195,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
             librefang_user: None,
         };
 
-        // #6445: honour a per-channel `output_format` override on the outbound path too, not only on inbound replies.
-        // The sidecar adapter projects its `[[sidecar_channels]] output_format` into `ChannelOverrides`, so an agent-initiated `channel_send` / delegation forward formats the same way a normal reply would.
-        // Falls back to the channel default when the adapter has no override (every non-sidecar adapter, and any sidecar that did not set the knob).
-        let format = adapter
-            .channel_overrides()
-            .and_then(|ov| ov.output_format)
-            .unwrap_or_else(|| {
-                // wecom migrated to a sidecar; its formatting now happens inside
-                // the Python adapter (`librefang.sidecar.adapters.wecom`) which
-                // wraps every outbound chunk as `msgtype: "markdown"`. The
-                // generic `format_for_channel` path with the Markdown default
-                // (see `default_output_format_for_channel("wecom")`) gives the
-                // sidecar exactly that.
-                librefang_channels::formatter::default_output_format_for_channel(channel)
-            });
-        let formatted = librefang_channels::formatter::format_for_channel(message, format);
+        let formatted = outbound_wire_text(adapter.as_ref(), channel, message);
 
         let content = librefang_channels::types::ChannelContent::Text(formatted);
 
@@ -509,8 +513,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
 
 #[cfg(test)]
 mod tests {
-    use super::sidecar_default_agent;
-    use librefang_types::config::SidecarChannelConfig;
+    use super::{outbound_wire_text, sidecar_default_agent};
+    use librefang_channels::types::{
+        ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
+    };
+    use librefang_types::config::{ChannelOverrides, OutputFormat, SidecarChannelConfig};
+    use std::pin::Pin;
 
     /// Build a `SidecarChannelConfig` from a minimal JSON shape — `name` and
     /// `command` are required; everything else (incl. the restart knobs) fills
@@ -566,5 +574,105 @@ mod tests {
             "default_agent": "",
         }))];
         assert_eq!(sidecar_default_agent(&chans, "slack"), None);
+    }
+
+    /// Minimal adapter fake: only the formatting-relevant methods carry behaviour.
+    struct FormattingAdapter {
+        owns_formatting: bool,
+        overrides: Option<ChannelOverrides>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelAdapter for FormattingAdapter {
+        fn name(&self) -> &str {
+            "telegram"
+        }
+
+        fn channel_type(&self) -> ChannelType {
+            ChannelType::Telegram
+        }
+
+        async fn start(
+            &self,
+        ) -> Result<
+            Pin<Box<dyn futures::Stream<Item = ChannelMessage> + Send>>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn send(
+            &self,
+            _user: &ChannelUser,
+            _content: ChannelContent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        fn owns_formatting(&self) -> bool {
+            self.owns_formatting
+        }
+
+        fn channel_overrides(&self) -> Option<ChannelOverrides> {
+            self.overrides.clone()
+        }
+    }
+
+    /// A sidecar declares `owns_formatting()`, so an agent-initiated send must
+    /// hand it raw Markdown. Formatting it here too produced `<b>bold</b>` on
+    /// the wire, which the Telegram sidecar escaped again — the recipient saw
+    /// the tags as text — and entity-escaped ordinary `<` / `>` / `&` twice.
+    #[test]
+    fn outbound_send_leaves_formatting_to_an_adapter_that_owns_it() {
+        let adapter = FormattingAdapter {
+            owns_formatting: true,
+            overrides: None,
+        };
+        assert_eq!(
+            outbound_wire_text(&adapter, "telegram", "**bold** and 5 < 6 && a > b"),
+            "**bold** and 5 < 6 && a > b",
+        );
+
+        // An explicit per-sidecar `output_format` does not override the
+        // adapter's own claim on formatting either — the second pass is what
+        // corrupts the text, whichever side chose the format.
+        let adapter = FormattingAdapter {
+            owns_formatting: true,
+            overrides: Some(ChannelOverrides {
+                output_format: Some(OutputFormat::TelegramHtml),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            outbound_wire_text(&adapter, "telegram", "**bold**"),
+            "**bold**",
+        );
+    }
+
+    /// An adapter that does not own formatting still gets the channel default,
+    /// and a per-channel `output_format` override still wins over it (#6445).
+    #[test]
+    fn outbound_send_still_formats_for_an_adapter_that_does_not_own_it() {
+        let adapter = FormattingAdapter {
+            owns_formatting: false,
+            overrides: None,
+        };
+        assert_eq!(
+            outbound_wire_text(&adapter, "telegram", "**bold**"),
+            "<b>bold</b>",
+        );
+
+        let adapter = FormattingAdapter {
+            owns_formatting: false,
+            overrides: Some(ChannelOverrides {
+                output_format: Some(OutputFormat::PlainText),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(outbound_wire_text(&adapter, "telegram", "**bold**"), "bold");
     }
 }
