@@ -454,7 +454,9 @@ pub fn ui_sections_overlay() -> serde_json::Value {
         // Background autonomous-loop executor knobs (#5168).
         {"key": "background", "struct_field": "background"},
         // Org-wide LLM provider allowlist (#6459).
-        {"key": "providers", "struct_field": "providers"}
+        {"key": "providers", "struct_field": "providers"},
+        // Complexity-based model routing (#7781).
+        {"key": "model_router", "struct_field": "model_router"}
     ])
 }
 

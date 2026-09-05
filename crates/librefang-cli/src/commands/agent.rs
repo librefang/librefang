@@ -637,6 +637,174 @@ pub(crate) fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
     None
 }
 
+/// `librefang agent routing <agent>` — show an agent's model routing settings.
+pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let agent_id = resolve_agent_id(&base, agent_id_str);
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/agents/{agent_id}/model_routing"))
+            .send(),
+    );
+
+    if let Some(err) = body.get("error").and_then(|e| e.as_str()) {
+        eprintln!(
+            "{}",
+            i18n::t_args("agent-routing-failed", &[("error", err)])
+        );
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
+        return;
+    }
+
+    let mode = body["mode"].as_str().unwrap_or("fixed");
+    ui::kv(&i18n::t("agent-routing-label-mode"), mode);
+    if mode != "flexible" {
+        println!("{}", i18n::t("agent-routing-fixed-explainer"));
+        return;
+    }
+    let allowed: Vec<&str> = body["allowed_profiles"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let allowed_display = if allowed.is_empty() {
+        i18n::t("agent-routing-any-profile")
+    } else {
+        allowed.join(", ")
+    };
+    ui::kv(&i18n::t("agent-routing-label-allowed"), &allowed_display);
+    let budget = body["cost_budget"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| i18n::t("agent-routing-no-cap"));
+    ui::kv(&i18n::t("agent-routing-label-budget"), &budget);
+    if let Some(default_profile) = body["default_profile"].as_str() {
+        ui::kv(&i18n::t("agent-routing-label-default"), default_profile);
+    }
+}
+
+/// `librefang agent routing-set <agent> --mode …` — update model routing.
+pub(crate) fn cmd_agent_routing_set(
+    agent_id_str: &str,
+    mode: &str,
+    profiles: Option<&str>,
+    budget: Option<&str>,
+    default_profile: Option<&str>,
+) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let agent_id = resolve_agent_id(&base, agent_id_str);
+
+    // Empty `--profiles ""` means "clear the allowlist" (any profile), which
+    // is distinct from omitting the flag; both send an empty list because a
+    // PUT always replaces the override wholesale.
+    let allowed: Vec<String> = profiles
+        .map(|p| {
+            p.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut payload = serde_json::json!({
+        "mode": mode,
+        "allowed_profiles": allowed,
+        "cost_budget": budget,
+    });
+    if let Some(dp) = default_profile {
+        payload["default_profile"] = serde_json::json!(dp);
+    }
+
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .put(format!("{base}/api/agents/{agent_id}/model_routing"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("status").is_some() {
+        println!(
+            "{}",
+            i18n::t_args(
+                "agent-routing-updated",
+                &[("id", &agent_id), ("mode", mode)]
+            )
+        );
+    } else {
+        let err_fallback = i18n::t("error-unknown");
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "agent-routing-failed",
+                &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+            )
+        );
+        std::process::exit(1);
+    }
+}
+
+/// `librefang agent routing-profiles` — list the resolved profile catalog.
+pub(crate) fn cmd_agent_routing_profiles(json: bool) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/model-router/profiles"))
+            .send(),
+    );
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
+        return;
+    }
+
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    println!(
+        "{}",
+        i18n::t_args(
+            "agent-routing-profiles-header",
+            &[("enabled", if enabled { "on" } else { "off" })]
+        )
+    );
+    let Some(profiles) = body["profiles"].as_array() else {
+        return;
+    };
+    for p in profiles {
+        println!(
+            "  {:<14} {:<10} {:<28} {}",
+            p["name"].as_str().unwrap_or(""),
+            p["cost_tier"].as_str().unwrap_or(""),
+            format!(
+                "{}/{}",
+                p["provider"].as_str().unwrap_or(""),
+                p["model"].as_str().unwrap_or("")
+            ),
+            p["description"].as_str().unwrap_or(""),
+        );
+    }
+}
+
 pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
         "model" => {

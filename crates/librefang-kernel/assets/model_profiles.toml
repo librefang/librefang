@@ -1,0 +1,52 @@
+# Builtin ModelRouter profiles — tag-based model selection by task complexity.
+#
+# Copy this file to ~/.librefang/model_profiles.toml to override it.
+# A profile in that file replaces the builtin of the same name; profiles with
+# a new name are added to the catalog.
+#
+# Only active when [model_router] enabled = true in config.toml, and only for
+# agents whose manifest sets mode = "flexible" in the [model] block.
+#
+# `model` accepts a catalog alias ("haiku", "sonnet", "opus") as well as a
+# fully-qualified id; aliases are resolved against the live model catalog, so
+# these defaults do not rot when a provider ships a new snapshot.
+
+[[profiles]]
+name = "quick"
+tags = ["check", "classify", "count", "echo", "extract", "format", "list", "ping", "summarize", "translate", "validate"]
+provider = "anthropic"
+model = "haiku"
+cost_tier = "cheap"
+priority = 1
+max_complexity = 0.3
+description = "Fast, cheap model for classification, extraction and summarisation"
+
+[[profiles]]
+name = "coder"
+tags = ["build", "code", "debug", "deploy", "develop", "fix", "implement", "optimize", "refactor", "test"]
+provider = "anthropic"
+model = "sonnet"
+cost_tier = "medium"
+priority = 10
+max_complexity = 0.8
+description = "Balanced model for code generation, debugging and implementation"
+
+[[profiles]]
+name = "researcher"
+tags = ["analyze", "browse", "document", "investigate", "report", "review", "search"]
+provider = "anthropic"
+model = "sonnet"
+cost_tier = "medium"
+priority = 15
+max_complexity = 0.9
+description = "Long-context model for web research, document analysis and investigation"
+
+[[profiles]]
+name = "architect"
+tags = ["architecture", "audit", "compliance", "design", "migrate", "pipeline", "plan", "research", "security"]
+provider = "anthropic"
+model = "opus"
+cost_tier = "expensive"
+priority = 20
+max_complexity = 1.0
+description = "High-capability model for deep reasoning, architecture and complex planning"

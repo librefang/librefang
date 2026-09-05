@@ -162,6 +162,10 @@ impl SetupWizard {
             schedule,
             session_mode: librefang_types::agent::SessionMode::default(),
             model: ModelConfig {
+                // The wizard pins the provider/model the operator just picked;
+                // routing is opted into afterwards, per agent.
+                mode: librefang_types::agent::ModelMode::Fixed,
+                router_override: None,
                 provider: provider.to_string(),
                 model: model.to_string(),
                 // A wizard-created agent inherits: no number is pinned until

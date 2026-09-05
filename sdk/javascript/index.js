@@ -298,6 +298,14 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
   }
 
+  async getAgentModelRouting(id) {
+    return this._c._request("GET", `/api/agents/${id}/model_routing`);
+  }
+
+  async setAgentModelRouting(id, data) {
+    return this._c._request("PUT", `/api/agents/${id}/model_routing`, data, undefined);
+  }
+
   async pushMessage(id, data) {
     return this._c._request("POST", `/api/agents/${id}/push`, data, undefined);
   }
@@ -950,6 +958,10 @@ class ModelsResource {
 
   async listCredentialPools() {
     return this._c._request("GET", "/api/credential-pools");
+  }
+
+  async listModelRouterProfiles() {
+    return this._c._request("GET", "/api/model-router/profiles");
   }
 
   async listAllModels() {

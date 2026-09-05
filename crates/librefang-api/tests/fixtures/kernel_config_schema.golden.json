@@ -881,6 +881,19 @@
         }
       ]
     },
+    "model_router": {
+      "description": "Profile router settings. Complements `default_routing` above: the tier router maps a scored request onto three fixed model slots, while the profile router matches the task against named profiles that also carry a cost tier and a complexity ceiling. Off by default; an agent opts in with `mode = \"flexible\"` in its manifest `[model]` block.",
+      "default": {
+        "enabled": false,
+        "profiles_path": "model_profiles.toml",
+        "complexity_threshold": 0.30000001192092896
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelRouterConfig"
+        }
+      ]
+    },
     "network": {
       "description": "Network configuration.",
       "default": {
@@ -5164,6 +5177,35 @@
         "native",
         "obsidian"
       ]
+    },
+    "ModelRouterConfig": {
+      "description": "Router configuration — `config.toml [model_router]`.",
+      "type": "object",
+      "properties": {
+        "complexity_threshold": {
+          "description": "Complexity threshold above which routing is allowed to leave the cheapest tier. Range 0.0–1.0.",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        },
+        "default_profile": {
+          "description": "Profile name used when no profile matches the task.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "description": "Master switch. When false the profile router is bypassed entirely and every agent keeps the provider/model in its own manifest.",
+          "default": false,
+          "type": "boolean"
+        },
+        "profiles_path": {
+          "description": "Profile catalog filename, resolved relative to the LibreFang home dir. When the file is absent the builtin profiles are used unchanged.",
+          "default": "model_profiles.toml",
+          "type": "string"
+        }
+      }
     },
     "ModelRoutingConfig": {
       "description": "Model routing configuration — auto-selects cheap/mid/expensive models by complexity.",

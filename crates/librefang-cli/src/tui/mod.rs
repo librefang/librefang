@@ -458,6 +458,33 @@ impl App {
                     .collect();
                 self.agents.mcp_cursor = 0;
             }
+            AppEvent::AgentModelRoutingLoaded {
+                mode,
+                allowed_profiles,
+                cost_budget,
+                available,
+            } => {
+                // Populate the routing editor from the agent's real stored
+                // state, not from whatever the previous screen left behind.
+                self.agents.model_mode = mode;
+                self.agents.router_profiles = available
+                    .into_iter()
+                    .map(|name| {
+                        let checked = allowed_profiles.contains(&name);
+                        (name, checked)
+                    })
+                    .collect();
+                self.agents.router_profile_cursor = 0;
+                self.agents.cost_budget_idx = agents::COST_BUDGET_OPTIONS
+                    .iter()
+                    .position(|(_, wire)| *wire == cost_budget.as_deref())
+                    .unwrap_or(0);
+            }
+            AppEvent::AgentModelRoutingUpdated(id) => {
+                self.agents.status_msg =
+                    crate::i18n::t_args("tui-mod-agent-model-routing-updated", &[("id", &id)]);
+                self.agents.sub = agents::AgentSubScreen::AgentDetail;
+            }
             AppEvent::AgentSkillsUpdated(id) => {
                 self.agents.status_msg =
                     crate::i18n::t_args("tui-mod-agent-skills-updated", &[("id", &id)]);
@@ -1893,6 +1920,28 @@ impl App {
                         backend,
                         id,
                         channels,
+                        self.event_tx.clone(),
+                    );
+                }
+            }
+            agents::AgentAction::FetchAgentModelRouting(id) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_fetch_agent_model_routing(backend, id, self.event_tx.clone());
+                }
+            }
+            agents::AgentAction::UpdateModelRouting {
+                id,
+                mode,
+                allowed_profiles,
+                cost_budget,
+            } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_update_agent_model_routing(
+                        backend,
+                        id,
+                        mode,
+                        allowed_profiles,
+                        cost_budget,
                         self.event_tx.clone(),
                     );
                 }
