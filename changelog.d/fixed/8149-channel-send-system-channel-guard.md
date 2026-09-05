@@ -1,0 +1,1 @@
+Stop suggesting the `channel_send` media hint to kernel-internal system channels (`webui`, `cron`, `autonomous`), where no messaging adapter exists and the suggestion only pushed the agent to try a failing send (#6504) (@DaBlitzStein)
