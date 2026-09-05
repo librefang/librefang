@@ -427,6 +427,31 @@ params = { region = "us" }
     });
   });
 
+  it("preserves an unmapped 'channels' allowlist through extras on round-trip (#7742)", () => {
+    // `channels` is a real AgentManifest field (agent.toml, PUT
+    // /agents/{id}/channels) but the visual editor doesn't have a
+    // first-class form widget for it — it must survive a
+    // parse → serialize → re-parse cycle unchanged via extras, the same
+    // guarantee every other unmapped field gets.
+    const toml = `name = "agent"
+channels = ["telegram", "discord"]
+
+[model]
+provider = "openai"
+model = "gpt-4o"
+`;
+    const parsed = parseManifestToml(toml);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
+
+    const reserialized = serializeManifestForm(parsed.form, parsed.extras);
+    const reparsed = parseManifestToml(reserialized);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.extras.topLevel.channels).toEqual(["telegram", "discord"]);
+  });
+
   it("returns a structured error on malformed TOML", () => {
     const result = parseManifestToml('name = "unterminated\n[oops');
     expect(result.ok).toBe(false);
