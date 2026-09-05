@@ -738,18 +738,19 @@ impl LibreFangKernel {
 
     /// Spawn the task-board stuck-task sweep loop (issue #2923 / #2926).
     ///
-    /// Periodically scans the `task_queue` for `in_progress` rows whose
-    /// `claimed_at` is older than `config.task_board.claim_ttl_secs`. Stuck
-    /// tasks are flipped back to `pending` and their `assigned_to` is cleared
-    /// so another worker (or the same one on the next trigger fire) can pick
-    /// them up.
+    /// Periodically scans the `task_queue` for `in_progress` rows held longer
+    /// than their effective TTL — the row's own `timeout_secs` when it has
+    /// one, `config.task_board.claim_ttl_secs` otherwise. Stuck tasks are
+    /// flipped back to `pending` and their `assigned_to` is cleared so another
+    /// worker (or the same one on the next trigger fire) can pick them up.
     ///
     /// Idempotent: re-calling while the loop is already running is a no-op.
     /// The interval and TTL are read *live* from the kernel config on every
     /// tick, so hot-reloading `[task_board]` does not require a kernel
-    /// restart. `claim_ttl_secs = 0` disables the sweeper (tick is a no-op)
-    /// for deployments that legitimately hold tasks `in_progress` for hours
-    /// (human-in-the-loop workflows).
+    /// restart. `claim_ttl_secs = 0` disables the global clock for deployments
+    /// that legitimately hold tasks `in_progress` for hours (human-in-the-loop
+    /// workflows); a task that declared its own `timeout_secs` still expires,
+    /// because that is a more specific statement than the global default.
     ///
     /// # Panics
     ///
@@ -796,13 +797,15 @@ impl LibreFangKernel {
                 // The reconcile's own switches are `[task_board] pending_grace_secs` and `assignee_wake`.
                 let _ = kernel.reconcile_pending_task_wakes().await;
 
-                if ttl_secs == 0 {
-                    // Stuck-task reclaim disabled by operator — keep the loop
-                    // alive so a later hot-reload can flip it back on without
-                    // restart.
-                    continue;
-                }
-
+                // `claim_ttl_secs = 0` disables the *global* clock, not a clock
+                // a task explicitly carries. `task_reset_stuck` reads the gate
+                // per row — a row with no `timeout_secs` inherits the disabled
+                // global and is never reclaimed (the historical behaviour, and
+                // what every pre-v56 row means), while a row that declared its
+                // own non-zero timeout is still swept. Same "two rules, two
+                // switches" reasoning as the reconcile above; the sweep is a
+                // single indexed query, so running it unconditionally costs
+                // nothing when there is nothing to reclaim.
                 match kernel
                     .memory
                     .substrate

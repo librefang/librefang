@@ -12392,6 +12392,48 @@
         }
       }
     },
+    "/api/tasks": {
+      "post": {
+        "tags": [
+          "tasks"
+        ],
+        "summary": "POST /api/tasks — Enqueue a task on behalf of an external caller.",
+        "description": "Body: `{\"title\": \"...\", \"description\": \"...\", \"assigned_to\": \"<agent-id|name>\"?, \"created_by\": \"<agent-id>\"?, \"priority\": <int>?, \"timeout_secs\": <uint>?}`\n\nWraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,\ncron scripts, external integrations) can enqueue tasks without a\nruntime/agent context. The agent-side `task_post` tool keeps the\ncaller's agent id automatically.\nAuthenticated HTTP requests use the caller's stable user id for\nprovenance and ignore a body-supplied `created_by` value.\n\n`priority` orders the claim queue (higher first, ties by age) and\n`timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —\nboth are enforced by the kernel, not merely recorded.\n\nAn `assigned_to` that names no known agent is rejected with 400 rather\nthan stored: `task_claim` refuses an unknown agent, so such a row would\nsit `pending` forever with nothing to say why.",
+        "operationId": "task_queue_post_root",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Task enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid title, description, priority, timeout_secs, or unknown assignee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/templates": {
       "get": {
         "tags": [

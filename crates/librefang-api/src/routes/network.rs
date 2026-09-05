@@ -2248,6 +2248,7 @@ pub async fn comms_task(
             &req.description,
             req.assigned_to.as_deref(),
             Some("ui-user"),
+            &librefang_kernel_handle::TaskPostOptions::default(),
         )
         .await
     {

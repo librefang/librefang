@@ -71,6 +71,7 @@ impl TaskQueue for StubKernel {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
+        _opts: &super::TaskPostOptions,
     ) -> Result<String, super::KernelOpError> {
         Err("stub".into())
     }

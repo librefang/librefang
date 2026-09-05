@@ -250,7 +250,7 @@ fn truncate_task_page(tasks: &mut Vec<serde_json::Value>, limit: Option<&str>) -
 
 /// POST /api/tasks — Enqueue a task on behalf of an external caller.
 ///
-/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
+/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id|name>"?, "created_by": "<agent-id>"?, "priority": <int>?, "timeout_secs": <uint>?}`
 ///
 /// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
 /// cron scripts, external integrations) can enqueue tasks without a
@@ -258,6 +258,24 @@ fn truncate_task_page(tasks: &mut Vec<serde_json::Value>, limit: Option<&str>) -
 /// caller's agent id automatically.
 /// Authenticated HTTP requests use the caller's stable user id for
 /// provenance and ignore a body-supplied `created_by` value.
+///
+/// `priority` orders the claim queue (higher first, ties by age) and
+/// `timeout_secs` overrides `[task_board] claim_ttl_secs` for this task —
+/// both are enforced by the kernel, not merely recorded.
+///
+/// An `assigned_to` that names no known agent is rejected with 400 rather
+/// than stored: `task_claim` refuses an unknown agent, so such a row would
+/// sit `pending` forever with nothing to say why.
+#[utoipa::path(
+    post,
+    path = "/api/tasks",
+    tag = "tasks",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 201, description = "Task enqueued", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid title, description, priority, timeout_secs, or unknown assignee", body = crate::types::JsonObject),
+    )
+)]
 pub async fn task_queue_post_root(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
@@ -282,19 +300,72 @@ pub async fn task_queue_post_root(
             );
         }
     };
+    // Absent is the neutral default; present-but-wrong-type is a client bug
+    // and is rejected rather than silently coerced to the default — a caller
+    // that sent `"priority": "high"` should learn that, not get a 201 for a
+    // task the queue will order as if it had said nothing.
+    let priority = match &body["priority"] {
+        serde_json::Value::Null => 0i64,
+        v => match v.as_i64() {
+            Some(p) => p,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "Field 'priority' must be an integer (higher is claimed first)"
+                    })),
+                );
+            }
+        },
+    };
+    let timeout_secs = match &body["timeout_secs"] {
+        serde_json::Value::Null => None,
+        v => match v.as_u64().filter(|s| *s <= u32::MAX as u64) {
+            Some(s) => Some(s as u32),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "Field 'timeout_secs' must be a non-negative integer of seconds (0 = never reclaim)"
+                    })),
+                );
+            }
+        },
+    };
     let assigned_to = body["assigned_to"].as_str();
     let created_by = resolve_task_creator(
         api_user.as_ref().map(|user| &user.0),
         body["created_by"].as_str(),
     );
+    let opts = librefang_kernel_handle::TaskPostOptions {
+        priority,
+        timeout_secs,
+    };
     match state
         .kernel
-        .task_post(title, description, assigned_to, created_by.as_deref())
+        .task_post(
+            title,
+            description,
+            assigned_to,
+            created_by.as_deref(),
+            &opts,
+        )
         .await
     {
         Ok(task_id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"id": task_id, "status": "pending"})),
+        ),
+        // The kernel reports an unresolvable assignee as `AgentNotFound`,
+        // which maps to 404 by the shared contract. On this route the missing
+        // thing is a *field of the request body*, not the addressed resource
+        // (`/api/tasks` exists), so it is reported as 400 — the same shape as
+        // the other body-validation failures above.
+        Err(KernelOpError::AgentNotFound(name)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("Field 'assigned_to' names no known agent: '{name}'")
+            })),
         ),
         Err(e) => map_kernel_op_err(e).into_json_tuple(),
     }

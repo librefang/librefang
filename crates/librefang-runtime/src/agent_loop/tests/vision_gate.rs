@@ -172,6 +172,7 @@ impl librefang_kernel_handle::TaskQueue for VisionKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: &librefang_kernel_handle::TaskPostOptions,
     ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }

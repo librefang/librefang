@@ -286,6 +286,7 @@ pub struct LibreFang {
     pub sessions: Arc<SessionsResource>,
     pub skills: Arc<SkillsResource>,
     pub system: Arc<SystemResource>,
+    pub tasks: Arc<TasksResource>,
     pub tools: Arc<ToolsResource>,
     pub users: Arc<UsersResource>,
     pub webhooks: Arc<WebhooksResource>,
@@ -335,6 +336,7 @@ impl LibreFang {
             sessions: Arc::new(SessionsResource::new(base_url.clone(), client.clone())),
             skills: Arc::new(SkillsResource::new(base_url.clone(), client.clone())),
             system: Arc::new(SystemResource::new(base_url.clone(), client.clone())),
+            tasks: Arc::new(TasksResource::new(base_url.clone(), client.clone())),
             tools: Arc::new(ToolsResource::new(base_url.clone(), client.clone())),
             users: Arc::new(UsersResource::new(base_url.clone(), client.clone())),
             webhooks: Arc::new(WebhooksResource::new(base_url.clone(), client.clone())),
@@ -5091,6 +5093,32 @@ impl SystemResource {
             reqwest::Method::GET,
             &["api", "versions"],
             None,
+            &[],
+        )
+        .await
+    }
+}
+
+// ── Tasks ──
+
+#[derive(Debug, Clone)]
+pub struct TasksResource {
+    base_url: String,
+    client: Client,
+}
+
+impl TasksResource {
+    fn new(base_url: String, client: Client) -> Self {
+        Self { base_url, client }
+    }
+
+    pub async fn task_queue_post_root(&self, data: Value) -> Result<Value> {
+        do_req(
+            &self.client,
+            &self.base_url,
+            reqwest::Method::POST,
+            &["api", "tasks"],
+            Some(data),
             &[],
         )
         .await

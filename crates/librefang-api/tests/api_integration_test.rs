@@ -6288,3 +6288,302 @@ async fn test_message_rejects_malformed_session_id() {
         "error code must be stable for scripted callers: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task Board: assignee validation and enforced per-task limits
+// ---------------------------------------------------------------------------
+//
+// These go through `start_full_router`, i.e. `server::build_router`, because
+// the hand-rolled router in `start_test_server` never registered `/api/tasks`
+// — against it every assertion below would pass or fail on a 404 that has
+// nothing to do with the task queue.
+
+/// Drive one request through the real router and decode the JSON body.
+///
+/// `oneshot` carries no peer address, so without an explicit loopback
+/// `ConnectInfo` the auth layer classifies every request as remote and answers
+/// 401 before the handler runs — the whole suite would then assert against the
+/// auth layer rather than the task queue.
+async fn task_request(
+    harness: &FullRouterHarness,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let builder = Request::builder().method(method).uri(uri);
+    let mut request = match body {
+        Some(b) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    };
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            0,
+        ))));
+
+    let resp = harness.app.clone().oneshot(request).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// POST a task body against the real router, returning `(status, json)`.
+async fn post_task(
+    harness: &FullRouterHarness,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "POST", "/api/tasks", Some(body)).await
+}
+
+async fn get_json(harness: &FullRouterHarness, uri: &str) -> (StatusCode, serde_json::Value) {
+    task_request(harness, "GET", uri, None).await
+}
+
+/// `POST /api/tasks` used to accept any `assigned_to` string. A task addressed
+/// to an agent that does not exist was stored `pending` and stayed there
+/// forever: the sweeper only touches `in_progress`, and `task_claim` refuses
+/// the unknown agent with `AgentNotFound`, so nothing ever moved it and nothing
+/// said why. The asymmetry between the two ends is the bug — this asserts the
+/// post end now refuses too.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_unknown_assignee() {
+    let harness = start_full_router("").await;
+
+    let (status, body) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Orphan",
+            "description": "Assigned to nobody real",
+            "assigned_to": "no-such-agent",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an assignee that resolves to no agent must be refused, not queued forever (body: {body})"
+    );
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("assigned_to") && err.contains("no-such-agent"),
+        "the error must name the offending field and value, got: {err}"
+    );
+
+    // The decisive part: nothing was written. A 400 that still queued the row
+    // would leave the exact ghost task this rejection exists to prevent.
+    let (status, body) = get_json(&harness, "/api/tasks").await;
+    assert_eq!(status, StatusCode::OK);
+    let tasks = body["tasks"].as_array().unwrap();
+    assert!(
+        !tasks.iter().any(|t| t["title"] == "Orphan"),
+        "the rejected task must not have been stored"
+    );
+}
+
+/// An unassigned task is legitimate — it is the "any worker may claim this"
+/// form that `task_claim` matches via `assigned_to = ''`. Validation must not
+/// have turned the optional field into a required one.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_still_accepts_an_absent_assignee() {
+    let harness = start_full_router("").await;
+
+    for body in [
+        serde_json::json!({"title": "Unowned", "description": "anyone"}),
+        serde_json::json!({"title": "Unowned2", "description": "anyone", "assigned_to": ""}),
+    ] {
+        let (status, resp) = post_task(&harness, body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "unassigned tasks must still be accepted ({body} -> {resp})"
+        );
+    }
+}
+
+/// The round trip an operator actually performs: pick a real agent from the
+/// registry, post, and read the task back with the assignment intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_accepts_a_real_agent_by_id_and_by_name() {
+    let harness = start_full_router("").await;
+
+    let (status, spawned) = task_request(
+        &harness,
+        "POST",
+        "/api/agents",
+        Some(serde_json::json!({"manifest_toml": TEST_MANIFEST})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "spawn failed: {spawned}");
+    let agent_id = spawned["agent_id"].as_str().unwrap().to_string();
+
+    // Both spellings are accepted because `task_claim` matches both (#2841);
+    // rejecting the name here would break every task posted before the
+    // dashboard picker started sending ids.
+    for (label, assignee) in [
+        ("uuid", agent_id.clone()),
+        ("name", "test-agent".to_string()),
+    ] {
+        let (status, created) = post_task(
+            &harness,
+            serde_json::json!({
+                "title": format!("Real {label}"),
+                "description": "Assigned to a registered agent",
+                "assigned_to": assignee,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{label} assignment must be accepted (body: {created})"
+        );
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        let (status, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(task["assigned_to"], assignee, "{label} must round-trip");
+        assert_eq!(task["status"], "pending");
+    }
+}
+
+/// `priority` is enforced, not decorative: the claim queue is ordered
+/// `priority DESC, created_at ASC`. Posting the low-priority task *first* is
+/// the point — under the historical hard-coded `priority = 0` both rows tie
+/// and age alone decides, so this asserts the value survives the HTTP layer,
+/// the kernel and the INSERT all the way to the ORDER BY.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_priority_is_stored_and_orders_the_claim_queue() {
+    let harness = start_full_router("").await;
+
+    let (status, low) = post_task(
+        &harness,
+        serde_json::json!({"title": "Low", "description": "d", "priority": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let low = low["id"].as_str().unwrap().to_string();
+
+    let (status, high) = post_task(
+        &harness,
+        serde_json::json!({"title": "High", "description": "d", "priority": 5}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let high = high["id"].as_str().unwrap().to_string();
+
+    // Read-back: the board shows the priority the queue will order by.
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{high}")).await;
+    assert_eq!(task["priority"], 5, "priority must survive the round trip");
+
+    // Enforcement: the later high-priority task is claimed before the older
+    // low-priority one.
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("a pending task is claimable");
+    assert_eq!(
+        claimed["id"], high,
+        "priority DESC must outrank age in the claim queue"
+    );
+
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the second task is still claimable");
+    assert_eq!(claimed["id"], low);
+}
+
+/// A per-task `timeout_secs` overrides the global `[task_board]
+/// claim_ttl_secs` at the one place that enforces a claim deadline — the
+/// stuck-task sweeper.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_timeout_secs_overrides_the_global_claim_ttl() {
+    let harness = start_full_router("").await;
+
+    let (status, created) = post_task(
+        &harness,
+        serde_json::json!({
+            "title": "Quick probe",
+            "description": "one-second budget",
+            // Small enough that the deadline genuinely elapses inside the test
+            // rather than being simulated by rewriting `claimed_at`, so the
+            // epoch arithmetic in the sweeper's query is exercised for real.
+            "timeout_secs": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let task_id = created["id"].as_str().unwrap().to_string();
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["timeout_secs"], 1,
+        "the deadline must be readable back"
+    );
+
+    let substrate = harness.state.kernel.memory_substrate();
+    let claimed = substrate
+        .task_claim("worker", Some("worker"))
+        .await
+        .unwrap()
+        .expect("the posted task is claimable");
+    assert_eq!(claimed["id"], task_id);
+
+    // Before the deadline the sweeper must leave it alone, so the reset below
+    // is attributable to the elapsed timeout and not to an always-reset bug.
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert!(
+        reset.is_empty(),
+        "a freshly claimed task is not yet past its 1s deadline, got {reset:?}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+
+    // A one-hour global TTL would leave this claimed; the row's own 1s wins.
+    let reset = substrate.task_reset_stuck(3600, 0).await.unwrap();
+    assert_eq!(
+        reset,
+        vec![task_id.clone()],
+        "the per-task timeout must be the deadline the sweeper enforces"
+    );
+
+    let (_, task) = get_json(&harness, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["status"], "pending",
+        "the reclaimed task returns to the queue"
+    );
+}
+
+/// Malformed limits are refused rather than silently coerced to the default: a
+/// caller that sent `"priority": "high"` should learn that, not get a 201 for a
+/// task the queue orders as if it had said nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn task_post_rejects_malformed_limits() {
+    let harness = start_full_router("").await;
+
+    for (field, value) in [
+        ("priority", serde_json::json!("high")),
+        ("timeout_secs", serde_json::json!(-5)),
+        ("timeout_secs", serde_json::json!("soon")),
+    ] {
+        let mut body = serde_json::json!({"title": "Bad", "description": "d"});
+        body[field] = value.clone();
+        let (status, resp) = post_task(&harness, body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field} = {value} must be rejected, not coerced to the default (got {resp})"
+        );
+    }
+}

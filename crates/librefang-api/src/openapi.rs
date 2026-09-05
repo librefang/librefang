@@ -56,6 +56,7 @@ use crate::types;
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
+        routes::task_queue_post_root,
 
         // ── Agents ──
         routes::list_agents,
