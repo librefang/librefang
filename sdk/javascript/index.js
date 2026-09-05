@@ -1654,6 +1654,14 @@ class SystemResource {
     return this._c._request("POST", `/api/templates/${name}/promote`);
   }
 
+  async getAgentTypeRegistryDiff(name) {
+    return this._c._request("GET", `/api/templates/${name}/registry-diff`);
+  }
+
+  async restoreAgentTypeFromRegistry(name) {
+    return this._c._request("POST", `/api/templates/${name}/restore`);
+  }
+
   async getAgentTemplateToml(name) {
     return this._c._request("GET", `/api/templates/${name}/toml`);
   }

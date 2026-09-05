@@ -12714,6 +12714,65 @@
         }
       }
     },
+    "/api/templates/{name}/registry-diff": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "operationId": "get_agent_type_registry_diff",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diff between local and registry versions"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [

@@ -3,13 +3,14 @@ import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import { Edit2, ExternalLink, History, LayoutTemplate, Lock, Play, Plus, RotateCcw, Share2, ShieldCheck, Trash2 } from "lucide-react";
 import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api";
-import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
+import { useAgentType, useAgentTypeRegistryDiff, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
 import {
   useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
+  useRestoreAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
   useUpdateAgentType,
@@ -509,6 +510,115 @@ function PromotionPreviewModal({ name, onClose }: { name: string; onClose: () =>
   );
 }
 
+function RestoreDiffModal({
+  name,
+  onClose,
+}: {
+  name: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const diff = useAgentTypeRegistryDiff(name);
+  const restore = useRestoreAgentType();
+
+  async function handleRestore() {
+    try {
+      await restore.mutateAsync(name);
+      addToast(t("agentTypes.restore_success"), "success");
+      onClose();
+    } catch (err) {
+      addToast(toastErr(err, t("agentTypes.restore_failed")), "error");
+    }
+  }
+
+  return (
+    <Modal
+      isOpen
+      onClose={onClose}
+      variant="panel-right"
+      size="lg"
+      title={t("agentTypes.restore_title", { name })}
+    >
+      {diff.isLoading ? (
+        <ListSkeleton rows={4} />
+      ) : diff.isError ? (
+        <div className="space-y-3">
+          <p className="text-[13px] text-text-dim">
+            {t("agentTypes.restore_no_registry")}
+          </p>
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+          </div>
+        </div>
+      ) : diff.data?.identical ? (
+        <div className="space-y-3">
+          <p className="text-[13px] text-text-dim">
+            {t("agentTypes.restore_identical")}
+          </p>
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="overflow-auto rounded-lg border border-border-subtle">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="border-b border-border-subtle bg-main/30">
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_field")}</th>
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_local")}</th>
+                  <th className="px-3 py-1.5 text-left font-semibold text-text-dim">{t("agentTypes.restore_diff_registry")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(diff.data?.diffs ?? []).map((d) => (
+                  <tr key={d.field} className="border-b border-border-subtle last:border-0">
+                    <td className="px-3 py-1.5 font-mono text-text-main">{d.field}</td>
+                    <td className="max-w-[200px] truncate px-3 py-1.5 text-error/80">
+                      {typeof d.local === "string" ? d.local : JSON.stringify(d.local)}
+                    </td>
+                    <td className="max-w-[200px] truncate px-3 py-1.5 text-green-500/80">
+                      {typeof d.registry === "string" ? d.registry : JSON.stringify(d.registry)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {(diff.data?.unlisted_diffs ?? 0) > 0 && (
+            <p className="text-[11px] text-text-dim">
+              {t("agentTypes.restore_diff_more", {
+                count: diff.data!.unlisted_diffs,
+              })}
+            </p>
+          )}
+
+          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
+            {t("agentTypes.restore_confirm")}
+          </p>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose} disabled={restore.isPending}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="primary"
+              leftIcon={<RotateCcw className="h-3.5 w-3.5" />}
+              onClick={() => void handleRestore()}
+              isLoading={restore.isPending}
+            >
+              {t("agentTypes.restore")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
 function TemplateHistoryModal({
   name,
   onClose,
@@ -604,6 +714,7 @@ function AgentTypeRow({
   onDelete,
   onPromote,
   onPreviewPromote,
+  onRestore,
   onHistory,
 }: {
   type: AgentTemplate;
@@ -612,6 +723,7 @@ function AgentTypeRow({
   onDelete: () => void;
   onPromote: () => void;
   onPreviewPromote: () => void;
+  onRestore: () => void;
   onHistory: () => void;
 }) {
   const { t } = useTranslation();
@@ -689,6 +801,15 @@ function AgentTypeRow({
             </button>
             <button
               type="button"
+              onClick={onRestore}
+              className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
+              aria-label={t("agentTypes.restore")}
+              title={t("agentTypes.restore")}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={onDelete}
               className="rounded-lg p-1.5 text-text-dim hover:bg-error/10 hover:text-error"
               aria-label={t("agentTypes.delete")}
@@ -725,6 +846,7 @@ export function AgentTypesPage() {
   const [promoting, setPromoting] = useState<string | null>(null);
   const [pendingPromote, setPendingPromote] = useState<string | null>(null);
   const [promotedPrUrl, setPromotedPrUrl] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState<string | null>(null);
   const [historyName, setHistoryName] = useState<string | null>(null);
 
   async function confirmDelete() {
@@ -792,6 +914,7 @@ export function AgentTypesPage() {
               onDelete={() => setPendingDelete(type.name)}
               onPromote={() => setPendingPromote(type.name)}
               onPreviewPromote={() => setPromoting(type.name)}
+              onRestore={() => setRestoring(type.name)}
               onHistory={() => setHistoryName(type.name)}
             />
           ))}
@@ -807,6 +930,8 @@ export function AgentTypesPage() {
       {promoting && (
         <PromotionPreviewModal name={promoting} onClose={() => setPromoting(null)} />
       )}
+
+      {restoring && <RestoreDiffModal name={restoring} onClose={() => setRestoring(null)} />}
 
       {historyName && (
         <TemplateHistoryModal name={historyName} onClose={() => setHistoryName(null)} />

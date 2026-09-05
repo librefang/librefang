@@ -4310,6 +4310,17 @@
     "promoted": "PR в реєстр створено",
     "promote_failed": "Не вдалося опублікувати тип агента",
     "promote_success": "Pull request створено в реєстрі. Перегляньте і злийте, коли буде готово.",
-    "view_pr": "Переглянути pull request"
+    "view_pr": "Переглянути pull request",
+    "restore": "Відновити",
+    "restore_title": "Відновити з реєстру — {{name}}",
+    "restore_confirm": "Перезаписати локальний тип агента версією з реєстру? Цю дію не можна скасувати.",
+    "restore_identical": "Цей тип агента ідентичний версії з реєстру.",
+    "restore_no_registry": "Цей тип агента не існує в реєстрі.",
+    "restore_success": "Тип агента відновлено з реєстру",
+    "restore_failed": "Не вдалося відновити з реєстру",
+    "restore_diff_field": "Поле",
+    "restore_diff_local": "Локально",
+    "restore_diff_registry": "Реєстр",
+    "restore_diff_more": "…і ще {{count}} інших відмінностей не показано"
   }
 }

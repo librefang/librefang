@@ -38,6 +38,7 @@ api-error-template-promote-render-failed = Nie można wyrenderować oczyszczoneg
 api-error-agent-type-exists = Typ agenta '{ $name }' już istnieje
 api-error-agent-type-name-taken = '{ $name }' to nazwa działającego agenta; wybierz inną nazwę dla typu agenta
 api-error-agent-type-not-editable = Typ agenta '{ $name }' pochodzi z obszaru roboczego działającego agenta i jest zarządzany przez /api/agents
+api-error-registry-type-not-found = Typ agenta '{ $name }' nie został znaleziony w rejestrze
 
 # Manifest errors
 api-error-manifest-too-large = Manifest jest za duży (maks. 1 MB)

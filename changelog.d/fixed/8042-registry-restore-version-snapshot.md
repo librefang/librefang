@@ -1,0 +1,4 @@
+Record a version snapshot when an agent type is restored from the registry, which was the one write path that persisted without recording while create, the dashboard save and the history restore all recorded theirs.
+The restore is also the one write that destroys the local copy on purpose, so the gap was worst exactly where it mattered: a manifest last written by a hand-edit of `~/.librefang/agent-types/{name}.toml` had no snapshot anywhere, and the restore left the operator nothing to go back to.
+Meanwhile `GET /api/templates/{name}/history` went on reporting the previous dashboard save as current while the file on disk was the registry copy, and a history that is silently incomplete is worse than none because nothing tells the two apart.
+The snapshot is recorded with the change source `registry-restore` (#8042) (@DaBlitzStein)

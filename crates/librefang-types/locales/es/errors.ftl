@@ -25,6 +25,7 @@ api-error-template-promote-render-failed = No se puede renderizar el manifiesto 
 api-error-agent-type-exists = Ya existe un tipo de agente llamado '{ $name }'
 api-error-agent-type-name-taken = '{ $name }' es el nombre de un agente activo; elija otro nombre para el tipo de agente
 api-error-agent-type-not-editable = El tipo de agente '{ $name }' proviene del espacio de trabajo de un agente activo y se gestiona a través de /api/agents
+api-error-registry-type-not-found = Tipo de agente '{ $name }' no encontrado en el registro
 
 # Manifest errors
 api-error-manifest-too-large = Manifiesto demasiado grande (máx. 1 MB)

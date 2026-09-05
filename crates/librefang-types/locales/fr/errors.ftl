@@ -25,6 +25,7 @@ api-error-template-promote-render-failed = Impossible de rendre le manifeste ass
 api-error-agent-type-exists = Un type d'agent nommé '{ $name }' existe déjà
 api-error-agent-type-name-taken = '{ $name }' est le nom d'un agent actif ; choisissez un autre nom pour le type d'agent
 api-error-agent-type-not-editable = Le type d'agent '{ $name }' provient de l'espace de travail d'un agent actif et se gère via /api/agents
+api-error-registry-type-not-found = Type d'agent '{ $name }' introuvable dans le registre
 
 # Manifest errors
 api-error-manifest-too-large = Manifeste trop volumineux (max. 1 Mo)

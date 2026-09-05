@@ -4297,6 +4297,17 @@
     "promoted": "레지스트리 PR 생성됨",
     "promote_failed": "에이전트 유형을 등록할 수 없습니다",
     "promote_success": "레지스트리에 pull request가 생성되었습니다. 검토 후 병합하세요.",
-    "view_pr": "Pull request 보기"
+    "view_pr": "Pull request 보기",
+    "restore": "복원",
+    "restore_title": "레지스트리에서 복원 — {{name}}",
+    "restore_confirm": "로컬 에이전트 유형을 레지스트리 버전으로 덮어쓸까요? 이 작업은 되돌릴 수 없습니다.",
+    "restore_identical": "이 에이전트 유형은 레지스트리 버전과 동일합니다.",
+    "restore_no_registry": "이 에이전트 유형은 레지스트리에 없습니다.",
+    "restore_success": "레지스트리에서 에이전트 유형을 복원했습니다.",
+    "restore_failed": "레지스트리에서 복원하지 못했습니다.",
+    "restore_diff_field": "필드",
+    "restore_diff_local": "로컬",
+    "restore_diff_registry": "레지스트리",
+    "restore_diff_more": "…그 외 표시되지 않은 {{count}}개 차이점"
   }
 }

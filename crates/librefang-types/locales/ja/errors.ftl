@@ -38,6 +38,7 @@ api-error-template-promote-render-failed = サニタイズ済みマニフェス�
 api-error-agent-type-exists = エージェントタイプ '{ $name }' はすでに存在します
 api-error-agent-type-name-taken = '{ $name }' は稼働中のエージェントの名前です。別の名前を指定してください
 api-error-agent-type-not-editable = エージェントタイプ '{ $name }' は稼働中のエージェントのワークスペース由来で、/api/agents で管理されます
+api-error-registry-type-not-found = エージェントタイプ '{ $name }' はレジストリに見つかりません
 
 # マニフェストエラー
 api-error-manifest-too-large = マニフェストが大きすぎます（最大 1MB）

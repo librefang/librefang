@@ -4310,6 +4310,17 @@
     "promoted": "PR w rejestrze utworzony",
     "promote_failed": "Nie udało się opublikować typu agenta",
     "promote_success": "Pull request został utworzony w rejestrze. Sprawdź i scal, gdy będzie gotowy.",
-    "view_pr": "Zobacz pull request"
+    "view_pr": "Zobacz pull request",
+    "restore": "Przywróć",
+    "restore_title": "Przywróć z rejestru — {{name}}",
+    "restore_confirm": "Zastąpić lokalny typ agenta wersją z rejestru? Tej operacji nie można cofnąć.",
+    "restore_identical": "Ten typ agenta jest identyczny z wersją z rejestru.",
+    "restore_no_registry": "Ten typ agenta nie istnieje w rejestrze.",
+    "restore_success": "Przywrócono typ agenta z rejestru",
+    "restore_failed": "Nie udało się przywrócić z rejestru",
+    "restore_diff_field": "Pole",
+    "restore_diff_local": "Lokalnie",
+    "restore_diff_registry": "Rejestr",
+    "restore_diff_more": "…oraz {{count}} innych różnic nieuwzględnionych"
   }
 }

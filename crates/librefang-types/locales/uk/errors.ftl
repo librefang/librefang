@@ -38,6 +38,7 @@ api-error-template-promote-render-failed = Не вдалося відобраз�
 api-error-agent-type-exists = Тип агента '{ $name }' вже існує
 api-error-agent-type-name-taken = '{ $name }' — це назва активного агента; оберіть іншу назву для типу агента
 api-error-agent-type-not-editable = Тип агента '{ $name }' походить із робочої області активного агента й керується через /api/agents
+api-error-registry-type-not-found = Тип агента '{ $name }' не знайдено в реєстрі
 
 # Manifest errors
 api-error-manifest-too-large = Маніфест занадто великий (макс. 1MB)

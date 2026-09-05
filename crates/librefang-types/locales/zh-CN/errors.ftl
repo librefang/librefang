@@ -25,6 +25,7 @@ api-error-template-promote-render-failed = 无法将清理后的清单渲染为 
 api-error-agent-type-exists = 名为 '{ $name }' 的智能体类型已存在
 api-error-agent-type-name-taken = '{ $name }' 是某个运行中智能体的名称，请为智能体类型另选名称
 api-error-agent-type-not-editable = 智能体类型 '{ $name }' 来自运行中智能体的工作区，请通过 /api/agents 管理
+api-error-registry-type-not-found = 在注册表中未找到智能体类型 '{ $name }'
 
 # Manifest errors
 api-error-manifest-too-large = 清单文件过大（最大 1MB）
