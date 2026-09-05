@@ -236,6 +236,7 @@ audit-failed = Перевірка цілісності аудиторськог�
 
 # --- Health ---
 health-ok = Демон здоровий
+health-degraded = Демон доступний, але повідомляє про несправну підсистему
 health-not-running = Демон не запущений.
 
 # --- Channel setup ---

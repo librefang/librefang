@@ -234,6 +234,7 @@ audit-failed = Audit trail integrity check FAILED.
 
 # --- Health ---
 health-ok = Daemon is healthy
+health-degraded = Daemon is reachable but reporting a degraded subsystem
 health-not-running = Daemon is not running.
 
 # --- Channel setup ---

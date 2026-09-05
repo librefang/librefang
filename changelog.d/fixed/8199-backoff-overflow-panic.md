@@ -1,0 +1,4 @@
+`ExponentialBackoff::next_delay` no longer panics on a large attempt count.
+The delay was built with `Duration::from_secs_f64` before being clamped to `max_delay`, and that constructor panics on a value that overflows `Duration` or is not finite — so the clamp, applied to the already-constructed `Duration`, could never bound the input.
+A retry loop that keeps incrementing its attempt counter across consecutive failures does reach it: with the desktop tray's 10-second initial delay and multiplier of 2.0 it is attempt 62, roughly five hours of unbroken reconnect failures, at which point the panic unwound the reconnect task and the tray never came back for the life of the process even after the session bus recovered.
+The clamp now happens in `f64` before the conversion, non-finite and negative growth are handled explicitly, and `LinearBackoff` saturates instead of using the panicking `Duration` multiply and add (#8199) (@houko)

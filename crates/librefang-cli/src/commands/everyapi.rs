@@ -1287,6 +1287,10 @@ fn handle_default_model(synthesis: &SynthesisResult, daemon: Option<&str>, set_d
             "everyapi-connect-default-failed",
             &[("model", &model), ("status", &status.to_string())],
         ));
+        // `--set-default` was asked for and the daemon refused it, so the command did not do what it was told and must not report success.
+        // Only genuine failures reach here: the 207 partial-success body carries `status` / `provider` / `model` / `sync_failures` and no top-level `error` key (`librefang-api/src/routes/providers.rs::set_default_provider`), so it takes the success branch above.
+        // The advisory arms of this function deliberately use `ui::check_warn` and return 0 — no default candidate, and no daemon to call — which is why only the `ui::error` arm exits.
+        std::process::exit(1);
     }
 }
 

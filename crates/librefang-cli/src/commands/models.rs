@@ -267,9 +267,9 @@ pub(crate) fn cmd_models_set(model: Option<String>) {
             "model-set-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
-    } else {
-        ui::success(&i18n::t_args("model-set-success", &[("model", &model)]));
+        std::process::exit(1);
     }
+    ui::success(&i18n::t_args("model-set-success", &[("model", &model)]));
 }
 
 pub(crate) fn cmd_models_overrides(
@@ -295,6 +295,7 @@ pub(crate) fn cmd_models_overrides(
                 "model-overrides-clear-failed",
                 &[("model", model), ("status", &status.to_string())],
             ));
+            std::process::exit(1);
         }
         return;
     }
@@ -345,6 +346,7 @@ pub(crate) fn cmd_models_overrides(
             "model-overrides-save-failed",
             &[("model", model), ("status", &status.to_string())],
         ));
+        std::process::exit(1);
     }
 }
 
@@ -540,6 +542,7 @@ pub(crate) fn cmd_approvals_respond(id: &str, approve: bool) {
             "approval-failed",
             &[("action", endpoint), ("error", &err)],
         ));
+        std::process::exit(1);
     }
 }
 

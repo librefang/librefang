@@ -234,6 +234,7 @@ audit-failed = 감사 추적 무결성 검사에 실패했습니다.
 
 # --- Health ---
 health-ok = 데몬이 정상입니다
+health-degraded = 데몬에 연결되었지만 일부 하위 시스템이 비정상입니다
 health-not-running = 데몬이 실행 중이 아닙니다.
 
 # --- Channel setup ---

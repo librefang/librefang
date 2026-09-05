@@ -740,19 +740,54 @@ pub(crate) fn uptime_secs(
     u64::try_from(delta.num_seconds()).ok()
 }
 
+/// Whether a `GET /api/health` payload reports a fully healthy daemon.
+///
+/// `/api/health` is a liveness probe and deliberately answers HTTP 200 even when a subsystem check failed, reporting `status = "degraded"` in the body (`librefang-api/src/routes/config/system.rs::health`); `/api/ready` is the endpoint that turns a failed check into a 503.
+/// So the success line and the exit code have to be read out of the payload: keying them off the HTTP status printed a green "Daemon is healthy" directly above `Status: degraded` and still exited 0 while the SQLite substrate was unreachable.
+///
+/// A missing or non-string `status` counts as unhealthy — the daemon answered with something this CLI cannot classify, which is not a result to report as success.
+pub(crate) fn health_payload_is_ok(body: &serde_json::Value) -> bool {
+    body["status"].as_str() == Some("ok")
+}
+
+/// Names of the `checks[]` entries reporting `status = "error"`.
+///
+/// This is the per-subsystem detail that makes an unhealthy `librefang health` actionable; `status = "warn"` is deliberately not included, since the liveness payload uses it for an optional subsystem.
+pub(crate) fn failed_health_checks(body: &serde_json::Value) -> Vec<String> {
+    body["checks"]
+        .as_array()
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| check["status"].as_str() == Some("error"))
+                .filter_map(|check| check["name"].as_str())
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn cmd_health(json: bool) {
     match find_daemon() {
         Some(base) => {
             let client = daemon_client();
             let body = daemon_json(client.get(format!("{base}/api/health")).send());
+            let healthy = health_payload_is_ok(&body);
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&body).unwrap_or_default()
                 );
+                if !healthy {
+                    std::process::exit(1);
+                }
                 return;
             }
-            ui::success(&i18n::t("health-ok"));
+            if healthy {
+                ui::success(&i18n::t("health-ok"));
+            } else {
+                ui::error(&i18n::t("health-degraded"));
+            }
             if let Some(status) = body["status"].as_str() {
                 ui::kv(&i18n::t("label-status"), status);
             }
@@ -767,6 +802,12 @@ pub(crate) fn cmd_health(json: bool) {
                     ),
                 );
             }
+            if !healthy {
+                for check in failed_health_checks(&body) {
+                    ui::check_fail(&check);
+                }
+                std::process::exit(1);
+            }
         }
         None => {
             if json {
@@ -777,5 +818,39 @@ pub(crate) fn cmd_health(json: bool) {
             ui::hint(&i18n::t("hint-start-daemon"));
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{failed_health_checks, health_payload_is_ok};
+    use serde_json::json;
+
+    #[test]
+    fn health_payload_is_ok_only_for_status_ok() {
+        assert!(health_payload_is_ok(
+            &json!({ "status": "ok", "version": "1.2.3" })
+        ));
+        // The case the command used to report as success: `/api/health` answers 200 with `degraded` when the database probe fails, because it is a liveness probe and not a readiness one.
+        assert!(!health_payload_is_ok(&json!({
+            "status": "degraded",
+            "checks": [{ "name": "database", "status": "error" }],
+        })));
+        // An unparseable or status-less body is not a healthy daemon either; `daemon_json` yields `Null` for a body it could not decode.
+        assert!(!health_payload_is_ok(&json!({ "version": "1.2.3" })));
+        assert!(!health_payload_is_ok(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn failed_health_checks_lists_only_errored_subsystems() {
+        let body = json!({
+            "status": "degraded",
+            "checks": [
+                { "name": "database", "status": "error" },
+                { "name": "embedding", "status": "warn" },
+            ],
+        });
+        assert_eq!(failed_health_checks(&body), vec!["database".to_string()]);
+        assert!(failed_health_checks(&json!({ "status": "ok" })).is_empty());
     }
 }
