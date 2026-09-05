@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use librefang_llm_driver::{LlmError, StreamEvent};
+use librefang_llm_drivers::drivers::openai::OpenAIDriver;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -95,7 +96,9 @@ async fn os2_stream_options_strip() {
 async fn os3_429_exhaustion_stream() {
     let _env = isolated_env();
     let server = MockServer::start().await;
-    let driver = mock_openai_driver(&server);
+    // Built with an explicit key rather than `mock_openai_driver`, whose key is a random UUID the test cannot name — the lockout assertion below has to hash the same key the driver used.
+    let api_key = "sk-test-os3".to_string();
+    let driver = OpenAIDriver::with_proxy_and_timeout(api_key.clone(), server.uri(), None, Some(5));
 
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -116,6 +119,11 @@ async fn os3_429_exhaustion_stream() {
         requests.len(),
         4,
         "expected 4 requests (initial + 3 retries)"
+    );
+    // The streaming path has its own 429 handling, so the persisting half of the behaviour needs its own assertion here: once the driver has given up, a sibling process must short-circuit in `pre_request_check` rather than repeat the same four doomed requests.
+    assert!(
+        lockout_file_exists(provider_for_openai_mock(), &api_key),
+        "exhausted 429 on the streaming path must persist a cross-process lockout"
     );
 }
 

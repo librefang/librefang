@@ -878,12 +878,34 @@ struct ClaudeJsonOutput {
 }
 
 /// Usage stats from Claude CLI JSON output.
+///
+/// The CLI reports the Anthropic API shape, where `input_tokens` counts only the NEW input and the cached prompt is reported separately.
+/// `#[serde(default)]` on the cache buckets keeps older CLI builds that omit them parsing.
 #[derive(Debug, Deserialize, Default)]
 struct ClaudeUsage {
     #[serde(default)]
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+}
+
+impl ClaudeUsage {
+    /// Normalise to the workspace `TokenUsage` convention: `input_tokens` is the TOTAL prompt count with the two cache buckets as subsets of it.
+    /// Same fold the Anthropic HTTP driver applies in `convert_response`; without it a cache-heavy Claude CLI turn reports a handful of prompt tokens instead of tens of thousands, and every consumer downstream — cost estimates, the hourly token quota, the per-minute burst window, RL export — under-counts by orders of magnitude.
+    fn to_token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens
+                + self.cache_read_input_tokens
+                + self.cache_creation_input_tokens,
+            output_tokens: self.output_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+        }
+    }
 }
 
 /// Stream JSON event from `claude -p --output-format stream-json`.
@@ -1186,11 +1208,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 }],
                 stop_reason: StopReason::EndTurn,
                 tool_calls: Vec::new(),
-                usage: TokenUsage {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    ..Default::default()
-                },
+                usage: usage.to_token_usage(),
                 actual_provider: None,
                 actual_model: parsed.model,
             });
@@ -1498,11 +1516,7 @@ impl LlmDriver for ClaudeCodeDriver {
                                         }
                                     }
                                     if let Some(usage) = event.usage {
-                                        final_usage = TokenUsage {
-                                            input_tokens: usage.input_tokens,
-                                            output_tokens: usage.output_tokens,
-                                            ..Default::default()
-                                        };
+                                        final_usage = usage.to_token_usage();
                                     }
                                 }
                                 _ => {
@@ -2211,6 +2225,60 @@ mod tests {
         let parsed: ClaudeJsonOutput =
             serde_json::from_str(with_model).expect("result json deserializes");
         assert_eq!(parsed.model.as_deref(), Some("claude-opus-4-1-20250805"));
+    }
+
+    #[test]
+    fn cli_usage_folds_cache_buckets_into_total_input_tokens() {
+        // The CLI reports the Anthropic API shape (`input_tokens` = new input only), so both driver paths must normalise to the workspace `TokenUsage` convention where `input_tokens` is the TOTAL prompt count.
+        // Without the fold a cache-heavy turn reports 4 prompt tokens instead of 29204, `burst_tokens()` drops from 1504 to 304 and `cache_hit_ratio()` is `None`, so cost estimates and the token quotas silently under-count this provider.
+        let result_line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi","usage":{"input_tokens":4,"cache_creation_input_tokens":1200,"cache_read_input_tokens":28000,"output_tokens":300}}"#;
+        let parsed: ClaudeJsonOutput =
+            serde_json::from_str(result_line).expect("result json deserializes");
+        let usage = parsed.usage.expect("usage present").to_token_usage();
+        assert_eq!(usage.input_tokens, 29204);
+        assert_eq!(usage.output_tokens, 300);
+        assert_eq!(usage.cache_creation_input_tokens, 1200);
+        assert_eq!(usage.cache_read_input_tokens, 28000);
+        assert_eq!(usage.burst_tokens(), 1504);
+        let ratio = usage.cache_hit_ratio().expect("cache activity reported");
+        assert!(
+            (ratio - 28000.0 / 29200.0).abs() < 1e-4,
+            "unexpected cache hit ratio: {ratio}"
+        );
+
+        // Same shape over stream-json, where the buckets arrive on the result event.
+        let stream_line = r#"{"type":"result","result":"hi","usage":{"input_tokens":4,"cache_creation_input_tokens":1200,"cache_read_input_tokens":28000,"output_tokens":300}}"#;
+        let event: ClaudeStreamEvent =
+            serde_json::from_str(stream_line).expect("stream result event deserializes");
+        let stream_usage = event.usage.expect("usage present").to_token_usage();
+        assert_eq!(stream_usage.input_tokens, 29204);
+        assert_eq!(stream_usage.cache_read_input_tokens, 28000);
+
+        // An older CLI build that omits the cache fields must still parse and degrade to plain new-input accounting rather than failing.
+        let no_cache = r#"{"input_tokens":10,"output_tokens":5}"#;
+        let legacy: ClaudeUsage =
+            serde_json::from_str(no_cache).expect("legacy usage deserializes");
+        let legacy = legacy.to_token_usage();
+        assert_eq!(legacy.input_tokens, 10);
+        assert_eq!(legacy.cache_read_input_tokens, 0);
+        assert_eq!(legacy.cache_hit_ratio(), None);
+    }
+
+    #[test]
+    fn cli_usage_fold_is_wired_into_both_driver_paths() {
+        // The fold only matters if `complete` and `stream` actually route through it; an inline `TokenUsage { input_tokens: usage.input_tokens, .. }` at either site reintroduces the under-count.
+        let Some(source) = read_claude_code_source() else {
+            return;
+        };
+        let tests_marker = source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("test module marker must exist");
+        let impl_body = &source[..tests_marker];
+        assert_eq!(
+            impl_body.matches(".to_token_usage()").count(),
+            2,
+            "both CLI result paths (json + stream-json) must build their TokenUsage via ClaudeUsage::to_token_usage",
+        );
     }
 
     #[test]

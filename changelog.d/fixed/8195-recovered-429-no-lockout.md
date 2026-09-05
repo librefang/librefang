@@ -1,0 +1,4 @@
+Stop persisting a cross-process rate-limit lockout for a 429 the driver recovers from on its own retry.
+The Anthropic, OpenAI-compatible and Gemini drivers recorded the lockout before deciding whether to retry, and nothing but wall-clock expiry ever clears one — there is no success-based clear and the on-disk merge keeps the longest window.
+A single transient 429 that the very next attempt rode out therefore failed every later turn's pre-request check, in this process and in every sibling process sharing the key, for the provider's whole reset window: up to five minutes for a header-less 429 such as Gemini's `RESOURCE_EXHAUSTED`, and long enough in every case to exceed the fallback chain's 10-second sleep cap and mark the slot exhausted without an HTTP request.
+The lockout is now written only once the driver has exhausted its retries; the retry path still counts the 429 for metrics and still honours its `Retry-After` for backoff (#8195) (@houko)

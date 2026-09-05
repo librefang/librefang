@@ -1,0 +1,4 @@
+Fold the Claude CLI's prompt-cache token buckets into the reported prompt total for the `claude-code` driver.
+The driver read only `input_tokens` and `output_tokens` from the CLI's Anthropic-shaped usage object, and Anthropic reports `input_tokens` as new input only, so a cache-heavy turn — the normal case for that CLI — was recorded as a handful of prompt tokens instead of tens of thousands.
+Cost estimates, per-agent budget caps, the hourly token quota, the per-minute burst window and RL-export rows all under-counted this provider by orders of magnitude, and the quotas effectively never gated it.
+`cache_creation_input_tokens` and `cache_read_input_tokens` are now parsed and added into `input_tokens`, matching the normalisation the Anthropic HTTP driver already performs; CLI builds that omit the fields keep their previous numbers rather than failing to parse (#8195) (@houko)
