@@ -1,0 +1,4 @@
+Stop the scheduled branch updater from treating an advisory check as a failing one, which turned each sweep into a full-repository CI cascade.
+`auto-update-branches` deliberately updates only pull requests whose CI is failing, precisely so that a moving `main` does not re-run CI on every open PR, but it decided "failing" from every check run on the head commit rather than from the checks the `main` ruleset actually requires.
+Two bookkeeping workflows sharing one concurrency bucket left a `cancelled` check on nearly every open pull request, `cancelled` counts as a failure, and so every sweep updated roughly thirty branches and queued thirty CI matrices behind them — one such fire left `main`'s own CI queued for over an hour and a half.
+The decision now reads only `CI Gate`, the sole entry in that ruleset's required checks, so a check that cannot block a merge can no longer trigger a branch update either (#8192) (@houko)
