@@ -17,12 +17,37 @@
 //! GOAL_PROGRESS: 60
 //! GOAL_DONE          (optional — signals the goal is complete)
 //! GOAL_BLOCKED       (optional — signals it cannot proceed without input)
+//! GOAL_LEARNED: ...  (optional — a reusable lesson worth keeping)
 //! ```
 //!
 //! This keeps the v1 runner entirely kernel-side: no new runtime tool, no
 //! tool-registry / capability-permission surgery. The parsing is forgiving
 //! (case-insensitive, last marker wins) so an agent that forgets the marker
 //! simply keeps iterating to the cap rather than failing.
+//!
+//! ## Loop engineering (opt-in, per goal)
+//!
+//! `GOAL_DONE` is the agent's own opinion of its own work, and a loop that
+//! stops the moment the worker says it is finished has no independent check
+//! in it at all. Setting `loop_engineering` on the goal adds two:
+//!
+//! - **A verifier agent** (`Goal::verify_agent_id`). Each iteration's output
+//!   goes to it for a `VERDICT: PASS|FAIL|NEEDS_REWORK` judgement. On a
+//!   rejection the generator is asked to rework the output *with the
+//!   verifier's stated reason*, up to `verify_max_retries` times. Until the
+//!   verifier passes it, `GOAL_DONE` does not end the run.
+//! - **An evaluator model** (`Goal::evaluator_model`). A single cheap
+//!   yes/no read of the goal against the latest output, which can conclude
+//!   the goal is met even when the agent never emitted `GOAL_DONE`.
+//!
+//! Both are optional and both are inert unless `loop_engineering` is set, so
+//! a goal that does not ask for them runs exactly the loop it ran before —
+//! same prompt, same number of LLM calls.
+//!
+//! Sub-agents are delegated, not conjured: the prompt tells the agent to use
+//! its own `agent_spawn` / `agent_send` tools, which run under the agent's
+//! own capability grants. The runner never provisions an agent behind the
+//! operator's back.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -63,6 +88,33 @@ const TICK_INTERVAL: Duration = Duration::from_secs(2);
 /// the background executor's circuit breaker (#5168) so a quota-exhausted
 /// provider does not get hammered on every iteration.
 const MAX_RATE_LIMIT_STREAK: u32 = 3;
+
+/// Consecutive non-rate-limit tick failures before the loop gives up.
+///
+/// The rate-limit breaker above only catches a quota-exhausted provider. A
+/// deleted agent, a revoked API key or a downed network fails every tick with
+/// the same error forever, and without a second breaker the loop spends the
+/// whole `max_iterations` budget rediscovering it. Kept separate from
+/// `MAX_RATE_LIMIT_STREAK` so a transient rate-limit does not also count
+/// toward this one.
+const MAX_ERROR_STREAK: u32 = 5;
+
+/// Marker prefix for a reusable lesson the agent wants to keep.
+const LEARNED_MARKER: &str = "GOAL_LEARNED:";
+
+/// How many captured learnings are replayed into the next iteration's prompt.
+/// Recent ones are the relevant ones, and the whole list would grow without
+/// bound across a long run.
+const LEARNINGS_IN_PROMPT: usize = 6;
+
+/// Rework rounds allowed per iteration when the caller does not pick a number.
+/// Each round is a verifier turn plus a generator turn, so the default stays
+/// small.
+const DEFAULT_VERIFY_MAX_RETRIES: u32 = 3;
+
+/// Structured-memory key prefix under which a run's captured learnings are
+/// stored, alongside the goals document itself.
+const LEARNINGS_KEY_PREFIX: &str = "goal_learnings_";
 
 /// Result of [`create_and_start_goal`]: the persisted goal id and whether a
 /// run was scheduled for it.
@@ -134,7 +186,8 @@ pub fn create_and_start_goal(
         })
         .map_err(|e| format!("Failed to create goal: {e}"))?;
 
-    let started = kernel.start_goal_run(goal_id, agent_id, None);
+    let started =
+        kernel.start_goal_run(goal_id, agent_id, None, loop_engineering, None, None, None);
     Ok(GoalLaunch { goal_id, started })
 }
 
@@ -147,6 +200,9 @@ pub struct ParsedTick {
     pub done: bool,
     /// The agent signalled it is blocked (`GOAL_BLOCKED`).
     pub blocked: bool,
+    /// Lessons the agent captured with `GOAL_LEARNED: <text>`, in the order
+    /// they appeared.
+    pub learnings: Vec<String>,
 }
 
 /// Parse an agent reply for `GOAL_PROGRESS:` / `GOAL_DONE` / `GOAL_BLOCKED`
@@ -164,6 +220,16 @@ pub fn parse_tick(reply: &str) -> ParsedTick {
             out.done = true;
         } else if marker_present(&upper, "GOAL_BLOCKED") {
             out.blocked = true;
+        } else if upper.starts_with(LEARNED_MARKER) {
+            // Slice the ORIGINAL line, not the uppercased copy: the lesson is
+            // prose that gets replayed into later prompts and written into a
+            // skill, and SHOUTING IT BACK loses the agent's own wording.
+            // `to_ascii_uppercase` is byte-length preserving and the marker is
+            // ASCII, so the marker's length is a valid boundary in `t` too.
+            let learning = t[LEARNED_MARKER.len()..].trim();
+            if !learning.is_empty() {
+                out.learnings.push(learning.to_string());
+            }
         }
     }
     out
@@ -189,13 +255,60 @@ fn marker_present(line: &str, marker: &str) -> bool {
 }
 
 /// Build the per-iteration prompt that frames the goal for the agent.
-pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> String {
+///
+/// `loop_engineering` adds the sections that only make sense when the extra
+/// machinery is switched on; with it off the prompt is byte-identical to the
+/// plain loop's, so an existing goal's prompt cache is not invalidated.
+/// `has_verifier` tells the agent its output will be judged, which is worth
+/// saying explicitly — it changes how much it should claim.
+pub fn build_goal_prompt(
+    goal: &Goal,
+    iteration: u32,
+    max_iterations: u32,
+    loop_engineering: bool,
+    has_verifier: bool,
+    learnings: &[String],
+) -> String {
+    let mut extra = String::new();
+    if loop_engineering {
+        if !learnings.is_empty() {
+            extra.push_str("\n\n## What earlier iterations learned\n");
+            // Chronological within the window: the agent reads them as a
+            // sequence, and the order is stable for a given run so the prompt
+            // prefix stays cacheable across iterations that add nothing.
+            let skip = learnings.len().saturating_sub(LEARNINGS_IN_PROMPT);
+            for l in &learnings[skip..] {
+                extra.push_str("- ");
+                extra.push_str(l);
+                extra.push('\n');
+            }
+        }
+        extra.push_str(if has_verifier {
+            "\n\n## Loop engineering\n\
+             A separate verifier agent judges this output before it counts. If it \
+             rejects the work you will be asked to rework it with the reason given, \
+             so claiming more than you did costs you an extra round rather than \
+             buying you one.\n\
+             Delegate genuinely separable work to sub-agents with your `agent_spawn` \
+             and `agent_send` tools.\n\
+             When you learn something reusable — a pattern, a pitfall, a technique — \
+             record it as `GOAL_LEARNED: <one sentence>` so later iterations start \
+             from it."
+        } else {
+            "\n\n## Loop engineering\n\
+             Delegate genuinely separable work to sub-agents with your `agent_spawn` \
+             and `agent_send` tools.\n\
+             When you learn something reusable — a pattern, a pitfall, a technique — \
+             record it as `GOAL_LEARNED: <one sentence>` so later iterations start \
+             from it."
+        });
+    }
     format!(
         "[LONG-HORIZON GOAL] You are autonomously pursuing a goal across multiple turns.\n\
          Goal: {title}\n\
          Description: {description}\n\
          Current progress: {progress}%\n\
-         Iteration: {iter} of {max}\n\n\
+         Iteration: {iter} of {max}{extra}\n\n\
          Take the next concrete action toward completing this goal. When you finish a \
          step, end your reply with a line `GOAL_PROGRESS: <0-100>` reflecting overall \
          completion. Add a line `GOAL_DONE` once the goal is fully achieved, or \
@@ -210,6 +323,58 @@ pub fn build_goal_prompt(goal: &Goal, iteration: u32, max_iterations: u32) -> St
         iter = iteration + 1,
         max = max_iterations,
     )
+}
+
+/// Build the prompt that asks the verifier for a verdict on `output`.
+fn build_verdict_prompt(goal: &Goal, output: &str) -> String {
+    format!(
+        "[GOAL VERIFICATION] Judge the work below against the goal. You are the \
+         independent check on it — do not restate it approvingly, decide whether it \
+         actually advances the goal.\n\n\
+         Goal: {title}\n\
+         Description: {description}\n\n\
+         Reply with exactly two lines:\n\
+         VERDICT: PASS|FAIL|NEEDS_REWORK\n\
+         REASON: <one sentence>\n\n\
+         Work to judge:\n{output}",
+        title = goal.title,
+        description = if goal.description.is_empty() {
+            "(none)"
+        } else {
+            &goal.description
+        },
+    )
+}
+
+/// Build the prompt that sends the verifier's rejection back to the generator.
+fn build_rework_prompt(goal: &Goal, verdict: &str) -> String {
+    format!(
+        "[GOAL REWORK] The verifier rejected your last output on goal \"{title}\". \
+         Its verdict was:\n\n{verdict}\n\n\
+         Address the stated reason and produce the corrected work. Emit the same \
+         `GOAL_PROGRESS:` / `GOAL_DONE` / `GOAL_BLOCKED` markers as usual — the \
+         reworked reply replaces the rejected one.",
+        title = goal.title,
+        verdict = verdict.trim(),
+    )
+}
+
+/// Read a verifier reply as pass / not-pass.
+///
+/// Only an explicit `VERDICT: PASS` passes. Anything else — `FAIL`,
+/// `NEEDS_REWORK`, a refusal, an empty string, or prose that never reaches a
+/// verdict — is a rejection, because the gate exists to be closed by default.
+///
+/// The verdict is compared as a whole token rather than a prefix, so a model
+/// that echoes the instruction line back verbatim
+/// (`VERDICT: PASS|FAIL|NEEDS_REWORK`) is not read as having chosen `PASS`.
+fn verdict_is_pass(verdict: &str) -> bool {
+    verdict.to_ascii_uppercase().lines().any(|line| {
+        let Some(rest) = line.trim().strip_prefix("VERDICT:") else {
+            return false;
+        };
+        rest.split_whitespace().next() == Some("PASS")
+    })
 }
 
 /// Load the goal with `goal_id` from the shared goals store.
@@ -425,18 +590,35 @@ impl GoalRunner {
     /// (or an error string). The loop owns iteration counting, marker parsing,
     /// goal persistence, and the rate-limit circuit breaker.
     ///
+    /// The remaining arguments configure loop engineering and are inert when
+    /// `loop_engineering` is false: `evaluate_goal` judges whether the goal
+    /// condition is met (only called when `evaluator_model` is set),
+    /// `on_learnings_captured` receives the run's `GOAL_LEARNED:` lessons once
+    /// the loop ends, and `verify_agent_id` / `verify_max_retries` configure
+    /// the verifier gate.
+    ///
     /// Replaces any existing run for the same goal.
-    pub fn start<F, Fut>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn start<F, Fut, L, E, Efut>(
         &self,
         goal_id: GoalId,
         agent_id: AgentId,
         max_iterations: u32,
         substrate: Arc<MemorySubstrate>,
         send_message: F,
+        on_learnings_captured: L,
+        evaluate_goal: E,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool
     where
         F: Fn(AgentId, String) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+        L: FnOnce(Vec<String>) + Send + 'static,
+        E: Fn(String, String) -> Efut + Send + Sync + 'static,
+        Efut: std::future::Future<Output = Result<bool, String>> + Send + 'static,
     {
         // Hold `start_lock` for the whole stop→gen→spawn→insert sequence so a
         // concurrent `start()` for the same goal cannot observe the empty slot
@@ -466,6 +648,26 @@ impl GoalRunner {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            // The verifier is only ever consulted under loop engineering, so
+            // do not record one on a run that is not using it — a stored
+            // verifier the loop ignores reads as a live gate on the run API.
+            verify_agent_id: if loop_engineering {
+                verify_agent_id
+            } else {
+                None
+            },
+            verify_max_retries: if loop_engineering {
+                verify_max_retries
+                    .unwrap_or(DEFAULT_VERIFY_MAX_RETRIES)
+                    .max(1)
+            } else {
+                0
+            },
+            evaluator_model: if loop_engineering {
+                evaluator_model
+            } else {
+                None
+            },
             started_at: now,
             updated_at: now,
         };
@@ -518,6 +720,9 @@ impl GoalRunner {
                 max_iterations,
                 substrate,
                 send_message,
+                on_learnings_captured,
+                evaluate_goal,
+                loop_engineering,
                 loop_state,
                 loop_stop,
                 shutdown_rx,
@@ -652,6 +857,14 @@ impl GoalRunner {
                         max_iterations: recovered_row.max_iterations.max(0) as u32,
                         last_progress: recovered_row.last_progress.clamp(0, 100) as u8,
                         last_error: recovered_row.last_error.clone(),
+                        // The placeholder is terminal — no loop is running, so
+                        // there is no verifier or evaluator to describe. The
+                        // persisted row never carried them either: the
+                        // loop-engineering configuration lives on the goal,
+                        // and a resumed run would read it back from there.
+                        verify_agent_id: None,
+                        verify_max_retries: 0,
+                        evaluator_model: None,
                         started_at,
                         updated_at: now,
                     };
@@ -690,12 +903,15 @@ impl GoalRunner {
 /// The run loop body. Extracted as a free function so tests can drive it with a
 /// fake `send_message` and an in-memory substrate.
 #[allow(clippy::too_many_arguments)]
-async fn run_loop<F, Fut>(
+async fn run_loop<F, Fut, L, E, Efut>(
     goal_id: GoalId,
     agent_id: AgentId,
     max_iterations: u32,
     substrate: Arc<MemorySubstrate>,
     send_message: F,
+    on_learnings_captured: L,
+    evaluate_goal: E,
+    loop_engineering: bool,
     state: Arc<Mutex<GoalRunState>>,
     stop: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -703,9 +919,29 @@ async fn run_loop<F, Fut>(
 ) where
     F: Fn(AgentId, String) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<String, String>> + Send,
+    L: FnOnce(Vec<String>) + Send,
+    E: Fn(String, String) -> Efut + Send + Sync,
+    Efut: std::future::Future<Output = Result<bool, String>> + Send,
 {
+    // Read the loop-engineering configuration once. It is fixed for the run —
+    // `start()` writes it before spawning and nothing mutates it afterwards —
+    // so re-locking per iteration would only add contention with `state()`,
+    // whose `try_lock` reports `running: false` whenever it loses the race.
+    let (verify_agent_id, verify_max_retries, has_evaluator) = {
+        let s = state.lock().await;
+        (
+            s.verify_agent_id,
+            s.verify_max_retries.max(1),
+            s.evaluator_model.is_some(),
+        )
+    };
+
     let mut iteration: u32 = 0;
     let mut rate_limit_streak: u32 = 0;
+    let mut error_streak: u32 = 0;
+    // Lessons captured via `GOAL_LEARNED:` across the whole run. Replayed into
+    // each iteration's prompt and handed to `on_learnings_captured` at the end.
+    let mut learnings: Vec<String> = Vec::new();
     // True when the loop ends because the kernel is shutting down (vs. an
     // operator stop, completion, or cap). On shutdown the durable row is left
     // in its last persisted `Running` shape so the next boot's stale-recovery
@@ -736,23 +972,130 @@ async fn run_loop<F, Fut>(
             break GoalRunPhase::MaxIterationsReached;
         }
 
-        let prompt = build_goal_prompt(&goal, iteration, max_iterations);
+        let prompt = build_goal_prompt(
+            &goal,
+            iteration,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id.is_some(),
+            &learnings,
+        );
         debug!(goal_id = %goal_id, iteration, "Goal run: sending tick");
 
         match send_message(agent_id, prompt).await {
             Ok(reply) => {
                 rate_limit_streak = 0;
-                let parsed = parse_tick(&reply);
-                let new_status = if parsed.done {
+                error_streak = 0;
+                let mut output = reply;
+                let mut parsed = parse_tick(&output);
+                if loop_engineering {
+                    learnings.append(&mut parsed.learnings);
+                }
+
+                // Verifier gate. Each rejection sends the work back to the
+                // generator WITH the verifier's reason: re-asking the same
+                // verifier about the same unchanged text would only replay the
+                // same verdict, so a retry that does not regenerate is not a
+                // retry. The reworked reply carries its own markers and
+                // replaces the rejected one outright.
+                let mut verified = true;
+                let mut rejection: Option<String> = None;
+                if let Some(verifier) = verify_agent_id {
+                    let mut round: u32 = 0;
+                    loop {
+                        let verdict = match send_message(
+                            verifier,
+                            build_verdict_prompt(&goal, &output),
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // An unreachable verifier is an open gate, and
+                                // an open gate is the failure mode this whole
+                                // mechanism exists to prevent. Treat it as a
+                                // rejection rather than waving the work through.
+                                warn!(goal_id = %goal_id, verifier = %verifier, error = %e,
+                                      "Goal run: verifier call failed; treating as a rejection");
+                                round = round.saturating_add(1);
+                                if round >= verify_max_retries {
+                                    verified = false;
+                                    rejection = Some(format!("verifier unreachable: {e}"));
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
+                        if verdict_is_pass(&verdict) {
+                            info!(goal_id = %goal_id, iteration, rework_rounds = round,
+                                  "Goal run: verifier passed the iteration");
+                            break;
+                        }
+                        round = round.saturating_add(1);
+                        if round >= verify_max_retries {
+                            warn!(goal_id = %goal_id, iteration, rework_rounds = round,
+                                  verdict = %verdict.trim(),
+                                  "Goal run: verifier still rejecting after the retry budget");
+                            verified = false;
+                            rejection = Some(verdict.trim().to_string());
+                            break;
+                        }
+                        info!(goal_id = %goal_id, iteration, rework_rounds = round,
+                              verdict = %verdict.trim(), "Goal run: verifier rejected; reworking");
+                        match send_message(agent_id, build_rework_prompt(&goal, &verdict)).await {
+                            Ok(reworked) => {
+                                output = reworked;
+                                parsed = parse_tick(&output);
+                                if loop_engineering {
+                                    learnings.append(&mut parsed.learnings);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(goal_id = %goal_id, error = %e,
+                                      "Goal run: rework turn failed; keeping the rejected output");
+                                verified = false;
+                                rejection = Some(format!("rework turn failed: {e}"));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Independent completion check. Only consulted when the goal
+                // asked for one, so the plain loop keeps costing exactly one
+                // LLM call per iteration.
+                let evaluator_done = if verified && loop_engineering && has_evaluator {
+                    match evaluate_goal(goal.description.clone(), output.clone()).await {
+                        Ok(done) => {
+                            if done {
+                                info!(goal_id = %goal_id, iteration,
+                                      "Goal run: evaluator judged the goal met");
+                            }
+                            done
+                        }
+                        Err(e) => {
+                            // Fall back to the agent's own marker rather than
+                            // stalling the run on an evaluator outage.
+                            warn!(goal_id = %goal_id, error = %e,
+                                  "Goal run: evaluator call failed; falling back to the agent's marker");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                // `GOAL_DONE` only ends the run once the verifier has passed
+                // the work it is attached to. Without this the gate would be
+                // decorative: the agent could close its own goal by asserting
+                // completion in an output the verifier had just rejected.
+                let done = verified && (parsed.done || evaluator_done);
+                let new_status = if done {
                     Some(GoalStatus::Completed)
                 } else {
                     Some(GoalStatus::InProgress)
                 };
-                let new_progress = if parsed.done {
-                    Some(100)
-                } else {
-                    parsed.progress
-                };
+                let new_progress = if done { Some(100) } else { parsed.progress };
                 patch_goal(&substrate, goal_id, new_progress, new_status);
 
                 // Release before persist_run: state()'s try_lock returns None (→ running:false) while held.
@@ -762,7 +1105,13 @@ async fn run_loop<F, Fut>(
                     if let Some(p) = new_progress {
                         s.last_progress = p;
                     }
-                    s.last_error = None;
+                    // Surface an exhausted verifier budget on the run API. The
+                    // tick itself succeeded, so leaving `last_error` clear
+                    // would show an operator a healthy run making no progress
+                    // with nothing to explain why.
+                    s.last_error = rejection.as_ref().map(|r| {
+                        format!("Iteration {} did not pass verification: {r}", iteration + 1)
+                    });
                     s.updated_at = Utc::now();
                     s.clone()
                 };
@@ -770,7 +1119,7 @@ async fn run_loop<F, Fut>(
                 // crash before the next tick still leaves a recoverable row.
                 persist_run(&store, &snapshot);
 
-                if parsed.done {
+                if done {
                     break GoalRunPhase::Finished;
                 }
                 if parsed.blocked {
@@ -790,6 +1139,12 @@ async fn run_loop<F, Fut>(
                     }
                     TickOutcome::Ok => {
                         rate_limit_streak = 0;
+                        error_streak = error_streak.saturating_add(1);
+                        warn!(
+                            goal_id = %goal_id,
+                            consecutive_errors = error_streak,
+                            "Goal run: tick failed",
+                        );
                     }
                 }
                 // Same lock discipline as success path: release before persist_run.
@@ -802,6 +1157,14 @@ async fn run_loop<F, Fut>(
                 persist_run(&store, &snapshot);
                 if rate_limit_streak >= MAX_RATE_LIMIT_STREAK {
                     break GoalRunPhase::RateLimited;
+                }
+                if error_streak >= MAX_ERROR_STREAK {
+                    warn!(
+                        goal_id = %goal_id,
+                        consecutive_errors = error_streak,
+                        "Goal run: giving up after repeated tick failures",
+                    );
+                    break GoalRunPhase::Stopped;
                 }
             }
         }
@@ -831,6 +1194,25 @@ async fn run_loop<F, Fut>(
     // in place so boot recovery demotes it, exactly as workflow runs do.
     if !interrupted_by_shutdown {
         delete_persisted_run(&store, goal_id);
+    }
+    // Lessons outlive the run that produced them — that is the whole point of
+    // capturing them. Write them to the shared store first (durable, queryable,
+    // independent of what the caller does with them), then hand them to the
+    // caller's hook.
+    if loop_engineering && !learnings.is_empty() {
+        let key = format!("{LEARNINGS_KEY_PREFIX}{goal_id}");
+        let count = learnings.len();
+        let payload = serde_json::json!({
+            "goal_id": goal_id.to_string(),
+            "learnings": learnings.clone(),
+            "captured_at": Utc::now().to_rfc3339(),
+        });
+        match substrate.structured_set(goals_storage_agent_id(), &key, payload) {
+            Ok(()) => info!(goal_id = %goal_id, count, "Goal run: persisted captured learnings"),
+            Err(e) => warn!(goal_id = %goal_id, error = %e,
+                            "Goal run: failed to persist captured learnings"),
+        }
+        on_learnings_captured(learnings);
     }
     info!(goal_id = %goal_id, phase = %final_phase, "Goal run ended");
 }
@@ -908,6 +1290,17 @@ mod tests {
             .unwrap();
     }
 
+    /// `on_learnings_captured` for a run that is not using loop engineering.
+    /// The loop never calls it, so it exists only to satisfy the type.
+    fn no_learnings_hook(_learnings: Vec<String>) {}
+
+    /// `evaluate_goal` for a run that has no evaluator model. The loop skips
+    /// the call entirely; `Ok(false)` makes an accidental call visible as
+    /// "not done" rather than silently completing the goal.
+    async fn no_evaluator(_goal: String, _output: String) -> Result<bool, String> {
+        Ok(false)
+    }
+
     fn test_goal(agent_id: AgentId) -> Goal {
         Goal {
             id: GoalId::new(),
@@ -917,6 +1310,9 @@ mod tests {
             status: GoalStatus::InProgress,
             progress: 0,
             agent_id: Some(agent_id),
+            loop_engineering: false,
+            verify_agent_id: None,
+            evaluator_model: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -970,6 +1366,9 @@ mod tests {
             max_iterations: 10,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -983,6 +1382,9 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1014,6 +1416,9 @@ mod tests {
             max_iterations: 2,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }));
@@ -1027,6 +1432,9 @@ mod tests {
             2,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1055,6 +1463,33 @@ mod tests {
             max_iterations,
             last_progress: 0,
             last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 0,
+            evaluator_model: None,
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+        }))
+    }
+
+    /// A run state configured for loop engineering with a verifier attached.
+    fn mk_verified_state(
+        goal_id: GoalId,
+        agent_id: AgentId,
+        verifier: AgentId,
+        max_iterations: u32,
+        verify_max_retries: u32,
+    ) -> Arc<Mutex<GoalRunState>> {
+        Arc::new(Mutex::new(GoalRunState {
+            goal_id,
+            agent_id,
+            phase: GoalRunPhase::Running,
+            iteration: 0,
+            max_iterations,
+            last_progress: 0,
+            last_error: None,
+            verify_agent_id: Some(verifier),
+            verify_max_retries,
+            evaluator_model: None,
             started_at: Utc::now(),
             updated_at: Utc::now(),
         }))
@@ -1078,6 +1513,9 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1114,6 +1552,9 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(true)),
             rx,
@@ -1147,6 +1588,9 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1181,6 +1625,9 @@ mod tests {
             100,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1244,6 +1691,9 @@ mod tests {
             3,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1282,6 +1732,9 @@ mod tests {
                 max_iterations: 10,
                 last_progress: 0,
                 last_error: None,
+                verify_agent_id: None,
+                verify_max_retries: 0,
+                evaluator_model: None,
                 started_at: Utc::now(),
                 updated_at: Utc::now(),
             }))
@@ -1297,6 +1750,9 @@ mod tests {
             10,
             substrate.clone(),
             send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
             state.clone(),
             Arc::new(AtomicBool::new(false)),
             rx,
@@ -1344,6 +1800,12 @@ mod tests {
             |_agent_id, _message| async move {
                 std::future::pending::<Result<String, String>>().await
             },
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None,
         );
 
         let row = store.get_run(&goal_id.to_string()).unwrap().unwrap();
@@ -1410,6 +1872,12 @@ mod tests {
                     10,
                     substrate.clone(),
                     |_agent_id, _message| async move { Ok::<String, String>(String::new()) },
+                    no_learnings_hook,
+                    no_evaluator,
+                    false,
+                    None,
+                    None,
+                    None,
                 ),
                 "round {round}: start() rejected a seeded goal, so this round tested nothing"
             );
@@ -1469,6 +1937,12 @@ mod tests {
                 let _ = seen_tx.send(probe.runs.contains_key(&goal_id));
                 async move { std::future::pending::<Result<String, String>>().await }
             },
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            None,
+            None,
+            None,
         ));
 
         let seen = seen_rx
@@ -1499,6 +1973,12 @@ mod tests {
                 |_agent_id, _message| async move {
                     std::future::pending::<Result<String, String>>().await
                 },
+                no_learnings_hook,
+                no_evaluator,
+                false,
+                None,
+                None,
+                None,
             );
 
         assert!(!started);
@@ -1705,10 +2185,34 @@ mod tests {
             let sub1 = substrate.clone();
             let sub2 = substrate.clone();
             let h1 = tokio::spawn(async move {
-                r1.start(goal_id, agent_id, 100, sub1, s1);
+                r1.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub1,
+                    s1,
+                    no_learnings_hook,
+                    no_evaluator,
+                    false,
+                    None,
+                    None,
+                    None,
+                );
             });
             let h2 = tokio::spawn(async move {
-                r2.start(goal_id, agent_id, 100, sub2, s2);
+                r2.start(
+                    goal_id,
+                    agent_id,
+                    100,
+                    sub2,
+                    s2,
+                    no_learnings_hook,
+                    no_evaluator,
+                    false,
+                    None,
+                    None,
+                    None,
+                );
             });
             let _ = tokio::join!(h1, h2);
 
@@ -1734,5 +2238,595 @@ mod tests {
                 "round {round}: an orphaned goal loop survived stop()"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Loop engineering
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_tick_keeps_a_learning_in_the_agents_own_words() {
+        // The marker is matched case-insensitively like every other marker,
+        // but the lesson itself is prose that gets replayed into later prompts
+        // and written into a skill. Uppercasing it would corrupt both.
+        let p = parse_tick("goal_learned: Retry the API with backoff, not immediately");
+        assert_eq!(
+            p.learnings,
+            vec!["Retry the API with backoff, not immediately".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_tick_collects_every_learning_and_ignores_empty_ones() {
+        let p = parse_tick(
+            "GOAL_LEARNED: first lesson\n\
+             GOAL_LEARNED:   \n\
+             working…\n\
+             GOAL_LEARNED: second lesson\n\
+             GOAL_PROGRESS: 40",
+        );
+        assert_eq!(p.learnings, vec!["first lesson", "second lesson"]);
+        assert_eq!(p.progress, Some(40));
+    }
+
+    #[test]
+    fn verdict_is_pass_only_on_an_explicit_pass() {
+        assert!(verdict_is_pass("VERDICT: PASS\nREASON: it works"));
+        assert!(verdict_is_pass("verdict: pass"));
+        assert!(verdict_is_pass("Some preamble.\nVERDICT: PASS"));
+
+        assert!(!verdict_is_pass("VERDICT: FAIL\nREASON: no tests"));
+        assert!(!verdict_is_pass("VERDICT: NEEDS_REWORK"));
+        assert!(!verdict_is_pass(""));
+        assert!(!verdict_is_pass("Looks good to me!"));
+        // A model that parrots the instruction line has not chosen anything.
+        assert!(!verdict_is_pass("VERDICT: PASS|FAIL|NEEDS_REWORK"));
+    }
+
+    #[test]
+    fn plain_goal_prompt_is_unchanged_by_the_new_sections() {
+        let goal = test_goal(AgentId::new());
+        let plain = build_goal_prompt(&goal, 0, 10, false, false, &[]);
+        // Even with learnings on hand and a verifier configured, a goal that
+        // did not opt in must get the exact prompt it got before, or every
+        // existing goal's provider-side prompt cache is invalidated for free.
+        let with_ignored_extras =
+            build_goal_prompt(&goal, 0, 10, false, true, &["a lesson".to_string()]);
+        assert_eq!(plain, with_ignored_extras);
+        assert!(!plain.contains("Loop engineering"));
+        assert!(!plain.contains("GOAL_LEARNED"));
+    }
+
+    #[test]
+    fn loop_engineering_prompt_announces_the_verifier_and_replays_learnings() {
+        let goal = test_goal(AgentId::new());
+        let lessons: Vec<String> = (1..=8).map(|i| format!("lesson {i}")).collect();
+
+        let with_verifier = build_goal_prompt(&goal, 0, 10, true, true, &lessons);
+        assert!(with_verifier.contains("verifier agent judges this output"));
+        assert!(with_verifier.contains("GOAL_LEARNED"));
+        // Only the most recent window is replayed, oldest first.
+        assert!(!with_verifier.contains("lesson 2"));
+        assert!(with_verifier.contains("lesson 3"));
+        assert!(with_verifier.contains("lesson 8"));
+
+        let without_verifier = build_goal_prompt(&goal, 0, 10, true, false, &lessons);
+        assert!(!without_verifier.contains("verifier agent judges this output"));
+        assert!(without_verifier.contains("GOAL_LEARNED"));
+    }
+
+    /// The gate has to be able to say no. An agent that claims `GOAL_DONE`
+    /// while the verifier keeps rejecting the work must not close its own
+    /// goal — that is the single failure mode the verifier exists to stop.
+    #[tokio::test(start_paused = true)]
+    async fn verifier_rejection_blocks_the_agents_own_goal_done() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 2, 2);
+
+        let send = move |target: AgentId, _p: String| async move {
+            if target == verifier {
+                Ok("VERDICT: FAIL\nREASON: nothing was actually produced".to_string())
+            } else {
+                Ok("all finished\nGOAL_DONE".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            2,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_eq!(
+            s.phase,
+            GoalRunPhase::MaxIterationsReached,
+            "a rejected iteration must not finish the run"
+        );
+        // The operator needs both halves: that verification is what blocked
+        // the iteration, and the verifier's own stated reason — a bare "did
+        // not pass" would leave them with a healthy-looking run making no
+        // progress and nothing to act on.
+        let last_error = s.last_error.as_deref().unwrap_or_default();
+        assert!(
+            last_error.contains("did not pass verification"),
+            "the exhausted verifier budget must be visible to an operator, got {:?}",
+            s.last_error
+        );
+        assert!(
+            last_error.contains("nothing was actually produced"),
+            "the verifier's reason must reach the operator, got {:?}",
+            s.last_error
+        );
+        let stored = load_goal(&substrate, goal.id).unwrap();
+        assert_eq!(stored.status, GoalStatus::InProgress);
+        assert_ne!(stored.progress, 100);
+    }
+
+    #[tokio::test]
+    async fn verifier_pass_lets_goal_done_finish_the_run() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 5, 2);
+
+        let send = move |target: AgentId, _p: String| async move {
+            if target == verifier {
+                Ok("VERDICT: PASS\nREASON: the report is complete".to_string())
+            } else {
+                Ok("report written\nGOAL_DONE".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            5,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_eq!(s.phase, GoalRunPhase::Finished);
+        assert_eq!(s.last_error, None);
+        let stored = load_goal(&substrate, goal.id).unwrap();
+        assert_eq!(stored.status, GoalStatus::Completed);
+        assert_eq!(stored.progress, 100);
+    }
+
+    /// A "retry" that re-asks the same verifier about the same unchanged text
+    /// just replays the same verdict. The rejection has to go back to the
+    /// generator, carrying the verifier's reason, and the reworked reply has
+    /// to be what the verifier sees next.
+    #[tokio::test]
+    async fn verifier_rejection_sends_the_work_back_to_the_generator() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 1, 3);
+
+        // The verifier rejects the first submission and accepts the reworked
+        // one; the generator only emits GOAL_DONE after being asked to rework.
+        let verifier_calls = Arc::new(AtomicU64::new(0));
+        let rework_prompts = Arc::new(AtomicU64::new(0));
+        let vc = verifier_calls.clone();
+        let rp = rework_prompts.clone();
+        let send = move |target: AgentId, prompt: String| {
+            let vc = vc.clone();
+            let rp = rp.clone();
+            async move {
+                if target == verifier {
+                    let n = vc.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        assert!(
+                            prompt.contains("first draft"),
+                            "the verifier must judge the generator's output"
+                        );
+                        Ok("VERDICT: NEEDS_REWORK\nREASON: cite a source".to_string())
+                    } else {
+                        assert!(
+                            prompt.contains("second draft"),
+                            "the verifier must re-judge the REWORKED output, not the rejected one"
+                        );
+                        Ok("VERDICT: PASS\nREASON: sourced now".to_string())
+                    }
+                } else if prompt.contains("[GOAL REWORK]") {
+                    assert!(
+                        prompt.contains("cite a source"),
+                        "the generator must be told WHY it was rejected"
+                    );
+                    rp.fetch_add(1, Ordering::SeqCst);
+                    Ok("second draft\nGOAL_DONE".to_string())
+                } else {
+                    Ok("first draft".to_string())
+                }
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            rework_prompts.load(Ordering::SeqCst),
+            1,
+            "the generator must be re-prompted after a rejection"
+        );
+        assert_eq!(verifier_calls.load(Ordering::SeqCst), 2);
+        let s = state.lock().await;
+        assert_eq!(s.phase, GoalRunPhase::Finished);
+    }
+
+    /// A verifier that cannot be reached is an open gate, and an open gate is
+    /// exactly what this mechanism exists to prevent. Its failure must count
+    /// as a rejection, not as a pass.
+    #[tokio::test(start_paused = true)]
+    async fn an_unreachable_verifier_does_not_wave_the_work_through() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let verifier = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_verified_state(goal.id, agent_id, verifier, 1, 2);
+
+        let send = move |target: AgentId, _p: String| async move {
+            if target == verifier {
+                Err("verifier agent not found".to_string())
+            } else {
+                Ok("done and dusted\nGOAL_DONE".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_ne!(s.phase, GoalRunPhase::Finished);
+        let stored = load_goal(&substrate, goal.id).unwrap();
+        assert_eq!(stored.status, GoalStatus::InProgress);
+    }
+
+    /// Loop engineering is opt-in, and the reason it can afford to be is that
+    /// switching it off costs nothing: no verifier turn, no evaluator turn,
+    /// one LLM call per iteration exactly as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_plain_run_makes_no_extra_llm_calls() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 3);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let evaluations = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let send = move |_a: AgentId, _p: String| {
+            let t = t.clone();
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                Ok("GOAL_PROGRESS: 10".to_string())
+            }
+        };
+        let e = evaluations.clone();
+        let evaluate = move |_g: String, _o: String| {
+            let e = e.clone();
+            async move {
+                e.fetch_add(1, Ordering::SeqCst);
+                Ok::<bool, String>(true)
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            3,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            evaluate,
+            false,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(turns.load(Ordering::SeqCst), 3, "one turn per iteration");
+        assert_eq!(
+            evaluations.load(Ordering::SeqCst),
+            0,
+            "a goal that did not ask for an evaluator must never be billed for one"
+        );
+    }
+
+    /// The evaluator can conclude the goal is met even when the agent never
+    /// says so — that is the point of having a judge that is not the worker.
+    #[tokio::test]
+    async fn the_evaluator_can_finish_a_goal_the_agent_never_claimed() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = Arc::new(Mutex::new(GoalRunState {
+            goal_id: goal.id,
+            agent_id,
+            phase: GoalRunPhase::Running,
+            iteration: 0,
+            max_iterations: 5,
+            last_progress: 0,
+            last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 1,
+            evaluator_model: Some("haiku".into()),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+        }));
+
+        let send = |_a: AgentId, _p: String| async move { Ok("GOAL_PROGRESS: 30".to_string()) };
+        let evaluate = |_g: String, _o: String| async move { Ok::<bool, String>(true) };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            5,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            evaluate,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        let s = state.lock().await;
+        assert_eq!(s.phase, GoalRunPhase::Finished);
+        assert_eq!(s.iteration, 1, "the first evaluated turn ends the run");
+        let stored = load_goal(&substrate, goal.id).unwrap();
+        assert_eq!(stored.status, GoalStatus::Completed);
+    }
+
+    /// An evaluator outage must not stall a run that the agent itself has
+    /// already reported complete.
+    #[tokio::test]
+    async fn an_evaluator_failure_falls_back_to_the_agents_marker() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = Arc::new(Mutex::new(GoalRunState {
+            goal_id: goal.id,
+            agent_id,
+            phase: GoalRunPhase::Running,
+            iteration: 0,
+            max_iterations: 5,
+            last_progress: 0,
+            last_error: None,
+            verify_agent_id: None,
+            verify_max_retries: 1,
+            evaluator_model: Some("haiku".into()),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+        }));
+
+        let send = |_a: AgentId, _p: String| async move { Ok("all set\nGOAL_DONE".to_string()) };
+        let evaluate = |_g: String, _o: String| async move {
+            Err::<bool, String>("evaluator model unavailable".to_string())
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            5,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            evaluate,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Finished);
+    }
+
+    /// Lessons are only worth capturing if they outlive the run. They must
+    /// reach the durable store AND the caller's hook.
+    #[tokio::test]
+    async fn captured_learnings_are_persisted_and_handed_to_the_caller() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 1);
+
+        let send = |_a: AgentId, _p: String| async move {
+            Ok("GOAL_LEARNED: Backoff beats retrying immediately\nGOAL_DONE".to_string())
+        };
+        let (tx_hook, rx_hook) = std::sync::mpsc::channel::<Vec<String>>();
+
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            move |l: Vec<String>| {
+                let _ = tx_hook.send(l);
+            },
+            no_evaluator,
+            true,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            rx_hook.try_recv().unwrap(),
+            vec!["Backoff beats retrying immediately".to_string()],
+            "the caller hook must receive the run's lessons"
+        );
+        let stored = substrate
+            .structured_get(
+                goals_storage_agent_id(),
+                &format!("{LEARNINGS_KEY_PREFIX}{}", goal.id),
+            )
+            .unwrap()
+            .expect("learnings must be persisted under the goal's key");
+        assert_eq!(
+            stored["learnings"][0].as_str(),
+            Some("Backoff beats retrying immediately")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_run_persists_no_learnings() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 1);
+
+        let send = |_a: AgentId, _p: String| async move {
+            Ok("GOAL_LEARNED: ignored without loop engineering\nGOAL_DONE".to_string())
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            1,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert!(substrate
+            .structured_get(
+                goals_storage_agent_id(),
+                &format!("{LEARNINGS_KEY_PREFIX}{}", goal.id),
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    /// A permanently broken condition — deleted agent, revoked key, network
+    /// down — fails identically on every tick. Without a breaker the loop
+    /// spends its whole iteration budget rediscovering that.
+    #[tokio::test(start_paused = true)]
+    async fn repeated_tick_failures_stop_the_run_before_the_iteration_cap() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap());
+        let agent_id = AgentId::new();
+        let goal = test_goal(agent_id);
+        seed_goal(&substrate, &goal);
+        let (_tx, rx) = watch::channel(false);
+        let state = mk_state(goal.id, agent_id, 100);
+
+        let turns = Arc::new(AtomicU64::new(0));
+        let t = turns.clone();
+        let send = move |_a: AgentId, _p: String| {
+            let t = t.clone();
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                Err::<String, String>("agent 'ghost' not found".to_string())
+            }
+        };
+
+        run_loop(
+            goal.id,
+            agent_id,
+            100,
+            substrate.clone(),
+            send,
+            no_learnings_hook,
+            no_evaluator,
+            false,
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            rx,
+            None,
+        )
+        .await;
+
+        assert_eq!(state.lock().await.phase, GoalRunPhase::Stopped);
+        assert_eq!(
+            turns.load(Ordering::SeqCst) as u32,
+            MAX_ERROR_STREAK,
+            "the breaker must fire at the streak limit, not at the iteration cap"
+        );
     }
 }

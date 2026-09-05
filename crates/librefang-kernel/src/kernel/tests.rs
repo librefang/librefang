@@ -10482,7 +10482,7 @@ fn goal_run_start_reports_unset_self_handle() {
     let goal_id = librefang_types::goal::GoalId::new();
     let agent_id = AgentId::new();
 
-    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1)));
+    assert!(!kernel.goal_run_start(goal_id, agent_id, Some(1), false, None, None, None));
     assert!(kernel.goal_run_status(goal_id).is_none());
 }
 
