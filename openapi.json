@@ -13909,6 +13909,129 @@
         }
       }
     },
+    "/api/vault/keys": {
+      "get": {
+        "tags": [
+          "vault"
+        ],
+        "operationId": "vault_list_keys",
+        "responses": {
+          "200": {
+            "description": "Writable vault keys and whether each is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin credential required"
+          },
+          "403": {
+            "description": "Admin role required"
+          }
+        }
+      }
+    },
+    "/api/vault/keys/{key}": {
+      "put": {
+        "tags": [
+          "vault"
+        ],
+        "operationId": "vault_put_key",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Vault key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VaultSetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Secret stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty or oversized value"
+          },
+          "401": {
+            "description": "Admin credential required"
+          },
+          "403": {
+            "description": "Admin role required"
+          },
+          "404": {
+            "description": "Key is not writable over HTTP"
+          },
+          "503": {
+            "description": "Vault could not be unlocked or written"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "vault"
+        ],
+        "operationId": "vault_delete_key",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Vault key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Secret removed (or already absent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Admin credential required"
+          },
+          "403": {
+            "description": "Admin role required"
+          },
+          "404": {
+            "description": "Key is not writable over HTTP"
+          },
+          "503": {
+            "description": "Vault could not be unlocked or written"
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -16704,6 +16827,19 @@
           }
         }
       },
+      "VaultSetRequest": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "description": "The secret to store. Surrounding whitespace is trimmed — a token pasted with a trailing newline is the common case and would otherwise be sent in an `Authorization` header verbatim."
+          }
+        },
+        "additionalProperties": false
+      },
       "WhoamiView": {
         "type": "object",
         "description": "Response of `GET /api/authz/whoami`.\n\nThe four fields answer the four questions an operator debugging an SSO denial actually has, in the order they ask them: who does the daemon think I am, what privilege did that resolve to, which teams am I on, and what did those teams confer.",
@@ -16848,6 +16984,10 @@
     {
       "name": "groups",
       "description": "User groups — CRUD over GroupConfig entries, membership, and the per-user reverse lookup"
+    },
+    {
+      "name": "vault",
+      "description": "Credential vault writes — store, list presence of, and delete the secrets the daemon resolves at runtime. Values are never returned"
     }
   ]
 }

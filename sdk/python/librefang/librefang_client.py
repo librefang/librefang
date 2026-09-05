@@ -69,6 +69,7 @@ class LibreFang:
         self.system = _SystemResource(self)
         self.tools = _ToolsResource(self)
         self.users = _UsersResource(self)
+        self.vault = _VaultResource(self)
         self.webhooks = _WebhooksResource(self)
         self.workflows = _WorkflowsResource(self)
 
@@ -1391,6 +1392,20 @@ class _UsersResource(_Resource):
 
     def rotate_user_key(self, name: str):
         return self._c._request("POST", f"/api/users/{name}/rotate-key")
+
+
+# ── Vault Resource ─────────────────────────────────────────────
+
+class _VaultResource(_Resource):
+
+    def vault_list_keys(self):
+        return self._c._request("GET", "/api/vault/keys")
+
+    def vault_put_key(self, key: str, **data):
+        return self._c._request("PUT", f"/api/vault/keys/{key}", data)
+
+    def vault_delete_key(self, key: str):
+        return self._c._request("DELETE", f"/api/vault/keys/{key}")
 
 
 # ── Webhooks Resource ──────────────────────────────────────────
