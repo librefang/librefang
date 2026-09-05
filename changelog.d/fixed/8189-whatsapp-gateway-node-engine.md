@@ -1,0 +1,3 @@
+Correct `@librefang/whatsapp-gateway`'s declared Node floor, which claimed `>=18` while two of its four direct dependencies had already excluded Node 18 — `@whiskeysockets/baileys` requires `>=20.0.0` and `better-sqlite3` requires `20.x` or newer.
+Installing on Node 18 produced an `EBADENGINE` warning naming a transitive package rather than a clear statement that the gateway does not support that runtime, and failed outright under `engine-strict` against a floor the package itself declared satisfied.
+No supported runtime loses support: the Dockerfile pins Node 22 and CI uses 24, so this corrects the declaration rather than dropping real support (#8189) (@houko)
