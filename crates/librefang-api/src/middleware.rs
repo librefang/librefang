@@ -157,7 +157,10 @@ pub struct AuthState {
     pub active_sessions:
         Arc<tokio::sync::RwLock<HashMap<String, crate::password_hash::SessionToken>>>,
     /// Whether dashboard username/password auth is configured.
-    pub dashboard_auth_enabled: bool,
+    ///
+    /// Shared `AtomicBool` rather than a boot-time `bool`, for the same reason `api_key_lock` and `master_key` are shared handles: `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are hot-reloadable (`HotAction::UpdateDashboardCredentials`, no restart flag), and this flag gates three things an operator expects a reload to change — it is an OR-term of `auth_configured` (so it can close the dashboard-reads allowlist), it decides whether the SPA shell at `/dashboard/*` stays publicly reachable, and it is one of the four terms of the fail-closed no-auth branch.
+    /// Written by `server::refresh_dashboard_auth_flag`, at the same four sites that refresh the master credential.
+    pub dashboard_auth_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Optional per-user API-key hashes used for role-based API access.
     ///
     /// Wrapped in a `RwLock` (mirroring `api_key_lock`) so the rotate-key
@@ -170,6 +173,12 @@ pub struct AuthState {
     /// budget, sessions, approvals, hands, skills, workflows, …) are forced
     /// through bearer authentication. Static assets, OAuth entry points, and
     /// `/api/health*` remain public so the daemon stays probeable.
+    ///
+    /// This is the *armed* half of the decision, derived at boot from the restart-required `require_auth_for_reads` / `external_auth_proxy` config pair.
+    /// The "is any credential configured" half is deliberately NOT folded in here: it is recomputed per request from the handles this struct carries (`auth_configured` in [`auth`]).
+    /// Three of its four terms track a config reload — `api_key` and `api_key_hash` are swapped into `api_key_lock` / `master_key` by `server::refresh_master_credential`, and `dashboard_auth_enabled` is re-derived by `server::refresh_dashboard_auth_flag` — so a boot snapshot would have kept the allowlist public after an operator added the first credential and reloaded.
+    /// The fourth term does not: `user_api_keys` is replaced only by the `/api/users*` and device-pairing writes (`routes::users::persist_users`, `routes::pairing`).
+    /// A hand-edited `[[users]]` block plus a reload rebuilds the kernel's `AuthManager` (`HotAction::ReloadAuth`) but leaves this middleware snapshot on its boot contents until the daemon restarts.
     pub require_auth_for_reads: bool,
     /// Set from `LIBREFANG_ALLOW_NO_AUTH=1` to permit running without an
     /// api_key on a non-loopback bind. Off by default so empty keys
@@ -331,48 +340,32 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     {
         return true;
     }
-    // #5981: revoking a passkey (`DELETE /api/auth/passkey/credentials/{id}`)
-    // removes a login credential — Owner-equivalent, matched by prefix because
-    // of the `{id}` path segment. The sibling GET list stays at the generic
-    // Admin-or-above read gate.
+    // #5981: revoking a passkey (`DELETE /api/auth/passkey/credentials/{id}`) removes a login credential — Owner-equivalent, matched by prefix because of the `{id}` path segment.
+    // The sibling GET list stays on the generic GET rule, which admits any authenticated role: it is scoped to the caller's own credentials, so a lower role sees only its own rows.
     if *method == axum::http::Method::DELETE && path.starts_with("/api/auth/passkey/credentials/") {
         return true;
     }
-    // RBAC user-management surface (M6) — every mutating call under
-    // `/api/users*` (create / replace / delete / bulk import) maps to
-    // `Action::ManageUsers` in the kernel, which requires `Owner`. We
-    // match by prefix because the path can be `/api/users`,
-    // `/api/users/{name}`, or `/api/users/import`. GET is left to the
-    // generic Admin-or-above gate so the dashboard's user list and
-    // permission simulator stay usable for Admins.
+    // RBAC user-management surface (M6) — every mutating call under `/api/users*` (create / replace / delete / bulk import) maps to `Action::ManageUsers` in the kernel, which requires `Owner`.
+    // We match by prefix because the path can be `/api/users`, `/api/users/{name}`, or `/api/users/import`.
+    // GET is left to the generic GET rule, which admits every authenticated role including `Viewer`, so the dashboard's user list and permission simulator are readable by whatever role opens them.
+    // The list / detail payload is redacted metadata (`UserView` collapses `api_key_hash` to a boolean and the policy / budget / memory slices to `has_*` flags) and `/api/users/{name}/provider-keys` is carved out to Owner in `min_role_for_privileged_get`.
+    // `GET /api/users/{name}/policy` is neither: it returns the unredacted per-user policy to any authenticated role, which is the same data `routes::authz::require_admin` gates at Admin on `/api/authz/effective/{user_id}`.
+    // That inconsistency is real and currently unresolved — the reasoning, and where a raised floor would go, is written up in the `routes::users` module docs.
     if path == "/api/users" || path.starts_with("/api/users/") {
         return true;
     }
-    // Group management (#7745) sits on the same side of the line as user
-    // management, and for a sharper reason: a group's `roles` list confers role
-    // strings on every member. An Admin per-user API key that could reach
-    // `POST /api/groups` would create a group carrying whatever role it likes,
-    // add itself as a member, and self-promote — the same escalation the
-    // `/api/users*` gate above exists to close, one indirection further out.
-    // Prefix-matched because the path can be `/api/groups`,
-    // `/api/groups/{name}`, or `/api/groups/{name}/members/{user}`. GET is left
-    // to the generic Admin-or-above gate so the dashboard's group list and the
-    // `/api/users/{name}/groups` reverse lookup stay usable for an Admin.
+    // Group management (#7745) sits on the same side of the line as user management, and for a sharper reason: a group's `roles` list confers role strings on every member.
+    // An Admin per-user API key that could reach `POST /api/groups` would create a group carrying whatever role it likes, add itself as a member, and self-promote — the same escalation the `/api/users*` gate above exists to close, one indirection further out.
+    // Prefix-matched because the path can be `/api/groups`, `/api/groups/{name}`, or `/api/groups/{name}/members/{user}`.
+    // GET is left to the generic GET rule, which admits every authenticated role including `Viewer`, so the dashboard's group list and the `/api/users/{name}/groups` reverse lookup stay readable for the role that opens them.
     if path == "/api/groups" || path.starts_with("/api/groups/") {
         return true;
     }
-    // Adding / updating / deleting an MCP server persists a config entry that
-    // `connect_mcp_servers()` immediately spawns — a stdio transport is a raw
-    // `command` + `args` executed under the daemon UID. That is process spawn,
-    // the exact privilege install-deps above is Owner-gated to protect, so an
-    // Admin ("config write" by design) must not be able to reach it (finding
-    // #3). Gate ONLY the config-mutation verbs: `POST /api/mcp/servers` (add)
-    // and `PUT` / `DELETE /api/mcp/servers/{name}` (update / remove). GET
-    // (list / detail) stays at the generic Admin-or-above read gate, and the
-    // `{name}/reconnect|taint|auth/*` sub-resources — which do not introduce a
-    // new spawn command — keep their existing Admin gate. The `{name}` target
-    // is matched by requiring a single trailing segment with no further `/`,
-    // so the deeper sub-resource paths are excluded.
+    // Adding / updating / deleting an MCP server persists a config entry that `connect_mcp_servers()` immediately spawns — a stdio transport is a raw `command` + `args` executed under the daemon UID.
+    // That is process spawn, the exact privilege install-deps above is Owner-gated to protect, so an Admin ("config write" by design) must not be able to reach it (finding #3).
+    // Gate ONLY the config-mutation verbs: `POST /api/mcp/servers` (add) and `PUT` / `DELETE /api/mcp/servers/{name}` (update / remove).
+    // GET (list / detail) stays on the generic GET rule (any authenticated role), and the `{name}/reconnect|taint|auth/*` sub-resources — which do not introduce a new spawn command — keep their existing Admin gate.
+    // The `{name}` target is matched by requiring a single trailing segment with no further `/`, so the deeper sub-resource paths are excluded.
     if *method == axum::http::Method::POST && path == "/api/mcp/servers" {
         return true;
     }
@@ -386,7 +379,7 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     // Same reasoning as `/api/hands/{id}/install-deps` above — Admin is "config write" by design and must not be able to turn that into "run attacker-supplied code as the daemon user".
     //
     // Deliberately NOT gated, and each for a reason:
-    //   * every GET (list / detail / status / doctor / lint / env / registries, and the context-engine reads) — reads stay at the Admin gate.
+    //   * every GET (list / detail / status / doctor / lint / env / registries, and the context-engine reads) — reads stay on the generic GET rule, which admits any authenticated role.
     //   * `POST /api/plugins/uninstall` and `POST /api/plugins/{name}/disable` REMOVE code from the execution path.
     //     Gating them to Owner would stop an Admin from shutting a malicious plugin off during an incident, which makes the system less safe, not more.
     //   * `POST /api/plugins/scaffold` writes a template into the plugins dir and executes nothing.
@@ -1606,6 +1599,10 @@ pub async fn auth(
     // hash work) and lets every downstream read avoid re-acquiring the
     // lock, including the constant-time `verify_password` loop below.
     let user_api_keys: Vec<ApiUserAuth> = auth_state.user_api_keys.read().await.clone();
+    // Read once per request for the same reason as the handles above: a config reload can flip it between two reads inside one request, and every consumer below must agree on one value.
+    let dashboard_auth_enabled = auth_state
+        .dashboard_auth_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
@@ -1784,7 +1781,7 @@ pub async fn auth(
     let auth_configured = !api_key.trim().is_empty()
         || !master_key_hash.is_empty()
         || !user_api_keys.is_empty()
-        || auth_state.dashboard_auth_enabled;
+        || dashboard_auth_enabled;
     // The inline login page (`login_page.html`) only speaks username/password,
     // so only gate the shell when *that* mode is actually enabled. API-key-only
     // deployments keep a public shell so the SPA can load its own API-key
@@ -1794,7 +1791,7 @@ pub async fn auth(
     // Dashboard assets (JS/CSS/font chunks) and locale bundles are in
     // PUBLIC_ROUTES_GET_ONLY; the dashboard shell is conditionally public
     // based on dashboard_auth_enabled (handled below).
-    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
+    let dashboard_shell_public = !dashboard_auth_enabled && is_dashboard_path;
 
     // Walk PUBLIC_ROUTES_GET_ONLY: public on GET only regardless of auth config.
     // MCP OAuth callbacks are handled separately by is_mcp_oauth_callback above
@@ -1827,6 +1824,8 @@ pub async fn auth(
             .iter()
             .any(|r| matches_route(r, path, is_get));
 
+    // `auth_configured` is the live half of this decision, so an operator who adds a master `api_key` / `api_key_hash` or dashboard credentials and reloads closes the allowlist without a restart.
+    // `user_api_keys` is the one term a config reload does not refresh — see the field docs on `AuthState::require_auth_for_reads`.
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
     let is_public = always_public || (dashboard_read_public && !enforce_auth_on_reads);
@@ -1848,7 +1847,7 @@ pub async fn auth(
     if api_key.is_empty()
         && master_key_hash.is_empty()
         && user_api_keys.is_empty()
-        && !auth_state.dashboard_auth_enabled
+        && !dashboard_auth_enabled
     {
         // Re-check ConnectInfo defensively — if it is missing for any reason
         // we MUST treat the origin as non-loopback (fail closed, never open).
@@ -2144,7 +2143,7 @@ pub async fn auth(
     // minimal self-contained login page instead of a JSON error, so the SPA
     // bundle (and whatever it imports) never reaches an unauthenticated
     // caller.
-    if is_get && is_dashboard_path && auth_state.dashboard_auth_enabled {
+    if is_get && is_dashboard_path && dashboard_auth_enabled {
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("content-type", "text/html; charset=utf-8")
@@ -2220,7 +2219,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Arc::new(master_key),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -2323,7 +2322,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
             master_key: Arc::new(master_key),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -2443,7 +2442,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("plain-master-key".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -2525,7 +2524,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("plain-master-key".to_string())),
             master_key: Arc::new(master_key),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -2918,9 +2917,7 @@ mod tests {
                 "Owner must be allowed to {method} {path}"
             );
         }
-        // Reads (list / detail) stay at the generic Admin-or-above gate — the
-        // GET short-circuit keeps them reachable for every role, so the gate
-        // does not over-block the dashboard MCP page.
+        // Reads (list / detail) stay on the generic GET rule — the GET short-circuit keeps them reachable for every authenticated role, so the mutation gate does not over-block the dashboard MCP page.
         let get = axum::http::Method::GET;
         for path in ["/api/mcp/servers", "/api/mcp/servers/my-server"] {
             for role in [
@@ -3280,10 +3277,8 @@ mod tests {
     }
 
     #[test]
-    fn test_group_reads_stay_at_the_generic_admin_gate() {
-        // The dashboard's group list and the `/api/users/{name}/groups` reverse
-        // lookup are reads, and locking them to Owner would make the surface
-        // unusable for the Admin who is expected to operate it.
+    fn test_group_reads_stay_on_the_generic_get_rule() {
+        // The dashboard's group list and the `/api/users/{name}/groups` reverse lookup are reads, and locking them to Owner would make the surface unusable for the Admin who is expected to operate it.
         let get = axum::http::Method::GET;
         for path in [
             "/api/groups",
@@ -3292,14 +3287,17 @@ mod tests {
         ] {
             assert!(user_role_allows_request(UserRole::Admin, &get, path));
             assert!(user_role_allows_request(UserRole::Owner, &get, path));
+            // And the enforced posture is the generic GET rule, not an Admin floor: every authenticated role reads these, the same way `test_user_role_viewer_can_still_list_users_for_simulator` pins `/api/users`.
+            // Asserted so the module docs and the predicate cannot drift apart again — raising the floor here is a deliberate decision that has to update this test.
+            assert!(user_role_allows_request(UserRole::User, &get, path));
+            assert!(user_role_allows_request(UserRole::Viewer, &get, path));
         }
     }
 
     #[test]
     fn test_user_role_viewer_can_still_list_users_for_simulator() {
-        // GET on /api/users* stays at the generic Admin-or-above gate (the
-        // permission simulator needs the list). Viewer/User remain GET-only
-        // by the existing user_role_allows_request rules.
+        // GET on /api/users* stays on the generic GET rule, which admits every authenticated role (the permission simulator needs the list).
+        // Viewer/User remain GET-only by the existing user_role_allows_request rules.
         let get = axum::http::Method::GET;
         assert!(user_role_allows_request(
             UserRole::Admin,
@@ -3437,7 +3435,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -3468,7 +3466,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
@@ -3507,7 +3505,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
@@ -3546,7 +3544,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "ReadOnly".to_string(),
                 role: UserRole::Viewer,
@@ -3585,7 +3583,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "ReadOnly".to_string(),
                 role: UserRole::Viewer,
@@ -3623,7 +3621,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
@@ -3672,7 +3670,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("somekey".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![])),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -3706,7 +3704,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "Guest".to_string(),
                 role: UserRole::User,
@@ -3749,7 +3747,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -3785,7 +3783,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -3818,7 +3816,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -3850,7 +3848,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -3886,7 +3884,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -3925,7 +3923,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -3973,7 +3971,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -4005,7 +4003,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -4042,7 +4040,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(vec![ApiUserAuth {
                 name: "alice".into(),
                 role: UserRole::User,
@@ -4098,7 +4096,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,
@@ -4141,7 +4139,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4154,7 +4152,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(key.to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4447,7 +4445,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4487,7 +4485,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4533,7 +4531,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4585,7 +4583,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: false,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: false,
             allow_no_auth: false,
@@ -4827,7 +4825,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
             active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            dashboard_auth_enabled: true,
+            dashboard_auth_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             require_auth_for_reads: true,
             allow_no_auth: false,

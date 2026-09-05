@@ -70,9 +70,18 @@ Operators who want a typed second factor should keep using password login, where
 
 ## Identity binding
 
-Credentials bind to the **same principal** the password login produces (the resolved `dashboard_user`).
+Credentials bind to the **same principal** the password login produces (the trimmed, resolved `dashboard_user`).
+Registration enforces that binding rather than assuming it: the ceremony and the stored row are keyed by the engine's principal, and a caller whose authenticated name is not that principal is refused with `409 principal_mismatch`.
+The Owner gate alone does not establish the identity — the master api key and a trusted loopback caller are both attributed `root`, and an Owner-role `[[users]]` entry carries its own name — so without the check those callers enrolled a credential the login ceremony (which only ever offers the principal's credentials) could never present.
+For the same reason `passkey_enabled = true` with no `dashboard_user` leaves the engine unbuilt and every route answering `503`: there would be no identity to mint a session for.
+The comparison is exact, with no trimming of the caller: `GET …/credentials` and `DELETE …/credentials/{id}` look the row up by the caller's name verbatim, so admitting a padded `[[users]] name` would file the credential under the trimmed principal and then leave that caller unable to list or revoke it.
 Each stored row carries its `user_name` to stay forward-compatible with the multi-user `[[users]]` path.
 The WebAuthn user handle is a stable UUIDv5 derived from the principal name, so the same operator always maps to the same handle across registrations.
+
+**`dashboard_user` is hot-reloadable, the principal is not.**
+`build_reload_plan` classifies `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` as `UpdateDashboardCredentials` with no restart flag, and the passkey restart-required set covers only `passkey_enabled` / `passkey_rp_id` / `passkey_rp_origin`.
+So renaming the dashboard user and reloading leaves the engine bound to the boot principal: the new user gets `409 principal_mismatch` on every registration attempt, and an existing credential still authenticates and mints a session under the *old* name (`authentication_verify` uses the stored `user_name`).
+Restart the daemon after changing `dashboard_user` on a passkey-enabled deployment.
 
 ## Storage
 

@@ -347,6 +347,22 @@ pub(crate) async fn refresh_master_credential(
     master_key.set(master.plaintext, master.hash).await;
 }
 
+/// Re-derive the "dashboard username/password auth is configured" flag the middleware reads on every request.
+///
+/// Call at every site that calls [`refresh_master_credential`], and for the same reason: `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are classified `HotAction::UpdateDashboardCredentials` with no restart flag, so the kernel treats the config swap as the whole of the reload.
+/// A boot-time snapshot on the middleware would make that classification false — it is an OR-term of the `auth_configured` test that closes the dashboard-reads allowlist, it decides whether the SPA shell at `/dashboard/*` stays publicly reachable, and it is one of the four terms of the fail-closed no-auth branch — so an operator whose remediation is "add dashboard credentials and reload" would keep all three open until the daemon restarted.
+///
+/// Kept as a separate function rather than folded into `refresh_master_credential` because the two touch unrelated credentials; they are called together, not derived from each other.
+pub(crate) fn refresh_dashboard_auth_flag(
+    snap: &ApiAuthSnapshot,
+    dashboard_auth_enabled: &std::sync::atomic::AtomicBool,
+) {
+    dashboard_auth_enabled.store(
+        has_dashboard_credentials(snap),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 pub(crate) fn configured_user_api_keys(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
     snap.config_users
         .iter()
@@ -1306,6 +1322,7 @@ pub(crate) async fn change_password(
     // handles are refreshed from one snapshot rather than only the list.
     let snap = state.kernel.auth_snapshot();
     refresh_master_credential(&snap, &state.api_key_lock, &state.master_key).await;
+    refresh_dashboard_auth_flag(&snap, &state.dashboard_auth_enabled);
 
     // Invalidate all existing sessions to force re-login
     state.active_sessions.write().await.clear();
@@ -1601,6 +1618,10 @@ pub async fn build_router(
         kernel.home_dir().to_path_buf(),
     ));
     refresh_master_credential(&auth_snap, &api_key_lock, &master_key).await;
+    // Third live auth handle, shared with AppState and AuthState the same way the two above are.
+    // `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` hot-reload, so the middleware must not snapshot "is dashboard auth configured" at boot; see `refresh_dashboard_auth_flag`.
+    let dashboard_auth_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    refresh_dashboard_auth_flag(&auth_snap, &dashboard_auth_enabled);
     // Per-user API key snapshot is wrapped in a `RwLock` so the rotate-key
     // endpoint (`POST /api/users/{name}/rotate-key`) can swap entries live —
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
@@ -1647,38 +1668,49 @@ pub async fn build_router(
             kernel.memory_substrate().pool(),
         ));
 
-    // Build the passkey ceremony engine only when opted in. A bad RP config
-    // is logged loudly and leaves the engine `None` (routes answer 503)
-    // rather than aborting daemon boot — password login must keep working.
+    // Build the passkey ceremony engine only when opted in.
+    // A bad RP config or a missing dashboard principal is logged loudly and leaves the engine `None` (routes answer 503) rather than aborting daemon boot — password login must keep working.
     let passkey_engine: Option<Arc<crate::passkey::PasskeyEngine>> = {
         let cfg = kernel.config_ref();
         if cfg.passkey_enabled {
+            // Trimmed to match `dashboard_login`, which compares the typed username against the trimmed `dashboard_user`: an untrimmed principal would file credentials under a name no password session can present, and the registration guard in `routes::passkey` would then refuse the only caller entitled to enroll.
             let principal = resolve_credential(
                 &cfg.dashboard_user,
                 "LIBREFANG_DASHBOARD_USER",
                 kernel.home_dir(),
             );
-            match crate::passkey::PasskeyEngine::new(
-                &cfg.passkey_rp_id,
-                &cfg.passkey_rp_origin,
-                &principal,
-            ) {
-                Ok(engine) => {
-                    tracing::info!(
-                        rp_id = %cfg.passkey_rp_id,
-                        rp_origin = %cfg.passkey_rp_origin,
-                        "passkey (WebAuthn) login enabled"
-                    );
-                    Some(Arc::new(engine))
-                }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "passkey_enabled = true but the RP configuration is invalid; \
-                         passkey login is DISABLED. Fix passkey_rp_id / passkey_rp_origin \
-                         in config.toml. Password login is unaffected."
-                    );
-                    None
+            let principal = principal.trim().to_string();
+            if principal.is_empty() {
+                // A passkey authenticates *as* the dashboard principal, so without one there is no identity to mint a session for — `authentication_verify` would hand `mint_dashboard_session` an empty user name. Leave the engine `None` (routes answer 503) instead of accepting registrations for a login that can never complete.
+                tracing::error!(
+                    "passkey_enabled = true but no dashboard user is configured; passkey login is \
+                     DISABLED. Passkeys authenticate as the dashboard principal — set dashboard_user \
+                     (or LIBREFANG_DASHBOARD_USER) in config.toml. Password login is unaffected."
+                );
+                None
+            } else {
+                match crate::passkey::PasskeyEngine::new(
+                    &cfg.passkey_rp_id,
+                    &cfg.passkey_rp_origin,
+                    &principal,
+                ) {
+                    Ok(engine) => {
+                        tracing::info!(
+                            rp_id = %cfg.passkey_rp_id,
+                            rp_origin = %cfg.passkey_rp_origin,
+                            "passkey (WebAuthn) login enabled"
+                        );
+                        Some(Arc::new(engine))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "passkey_enabled = true but the RP configuration is invalid; \
+                             passkey login is DISABLED. Fix passkey_rp_id / passkey_rp_origin \
+                             in config.toml. Password login is unaffected."
+                        );
+                        None
+                    }
                 }
             }
         } else {
@@ -1709,6 +1741,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
         master_key: master_key.clone(),
+        dashboard_auth_enabled: dashboard_auth_enabled.clone(),
         user_api_keys: user_api_keys_lock.clone(),
         media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
@@ -1772,12 +1805,15 @@ pub async fn build_router(
     // change_password / rotate-key can update them live without a daemon
     // restart.
     let user_api_keys_initial_len = state.user_api_keys.read().await.len();
-    // Atomic snapshot so dashboard_auth_enabled and api_key_set come from
-    // the same config generation (#3744 review #2).
+    // Atomic snapshot so the dashboard-credential flag and api_key_set come from the same config generation (#3744 review #2).
     let snap = state.kernel.auth_snapshot();
-    let dashboard_auth_enabled = has_dashboard_credentials(&snap);
+    // Re-derive onto the shared handle so the flag the middleware reads and the `any_auth` the boot logs below describe come from this one snapshot rather than the (older) one taken before `AppState`.
+    refresh_dashboard_auth_flag(&snap, &state.dashboard_auth_enabled);
+    let dashboard_auth_configured = state
+        .dashboard_auth_enabled
+        .load(std::sync::atomic::Ordering::Relaxed);
     let api_key_set = master_credential(&snap).is_configured();
-    let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_enabled;
+    let any_auth = api_key_set || user_api_keys_initial_len > 0 || dashboard_auth_configured;
 
     // Resolve the effective value of `require_auth_for_reads`.
     // - Explicit `Some(true)`  → operators are forcing the allowlist
@@ -1793,11 +1829,18 @@ pub async fn build_router(
     //   agent IDs to the LAN.
     let configured_require_auth_for_reads = state.kernel.config_ref().require_auth_for_reads;
     let external_auth_proxy = state.kernel.config_ref().external_auth_proxy;
-    let require_auth_for_reads = derive_require_auth_for_reads(
+    // The effective posture *at boot*, used only by the operator-facing logs below.
+    let require_auth_for_reads_at_boot = derive_require_auth_for_reads(
         configured_require_auth_for_reads,
         any_auth,
         external_auth_proxy,
     );
+    // What the middleware carries is the same derivation with `any_auth` assumed true, because the middleware recomputes the "is any credential configured" half on every request and ANDs it in (`auth_configured` in `middleware::auth`).
+    // The credentials that half reads reach it without a restart: `refresh_master_credential` pushes `api_key` / `api_key_hash` into the live handles on `POST /api/config/reload` and on the config-file watcher tick, `refresh_dashboard_auth_flag` re-derives the dashboard-credential flag at the same sites, and `[[users]]` entries written through `/api/users*` replace `user_api_keys` in place.
+    // `require_auth_for_reads` and `external_auth_proxy` are the restart-required pair, which is why they — and only they — are snapshotted here.
+    // Folding the boot value of `any_auth` in would mean an operator who adds the first credential and reloads keeps a publicly readable dashboard-reads allowlist until the daemon restarts, with the reload plan reporting `restart_required: false` and nothing warning them.
+    let require_auth_for_reads =
+        derive_require_auth_for_reads(configured_require_auth_for_reads, true, external_auth_proxy);
     // Audit `require-auth-for-reads-false-leak`: surface the
     // bypass-refused case loudly so an operator who set
     // `require_auth_for_reads = false` without an external proxy
@@ -1814,7 +1857,7 @@ pub async fn build_router(
              Cloudflare Access, etc.) actually fronts the daemon."
         );
     }
-    if require_auth_for_reads && !any_auth {
+    if require_auth_for_reads_at_boot && !any_auth {
         tracing::warn!(
             "require_auth_for_reads = true but no authentication is configured \
              (api_key, user_api_keys, and dashboard credentials are all empty). \
@@ -1822,7 +1865,7 @@ pub async fn build_router(
              credentials to lock down read endpoints."
         );
     }
-    if require_auth_for_reads && configured_require_auth_for_reads.is_none() {
+    if require_auth_for_reads_at_boot && configured_require_auth_for_reads.is_none() {
         tracing::info!(
             "require_auth_for_reads auto-enabled because authentication is configured \
              (api_key / user_api_keys / dashboard credentials). Dashboard reads now \
@@ -1895,7 +1938,7 @@ pub async fn build_router(
         api_key_lock: api_key_lock.clone(),
         master_key: master_key.clone(),
         active_sessions: active_sessions.clone(),
-        dashboard_auth_enabled,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads,
         allow_no_auth,
@@ -2373,6 +2416,7 @@ pub async fn run_daemon(
                             // middleware.
                             let snap = k.auth_snapshot();
                             refresh_master_credential(&snap, &st.api_key_lock, &st.master_key).await;
+                            refresh_dashboard_auth_flag(&snap, &st.dashboard_auth_enabled);
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
                                 &HotAction::ReloadChannels,

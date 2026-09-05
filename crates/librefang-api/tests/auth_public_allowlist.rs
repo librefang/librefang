@@ -689,3 +689,73 @@ async fn auth_providers_open_mode_returns_names_only() {
         "open-mode anonymous response must NOT include `scopes`; got {p:?}"
     );
 }
+
+/// The `require_auth_for_reads` derivation has two halves — the configured flag and "is any credential configured" — and the second half must be evaluated live.
+/// `api_key` hot-reloads: `POST /api/config/reload` and the config-file watcher both push the new value into the shared `api_key_lock` via `refresh_master_credential`, and `build_reload_plan` classifies the field as effective immediately, so the response reports `restart_required: false`.
+/// With the whole derivation snapshotted at boot, an operator who booted without credentials and then added an `api_key` kept every dashboard read anonymous until the daemon restarted, and nothing told them.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_reads_close_when_an_api_key_arrives_via_reload() {
+    let harness = boot_router_with_api_key("").await;
+
+    // Open mode: no credential of any kind, so the dashboard-reads allowlist is public.
+    let before = get_status(harness.app.clone(), "/api/status").await;
+    assert_ne!(
+        before,
+        StatusCode::UNAUTHORIZED,
+        "with no auth configured /api/status must be readable anonymously, got {before}"
+    );
+
+    // Exactly what a config reload does once `api_key` is set on disk.
+    *harness._state.api_key_lock.write().await = "reloaded-secret-key".to_string();
+
+    let after = get_status(harness.app.clone(), "/api/status").await;
+    assert_eq!(
+        after,
+        StatusCode::UNAUTHORIZED,
+        "an api_key added by config reload must close the dashboard-reads allowlist \
+         without a daemon restart, got {after}"
+    );
+
+    // The reloaded key authenticates the same read, so the lockdown is not a lockout.
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/api/status")
+        .header("Authorization", "Bearer reloaded-secret-key")
+        .body(Body::empty())
+        .unwrap();
+    let authed = harness.app.clone().oneshot(req).await.unwrap().status();
+    assert_ne!(
+        authed,
+        StatusCode::UNAUTHORIZED,
+        "the reloaded api_key must authenticate the read it just closed, got {authed}"
+    );
+}
+
+/// Same derivation, the other credential kind that reaches the middleware without a restart.
+/// `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are classified `HotAction::UpdateDashboardCredentials` with no restart flag, and `server::refresh_dashboard_auth_flag` pushes the re-derived value into the shared handle on `POST /api/config/reload`, on the config-file watcher tick, and on a dashboard credential change.
+/// While the middleware held a boot-time `bool`, an operator whose remediation was "add a dashboard password and reload" kept the reads allowlist open, the `/dashboard/*` shell public, and the fail-closed no-auth branch disarmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_reads_close_when_dashboard_credentials_arrive_via_reload() {
+    let harness = boot_router_with_api_key("").await;
+
+    let before = get_status(harness.app.clone(), "/api/status").await;
+    assert_ne!(
+        before,
+        StatusCode::UNAUTHORIZED,
+        "with no auth configured /api/status must be readable anonymously, got {before}"
+    );
+
+    // Exactly what a reload does once `dashboard_user` + `dashboard_pass` are set on disk.
+    harness
+        ._state
+        .dashboard_auth_enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let after = get_status(harness.app.clone(), "/api/status").await;
+    assert_eq!(
+        after,
+        StatusCode::UNAUTHORIZED,
+        "dashboard credentials added by config reload must close the dashboard-reads \
+         allowlist without a daemon restart, got {after}"
+    );
+}
