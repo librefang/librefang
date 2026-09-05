@@ -4250,7 +4250,6 @@
     "name_placeholder": "customer-support",
     "new": "New agent type",
     "preserved_note": "Saving rewrites only the fields above. Anything else in this type's agent.toml — triggers, compaction, MCP allowlists, session mode — is preserved.",
-    "promote": "Promote",
     "promote_copied": "Copied the sanitized TOML",
     "promote_copy": "Copy TOML",
     "promote_copy_failed": "Could not copy the TOML",

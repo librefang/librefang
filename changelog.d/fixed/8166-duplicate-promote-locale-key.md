@@ -1,0 +1,3 @@
+Remove the `agentTypes.promote` key that every dashboard locale declared twice inside the same object, and add a guard that fails the locale suite on any repeat.
+`JSON.parse` is last-wins, so the first copy was unreachable dead text — a translator could work on it forever without changing a pixel — and every existing check ran on the parsed tree, where the duplicate had already collapsed.
+It got in without a merge conflict, because two branches added the key at different positions in the same object and git merged both cleanly, which is why the fix is a guard and not just a deletion (#8166) (@DaBlitzStein)

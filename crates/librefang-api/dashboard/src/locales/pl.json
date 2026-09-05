@@ -4262,7 +4262,6 @@
     "name_placeholder": "customer-support",
     "new": "Nowy typ agenta",
     "preserved_note": "Zapis nadpisuje wyłącznie powyższe pola. Reszta pliku agent.toml tego typu — wyzwalacze, kompaktowanie, listy MCP, tryb sesji — zostaje zachowana.",
-    "promote": "Promuj",
     "promote_copied": "Skopiowano oczyszczony plik TOML",
     "promote_copy": "Kopiuj TOML",
     "promote_copy_failed": "Nie udało się skopiować pliku TOML",

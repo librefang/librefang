@@ -4250,7 +4250,6 @@
     "name_placeholder": "customer-support",
     "new": "新建智能体类型",
     "preserved_note": "保存只会重写以上字段。该类型 agent.toml 中的其他内容——触发器、压缩配置、MCP 允许列表、会话模式——都会原样保留。",
-    "promote": "提升",
     "promote_copied": "已复制脱敏后的 TOML",
     "promote_copy": "复制 TOML",
     "promote_copy_failed": "无法复制 TOML",

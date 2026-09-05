@@ -4249,7 +4249,6 @@
     "name_placeholder": "customer-support",
     "new": "새 에이전트 타입",
     "preserved_note": "저장 시 위 필드만 다시 기록됩니다. 이 타입의 agent.toml에 있는 트리거, 컴팩션, MCP 허용 목록, 세션 모드 등 나머지는 그대로 유지됩니다.",
-    "promote": "승격",
     "promote_copied": "정제된 TOML을 복사했습니다",
     "promote_copy": "TOML 복사",
     "promote_copy_failed": "TOML을 복사하지 못했습니다",

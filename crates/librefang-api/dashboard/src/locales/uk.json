@@ -4262,7 +4262,6 @@
     "name_placeholder": "customer-support",
     "new": "Новий тип агента",
     "preserved_note": "Збереження перезаписує лише поля вище. Решта в agent.toml цього типу — тригери, компакція, списки MCP, режим сесії — залишається без змін.",
-    "promote": "Просунути",
     "promote_copied": "Очищений TOML скопійовано",
     "promote_copy": "Копіювати TOML",
     "promote_copy_failed": "Не вдалося скопіювати TOML",
