@@ -47,6 +47,7 @@ use crate::types;
         routes::list_agent_templates,
         routes::get_agent_template,
         routes::get_agent_template_toml,
+        routes::put_agent_template_toml,
         routes::create_agent_type,
         routes::update_agent_type,
         routes::delete_agent_type,

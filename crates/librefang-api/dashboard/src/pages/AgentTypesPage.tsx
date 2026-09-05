@@ -6,13 +6,16 @@ import type { AgentTemplate, AgentTypeSpec, SpawnEphemeralResult } from "../api"
 import { useAgentType, useAgentTypes, useAgentTypeHistory } from "../lib/queries/agentTypes";
 import { useAgents, useTools } from "../lib/queries/agents";
 import { useSkills } from "../lib/queries/skills";
+import { useProviders } from "../lib/queries/providers";
+import { useModels } from "../lib/queries/models";
+import { useMcpServers } from "../lib/queries/mcp";
 import {
   useCreateAgentType,
   useDeleteAgentType,
   usePromoteAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
-  useUpdateAgentType,
+  useUpdateAgentTypeToml,
 } from "../lib/mutations/agentTypes";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -22,69 +25,24 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
+import { AgentManifestForm } from "../components/AgentManifestForm";
+import type { ManifestCatalogEntry } from "../components/AgentManifestForm";
+import {
+  emptyManifestExtras,
+  emptyManifestForm,
+  parseManifestToml,
+  serializeManifestForm,
+  validateManifestForm,
+  type ManifestExtras,
+  type ManifestFormState,
+} from "../lib/agentManifest";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
 import { copyToClipboard } from "../lib/clipboard";
 
-/**
- * The subset of an agent type this editor writes.
- *
- * `name` is absent on purpose: it identifies the document and the `PUT` route
- * takes it from the URL, so the form cannot rename a type out from under itself.
- */
-interface FormState {
-  description: string;
-  system_prompt: string;
-  provider: string;
-  model: string;
-  tools: string[];
-  skills: string[];
-}
-
-const EMPTY_FORM: FormState = {
-  description: "",
-  system_prompt: "",
-  provider: "",
-  model: "",
-  tools: [],
-  skills: [],
-};
-
-function formFromSpec(spec: AgentTypeSpec): FormState {
-  return {
-    description: spec.description ?? "",
-    system_prompt: spec.system_prompt ?? "",
-    provider: spec.provider ?? "",
-    model: spec.model ?? "",
-    tools: spec.tools ?? [],
-    skills: spec.skills ?? [],
-  };
-}
-
 const inputClass =
   "w-full rounded-lg border border-border-subtle bg-main/40 px-2.5 py-1.5 text-[13px] " +
   "text-text-main placeholder:text-text-dim/50 focus:border-brand/50 focus:outline-none";
-
-/**
- * Union the catalog with what the type already references, so an identifier the
- * registry does not know about (a skill installed on another host, a tool from a
- * plugin that has not loaded yet) still renders as a chip instead of vanishing
- * from the form and, with it, from the saved document.
- */
-function mergeCatalog(
-  catalog: { name: string; description?: string }[] | undefined,
-  selected: string[],
-): { options: string[]; meta: Record<string, { description?: string }> } {
-  const meta: Record<string, { description?: string }> = {};
-  const options = new Set<string>();
-  for (const entry of catalog ?? []) {
-    options.add(entry.name);
-    if (entry.description) meta[entry.name] = { description: entry.description };
-  }
-  for (const name of selected) options.add(name);
-  return { options: [...options].sort(), meta };
-}
 
 function Field({
   label,
@@ -110,7 +68,6 @@ function AgentTypeEditor({
   name,
   onClose,
 }: {
-  /** `null` opens the create form; a string opens the editor for that type. */
   name: string | null;
   onClose: () => void;
 }) {
@@ -119,42 +76,93 @@ function AgentTypeEditor({
   const isCreate = name === null;
 
   const detail = useAgentType(name ?? "", { enabled: !isCreate });
+  const createMutation = useCreateAgentType();
+  const updateTomlMutation = useUpdateAgentTypeToml();
+
+  const providersQuery = useProviders();
+  const modelsQuery = useModels();
   const toolsQuery = useTools();
   const skillsQuery = useSkills();
-  const createMutation = useCreateAgentType();
-  const updateMutation = useUpdateAgentType();
+  const mcpServersQuery = useMcpServers();
 
   const [newName, setNewName] = useState("");
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [formState, setFormState] = useState<ManifestFormState>(emptyManifestForm);
+  const [formExtras, setFormExtras] = useState<ManifestExtras>(emptyManifestExtras);
+  const [invalidFields, setInvalidFields] = useState<Set<string>>(new Set());
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [seeded, setSeeded] = useState(false);
 
-  const spec = detail.data?.spec;
   useEffect(() => {
-    setForm(spec ? formFromSpec(spec) : EMPTY_FORM);
-  }, [spec]);
+    if (isCreate || seeded) return;
+    const toml = detail.data?.manifest_toml;
+    if (!toml) return;
+    const parsed = parseManifestToml(toml);
+    if (parsed.ok) {
+      setFormState(parsed.form);
+      setFormExtras(parsed.extras);
+      setParseError(null);
+    } else {
+      setParseError(
+        parsed.message === "json_schema_unsafe_integer"
+          ? t("agents.form.json_schema_unsafe_integer")
+          : parsed.message,
+      );
+    }
+    setSeeded(true);
+  }, [isCreate, seeded, detail.data, t]);
 
-  const toolFinder = useMemo(
-    () => mergeCatalog(toolsQuery.data, form.tools),
-    [toolsQuery.data, form.tools],
-  );
-  const skillFinder = useMemo(
-    () => mergeCatalog(skillsQuery.data, form.skills),
-    [skillsQuery.data, form.skills],
+  const providers = useMemo(
+    () => (providersQuery.data ?? []).map((p) => ({ name: p.id })),
+    [providersQuery.data],
   );
 
-  const saving = createMutation.isPending || updateMutation.isPending;
-  const update = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }));
+  const models = useMemo(
+    () =>
+      (modelsQuery.data?.models ?? []).map((m) => ({
+        provider: m.provider ?? "",
+        id: m.id,
+      })),
+    [modelsQuery.data],
+  );
+
+  const skillCatalog = useMemo<ManifestCatalogEntry[]>(
+    () => (skillsQuery.data ?? []).map((s) => ({ name: s.name, description: s.description })),
+    [skillsQuery.data],
+  );
+
+  const toolCatalog = useMemo<ManifestCatalogEntry[]>(
+    () => (toolsQuery.data ?? []).map((t) => ({ name: t.name, description: t.description })),
+    [toolsQuery.data],
+  );
+
+  const mcpCatalog = useMemo<ManifestCatalogEntry[]>(
+    () =>
+      mcpServersQuery.data
+        ? mcpServersQuery.data.configured.map((s: { name: string }) => ({ name: s.name }))
+        : [],
+    [mcpServersQuery.data],
+  );
+
+  const saving = createMutation.isPending || updateTomlMutation.isPending;
 
   async function handleSave() {
-    // Send exactly the keys this form owns. The server merges them over the
-    // stored manifest, so everything it does not mention — triggers, compaction,
-    // MCP allowlists, session mode — survives the save untouched (#7740).
-    const payload: AgentTypeSpec = { ...form };
+    const errors = validateManifestForm(formState);
+    setInvalidFields(new Set(errors));
+    if (errors.length > 0) return;
+
     try {
       if (isCreate) {
-        await createMutation.mutateAsync({ ...payload, name: newName.trim() });
+        const trimmed = newName.trim();
+        await createMutation.mutateAsync({
+          name: trimmed,
+          description: formState.description,
+        } as AgentTypeSpec);
+        const toml = serializeManifestForm(formState, formExtras);
+        await updateTomlMutation.mutateAsync({ name: trimmed, toml });
         addToast(t("agentTypes.created"), "success");
       } else {
-        await updateMutation.mutateAsync({ name: name as string, spec: payload });
+        const toml = serializeManifestForm(formState, formExtras);
+        await updateTomlMutation.mutateAsync({ name: name as string, toml });
         addToast(t("agentTypes.saved"), "success");
       }
       onClose();
@@ -168,7 +176,7 @@ function AgentTypeEditor({
       isOpen
       onClose={onClose}
       variant="panel-right"
-      size="lg"
+      size="xl"
       overflowVisible
       title={isCreate ? t("agentTypes.create_title") : t("agentTypes.edit_title", { name })}
     >
@@ -176,6 +184,15 @@ function AgentTypeEditor({
         <ListSkeleton rows={4} />
       ) : !isCreate && detail.isError ? (
         <ErrorState message={detail.error?.message} onRetry={() => void detail.refetch()} />
+      ) : parseError ? (
+        <div className="space-y-3">
+          <ErrorState message={parseError} />
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={onClose}>
+              {t("common.close")}
+            </Button>
+          </div>
+        </div>
       ) : (
         <div className="space-y-4">
           {isCreate && (
@@ -191,74 +208,17 @@ function AgentTypeEditor({
             </Field>
           )}
 
-          <Field label={t("agentTypes.description")}>
-            <input
-              type="text"
-              value={form.description}
-              onChange={(e) => update({ description: e.target.value })}
-              className={inputClass}
-            />
-          </Field>
-
-          <Field label={t("agentTypes.system_prompt")} hint={t("agentTypes.system_prompt_hint")}>
-            <textarea
-              value={form.system_prompt}
-              onChange={(e) => update({ system_prompt: e.target.value })}
-              rows={6}
-              className={`${inputClass} font-mono resize-y`}
-            />
-          </Field>
-
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={t("agentTypes.provider")} hint={t("agentTypes.provider_hint")}>
-              <input
-                type="text"
-                value={form.provider}
-                onChange={(e) => update({ provider: e.target.value })}
-                placeholder={t("agentTypes.inherit_placeholder")}
-                className={inputClass}
-              />
-            </Field>
-            <Field label={t("agentTypes.model")} hint={t("agentTypes.model_hint")}>
-              <input
-                type="text"
-                value={form.model}
-                onChange={(e) => update({ model: e.target.value })}
-                placeholder={t("agentTypes.inherit_placeholder")}
-                className={inputClass}
-              />
-            </Field>
-          </div>
-
-          <Field label={t("agentTypes.tools")} hint={t("agentTypes.tools_hint")}>
-            <MultiSelectCmdk
-              options={toolFinder.options}
-              optionMeta={toolFinder.meta}
-              value={form.tools}
-              onChange={(next) =>
-                update({ tools: typeof next === "function" ? next(form.tools) : next })
-              }
-              placeholder={t("agentTypes.tools_search")}
-              allowFreeText
-            />
-          </Field>
-
-          <Field label={t("agentTypes.skills")} hint={t("agentTypes.skills_hint")}>
-            <MultiSelectCmdk
-              options={skillFinder.options}
-              optionMeta={skillFinder.meta}
-              value={form.skills}
-              onChange={(next) =>
-                update({ skills: typeof next === "function" ? next(form.skills) : next })
-              }
-              placeholder={t("agentTypes.skills_search")}
-              allowFreeText
-            />
-          </Field>
-
-          <p className="rounded-lg border border-border-subtle bg-main/30 px-3 py-2 text-[11px] text-text-dim">
-            {t("agentTypes.preserved_note")}
-          </p>
+          <AgentManifestForm
+            value={formState}
+            onChange={setFormState}
+            providers={providers}
+            models={models}
+            invalidFields={invalidFields}
+            extras={formExtras}
+            skillCatalog={skillCatalog}
+            toolCatalog={toolCatalog}
+            mcpCatalog={mcpCatalog}
+          />
 
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" onClick={onClose} disabled={saving}>
@@ -310,9 +270,6 @@ function QuickRunModal({
     [agents.data],
   );
 
-  // Preselect the first agent so the common case is two fields, not three.
-  // Guarded on `parent` staying empty so a refetch never moves a choice the
-  // operator already made.
   useEffect(() => {
     if (parent === "" && candidates.length > 0) setParent(candidates[0].id);
   }, [candidates, parent]);
@@ -631,10 +588,6 @@ function AgentTypeRow({
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        {/* Quick Run is offered on every row, editable or not. Spawnability and
-            writability are different questions: a workspace-sourced row is a live
-            agent's manifest this API refuses to edit, but the spawn engine resolves
-            it by name just as happily as an operator-authored type (#6699). */}
         <button
           type="button"
           onClick={onQuickRun}
@@ -655,9 +608,6 @@ function AgentTypeRow({
           <ShieldCheck className="h-3.5 w-3.5" />
         </button>
 
-        {/* A workspace-sourced row is a live agent's own manifest. The write verbs
-            refuse it by design, so rendering Edit/Delete here would offer a control
-            that cannot succeed — point at the surface that can instead (#7731). */}
         {type.editable ? (
           <>
             <button

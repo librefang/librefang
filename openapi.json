@@ -12744,6 +12744,56 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "system"
+        ],
+        "summary": "PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.",
+        "description": "Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.\nThis is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.\n\nTwo contracts worth stating before touching this handler:\n\n- **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = \"…\"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.\n  It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.\n- **Keys the manifest does not recognize are reported, not dropped in silence.**\n  `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.\n  The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.",
+        "operationId": "put_agent_template_toml",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Template updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid TOML"
+          },
+          "404": {
+            "description": "No such agent type"
+          },
+          "409": {
+            "description": "Name belongs to a live agent"
+          }
+        }
       }
     },
     "/api/tools": {

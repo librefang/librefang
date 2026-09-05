@@ -87,14 +87,32 @@ async fn boot() -> Harness {
 }
 
 async fn request(h: &Harness, method: &str, path: &str, body: Option<Json>) -> (StatusCode, Json) {
-    let builder = axum::http::Request::builder().method(method).uri(path);
-    let mut req = match body {
-        Some(json) => builder
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(serde_json::to_vec(&json).unwrap()))
-            .unwrap(),
-        None => builder.body(axum::body::Body::empty()).unwrap(),
-    };
+    send(
+        h,
+        method,
+        path,
+        body.is_some().then_some("application/json"),
+        match &body {
+            Some(json) => serde_json::to_vec(&json).unwrap(),
+            None => Vec::new(),
+        },
+    )
+    .await
+}
+
+/// A raw-body request — the shape `PUT /api/templates/{name}/toml` (`text/plain`) takes.
+async fn send(
+    h: &Harness,
+    method: &str,
+    path: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> (StatusCode, Json) {
+    let mut builder = axum::http::Request::builder().method(method).uri(path);
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    let mut req = builder.body(axum::body::Body::from(body)).unwrap();
     // `MockKernelBuilder` leaves `api_key` empty; the auth middleware still requires a loopback
     // origin, and a `oneshot` call attaches no `ConnectInfo` of its own.
     req.extensions_mut()
@@ -881,6 +899,188 @@ async fn the_tool_reports_the_defaults_it_resolved_rather_than_the_fields_it_was
 
     cleanup(name);
 }
+// ---------------------------------------------------------------------------
+// The raw-TOML write path (#8028)
+// ---------------------------------------------------------------------------
+
+/// A manifest in the shape the TOML tab saves: sections the flat editor cannot
+/// express, a known-table section, and keys no current schema knows about.
+fn toml_tab_document(name: &str) -> String {
+    format!(
+        r#"name = "{name}"
+description = "raw toml save"
+session_mode = "new"
+mcp_servers = ["github"]
+tool_allowlist = ["file_read"]
+future_field = "unknown to this daemon"
+
+[model]
+provider = "ollama"
+model = "test-model"
+
+[workspaces]
+notes = {{ path = "notes", mode = "rw" }}
+
+[compaction]
+threshold_messages = 7
+
+[[triggers]]
+pattern = "git.push"
+prompt_template = "on push"
+"#
+    )
+}
+
+/// PUT with a text/plain body through the production router.
+async fn put_toml(h: &Harness, path: &str, body: &str) -> (StatusCode, Json) {
+    send(h, "PUT", path, Some("text/plain"), body.as_bytes().to_vec()).await
+}
+
+/// The headline claim of #8028: the whole-document write is not lossy. Review asked
+/// for exactly this round trip — triggers and compaction read back intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_round_trips_every_section_the_flat_editor_cannot_express() {
+    let _g = lock().lock().await;
+    let name = "at_toml_roundtrip";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, raw) = get(&h, &format!("/api/templates/{name}/toml")).await;
+    assert_eq!(status, StatusCode::OK);
+    let stored: toml::Value = toml::from_str(raw.as_str().unwrap()).unwrap();
+    assert_eq!(stored["session_mode"].as_str(), Some("new"), "{stored}");
+    assert_eq!(
+        stored["mcp_servers"][0].as_str(),
+        Some("github"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["tool_allowlist"][0].as_str(),
+        Some("file_read"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["workspaces"]["notes"]["path"].as_str(),
+        Some("notes"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["compaction"]["threshold_messages"].as_integer(),
+        Some(7),
+        "[compaction] did not survive the save: {stored}"
+    );
+    assert_eq!(
+        stored["triggers"][0]["pattern"].as_str(),
+        Some("git.push"),
+        "{stored}"
+    );
+    assert_eq!(
+        stored["triggers"][0]["prompt_template"].as_str(),
+        Some("on push"),
+        "[[triggers]] did not survive the save: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// The raw-TOML tab is a write path like create and the flat `PUT`, so it snapshots like one.
+/// Without the record, `GET /api/templates/{name}/history` reports the previous save as current while the file on disk is what this handler just wrote — a history that is silently incomplete rather than absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_records_a_version_snapshot() {
+    let _g = lock().lock().await;
+    let name = "at_toml_history";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = toml_tab_document(name);
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, history) = get(&h, &format!("/api/templates/{name}/history")).await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let versions = history["versions"].as_array().expect("versions array");
+    assert_eq!(
+        versions.len(),
+        1,
+        "the raw-TOML save must record exactly one snapshot: {history}"
+    );
+    assert_eq!(versions[0]["template_name"], name, "{history}");
+    assert_eq!(versions[0]["change_source"], "toml", "{history}");
+    assert!(
+        versions[0]["manifest_toml"]
+            .as_str()
+            .expect("manifest_toml")
+            .contains("raw toml save"),
+        "the snapshot must carry the content the save wrote: {history}"
+    );
+
+    cleanup(name);
+}
+
+/// A key the manifest does not recognize is reported in the response and dropped from
+/// the file — the report is what keeps that drop from happening in silence.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_reports_keys_the_manifest_does_not_recognise() {
+    let _g = lock().lock().await;
+    let name = "at_toml_typo";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{name}\"\nsesion_mode = \"new\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let unknown = body["unknown_keys"].as_array().expect("unknown_keys array");
+    assert!(
+        unknown.contains(&json!("sesion_mode")),
+        "the typo key was not reported: {body}"
+    );
+
+    // And the stored document confirms what the report says: the unrecognised key is gone.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(
+        !stored.contains("sesion_mode"),
+        "the typo key survived the save despite the report: {stored}"
+    );
+
+    cleanup(name);
+}
+
+/// Malformed syntax and a type-violation both refuse with 400 and carry the parser
+/// detail in `details.toml_error` rather than mixing it into the translated message.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_rejects_malformed_toml_with_a_400() {
+    let _g = lock().lock().await;
+    let name = "at_toml_bad";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+
+    for doc in [
+        "name = \nbroken[".to_string(),
+        format!("name = \"{name}\"\nmax_history_messages = \"not-a-number\"\n"),
+    ] {
+        let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "template_invalid_toml", "{body}");
+        assert!(
+            body["details"]["toml_error"].is_string(),
+            "parser detail missing: {body}"
+        );
+    }
+
+    // The seeded document is untouched by the refusals.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("seed"), "{stored}");
+    cleanup(name);
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/templates/{name}/promote (#8043)
@@ -1001,6 +1201,33 @@ async fn history_and_restore_round_trip() {
     cleanup(name);
 }
 
+/// Unknown template name and live-agent name keep their distinct refusals on this verb too.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_refuses_unknown_and_live_agent_names() {
+    let _g = lock().lock().await;
+    let name = "at_toml_liveagent";
+    cleanup(name);
+    write_workspace_agent(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+
+    let (status, body) =
+        put_toml(&h, "/api/templates/at_toml_missing/toml", "name = \"x\"\n").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["code"], "template_not_found", "{body}");
+
+    let (status, body) = put_toml(
+        &h,
+        &format!("/api/templates/{name}/toml"),
+        "name = \"at_toml_liveagent\"\n",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "template_not_editable", "{body}");
+
+    cleanup(name);
+}
+
 /// The server-side privacy gate: a manifest whose system prompt still
 /// carries a personal-data literal (a field the sanitizer keeps) must be
 /// refused with 409 and the findings returned, not published.
@@ -1103,4 +1330,54 @@ async fn restore_rejects_foreign_versions_and_live_agents() {
     cleanup(name);
     cleanup(other);
     cleanup(live);
+}
+
+/// The same 1MB manifest cap the agent spawn path enforces, checked before parsing.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_refuses_an_oversize_body_before_parsing() {
+    let _g = lock().lock().await;
+    let name = "at_toml_oversize";
+    cleanup(name);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let padding = "x".repeat(1024 * 1024);
+    let doc = format!("name = \"{name}\"\ndescription = \"{padding}\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "template_manifest_too_large", "{body}");
+
+    // The seeded document is untouched.
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("seed"), "{stored}");
+
+    cleanup(name);
+}
+
+/// The name pin is deliberate (the UI copy says the name cannot change); it just has
+/// to be visible. Same shape as `manifest_toml_cannot_rename_an_agent_out_from_under_
+/// the_registry` on the agent side.
+#[tokio::test(flavor = "multi_thread")]
+async fn toml_put_pins_the_name_to_the_url_rather_than_the_body() {
+    let _g = lock().lock().await;
+    let name = "at_toml_pin";
+    let renamed = "at_toml_pin_moved";
+    cleanup(name);
+    cleanup(renamed);
+    write_agent_type(name, "name = \"seed\"\n");
+
+    let h = boot().await;
+    let doc = format!("name = \"{renamed}\"\ndescription = \"kept\"\n");
+    let (status, body) = put_toml(&h, &format!("/api/templates/{name}/toml"), &doc).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], name, "{body}");
+    assert!(
+        !agent_type_file(renamed).exists(),
+        "a body name moved the document out from under the URL that addressed it"
+    );
+    let stored = std::fs::read_to_string(agent_type_file(name)).unwrap();
+    assert!(stored.contains("kept"), "{stored}");
+
+    cleanup(name);
+    cleanup(renamed);
 }

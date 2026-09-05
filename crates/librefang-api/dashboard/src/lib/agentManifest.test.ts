@@ -870,6 +870,58 @@ params = { region = "us" }
     expect(cleanForm(reparsed.form)).toEqual(cleanForm(parsed.form));
     expect(reparsed.extras).toEqual(parsed.extras);
   });
+  it("round-trips a manifest with triggers, compaction, an MCP allowlist and unknown keys without losing or moving anything", () => {
+    const original = `name = "parity"
+session_mode = "new"
+mcp_servers = ["github"]
+tool_allowlist = ["file_read"]
+future_field = "unknown to this daemon"
+
+[workspaces]
+notes = { path = "notes", mode = "rw" }
+
+[compaction]
+threshold_messages = 7
+
+[[triggers]]
+pattern = "git.push"
+prompt_template = "on push"
+`;
+    const parsed = parseManifestToml(original);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const out = serializeManifestForm(parsed.form, parsed.extras);
+
+    // Nothing was lost — the sections the deleted editor note promised to preserve
+    // survive the parse -> serialize -> parse cycle.
+    const reparsed = parseManifestToml(out);
+    expect(reparsed.ok).toBe(true);
+    if (!reparsed.ok) return;
+    expect(reparsed.form.session_mode).toBe("new");
+    expect(reparsed.form.mcp_servers).toEqual(["github"]);
+    expect(reparsed.form.tool_allowlist).toEqual(["file_read"]);
+    expect(reparsed.extras.topLevel["future_field"]).toBe("unknown to this daemon");
+    expect(reparsed.extras.topLevel["compaction"]).toEqual({ threshold_messages: 7 });
+    expect(reparsed.extras.topLevel["workspaces"]).toEqual({
+      notes: { path: "notes", mode: "rw" },
+    });
+    expect(reparsed.extras.topLevel["triggers"]).toEqual([
+      { pattern: "git.push", prompt_template: "on push" },
+    ]);
+
+    // …and nothing was moved: every scalar/array still sits before the first table
+    // header, so no later key can be absorbed into a preceding section (the #8013
+    // hazard — a table emitted before the remaining top-level scalars would swallow
+    // tags, skills, mcp_servers, schedule and the rest).
+    const firstTableHeader = out.search(/^\[/m);
+    expect(firstTableHeader).toBeGreaterThan(-1);
+    for (const key of ["session_mode", "mcp_servers", "tool_allowlist", "future_field"]) {
+      const at = out.indexOf(`${key} =`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(at).toBeLessThan(firstTableHeader);
+    }
+  });
+
 });
 
 describe("agentManifest — inference parameters (#7781)", () => {

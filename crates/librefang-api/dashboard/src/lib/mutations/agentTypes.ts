@@ -1,11 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createAgentType,
-  updateAgentType,
   deleteAgentType,
   promoteAgentType,
   restoreTemplateVersion,
   spawnEphemeral,
+  putAgentTemplateToml,
 } from "../http/client";
 import type { AgentTypeSpec, SpawnEphemeralRequest } from "../../api";
 import { agentTypeKeys, budgetKeys, usageKeys } from "../queries/keys";
@@ -18,19 +18,11 @@ export function useCreateAgentType() {
   });
 }
 
-/**
- * Save an edit to an existing agent type.
- *
- * `spec` is a patch: the server keeps every manifest field the object does not
- * mention (#7740). Callers should send only what the form actually edits rather
- * than reconstructing a full document, so an operator's `[[triggers]]`,
- * `tool_allowlist`, `[compaction]` and the rest survive the save.
- */
-export function useUpdateAgentType() {
+export function useUpdateAgentTypeToml() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, spec }: { name: string; spec: AgentTypeSpec }) =>
-      updateAgentType(name, spec),
+    mutationFn: ({ name, toml }: { name: string; toml: string }) =>
+      putAgentTemplateToml(name, toml),
     onSuccess: (_data, { name }) => {
       qc.invalidateQueries({ queryKey: agentTypeKeys.detail(name) });
       qc.invalidateQueries({ queryKey: agentTypeKeys.lists() });
