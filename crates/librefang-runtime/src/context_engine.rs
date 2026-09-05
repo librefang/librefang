@@ -41,7 +41,7 @@ use librefang_memory::MemorySubstrate;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemoryFragment};
-use librefang_types::message::Message;
+use librefang_types::message::{Message, Role};
 use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -629,9 +629,22 @@ impl ContextEngine for DefaultContextEngine {
             warn!("ContextEngine: overflow unrecoverable — suggest /reset or /compact");
         }
 
-        // Re-validate tool_call/tool_result pairing after overflow drains
+        // Re-validate tool_call/tool_result pairing after overflow drains, then re-establish the leading-user invariant.
+        // The drain boundary can land on an assistant turn, and strict providers reject a history whose first message is not from the user.
         if recovery != RecoveryStage::None {
             *messages = crate::session_repair::validate_and_repair(messages);
+            // The repair is applied only when it leaves a user turn behind.
+            // `ensure_starts_with_user` cascades: dropping a leading assistant turn orphans the ToolResult blocks that answered its ToolUse, the emptied user turn is dropped in turn, and the next pair repeats it — a window of nothing but tool-call pairs, the usual shape after a front drain mid tool loop, drains to nothing that way.
+            // `assemble` has no user message to synthesize a replacement from, so the unrepaired history is the better of the two: a leading assistant turn is rejected by strict providers only, an empty request body by every provider.
+            let repaired = crate::session_repair::ensure_starts_with_user(messages.clone());
+            if repaired.iter().any(|m| m.role == Role::User) {
+                *messages = repaired;
+            } else if repaired.len() < messages.len() {
+                warn!(
+                    kept = messages.len(),
+                    "ContextEngine: leading-user repair left no user turn — keeping history as-is"
+                );
+            }
         }
 
         // Stage 2: Context guard — compact oversized tool results

@@ -41,7 +41,7 @@ pub struct CompactionConfig {
     pub summarization_overhead_tokens: u32,
     /// Maximum input chars per summarization chunk.
     pub max_chunk_chars: usize,
-    /// Maximum retry attempts for summarization.
+    /// Maximum retries for summarization, on top of the one attempt that always runs.
     pub max_retries: u32,
     /// Trigger compaction when estimated tokens exceed this fraction of context_window_tokens.
     pub token_threshold_ratio: f64,
@@ -816,22 +816,25 @@ async fn summarize_messages(
         ..Default::default()
     };
 
-    // Retry logic for transient failures
+    // Retry logic for transient failures.
+    // `max_retries` counts *retries*, so the inclusive range always makes one attempt — `max_retries = 0` means "try once, do not retry", never "do not call the LLM at all", which would drop straight to the fallback placeholder and discard the history it was meant to summarize.
     let mut last_error = String::new();
-    for attempt in 0..config.max_retries {
+    for attempt in 0..=config.max_retries {
         match driver.complete(request.clone()).await {
             Ok(response) => {
                 let summary = response.text();
                 if summary.is_empty() {
                     last_error = "LLM returned empty summary".to_string();
-                    warn!(attempt, "Empty summary from LLM, retrying");
+                    if attempt < config.max_retries {
+                        warn!(attempt, "Empty summary from LLM, retrying");
+                    }
                     continue;
                 }
                 return Ok(summary);
             }
             Err(e) => {
                 last_error = format!("LLM summarization failed: {e}");
-                if attempt + 1 < config.max_retries {
+                if attempt < config.max_retries {
                     warn!(attempt, error = %e, "Summarization attempt failed, retrying");
                 }
             }
@@ -2141,6 +2144,78 @@ mod tests {
         );
         assert_eq!(result.compacted_count, 25);
         assert_eq!(result.kept_messages.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_zero_max_retries_still_attempts_one_summarization() {
+        use crate::llm_driver::{CompletionResponse, LlmError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct CountingDriver {
+            calls: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl LlmDriver for CountingDriver {
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "the summary".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: librefang_types::message::StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage {
+                        input_tokens: 50,
+                        output_tokens: 20,
+                        ..Default::default()
+                    },
+                    actual_provider: None,
+                    actual_model: None,
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let messages: Vec<Message> = (0..30)
+            .map(|i| Message::user(format!("Message {i}")))
+            .collect();
+        let config = CompactionConfig {
+            threshold: 10,
+            keep_recent: 5,
+            // "no retries" must still mean one attempt, not zero attempts.
+            max_retries: 0,
+            ..CompactionConfig::default()
+        };
+
+        let result = compact_messages(
+            Arc::new(CountingDriver {
+                calls: calls.clone(),
+            }),
+            "test-model",
+            &messages,
+            &config,
+            librefang_types::model_catalog::ReasoningEchoPolicy::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "max_retries = 0 must still issue exactly one summarization call"
+        );
+        assert!(
+            !result.used_fallback,
+            "a reachable LLM must not be bypassed into the fallback placeholder"
+        );
+        assert_eq!(result.summary, "the summary");
+        assert_eq!(result.compacted_count, 25);
     }
 
     #[tokio::test]

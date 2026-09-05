@@ -1822,6 +1822,45 @@ fn compute_retry_backoff(
     }
 }
 
+/// Expand every `{{name}}` placeholder in `template` in one left-to-right pass, resolving each name through `lookup`.
+///
+/// The single pass is the point. Substituting with a `String::replace` per map entry rescans text that an earlier substitution inserted, so when one variable's value contained another variable's `{{…}}` token the token was expanded or left literal depending on the map's iteration order — and `std::collections::HashMap` varies that order between processes, which is exactly the nondeterminism the #3298 prompt-ordering rule exists to prevent.
+/// Resolving each placeholder found in the template itself, once, removes the order sensitivity rather than merely making it stable.
+///
+/// A name `lookup` does not know is emitted verbatim, including its braces, which is how an unresolved placeholder behaved before.
+/// A run of more than two opening braces belongs to the placeholder at its tail, so `{{{a}}}` renders as `{`, the value, `}` — the shape repeated `String::replace` produced.
+fn expand_placeholders_once<'v>(
+    template: &str,
+    lookup: impl Fn(&str) -> Option<&'v str>,
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        let run_end = rest[open..]
+            .find(|c| c != '{')
+            .map(|i| open + i)
+            .unwrap_or(rest.len());
+        let after = &rest[run_end..];
+        let Some(close) = after.find("}}") else {
+            // Unterminated placeholder — the remainder is literal text.
+            out.push_str(rest);
+            return out;
+        };
+        let name = &after[..close];
+        match lookup(name) {
+            // Everything before the two braces that open this placeholder, then the value.
+            Some(value) => {
+                out.push_str(&rest[..run_end - 2]);
+                out.push_str(value);
+            }
+            None => out.push_str(&rest[..run_end + close + 2]),
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl WorkflowEngine {
     /// Create a new workflow engine (no persistence).
     pub fn new() -> Self {
@@ -2950,11 +2989,13 @@ impl WorkflowEngine {
 
     /// Replace `{{var_name}}` references in a template with stored variable values.
     fn expand_variables(template: &str, input: &str, vars: &HashMap<String, String>) -> String {
-        let mut result = template.replace("{{input}}", input);
-        for (key, value) in vars {
-            result = result.replace(&format!("{{{{{key}}}}}"), value);
-        }
-        result
+        expand_placeholders_once(template, |name| {
+            if name == "input" {
+                Some(input)
+            } else {
+                vars.get(name).map(String::as_str)
+            }
+        })
     }
 
     /// Populate per-key `{{var}}` substitution variables from the workflow's
@@ -7089,10 +7130,11 @@ impl WorkflowTemplateRegistry {
             .steps
             .iter()
             .map(|ts| {
-                let mut prompt = ts.prompt_template.clone();
-                for (k, v) in &resolved {
-                    prompt = prompt.replace(&format!("{{{{{}}}}}", k), v);
-                }
+                // Same single-pass expansion the run path uses (`expand_placeholders_once`).
+                // A `String::replace` per map entry rescanned text an earlier entry had inserted, so a parameter whose *value* carried another parameter's `{{…}}` token expanded or stayed literal depending on `HashMap` iteration order — and the prompt this produces is persisted onto the instantiated workflow, so the same template and the same parameters could be stored as two different prompts.
+                let prompt = expand_placeholders_once(&ts.prompt_template, |name| {
+                    resolved.get(name).map(String::as_str)
+                });
                 WorkflowStep {
                     name: ts.name.clone(),
                     agent: match &ts.agent {
@@ -8791,6 +8833,43 @@ prompt_template = "go"
         assert_eq!(result, "Hello Alice, please do code review on main.rs");
     }
 
+    /// A variable's *value* is data, not a template.
+    ///
+    /// Expansion used to run one `String::replace` per map entry against the growing result, so a value carrying another variable's `{{…}}` token was rescanned and substituted — or left alone — depending on where `std::collections::HashMap` happened to order the two keys, and that order varies between processes and between a run and its resume.
+    /// The same workflow with the same inputs could therefore send an agent two different prompts.
+    ///
+    /// The mutually-referential pair is what makes this assertion order-proof rather than merely order-lucky: under the old algorithm `[a, b]` yields `{{a}} {{a}}` and `[b, a]` yields `{{b}} {{b}}`, so no iteration order produces the expected output.
+    #[test]
+    fn expand_variables_does_not_rescan_substituted_values() {
+        let mut mutual = HashMap::new();
+        mutual.insert("a".to_string(), "{{b}}".to_string());
+        mutual.insert("b".to_string(), "{{a}}".to_string());
+        assert_eq!(
+            WorkflowEngine::expand_variables("{{a}} {{b}}", "", &mutual),
+            "{{b}} {{a}}",
+            "each placeholder in the template resolves exactly once, from the map"
+        );
+
+        // The shape a real workflow hits: an earlier step's output, or a top-level key of the
+        // caller's run input, happens to contain something that looks like a placeholder.
+        let mut chained = HashMap::new();
+        chained.insert("a".to_string(), "Use {{b}} carefully".to_string());
+        chained.insert("b".to_string(), "XYZ".to_string());
+        assert_eq!(
+            WorkflowEngine::expand_variables("{{a}}", "ignored", &chained),
+            "Use {{b}} carefully",
+            "a placeholder that arrived inside a value is content, not a further substitution"
+        );
+
+        // Unresolved names keep their braces, and `{{input}}` still wins over a same-named var.
+        let mut shadowing = HashMap::new();
+        shadowing.insert("input".to_string(), "from-vars".to_string());
+        assert_eq!(
+            WorkflowEngine::expand_variables("{{input}} {{missing}}", "from-arg", &shadowing),
+            "from-arg {{missing}}"
+        );
+    }
+
     /// `seed_input_vars_from_json` pulls each top-level key off an
     /// object-shaped input JSON and inserts it into the substitution map
     /// in the form `expand_variables` expects. Covers all value kinds
@@ -9996,6 +10075,50 @@ id = "{id}"
 
         assert!(reg.get("r1").await.is_none());
         assert!(reg.remove("r1").await.is_none());
+    }
+
+    /// Instantiation bakes its result into the persisted workflow, so an order-dependent expansion there is not a transient wobble — the same template and the same parameters could be stored as two different prompts, each of which then goes on to drive an agent.
+    ///
+    /// The mutually-referential pair pins this independently of iteration order: the old per-entry `String::replace` loop yields `{{lang}} {{lang}}` for one order and `{{topic}} {{topic}}` for the other, and neither is the expected output.
+    #[test]
+    fn instantiate_does_not_rescan_substituted_parameter_values() {
+        let reg = WorkflowTemplateRegistry::new();
+        let mut template = test_template("nested-params");
+        template.parameters = ["topic", "lang"]
+            .into_iter()
+            .map(|name| TemplateParameter {
+                name: name.to_string(),
+                description: None,
+                param_type: ParameterType::String,
+                default: None,
+                required: true,
+            })
+            .collect();
+        template.steps = vec![WorkflowTemplateStep {
+            name: "step1".into(),
+            prompt_template: "{{topic}} {{lang}}".into(),
+            agent: None,
+            depends_on: vec![],
+        }];
+
+        let mut params = HashMap::new();
+        params.insert("topic".to_string(), serde_json::json!("{{lang}}"));
+        params.insert("lang".to_string(), serde_json::json!("{{topic}}"));
+
+        let workflow = reg.instantiate(&template, &params).expect("instantiates");
+        assert_eq!(
+            workflow.steps[0].prompt_template, "{{lang}} {{topic}}",
+            "each placeholder in the step template resolves exactly once, from the parameters"
+        );
+
+        // The plausible version of the same shape: one parameter's value mentions another.
+        let mut realistic = HashMap::new();
+        realistic.insert("topic".to_string(), serde_json::json!("{{lang}}"));
+        realistic.insert("lang".to_string(), serde_json::json!("French"));
+        let workflow = reg
+            .instantiate(&template, &realistic)
+            .expect("instantiates");
+        assert_eq!(workflow.steps[0].prompt_template, "{{lang}} French");
     }
 
     /// Regression test for #1764: calling `load_templates_from_dir` from inside

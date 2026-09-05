@@ -484,13 +484,24 @@ impl CronScheduler {
         // the job is being re-enabled (mirrors the prior in-place
         // semantics so an existing job that was paused with a stale
         // next_run gets a fresh tick on activation).
-        if schedule_updated || matches!(enabled_updated, Some(true)) {
+        let next_run_recomputed = schedule_updated || matches!(enabled_updated, Some(true));
+        if next_run_recomputed {
             candidate.next_run = Some(compute_next_run(&candidate.schedule));
         }
 
         match self.jobs.get_mut(&id) {
             Some(mut entry) => {
                 let meta = entry.value_mut();
+                // The candidate is a snapshot taken before validation, and `CronJob` carries three fields that the tick loop and the fire tasks write without going through this method: `last_run` and `next_run` (`due_jobs`, `record_success`, `record_failure`) and `enabled` (auto-disable after repeated failures).
+                // Swapping the whole snapshot in would roll those back to their pre-validation values, re-firing a job whose next_run had already been advanced, discarding a failure backoff, or resurrecting a job the scheduler just auto-disabled.
+                // Carry the live values across unless this update deliberately set them.
+                candidate.last_run = meta.job.last_run;
+                if !next_run_recomputed {
+                    candidate.next_run = meta.job.next_run;
+                }
+                if enabled_updated.is_none() {
+                    candidate.enabled = meta.job.enabled;
+                }
                 if let Some(enabled) = enabled_updated {
                     // An explicit toggle from the user clears the
                     // auto_disabled flag regardless of direction.
@@ -2889,6 +2900,66 @@ mod tests {
             after.delivery
         );
         assert!(after.delivery_targets.is_empty());
+    }
+
+    /// `update_job` clones the job, releases the shard guard to validate, then swaps the candidate back in.
+    /// `CronJob` also carries runtime state that the tick loop and the fire tasks write without going through `update_job` — `due_jobs` pre-advances `next_run`, `record_success` / `record_failure` stamp `last_run` — so the wholesale swap used to roll those back to their pre-validation values, re-firing a job whose `next_run` had already been advanced and reporting a job as never having run.
+    /// The scheduler only ever moves `last_run` forwards, so an observation of it moving backwards is the signature of that clobber.
+    #[test]
+    fn update_job_does_not_roll_back_concurrently_written_last_run() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let (sched, _tmp) = make_scheduler(100);
+        let sched = Arc::new(sched);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+        sched.record_success(id);
+
+        let done = Arc::new(AtomicBool::new(false));
+
+        let writer = {
+            let sched = Arc::clone(&sched);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                for _ in 0..150 {
+                    sched.record_success(id);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                done.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let updater = {
+            let sched = Arc::clone(&sched);
+            let done = Arc::clone(&done);
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    sched
+                        .update_job(id, &serde_json::json!({ "name": "renamed" }))
+                        .expect("a name-only patch must be accepted");
+                }
+            })
+        };
+
+        let mut high_water = sched.get_job(id).unwrap().last_run.unwrap();
+        while !done.load(Ordering::Relaxed) {
+            let observed = sched
+                .get_job(id)
+                .unwrap()
+                .last_run
+                .expect("last_run must not be erased once a fire has stamped it");
+            assert!(
+                observed >= high_water,
+                "last_run moved backwards ({observed} < {high_water}): a concurrent \
+                 update_job swapped a stale CronJob snapshot over live runtime state"
+            );
+            high_water = observed;
+            std::thread::yield_now();
+        }
+
+        writer.join().unwrap();
+        updater.join().unwrap();
     }
 
     /// candidate-validate-swap (#4739 review followup): non-SSRF shape
