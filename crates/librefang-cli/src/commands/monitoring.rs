@@ -725,6 +725,7 @@ pub(crate) fn cmd_webhooks_create(agent: &str, url: &str) {
             "webhook-create-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
+        std::process::exit(1);
     }
 }
 
@@ -737,21 +738,24 @@ pub(crate) fn cmd_webhooks_delete(id: &str) {
             "webhook-delete-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
-    } else {
-        ui::success(&i18n::t_args("webhook-deleted", &[("id", id)]));
+        std::process::exit(1);
     }
+    ui::success(&i18n::t_args("webhook-deleted", &[("id", id)]));
 }
 
 pub(crate) fn cmd_webhooks_test(id: &str) {
     let base = require_daemon("webhooks test");
     let client = daemon_client();
     let body = daemon_json(client.post(format!("{base}/api/webhooks/{id}/test")).send());
-    if body["success"].as_bool().unwrap_or(false) {
+    // Delivery is reported in `status`, not in a `success` flag: `"sent"` with HTTP 200 once the payload reached the endpoint, `"error"` with 502 when it did not, and a plain `{"error": ...}` for the 400/404 arms (`librefang-api/src/routes/webhooks.rs::test_webhook`).
+    // The route emits no `success` key at all, so gating on one was a predicate that could never be true — harmless while the failure branch only printed, but it would turn every *successful* test into a non-zero exit once that branch started exiting.
+    if body["status"].as_str() == Some("sent") {
         ui::success(&i18n::t_args("webhook-test-ok", &[("id", id)]));
     } else {
         ui::error(&i18n::t_args(
             "webhook-test-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
+        std::process::exit(1);
     }
 }

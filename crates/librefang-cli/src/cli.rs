@@ -354,7 +354,7 @@ pub(crate) enum Commands {
     },
     /// Quick daemon health check.
     #[command(
-        long_about = "Perform a quick health check on the running daemon.\n\nReturns basic connectivity and status info. For comprehensive diagnostics,\nuse `librefang doctor` instead.\n\nExamples:\n  librefang health          # Pretty-printed output\n  librefang health --json   # JSON output for monitoring"
+        long_about = "Perform a quick health check on the running daemon.\n\nReturns basic connectivity and status info. For comprehensive diagnostics,\nuse `librefang doctor` instead.\n\nExits 1 when the daemon reports a degraded subsystem. `/api/health` is a\nliveness probe, so it answers HTTP 200 even then and the exit code is what\na monitor should key on.\n\nExamples:\n  librefang health          # Pretty-printed output\n  librefang health --json   # JSON output for monitoring"
     )]
     Health {
         /// Output as JSON for scripting.

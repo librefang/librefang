@@ -1232,7 +1232,7 @@ Beyond the agent / hand / skill / workflow / channel / config groups documented 
 | `librefang start` | Start the daemon. | `--foreground` (no fork), `--log-file <path>` |
 | `librefang stop` | Stop the running daemon. | — |
 | `librefang restart` | Restart the daemon. | `--tail` (follow new logs), `--foreground` |
-| `librefang health` | Quick readiness probe. | `--json` |
+| `librefang health` | Liveness probe; exits 1 when the daemon reports a degraded subsystem. | `--json` |
 | `librefang status` | Show kernel + provider state. | `--watch <secs>` (refresh loop) |
 | `librefang logs` | Tail daemon logs. | `--lines <n>`, `--follow` / `-f` |
 | `librefang tui` | Launch the interactive terminal dashboard. | — |

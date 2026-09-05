@@ -413,6 +413,10 @@ pub(crate) fn daemon_json(
 /// the user but still returns the (often empty) body, so a caller that only
 /// checked `body["error"]` would treat a 4xx/5xx with no JSON error as
 /// success — the #6492 CLI `approvals approve` false-success bug.
+///
+/// The exit code stays the caller's responsibility: this helper calls `std::process::exit` only for a transport error, and returns normally on an HTTP error status.
+/// Every message it and its callers print goes to stdout (`ui::error` is a `println!`), so for a mutating command the process exit code is the only signal a script or agent driving the CLI can key on — a failure path that merely prints and returns reports a rejected write as success.
+/// Mutation call sites must therefore `std::process::exit(1)` after printing their message.
 pub(crate) fn daemon_json_checked(
     resp: Result<reqwest::blocking::Response, reqwest::Error>,
 ) -> (reqwest::StatusCode, serde_json::Value) {

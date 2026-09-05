@@ -221,6 +221,7 @@ audit-failed = 审计追踪完整性检查失败。
 
 # --- Health ---
 health-ok = 守护进程运行正常
+health-degraded = 守护进程可访问，但报告有子系统异常
 health-not-running = 守护进程未运行。
 
 # --- Channel setup ---

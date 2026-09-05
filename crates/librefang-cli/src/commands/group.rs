@@ -153,7 +153,7 @@ pub(crate) fn cmd_group_create(name: &str, description: Option<&str>, roles: &[S
             "group-create-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
-        return;
+        std::process::exit(1);
     }
     ui::success(&i18n::t_args("group-created", &[("name", name)]));
     print_group(&body);
@@ -172,7 +172,7 @@ pub(crate) fn cmd_group_delete(name: &str) {
             "group-delete-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
-        return;
+        std::process::exit(1);
     }
     ui::success(&i18n::t_args("group-deleted", &[("name", name)]));
 }
@@ -201,7 +201,7 @@ pub(crate) fn cmd_group_member(group: &str, user: &str, add: bool) {
             "group-member-failed",
             &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
-        return;
+        std::process::exit(1);
     }
     let key = if add {
         "group-member-added"

@@ -1222,7 +1222,7 @@ channel adapter 暴露的命令（`/agents`、`/new`、`/usage`、`/triggers`、
 | `librefang start` | 启动 daemon。 | `--foreground`(不 fork)、`--log-file <path>` |
 | `librefang stop` | 停止运行中的 daemon。 | — |
 | `librefang restart` | 重启 daemon。 | `--tail`(跟新日志)、`--foreground` |
-| `librefang health` | 快速就绪探针。 | `--json` |
+| `librefang health` | 存活探针；daemon 报告子系统异常时退出码为 1。 | `--json` |
 | `librefang status` | 显示 kernel 与 provider 状态。 | `--watch <secs>`(刷新循环) |
 | `librefang logs` | tail daemon 日志。 | `--lines <n>`、`--follow` / `-f` |
 | `librefang tui` | 启动交互终端 dashboard。 | — |
