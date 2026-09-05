@@ -296,6 +296,11 @@ pub struct AppState {
     /// takes effect on the next request. Always refreshed together with
     /// `api_key_lock` via `crate::server::refresh_master_credential`.
     pub master_key: Arc<crate::middleware::MasterKeyState>,
+    /// Whether dashboard username/password auth is configured — the same Arc the auth middleware reads on every request.
+    ///
+    /// Live rather than a boot snapshot because `dashboard_user` / `dashboard_pass` / `dashboard_pass_hash` are hot-reloadable (`HotAction::UpdateDashboardCredentials`, no restart flag).
+    /// Refreshed by [`crate::server::refresh_dashboard_auth_flag`] at boot, on `POST /api/config/reload`, on a config-file change, and on a dashboard credential change — the same four sites as `api_key_lock` / `master_key`.
+    pub dashboard_auth_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Shared per-user API key snapshot — the same Arc the auth middleware reads from, so replacing the inner Vec makes the change visible to the very next request without a daemon restart.
     ///
     /// The invariant every writer owes this field: **its contents equal the `[[users]]` entries carrying an `api_key_hash`, plus every paired device** — `crate::server::user_api_key_table` spells that union, and `crate::server::refresh_auth_tables` republishes it after a reload that advanced the live config.

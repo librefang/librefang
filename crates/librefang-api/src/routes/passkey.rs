@@ -146,6 +146,32 @@ fn parse_stored_passkeys(rows: &[librefang_memory::passkey_store::PasskeyRecord]
         .collect()
 }
 
+/// Refuse a registration whose caller is not the principal the login ceremony authenticates as.
+///
+/// `authentication_options` only ever offers `engine.principal()`'s credentials, so a row filed under any other name is stored successfully and then never offered — the endpoint would report success for a passkey that can never sign in.
+/// The Owner gate in the middleware does not imply the caller *is* that principal: the master api key and a trusted loopback caller are both attributed `root`, and an Owner-role `[[users]]` entry carries its own name.
+///
+/// The comparison is deliberately exact, with no trimming of the caller name.
+/// `list_credentials` and `revoke_credential` key the store by the caller's name verbatim and `PasskeyStore::list_for_user` is an exact SQL match, so admitting a padded `[[users]] name = " admin "` against a principal of `admin` would file the row under `admin` and then hand that caller an empty list and a `404` on revoke — the orphaned-row symptom this guard exists to remove, reintroduced one indirection further in.
+/// The principal itself is trimmed once, where the engine is built in `server::build_router`, so the only names that reach here are the ones a password session can also present.
+fn principal_mismatch_response(
+    engine: &crate::passkey::PasskeyEngine,
+    caller: &str,
+) -> Option<Response> {
+    if caller == engine.principal() {
+        return None;
+    }
+    Some(json_err(
+        StatusCode::CONFLICT,
+        "principal_mismatch",
+        format!(
+            "Passkeys authenticate as the configured dashboard user, which is not this \
+             session's identity ('{caller}'). Sign in with the dashboard username and \
+             password before adding a passkey."
+        ),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Registration (auth-gated; Owner)
 // ---------------------------------------------------------------------------
@@ -160,6 +186,7 @@ fn parse_stored_passkeys(rows: &[librefang_memory::passkey_store::PasskeyRecord]
     responses(
         (status = 200, description = "Creation options + ceremony id", body = crate::types::JsonObject),
         (status = 401, description = "Not authenticated"),
+        (status = 409, description = "Caller is not the passkey principal"),
         (status = 503, description = "Passkey login not enabled")
     )
 )]
@@ -179,12 +206,18 @@ pub(crate) async fn registration_options(
         );
     };
 
-    let existing = match state.passkey_store.list_for_user(&user.name) {
+    if let Some(refused) = principal_mismatch_response(&engine, &user.name) {
+        return refused;
+    }
+    // Key the ceremony by the principal, not the caller name they just matched — the store lookup in `authentication_options` is an exact `user_name` match, so this is the one identity the login ceremony can find.
+    let principal = engine.principal();
+
+    let existing = match state.passkey_store.list_for_user(principal) {
         Ok(rows) => parse_stored_passkeys(&rows),
         Err(e) => return internal_error_response("store_error", "list credentials", &e),
     };
 
-    match engine.start_registration(&user.name, &existing) {
+    match engine.start_registration(principal, &existing) {
         Ok((ceremony_id, options)) => Json(serde_json::json!({
             "ceremony_id": ceremony_id,
             "options": options,
@@ -204,6 +237,7 @@ pub(crate) async fn registration_options(
         (status = 200, description = "Credential stored", body = crate::types::JsonObject),
         (status = 400, description = "Verification failed"),
         (status = 401, description = "Not authenticated"),
+        (status = 409, description = "Caller is not the passkey principal"),
         (status = 503, description = "Passkey login not enabled")
     )
 )]
@@ -223,8 +257,12 @@ pub(crate) async fn registration_verify(
         );
     };
 
-    let passkey = match engine.finish_registration(&body.ceremony_id, &user.name, &body.credential)
-    {
+    if let Some(refused) = principal_mismatch_response(&engine, &user.name) {
+        return refused;
+    }
+    let principal = engine.principal();
+
+    let passkey = match engine.finish_registration(&body.ceremony_id, principal, &body.credential) {
         Ok(pk) => pk,
         Err(e) => return engine_error_response(e),
     };
@@ -241,7 +279,7 @@ pub(crate) async fn registration_verify(
 
     let record = librefang_memory::passkey_store::new_record(
         credential_id.clone(),
-        user.name.clone(),
+        principal.to_string(),
         cred_json,
         label,
     );
@@ -249,7 +287,7 @@ pub(crate) async fn registration_verify(
         return internal_error_response("store_error", "insert credential", &e);
     }
 
-    tracing::info!(user = %user.name, %credential_id, "passkey registered");
+    tracing::info!(user = %principal, %credential_id, "passkey registered");
     Json(serde_json::json!({ "ok": true, "credential_id": credential_id })).into_response()
 }
 

@@ -3,16 +3,21 @@
 //! These endpoints expose CRUD over `[[users]]` entries in `config.toml`,
 //! plus a bulk-import endpoint used by the dashboard CSV-import wizard.
 //!
-//! Auth: NOT in the public allowlist — every request goes through the
-//! authenticated middleware path. Mutating calls (`POST` / `PUT` /
-//! `DELETE` under `/api/users*`) are additionally gated to `Owner` via
-//! `middleware::is_owner_only_write` because they map to
-//! `Action::ManageUsers` in the kernel — without that gate an Admin
-//! per-user API key could `POST /api/users` to create a `role: "owner"`
-//! user with a chosen `api_key_hash` and self-promote. `GET` stays
-//! Admin-or-above so the permission simulator's user list keeps working.
-//! Static api_key / dashboard session callers bypass the per-user role
-//! check by design (they are owner-equivalent shared secrets).
+//! Auth: NOT in the public allowlist — every request goes through the authenticated middleware path.
+//! Mutating calls (`POST` / `PUT` / `DELETE` under `/api/users*`) are additionally gated to `Owner` via `middleware::is_owner_only_write` because they map to `Action::ManageUsers` in the kernel — without that gate an Admin per-user API key could `POST /api/users` to create a `role: "owner"` user with a chosen `api_key_hash` and self-promote.
+//! Static api_key / dashboard session callers bypass the per-user role check by design (they are owner-equivalent shared secrets).
+//!
+//! `GET` is a different story per endpoint, and the enforced posture is not uniform:
+//!
+//! * `GET /api/users` and `GET /api/users/{name}` stay on the middleware's generic GET rule, which admits every authenticated role including `Viewer` — deliberately, so the permission simulator's user list keeps working for the role that opens it.
+//!   The payload is redacted: [`UserView`] collapses `api_key_hash` to a boolean and `budget` / `memory_access` / `tool_policy` to `has_*` flags.
+//! * `GET /api/users/{name}/provider-keys` is carved out to `Owner` in `middleware::min_role_for_privileged_get`, so an Admin cannot enumerate another user's provider credential layout.
+//! * `GET /api/users/{name}/policy` is on the generic GET rule too, and it is **not** redacted: [`get_user_policy`] returns the whole [`UserPolicyView`] — `tool_policy`, `tool_categories`, `memory_access`, `channel_tool_rules` — to any authenticated role, `Viewer` included.
+//!
+//! That last one is a known inconsistency, recorded here rather than papered over.
+//! `routes::authz::require_admin` gates `GET /api/authz/effective/{user_id}` at `Admin` with the stated rationale that "the snapshot exposes per-user policy and channel bindings", and that snapshot is computed from the same fields this endpoint hands out raw — so the codebase currently classifies one copy of the data as Admin-only and serves the other to `Viewer`.
+//! [`UserView::has_policy`] used to describe the contents as staying "behind" that endpoint, which read as though it were the gated place; its wording is corrected too.
+//! Raising the floor here is a behaviour change for any deployment whose dashboard opens the policy matrix under a non-Admin key, so it is a maintainer decision rather than a silent tightening — the honest description is the minimum, and if the floor is raised it goes in `min_role_for_privileged_get` next to the `provider-keys` entry, not by reordering routes.
 //!
 //! Persistence model: we read the live `KernelConfig`, mutate the `users`
 //! vector, then rewrite the `[[users]]` array-of-tables in `config.toml`
@@ -81,10 +86,8 @@ pub struct UserView {
     pub role: String,
     pub channel_bindings: HashMap<String, String>,
     pub has_api_key: bool,
-    /// True when the user has any per-user tool policy configured —
-    /// either an allow/deny list, tool-category overrides, or
-    /// per-channel rules. Summary only; the contents stay behind
-    /// `/api/users/{name}/policy`.
+    /// True when the user has any per-user tool policy configured — either an allow/deny list, tool-category overrides, or per-channel rules.
+    /// Summary only; the contents are served by `GET /api/users/{name}/policy`, which is on the same generic GET rule as this list rather than behind a higher role floor — see the module docs.
     pub has_policy: bool,
     /// True when the user has a custom memory namespace ACL.
     pub has_memory_access: bool,

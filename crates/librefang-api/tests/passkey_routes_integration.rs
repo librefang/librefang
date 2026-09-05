@@ -217,3 +217,60 @@ async fn list_credentials_authenticated_is_empty() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["credentials"].as_array().map(|a| a.len()), Some(0));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registration_is_refused_when_the_caller_is_not_the_passkey_principal() {
+    // The master api key is attributed `root`, while the login ceremony only ever offers the credentials of the dashboard principal (`admin` here).
+    // Registering under `root` used to answer 200 and store a row `authentication-options` could never look up, so the enrollment reported success for a passkey that could not sign in.
+    // The mismatch must be refused instead.
+    let h = boot_enabled().await;
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/passkey/registration-options")
+        .header("Authorization", "Bearer test-secret-key")
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+    ));
+    let resp = h.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "a caller that is not the dashboard principal must not enroll a passkey"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"], "principal_mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_is_disabled_without_a_dashboard_principal() {
+    // `passkey_enabled = true` with no dashboard user leaves nothing for a successful assertion to mint a session as, so the engine must not be built.
+    // Every route answers 503 rather than accepting registrations for a login that can never complete.
+    let mut cfg = base_config();
+    cfg.api_key = "test-secret-key".to_string();
+    cfg.passkey_enabled = true;
+    cfg.passkey_rp_id = "localhost".to_string();
+    cfg.passkey_rp_origin = "http://localhost".to_string();
+    assert!(
+        cfg.dashboard_user.is_empty(),
+        "the fixture must leave dashboard_user unset for this case"
+    );
+    let h = boot(cfg).await;
+    let status = send(
+        &h,
+        Method::POST,
+        "/api/auth/passkey/authentication-options",
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no dashboard principal → engine unbuilt → 503, got {status}"
+    );
+}

@@ -66,7 +66,7 @@ async fn boot() -> Harness {
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         // `true`, not the test-harness-typical `false`: production's own `derive_require_auth_for_reads` (server.rs) auto-enables this whenever any authentication is configured, which this harness's `[[users]]` always does.
         // Every dashboard-read-public route (including bare `GET /api/agents`) must go through the real bearer check here, or `AuthenticatedApiUser` is never populated for those routes and the ownership assertions below would pass vacuously — see `non_admin_cannot_override_owner_filter_on_list_agents`.
