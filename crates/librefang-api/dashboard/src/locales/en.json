@@ -475,6 +475,7 @@
       "top_p": "Top-p",
       "frequency_penalty": "Frequency Penalty",
       "presence_penalty": "Presence Penalty",
+      "sampling_provider_hint": "OpenAI-compatible providers and Ollama only",
       "context_window": "Context Window",
       "context_window_placeholder": "tokens the model can read",
       "max_output_tokens": "Output Cap",

@@ -101,6 +101,50 @@ describe("agentManifest serializer", () => {
     expect(toml).not.toContain("max_tokens =");
   });
 
+  it("clamps sampling fields to their provider ranges instead of emitting out-of-range values", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.top_p = "5";
+    form.model.frequency_penalty = "9";
+    form.model.presence_penalty = "-9";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).toContain("top_p = 1");
+    expect(toml).toContain("frequency_penalty = 2");
+    expect(toml).toContain("presence_penalty = -2");
+  });
+
+  it("omits sampling fields when empty or garbage", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.top_p = "";
+    form.model.frequency_penalty = "not a number";
+    form.model.presence_penalty = "";
+
+    const toml = serializeManifestForm(form);
+    expect(toml).not.toContain("top_p");
+    expect(toml).not.toContain("frequency_penalty");
+    expect(toml).not.toContain("presence_penalty");
+  });
+
+  it("round-trips a negative penalty through parse and serialize", () => {
+    const form = emptyManifestForm();
+    form.name = "agent";
+    form.model.provider = "openai";
+    form.model.model = "gpt-4o";
+    form.model.presence_penalty = "-0.5";
+    const toml = serializeManifestForm(form);
+    const parsed = parseManifestToml(toml);
+    if (!parsed.ok) throw new Error(parsed.message);
+    expect(parsed.form.model.presence_penalty).toBe("-0.5");
+    const round = serializeManifestForm(parsed.form);
+    expect(round).toContain("presence_penalty = -0.5");
+  });
+
   it("emits arrays only when populated", () => {
     const form = emptyManifestForm();
     form.name = "agent";

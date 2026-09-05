@@ -475,6 +475,7 @@
       "top_p": "Top-p",
       "frequency_penalty": "频率惩罚",
       "presence_penalty": "存在惩罚",
+      "sampling_provider_hint": "仅适用于兼容 OpenAI 的提供商和 Ollama",
       "context_window": "上下文窗口",
       "context_window_placeholder": "模型可读取的 token 数",
       "max_output_tokens": "输出上限",

@@ -475,6 +475,7 @@
       "top_p": "Top-p",
       "frequency_penalty": "Kara za częstotliwość",
       "presence_penalty": "Kara za obecność",
+      "sampling_provider_hint": "Tylko dostawcy zgodni z OpenAI oraz Ollama",
       "context_window": "Okno kontekstu",
       "context_window_placeholder": "tokeny, które model może odczytać",
       "max_output_tokens": "Limit wyjścia",

@@ -15,6 +15,10 @@ struct ResolvedManifest {
 /// Error from manifest resolution — carries a user-facing message.
 struct ManifestError {
     message: String,
+    /// Machine-readable code, decided where the error is raised.
+    /// It is what `spawn_agent` maps to an HTTP status, so a new failure mode must set it — `None` falls back to `400 invalid_manifest`.
+    /// This exists because the status used to be recovered by matching substrings of `message`, which is already translated into nine locales: every such arm was true in English and false everywhere else, so the same failure answered 403 to one caller and 400 to another purely by `Accept-Language`.
+    code: Option<&'static str>,
 }
 
 /// Resolve a `SpawnRequest` into a parsed `AgentManifest`.
@@ -38,26 +42,35 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-template-invalid-name"),
+                    code: Some("invalid_template_name"),
                 });
             }
-            let tmpl_path = state
-                .kernel
-                .config_ref()
-                .home_dir
-                .join("workspaces")
-                .join("agents")
-                .join(&safe_name)
-                .join("agent.toml");
-            // Use tokio::fs to avoid blocking in an async context
-            match tokio::fs::read_to_string(&tmpl_path).await {
-                Ok(content) => {
+            // Same precedence as the template catalog (`read_agent_type`):
+            // `agent-types/` wins a collision because it is the source the
+            // write verbs act on, so the editor and the spawn path can never
+            // disagree about which document an operator is acting on.
+            let home_dir = state.kernel.config_ref().home_dir.clone();
+            match crate::routes::agent_templates::read_agent_type_in(&home_dir, &safe_name).await {
+                Ok(Some((_, content))) => {
                     used_template = Some(safe_name.clone());
                     content
                 }
-                Err(_) => {
+                Ok(None) => {
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
+                        code: Some("template_not_found"),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(name = %safe_name, error = %e, "failed to read template manifest");
+                    let t = ErrorTranslator::new(lang);
+                    // Not "not found": the template may well exist and be unreadable
+                    // (permissions, I/O), and reporting that as a 404 sends the operator
+                    // looking for a missing file instead of at the error in the log.
+                    return Err(ManifestError {
+                        message: t.t("api-error-template-read-failed"),
+                        code: Some("template_read_failed"),
                     });
                 }
             }
@@ -65,6 +78,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-template-required"),
+                code: Some("template_required"),
             });
         }
     } else {
@@ -76,6 +90,7 @@ async fn resolve_manifest(
         let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
             message: t.t("api-error-manifest-too-large"),
+            code: Some("manifest_too_large"),
         });
     }
 
@@ -88,6 +103,7 @@ async fn resolve_manifest(
                     let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
                         message: t.t("api-error-manifest-signature-mismatch"),
+                        code: Some("signature_invalid"),
                     });
                 }
             }
@@ -102,6 +118,7 @@ async fn resolve_manifest(
                 let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
                     message: t.t("api-error-manifest-signature-failed"),
+                    code: Some("signature_invalid"),
                 });
             }
         }
@@ -115,6 +132,7 @@ async fn resolve_manifest(
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-invalid-format"),
+                code: Some("invalid_manifest"),
             });
         }
     };
@@ -194,14 +212,20 @@ async fn spawn_agent_inner(
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
-            let (status, code) = if e.message.contains("too large") {
-                (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
-            } else if e.message.contains("not found") && e.message.contains("Template") {
-                (StatusCode::NOT_FOUND, "template_not_found")
-            } else if e.message.contains("signature verification failed") {
-                (StatusCode::FORBIDDEN, "signature_invalid")
-            } else {
-                (StatusCode::BAD_REQUEST, "invalid_manifest")
+            // Every status comes from the code the raise site set. This used to
+            // match substrings of `e.message`, which is already translated — so
+            // `contains("signature verification failed")` was true in English and
+            // false in the other eight locales, and a rejected signature came back
+            // as 400 "malformed request" to anyone not reading English.
+            let (status, code) = match e.code {
+                // The template exists as far as we know; we could not read it.
+                // That is a server-side fault, not a malformed request.
+                Some(c @ "template_read_failed") => (StatusCode::INTERNAL_SERVER_ERROR, c),
+                Some(c @ "manifest_too_large") => (StatusCode::PAYLOAD_TOO_LARGE, c),
+                Some(c @ "template_not_found") => (StatusCode::NOT_FOUND, c),
+                Some(c @ "signature_invalid") => (StatusCode::FORBIDDEN, c),
+                Some(c) => (StatusCode::BAD_REQUEST, c),
+                None => (StatusCode::BAD_REQUEST, "invalid_manifest"),
             };
             return json_error(status, code, e.message);
         }

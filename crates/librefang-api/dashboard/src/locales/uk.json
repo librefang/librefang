@@ -475,6 +475,7 @@
       "top_p": "Top-p",
       "frequency_penalty": "Штраф за частоту",
       "presence_penalty": "Штраф за присутність",
+      "sampling_provider_hint": "Лише провайдери, сумісні з OpenAI, та Ollama",
       "context_window": "Вікно контексту",
       "context_window_placeholder": "токени, які модель може прочитати",
       "max_output_tokens": "Ліміт виводу",

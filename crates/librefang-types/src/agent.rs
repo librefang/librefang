@@ -908,6 +908,10 @@ pub struct ModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// Top-p / nucleus sampling (0.0–1.0). `None` = inherit.
+    ///
+    /// Reaches the wire through `extra_body`, so every OpenAI-compatible provider (including groq, which routes through `OpenAIDriver`) plus Ollama honour it.
+    /// Typed-body drivers (Anthropic, Gemini) never read `extra_body` and silently drop the value; the dashboard field carries a provider hint so the operator is not left guessing.
+    /// The same applies to [`Self::frequency_penalty`] and [`Self::presence_penalty`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     /// Frequency penalty (-2.0–2.0). `None` = inherit.

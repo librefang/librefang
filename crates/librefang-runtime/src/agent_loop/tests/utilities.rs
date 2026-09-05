@@ -2306,3 +2306,51 @@ fn redact_images_for_text_only_is_noop_without_images() {
         "messages without image blocks must pass through unchanged"
     );
 }
+
+// --- Tests for build_extra_body (#8112 typed sampling fields) ---
+#[test]
+fn test_build_extra_body_merges_typed_sampling_fields() {
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        frequency_penalty: Some(0.5),
+        presence_penalty: Some(-0.5),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("typed sampling fields must produce a body");
+    // `f32` widens to `f64` inside `serde_json::Value`, so compare numerically
+    // with a tolerance instead of against the `f64` literal.
+    let v = |k: &str| body.get(k).and_then(serde_json::Value::as_f64).unwrap();
+    assert!((v("top_p") - 0.9).abs() < 1e-6);
+    assert!((v("frequency_penalty") - 0.5).abs() < 1e-6);
+    assert!((v("presence_penalty") - (-0.5)).abs() < 1e-6);
+}
+
+#[test]
+fn test_build_extra_body_typed_field_overrides_extra_params_key() {
+    // The agent manifest's typed field is the operator's intent; a stale
+    // `extra_params` key of the same name (e.g. left by an older form or a
+    // model-catalog override) must not win.
+    let model = ModelConfig {
+        top_p: Some(0.9),
+        extra_params: BTreeMap::from([("top_p".to_string(), serde_json::json!(0.1))]),
+        ..Default::default()
+    };
+    let body = build_extra_body(&model).expect("non-empty body");
+    let v = body
+        .get("top_p")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap();
+    assert!(
+        (v - 0.9).abs() < 1e-6,
+        "typed field must override the legacy extra_params key"
+    );
+}
+
+#[test]
+fn test_build_extra_body_none_sends_nothing() {
+    let model = ModelConfig::default();
+    assert!(
+        build_extra_body(&model).is_none(),
+        "a ModelConfig without typed sampling fields and without extra_params must produce no extra_body"
+    );
+}

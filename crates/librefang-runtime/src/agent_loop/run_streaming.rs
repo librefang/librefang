@@ -822,11 +822,7 @@ async fn run_agent_loop_streaming_inner(
             prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
-            extra_body: if manifest.model.extra_params.is_empty() {
-                None
-            } else {
-                Some(manifest.model.extra_params.clone())
-            },
+            extra_body: build_extra_body(&manifest.model),
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),

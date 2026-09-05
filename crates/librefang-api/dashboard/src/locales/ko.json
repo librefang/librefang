@@ -475,6 +475,7 @@
       "top_p": "Top-p",
       "frequency_penalty": "빈도 페널티",
       "presence_penalty": "존재 페널티",
+      "sampling_provider_hint": "OpenAI 호환 제공자와 Ollama에서만 적용됩니다",
       "context_window": "컨텍스트 창",
       "context_window_placeholder": "모델이 읽을 수 있는 토큰 수",
       "max_output_tokens": "출력 상한",

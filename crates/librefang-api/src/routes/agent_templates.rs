@@ -165,7 +165,7 @@ fn promote_error_messages(lang: &str) -> (String, String) {
 /// Only the first is a file this API owns.
 /// The second belongs to a running agent and is edited through `/api/agents/{id}`, so a write verb aimed at it is refused rather than silently creating a shadowing copy — and the row carries `editable: false` so a client can render it as managed elsewhere instead of offering a control that cannot work (#7731).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TemplateSource {
+pub(crate) enum TemplateSource {
     /// `~/.librefang/agent-types/{name}.toml` — created and edited through this API.
     AgentType,
     /// `~/.librefang/workspaces/agents/{name}/agent.toml` — a live agent's manifest.
@@ -185,25 +185,32 @@ impl TemplateSource {
     }
 }
 
+use librefang_types::agent_type_store::agent_type_path_in;
+use librefang_types::agent_type_store::librefang_home;
 use librefang_types::agent_type_store::{
-    agent_type_path, agent_types_dir, workspace_agent_manifest_path, workspace_agents_dir,
+    agent_type_path, agent_types_dir, workspace_agent_manifest_path,
+    workspace_agent_manifest_path_in, workspace_agents_dir,
 };
 
 /// Read one agent type by name from whichever source holds it.
 ///
 /// `agent-types/` wins a name collision because it is the source the write verbs act on: if `Edit` loaded a live agent's manifest and `Save` wrote the agent-type file, the operator would be editing one document and saving another.
 /// A collision can still arise after the fact — an agent spawned under a name an agent type already uses — so it is logged rather than passed over in silence.
-async fn read_agent_type(name: &str) -> std::io::Result<Option<(TemplateSource, String)>> {
-    let own = match tokio::fs::read_to_string(agent_type_path(name)).await {
+pub(crate) async fn read_agent_type_in(
+    home_dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<Option<(TemplateSource, String)>> {
+    let own = match tokio::fs::read_to_string(agent_type_path_in(home_dir, name)).await {
         Ok(content) => Some(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let workspace = match tokio::fs::read_to_string(workspace_agent_manifest_path(name)).await {
-        Ok(content) => Some(content),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
+    let workspace =
+        match tokio::fs::read_to_string(workspace_agent_manifest_path_in(home_dir, name)).await {
+            Ok(content) => Some(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
 
     match (own, workspace) {
         (Some(content), Some(_)) => {
@@ -216,6 +223,12 @@ async fn read_agent_type(name: &str) -> std::io::Result<Option<(TemplateSource, 
         (None, Some(content)) => Ok(Some((TemplateSource::WorkspaceAgent, content))),
         (None, None) => Ok(None),
     }
+}
+/// Same resolution as [`read_agent_type_in`] against the process-environment home.
+pub(crate) async fn read_agent_type(
+    name: &str,
+) -> std::io::Result<Option<(TemplateSource, String)>> {
+    read_agent_type_in(&librefang_home(), name).await
 }
 
 // ---------------------------------------------------------------------------

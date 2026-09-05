@@ -17,7 +17,7 @@ use std::path::PathBuf;
 /// Resolve the LibreFang home directory: `LIBREFANG_HOME` if set, otherwise `~/.librefang`.
 ///
 /// Read live on every call rather than cached, because the integration suites set the variable per test binary and a cached value would leak one suite's fixtures into another's assertions.
-fn librefang_home() -> PathBuf {
+pub fn librefang_home() -> PathBuf {
     if let Ok(home) = std::env::var("LIBREFANG_HOME") {
         return PathBuf::from(home);
     }
@@ -59,6 +59,17 @@ pub fn workspace_agents_dir() -> PathBuf {
 /// The `agent.toml` of a live agent, which the catalog lists but this store never writes.
 pub fn workspace_agent_manifest_path(name: &str) -> PathBuf {
     workspace_agents_dir().join(name).join("agent.toml")
+}
+
+/// The `agent.toml` of a live agent under an explicitly supplied home directory.
+///
+/// The kernel resolves a live agent's manifest against a `home_dir` it was handed rather than against the process environment, so the same explicit-home spelling exists here as for the agent-type store.
+pub fn workspace_agent_manifest_path_in(home_dir: &std::path::Path, name: &str) -> PathBuf {
+    home_dir
+        .join("workspaces")
+        .join("agents")
+        .join(name)
+        .join("agent.toml")
 }
 
 /// Validate an agent-type name before it is joined onto the store directory.
