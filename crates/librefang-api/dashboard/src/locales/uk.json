@@ -1025,8 +1025,9 @@
   "channels": {
     "add": "Додати",
     "add_channel": "Додати канал",
-    "all_configured": "Усі канали налаштовані",
     "all_configured_desc": "Усі доступні типи каналів уже налаштовані.",
+    "picker_instances_configured": "налаштовано: {{instances}}",
+    "picker_instances_configured_hint": "Кількість уже налаштованих екземплярів цього типу каналу",
     "category": "Категорія",
     "config": "Налаштувати",
     "config_template_summary": "Або вставте це в config.toml вручну",

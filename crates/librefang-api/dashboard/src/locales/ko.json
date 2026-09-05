@@ -1022,8 +1022,9 @@
   "channels": {
     "add": "추가",
     "add_channel": "채널 추가",
-    "all_configured": "모든 채널이 구성됨",
     "all_configured_desc": "사용 가능한 모든 채널 유형이 이미 구성되어 있습니다.",
+    "picker_instances_configured": "{{instances}}개 구성됨",
+    "picker_instances_configured_hint": "이 채널 유형의 구성된 인스턴스 수",
     "category": "범주",
     "config": "구성",
     "config_template_summary": "아니면 직접 config.toml에 붙여넣으세요.",

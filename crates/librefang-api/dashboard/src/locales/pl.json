@@ -1025,8 +1025,9 @@
   "channels": {
     "add": "Dodaj",
     "add_channel": "Dodaj kanał",
-    "all_configured": "Wszystkie kanały skonfigurowane",
     "all_configured_desc": "Wszystkie dostępne typy kanałów są już skonfigurowane.",
+    "picker_instances_configured": "skonfigurowane: {{instances}}",
+    "picker_instances_configured_hint": "Liczba już skonfigurowanych instancji tego typu kanału",
     "category": "Kategoria",
     "config": "Skonfiguruj",
     "config_template_summary": "Or paste this into config.toml by hand",

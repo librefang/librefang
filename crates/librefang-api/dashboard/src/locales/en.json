@@ -1023,8 +1023,9 @@
   "channels": {
     "add": "Add",
     "add_channel": "Add channel",
-    "all_configured": "All channels configured",
     "all_configured_desc": "All available channel types are already configured.",
+    "picker_instances_configured": "{{instances}} configured",
+    "picker_instances_configured_hint": "Instances of this channel type that are already configured",
     "category": "Category",
     "config": "Configure",
     "config_template_summary": "Or paste this into config.toml by hand",

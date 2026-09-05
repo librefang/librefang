@@ -228,6 +228,7 @@ describe("ChannelsPage", () => {
           name: "discord",
           display_name: "Discord",
           configured: false,
+          channel_type: undefined,
         }),
       ]),
     );
@@ -318,6 +319,7 @@ describe("ChannelsPage", () => {
           name: "discord",
           display_name: "Discord",
           configured: false,
+          channel_type: undefined,
         }),
       ]),
     );
@@ -335,6 +337,7 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          channel_type: undefined,
           fields: [
             {
               key: "TELEGRAM_BOT_TOKEN",
@@ -367,6 +370,7 @@ describe("ChannelsPage", () => {
           name: "wechat",
           display_name: "WeChat",
           configured: false,
+          channel_type: undefined,
           // describe failed at boot → no fields, but a reason rides along.
           fields: [],
           schema_error: reason,
@@ -410,6 +414,7 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          channel_type: undefined,
           sdk_version: "2026.3.2201",
           fields: [
             {
@@ -424,6 +429,7 @@ describe("ChannelsPage", () => {
           name: "wechat",
           display_name: "WeChat",
           configured: false,
+          channel_type: undefined,
           // An SDK too old to report a version is exactly the deployment this
           // line exists to expose, so it must read as "unknown" — an absent
           // line — rather than borrowing another adapter's number.
@@ -568,6 +574,7 @@ describe("ChannelsPage", () => {
           name: "ntfy",
           display_name: "ntfy",
           configured: false,
+          channel_type: undefined,
           fields: [
             {
               key: "NTFY_TOPIC",
@@ -596,6 +603,7 @@ describe("ChannelsPage", () => {
           name: "telegram",
           display_name: "Telegram",
           configured: false,
+          channel_type: undefined,
           fields: [
             {
               key: "TELEGRAM_BOT_TOKEN",
@@ -764,6 +772,61 @@ describe("ChannelsPage", () => {
     expect(save.mutate).not.toHaveBeenCalled();
   });
 
+  it("lists an already-configured type once in the Add picker and opens create mode for it (#8091)", () => {
+    useChannelsMock.mockReturnValue(
+      makeQuery<ChannelItem[]>([
+        makeChannel({ name: "slack" }),
+        makeChannel({
+          name: "telegram",
+          display_name: "Telegram",
+          configured: false,
+          // Discovery rows never carry `channel_type` on the wire (only
+          // configured rows do) — see the save-path test below.
+          channel_type: undefined,
+          fields: [
+            {
+              key: "TELEGRAM_BOT_TOKEN",
+              label: "Bot token",
+              type: "secret",
+              required: true,
+            },
+          ],
+        }),
+        // A second instance of a type that already has one: before the
+        // fix the picker filtered on `!configured`, so this type had
+        // nowhere left to click.
+        makeChannel({
+          name: "telegram-support",
+          display_name: "telegram-support",
+          channel_type: "telegram",
+          configured: true,
+        }),
+      ]),
+    );
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /channels\.add/ }));
+    let drawer = screen.getByTestId("drawer-slot");
+    // One row per type despite the instance + the catalog row.
+    expect(within(drawer).getAllByText("Telegram")).toHaveLength(1);
+    // The instance-count hint rides on the row (the slack row shows one
+    // too — it also has a configured instance).
+    const tgRow = within(drawer).getByText("Telegram").closest("button");
+    expect(tgRow).toBeTruthy();
+    expect(
+      within(tgRow as HTMLElement).getByText("channels.picker_instances_configured"),
+    ).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByText("Telegram"));
+    drawer = screen.getByTestId("drawer-slot");
+    // Create mode: the instance-name field is editable and empty (an
+    // instance already exists, so the type is not safe as a default), with
+    // the "N configured" hint — not the edit-mode copy.
+    const nameInput = within(drawer).getByLabelText("channels.instance_name_label");
+    expect(nameInput).toBeEnabled();
+    expect(nameInput).toHaveValue("");
+    expect(within(drawer).getByText("channels.instance_name_hint_next")).toBeInTheDocument();
+    expect(within(drawer).queryByText("channels.instance_name_hint_edit")).not.toBeInTheDocument();
+  });
+
   it("offers the copyable config_template snippet inside the SidecarForm drawer", () => {
     useChannelsMock.mockReturnValue(
       makeQuery<ChannelItem[]>([
@@ -772,6 +835,7 @@ describe("ChannelsPage", () => {
           name: "ntfy",
           display_name: "ntfy",
           configured: false,
+          channel_type: undefined,
           config_template: '[[sidecar_channels]]\nname = "ntfy"\n',
           fields: [
             {
