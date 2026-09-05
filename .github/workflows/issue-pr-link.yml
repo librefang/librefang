@@ -16,14 +16,15 @@ on:
 permissions:
   contents: read
 
-# Each run re-derives the linked-issue set from the PR body and the PR's current open/closed state, so the newest run converges on the correct `has-pr` labels whatever a cancelled predecessor had applied so far.
-# `pull_request_target` reports `github.ref` as the base branch for every PR, so the group must key on something PR-specific to stay collision-free across PRs.
+# Each run re-derives the linked-issue set from the PR body and the PR's current open/closed state, so every run converges on the correct `has-pr` labels on its own and serialising them costs only time.
+# `pull_request_target` reports `github.ref` as the base branch for every PR, so the group keys on `github.head_ref`, which is PR-specific.
 #
-# That something is `github.head_ref`, not `github.event.pull_request.number`, which did not isolate PRs in practice: on 2026-09-05 a three-PR merge sweep produced runs on three distinct branches between 13:28:59 and 13:29:09 and cancelled the middle one, and the same shape recurs on every burst of opens or closes.
-# A cancelled run reports its check as failed, which left open PRs sitting at `mergeStateStatus = UNSTABLE` over a bookkeeping label job while `CI Gate` was green.
+# Cancellation is off for the same reason as in `stale-pr.yml`: a cancelled run reports its check as failed, and a bookkeeping label job has no business putting a red check on a pull request whose required `CI Gate` is green.
+# Runs on unrelated pull requests were observed cancelling one another — a three-PR merge sweep on 2026-09-05 produced runs on three distinct branches between 13:28:59 and 13:29:09 and cancelled the middle one — and the same shape recurred on every burst of opens or closes.
+# #8190 read that as a group-key collision and changed the key; the cancellations continued afterwards, so the cause is not established and only the harm is removed here.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.event.pull_request.number || 'reconcile' }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
