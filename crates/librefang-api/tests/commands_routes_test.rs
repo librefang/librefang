@@ -69,6 +69,10 @@ async fn get_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value) {
     (status, serde_json::from_slice(&body).unwrap())
 }
 
+/// `/goal` must reach the dashboard catalog. It was registered with
+/// `Scope::CHANNEL` only and the endpoint served a hand-written const, so the
+/// command worked in Telegram and was invisible in the dashboard chat
+/// (upstream #3355).
 #[tokio::test(flavor = "multi_thread")]
 async fn goal_is_served_by_the_command_catalog() {
     let harness = boot().await;
@@ -88,6 +92,7 @@ async fn goal_is_served_by_the_command_catalog() {
                     .collect::<Vec<_>>()
             )
         });
+    // The dashboard needs all three to render and dispatch the command.
     assert_eq!(goal["exec"], "backend");
     assert_eq!(goal["args_hint"], "<description> [--loop-engineering]");
     assert_eq!(goal["no_args"], false);
@@ -103,6 +108,8 @@ async fn goal_is_served_by_the_command_catalog() {
     assert_eq!(goal["exec"], "backend");
 }
 
+/// Deriving the catalog from `COMMAND_REGISTRY` must not drop anything the
+/// hand-written `BUILTIN_COMMANDS` const used to serve.
 #[tokio::test(flavor = "multi_thread")]
 async fn catalog_still_serves_every_historical_builtin() {
     let harness = boot().await;
@@ -116,8 +123,8 @@ async fn catalog_still_serves_every_historical_builtin() {
         .collect();
 
     for cmd in [
-        "/help", "/new", "/reboot", "/compact", "/model", "/stop", "/usage", "/think", "/status",
-        "/clear", "/exit",
+        "/help", "/new", "/reset", "/reboot", "/compact", "/model", "/stop", "/usage", "/think",
+        "/context", "/verbose", "/queue", "/status", "/clear", "/exit",
     ] {
         assert!(
             served.contains(&cmd),
@@ -127,6 +134,7 @@ async fn catalog_still_serves_every_historical_builtin() {
         assert_eq!(status, StatusCode::OK, "{cmd} not resolvable by name");
     }
 
+    // Channel-only commands must not leak into the dashboard catalog.
     for cmd in ["/btw", "/agent", "/approve", "/schedule"] {
         assert!(
             !served.contains(&cmd),

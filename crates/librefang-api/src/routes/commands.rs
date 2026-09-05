@@ -66,6 +66,12 @@ fn builtin_commands() -> impl Iterator<Item = &'static CommandDef> {
 }
 
 /// Render one builtin as a catalog entry.
+///
+/// `desc_key` is the dashboard i18n key by convention (`chat.cmd_<name>`); the
+/// SPA falls back to `desc` when a locale has no entry for it, so adding a
+/// command to the registry never leaves a blank label in the slash menu.
+/// `exec` is absent when the command is catalogued but has no dashboard
+/// execution path, which is the SPA's signal to keep it out of the menu.
 fn builtin_entry(def: &CommandDef) -> serde_json::Value {
     let mut entry = serde_json::json!({
         "cmd": format!("/{}", def.name),
@@ -125,6 +131,10 @@ pub async fn get_command(
         format!("/{name}")
     };
 
+    // Resolve through the registry so aliases (`/quit` → `/exit`) answer the
+    // same entry the slash menu offers, and so a channel-only command like
+    // `/btw` is not silently advertised to the dashboard. The registry keys on
+    // exact lowercase names; this endpoint has always been case-insensitive.
     let candidate = lookup
         .strip_prefix('/')
         .unwrap_or(&lookup)
