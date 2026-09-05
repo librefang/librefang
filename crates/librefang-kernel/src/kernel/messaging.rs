@@ -927,6 +927,26 @@ impl LibreFangKernel {
         }
     }
 
+    /// The `SessionId` a channel-scoped turn lands on.
+    ///
+    /// Single source of truth for the channel branch of session resolution, on the kernel side.
+    /// Every dispatch resolver takes this branch for a `SenderContext` that names a channel and does not set `use_canonical_session` (`send_message_full_with_upstream`, `execute_llm_agent`, the streaming resolver), and the channel bridge's `/new` / `/reboot` / `/compact` handlers must name the same session or they reset one nobody is talking in.
+    ///
+    /// #7701 is what disagreement looks like, and it has now cost two rounds: the channels half of the pair drifted first (`session_scope` in `librefang-channels::bridge` is the mirror of this function, and its doc-comment carries that half of the story), and the kernel half re-inlined `for_sender_scope(agent, resolve_scope_channel(..), chat)` at three sites that each had to remember the reserved-name guard.
+    /// A reset that derives its own id "succeeds" against an empty session while the conversation the user can see keeps every message — the failure is silent on both ends, because the ack is generated from the reset that did nothing.
+    pub fn channel_session_id(
+        agent_id: AgentId,
+        channel: &str,
+        chat_id: Option<&str>,
+        is_internal_system: bool,
+    ) -> SessionId {
+        SessionId::for_sender_scope(
+            agent_id,
+            &Self::resolve_scope_channel(channel, is_internal_system),
+            chat_id,
+        )
+    }
+
     /// Internal: send a message with all optional parameters (content blocks + sender context).
     ///
     /// This is the unified entry point for all message dispatch. When `sender_context`
@@ -2314,14 +2334,15 @@ impl LibreFangKernel {
         } else {
             match sender_context {
                 Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
-                    // Audit: cron-channel-name-not-reserved. Defense-in-depth
-                    // at the kernel boundary — see `resolve_scope_channel`.
-                    let scope_channel =
-                        Self::resolve_scope_channel(&ctx.channel, ctx.is_internal_system);
-                    let derived = SessionId::for_sender_scope(
+                    // Audit: cron-channel-name-not-reserved. The reserved-name
+                    // defense-in-depth lives inside `channel_session_id`, which
+                    // the `/new` / `/reboot` / `/compact` handlers also call so
+                    // a reset addresses this exact session (#7701).
+                    let derived = Self::channel_session_id(
                         agent_id,
-                        &scope_channel,
+                        &ctx.channel,
                         ctx.chat_id.as_deref(),
+                        ctx.is_internal_system,
                     );
                     // #3692: surface when the channel branch silently
                     // overrides a non-default manifest `session_mode`.

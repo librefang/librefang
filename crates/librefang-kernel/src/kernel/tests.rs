@@ -10591,6 +10591,43 @@ fn resolve_dispatch_session_id_uses_channel_only_when_no_chat_id() {
     assert_eq!(got, Some(expected));
 }
 
+/// #7701: the session a channel `/new` resets is derived from `(channel, chat_id)` alone, with no `SenderContext` in hand, so it can only be right if it goes through the same function the inbound turn went through.
+/// Both sides call `channel_session_id`; this pins them together so re-inlining `for_sender_scope` at either end — which is how #7701 happened twice — fails here instead of silently resetting a session nobody is talking in.
+///
+/// The reserved-name case is the one that drifts without being noticed: a `Custom("cron")` adapter's turn lands on `ext-cron`, and a reset that skipped the guard would clear `cron`, the kernel's internal session.
+#[test]
+fn channel_reset_target_matches_the_session_the_dispatch_resolver_picks() {
+    for (channel, chat_id) in [
+        ("telegram", Some("chat-42")),
+        ("slack", None),
+        ("cron", Some("chat-7")),
+    ] {
+        let agent_id = AgentId::new();
+        let entry_sid = SessionId::new();
+        let sender = dummy_sender(channel, chat_id);
+        let dispatched = resolve_dispatch_session_id(
+            "builtin:chat",
+            agent_id,
+            entry_sid,
+            librefang_types::agent::SessionMode::Persistent,
+            Some(&sender),
+            None,
+            None,
+        );
+        // What `KernelBridgeAdapter::channel_session` computes for `/new`.
+        let reset_target = LibreFangKernel::channel_session_id(agent_id, channel, chat_id, false);
+        assert_eq!(
+            dispatched,
+            Some(reset_target),
+            "channel {channel:?} chat {chat_id:?}: a reset must address the session the turn landed in"
+        );
+        assert_ne!(
+            reset_target, entry_sid,
+            "channel {channel:?}: the reset must not collapse onto the canonical (WebUI) session"
+        );
+    }
+}
+
 #[test]
 fn resolve_dispatch_session_id_canonical_session_bypasses_channel_scope() {
     let agent_id = AgentId::new();
