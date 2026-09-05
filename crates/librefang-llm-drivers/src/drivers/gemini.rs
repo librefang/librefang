@@ -1002,12 +1002,21 @@ impl LlmDriver for GeminiDriver {
                 // lockout for it.
                 let retry_after_ms = crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                 if status == 429 {
-                    crate::shared_rate_guard::record_429_from_headers(
-                        guard_provider,
-                        &guard_key_id,
-                        resp.headers(),
-                        "Gemini HTTP 429",
-                    );
+                    if attempt < max_retries {
+                        // Retry path: count the 429 but persist no lockout.
+                        // Nothing clears one except expiry, and a Gemini RESOURCE_EXHAUSTED carries no reset headers, so a 429 we ride out here would blackhole the key for the full 5-minute default in this and every sibling process.
+                        crate::shared_rate_guard::note_429_from_headers(
+                            guard_provider,
+                            resp.headers(),
+                        );
+                    } else {
+                        crate::shared_rate_guard::record_429_from_headers(
+                            guard_provider,
+                            &guard_key_id,
+                            resp.headers(),
+                            "Gemini HTTP 429",
+                        );
+                    }
                 }
                 if attempt < max_retries {
                     let delay = standard_retry_delay(
@@ -1156,12 +1165,20 @@ impl LlmDriver for GeminiDriver {
                 // lockout for it.
                 let retry_after_ms = crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                 if status == 429 {
-                    crate::shared_rate_guard::record_429_from_headers(
-                        guard_provider,
-                        &guard_key_id,
-                        resp.headers(),
-                        "Gemini HTTP 429 (stream)",
-                    );
+                    if attempt < max_retries {
+                        // Retry path: count the 429 without persisting a lockout that only expiry could clear.
+                        crate::shared_rate_guard::note_429_from_headers(
+                            guard_provider,
+                            resp.headers(),
+                        );
+                    } else {
+                        crate::shared_rate_guard::record_429_from_headers(
+                            guard_provider,
+                            &guard_key_id,
+                            resp.headers(),
+                            "Gemini HTTP 429 (stream)",
+                        );
+                    }
                 }
                 if attempt < max_retries {
                     let delay = standard_retry_delay(

@@ -68,9 +68,10 @@ async fn aa1_429_retry_then_success() {
     let result = dk.driver.complete(simple_request("claude-test")).await;
     assert!(result.is_ok(), "expected Ok, got {:?}", result);
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    // A 429 the driver rode out itself must not persist a lockout: the call returned Ok, and only wall-clock expiry ever clears a recorded lockout, so keeping it would block this and every sibling process against a provider that is demonstrably healthy.
     assert!(
-        lockout_file_exists("anthropic", &dk.api_key),
-        "lockout file should exist after 429"
+        !lockout_file_exists("anthropic", &dk.api_key),
+        "a recovered 429 must not persist a cross-process lockout"
     );
 }
 
@@ -181,4 +182,37 @@ async fn aa5_stream_429_retry() {
     assert!(result.is_ok(), "expected Ok, got {:?}", result);
     assert!(!events.is_empty(), "stream events should not be empty");
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    assert!(
+        !lockout_file_exists("anthropic", &dk.api_key),
+        "a recovered 429 must not persist a cross-process lockout on the streaming path either"
+    );
+}
+
+/// The streaming twin of `aa2`: the stream path has its own 429 handling, so the persisting half of the behaviour needs its own assertion here.
+#[tokio::test]
+#[serial_test::serial]
+async fn aa6_stream_429_exhaustion() {
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let dk = driver_with_key(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_429_fast_retry())
+        .up_to_n_times(4)
+        .mount(&server)
+        .await;
+
+    let (result, events) = collect_stream(&dk.driver, simple_request("claude-test")).await;
+    assert!(
+        matches!(result, Err(LlmError::RateLimited { .. })),
+        "expected RateLimited, got {:?}",
+        result
+    );
+    assert!(events.is_empty(), "expected no events, got {:?}", events);
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    assert!(
+        lockout_file_exists("anthropic", &dk.api_key),
+        "exhausted 429 on the streaming path must persist a cross-process lockout"
+    );
 }

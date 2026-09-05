@@ -57,9 +57,66 @@ async fn oc1_429_retry_then_success() {
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3, "expected 3 requests (2x429 + 1x200)");
 
+    // A 429 the driver rode out on its own retry must leave no persisted lockout: the call returned Ok, so the provider is proven healthy, and nothing but wall-clock expiry ever clears a recorded lockout.
     assert!(
-        lockout_file_exists(provider_for_openai_mock(), &api_key),
-        "lockout file should exist"
+        !lockout_file_exists(provider_for_openai_mock(), &api_key),
+        "a recovered 429 must not persist a cross-process lockout"
+    );
+}
+
+/// A 429 from an hour-bucket gateway (OpenAI tier-1, Nous Portal): the RPH bucket is exhausted and no `Retry-After` is sent.
+/// The recorded cooldown is then the full bucket reset instead of a couple of seconds, which is what makes a stale lockout observable at all — a one-second lockout would expire during the driver's own backoff and hide the defect rather than expose it.
+fn openai_429_hour_bucket_exhausted() -> ResponseTemplate {
+    ResponseTemplate::new(429)
+        .insert_header("x-ratelimit-limit-requests-1h", "1000")
+        .insert_header("x-ratelimit-remaining-requests-1h", "0")
+        .insert_header("x-ratelimit-reset-requests-1h", "3540")
+        .set_body_json(serde_json::json!({
+            "error": {"message": "rate limited", "type": "rate_limit_error"}
+        }))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn oc1b_recovered_429_leaves_sibling_process_able_to_call() {
+    // The user-visible half of the same defect: the lockout file is shared across processes, so a stale one from a recovered 429 made the next driver instance (daemon fork, `librefang agent chat`, cron) fail `pre_request_check` with RateLimited before opening a socket.
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+
+    let api_key = "sk-test-oc1b".to_string();
+    let driver_a =
+        OpenAIDriver::with_proxy_and_timeout(api_key.clone(), server.uri(), None, Some(5));
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(openai_429_hour_bucket_exhausted())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("recovered")))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let first = driver_a.complete(simple_request("gpt-test")).await;
+    assert!(first.is_ok(), "expected Ok after retry, got {:?}", first);
+
+    let driver_b =
+        OpenAIDriver::with_proxy_and_timeout(api_key.clone(), server.uri(), None, Some(5));
+    let second = driver_b.complete(simple_request("gpt-test")).await;
+    assert!(
+        second.is_ok(),
+        "sibling process must still reach a provider that already recovered, got {:?}",
+        second
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "the second call must actually hit the network (1x429 + 1x200 + 1x200)"
     );
 }
 

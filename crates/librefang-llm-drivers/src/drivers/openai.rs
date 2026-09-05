@@ -1640,16 +1640,12 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
-                // Persist the lockout (honors RPH > RPM > retry-after >
-                // 5min default precedence) and reuse the parsed
-                // retry-after for the in-process backoff.
-                let retry_after = crate::shared_rate_guard::record_429_from_headers(
-                    guard_provider,
-                    &guard_key_id,
-                    resp.headers(),
-                    &format!("HTTP 429 from {}", self.base_url),
-                );
                 if attempt < max_retries {
+                    // Count the 429 and reuse its retry-after for the in-process backoff, but do not persist a lockout: nothing clears one except expiry, so a 429 we ride out here would still block this and every sibling process against a provider we are about to prove healthy.
+                    let retry_after = crate::shared_rate_guard::note_429_from_headers(
+                        guard_provider,
+                        resp.headers(),
+                    );
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,
@@ -1659,6 +1655,13 @@ impl LlmDriver for OpenAIDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                // Retries exhausted: persist the lockout (honors RPH > RPM > retry-after > 5min default precedence) so a restart and sibling processes observe it too.
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
+                    guard_provider,
+                    &guard_key_id,
+                    resp.headers(),
+                    &format!("HTTP 429 from {}", self.base_url),
+                );
                 return Err(LlmError::RateLimited {
                     retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
@@ -2098,13 +2101,12 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
-                let retry_after = crate::shared_rate_guard::record_429_from_headers(
-                    guard_provider,
-                    &guard_key_id,
-                    resp.headers(),
-                    &format!("HTTP 429 (stream) from {}", self.base_url),
-                );
                 if attempt < max_retries {
+                    // Retry path: count the 429 without persisting a lockout that only expiry could clear.
+                    let retry_after = crate::shared_rate_guard::note_429_from_headers(
+                        guard_provider,
+                        resp.headers(),
+                    );
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,
@@ -2114,6 +2116,12 @@ impl LlmDriver for OpenAIDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
+                    guard_provider,
+                    &guard_key_id,
+                    resp.headers(),
+                    &format!("HTTP 429 (stream) from {}", self.base_url),
+                );
                 return Err(LlmError::RateLimited {
                     retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
@@ -2514,7 +2522,10 @@ impl LlmDriver for OpenAIDriver {
 
                                 // Grow to a sparse provider-supplied index in
                                 // one allocation rather than one push per slot.
-                                tool_accum.resize_with(idx + 1, StreamedToolCall::default);
+                                // Growth has to stay one-directional: `resize_with` also shrinks, so a delta for a lower index — a late `id`, a trailing `arguments` fragment, or two entries in one frame in descending order — would truncate the slots already accumulated above it and silently drop a parallel tool call the model asked for.
+                                if tool_accum.len() < idx + 1 {
+                                    tool_accum.resize_with(idx + 1, StreamedToolCall::default);
+                                }
 
                                 // ID (sent in first chunk for this tool)
                                 if let Some(id) = call["id"].as_str() {
@@ -5540,6 +5551,61 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Regression: a tool_call delta for an already-seen lower index must not discard the higher slots accumulated after it.
+    /// The accumulator grows with `resize_with`, which shrinks as well as grows, so the trailing `arguments` fragment for index 0 below used to truncate the Vec back to one element and lose the second parallel call entirely.
+    #[tokio::test]
+    async fn streamed_tool_call_delta_for_earlier_index_keeps_later_calls() {
+        let sse_body = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"first_tool\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"second_tool\",\"arguments\":\"{\\\"y\\\":2}\"}}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\"}}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\
+             data: [DONE]\n"
+            .to_string();
+        let base = spawn_sse_server(sse_body).await;
+        let driver = OpenAIDriver::new("test-key".to_string(), base);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let response = driver
+            .stream(transport_retry_request(), tx)
+            .await
+            .expect("stream with a back-referencing tool_call delta must complete");
+
+        assert_eq!(
+            response.tool_calls.len(),
+            2,
+            "both parallel tool calls must survive a delta for the earlier index: {:?}",
+            response.tool_calls
+        );
+        assert_eq!(response.tool_calls[0].id, "call_a");
+        assert_eq!(response.tool_calls[0].name, "first_tool");
+        assert_eq!(response.tool_calls[0].input["x"], 1);
+        assert_eq!(response.tool_calls[1].id, "call_b");
+        assert_eq!(response.tool_calls[1].name, "second_tool");
+        assert_eq!(response.tool_calls[1].input["y"], 2);
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        // Every started tool call must also be ended, or ACP / dashboard consumers keep rendering it as still running.
+        let started: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolUseStart { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let ended: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolUseEnd { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, vec!["call_a", "call_b"]);
+        assert_eq!(ended, vec!["call_a", "call_b"]);
     }
 
     /// Regression: an OpenAI-compatible provider (OpenRouter / Groq) can send a terminal error as an SSE `data:` frame over an already-HTTP-200 body instead of a non-2xx status.

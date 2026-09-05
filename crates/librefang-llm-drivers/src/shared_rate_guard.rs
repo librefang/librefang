@@ -374,29 +374,11 @@ pub fn pre_request_check(
     Ok(())
 }
 
-/// Persist a 429 lockout from a `reqwest` response's headers and return
-/// the parsed `Retry-After` so the caller can reuse it for backoff.
+/// Count a 429 for observability and return the parsed `Retry-After` for in-process backoff, **without** persisting a cross-process lockout.
 ///
-/// Header parsing precedence (RPH > RPM > Retry-After > 5min default) is
-/// delegated to [`record_from_snapshot`].
-pub fn record_429_from_headers(
-    provider: &str,
-    key_id: &str,
-    headers: &reqwest::header::HeaderMap,
-    reason: &str,
-) -> Duration {
-    // 0 fallback preserves the existing precedence semantics
-    // (RPH > RPM > Retry-After > 5min default) — a missing or
-    // unparseable header means "no Retry-After signal", not "5 s".
-    let retry_after = crate::retry_after::parse_retry_after(headers, 0);
-    let snap = crate::rate_limit_tracker::RateLimitSnapshot::from_headers(headers);
-    record_from_snapshot(
-        provider,
-        key_id,
-        snap.as_ref(),
-        Some(retry_after),
-        Some(reason.to_string()),
-    );
+/// This is the right call for a 429 the driver is about to retry itself.
+/// A lockout is only honest once the driver has given up: nothing clears a persisted lockout except wall-clock expiry (there is no success-based clear, and the max-merge in [`record`] keeps the longest window), so recording one for a 429 the very next attempt rides out would fail every subsequent [`pre_request_check`] in this and every sibling process for the whole recorded window — against a provider that was just proven healthy.
+pub fn note_429_from_headers(provider: &str, headers: &reqwest::header::HeaderMap) -> Duration {
     // Cardinality: provider is a fixed enum (anthropic/openai/gemini/…),
     // status is the bare HTTP status code as string. We never include
     // key_id or reason text. (#3495)
@@ -406,6 +388,34 @@ pub fn record_429_from_headers(
         "status" => "429",
     )
     .increment(1);
+    // 0 fallback preserves the existing precedence semantics
+    // (RPH > RPM > Retry-After > 5min default) — a missing or
+    // unparseable header means "no Retry-After signal", not "5 s".
+    crate::retry_after::parse_retry_after(headers, 0)
+}
+
+/// Persist a 429 lockout from a `reqwest` response's headers and return
+/// the parsed `Retry-After` so the caller can reuse it for backoff.
+///
+/// Call this only on the terminal attempt — see [`note_429_from_headers`] for the retry path.
+///
+/// Header parsing precedence (RPH > RPM > Retry-After > 5min default) is
+/// delegated to [`record_from_snapshot`].
+pub fn record_429_from_headers(
+    provider: &str,
+    key_id: &str,
+    headers: &reqwest::header::HeaderMap,
+    reason: &str,
+) -> Duration {
+    let retry_after = note_429_from_headers(provider, headers);
+    let snap = crate::rate_limit_tracker::RateLimitSnapshot::from_headers(headers);
+    record_from_snapshot(
+        provider,
+        key_id,
+        snap.as_ref(),
+        Some(retry_after),
+        Some(reason.to_string()),
+    );
     retry_after
 }
 
@@ -679,6 +689,45 @@ mod tests {
         record_from_snapshot("openai", &key_id, Some(&snap), None, Some("429".into()));
 
         let remaining = check("openai", &key_id).expect("locked out");
+        assert!(
+            remaining.as_secs() > 3500,
+            "must record full RPH cooldown, got {}s",
+            remaining.as_secs()
+        );
+
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
+    }
+
+    #[test]
+    fn note_429_returns_retry_after_without_writing_a_lockout() {
+        // The retry path needs the parsed Retry-After for its backoff but must leave no lockout behind: a 429 the driver rides out cannot be allowed to blackhole the key, because only wall-clock expiry ever clears a recorded lockout.
+        let _g = ENV_GUARD.lock().unwrap();
+        let home = fresh_home();
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+        headers.insert("x-ratelimit-reset-requests-1h", "3540".parse().unwrap());
+        headers.insert("x-ratelimit-limit-requests-1h", "1000".parse().unwrap());
+        headers.insert("x-ratelimit-remaining-requests-1h", "0".parse().unwrap());
+
+        let key_id = key_id_hash("sk-note-429");
+        let retry_after = note_429_from_headers("openai", &headers);
+        assert_eq!(retry_after, Duration::from_secs(7));
+        assert!(
+            check("openai", &key_id).is_none(),
+            "note must not persist a lockout"
+        );
+        assert!(
+            !lockout_path("openai", &key_id).exists(),
+            "note must not create a lockout file"
+        );
+
+        // The terminal-attempt helper still persists, and honours RPH over the shorter Retry-After.
+        record_429_from_headers("openai", &key_id, &headers, "test 429");
+        let remaining = check("openai", &key_id).expect("record must persist a lockout");
         assert!(
             remaining.as_secs() > 3500,
             "must record full RPH cooldown, got {}s",

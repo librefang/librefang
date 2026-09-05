@@ -546,10 +546,28 @@ impl LlmDriver for AnthropicDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 529 {
-                // Persist 429 lockouts only — 529 (overloaded) is a
-                // server-capacity issue, not an account-level rate
-                // limit, so it must not lock the key out across
-                // processes.
+                if attempt < max_retries {
+                    // Retry path: count a 429 but persist no lockout.
+                    // A lockout is only cleared by expiry, so recording one for a 429 the next attempt rides out would block this and every sibling process against a provider we are about to prove healthy.
+                    let retry_after = if status == 429 {
+                        crate::shared_rate_guard::note_429_from_headers(
+                            guard_provider,
+                            resp.headers(),
+                        )
+                    } else {
+                        crate::retry_after::parse_retry_after(resp.headers(), 0)
+                    };
+                    let delay = standard_retry_delay(attempt + 1, retry_after);
+                    warn!(
+                        status,
+                        delay_ms = delay.as_millis(),
+                        "Rate limited, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                // Retries exhausted.
+                // Persist 429 lockouts only — 529 (overloaded) is a server-capacity issue, not an account-level rate limit, so it must not lock the key out across processes.
                 let retry_after = if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
@@ -560,16 +578,6 @@ impl LlmDriver for AnthropicDriver {
                 } else {
                     crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
-                if attempt < max_retries {
-                    let delay = standard_retry_delay(attempt + 1, retry_after);
-                    warn!(
-                        status,
-                        delay_ms = delay.as_millis(),
-                        "Rate limited, retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
                 // Honor the server-supplied Retry-After when surfacing
                 // the final error after retries are exhausted; fall
                 // back to 5 s when the header was absent, invalid, or
@@ -718,9 +726,27 @@ impl LlmDriver for AnthropicDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 529 {
-                // 529 (overloaded) is a server-capacity issue, not an
-                // account-level rate limit — don't persist a key-wide
-                // lockout for it.
+                if attempt < max_retries {
+                    // Retry path: count a 429 without persisting a lockout that only expiry could clear.
+                    let retry_after = if status == 429 {
+                        crate::shared_rate_guard::note_429_from_headers(
+                            guard_provider,
+                            resp.headers(),
+                        )
+                    } else {
+                        crate::retry_after::parse_retry_after(resp.headers(), 0)
+                    };
+                    let delay = standard_retry_delay(attempt + 1, retry_after);
+                    warn!(
+                        status,
+                        delay_ms = delay.as_millis(),
+                        "Rate limited (stream), retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                // Retries exhausted.
+                // 529 (overloaded) is a server-capacity issue, not an account-level rate limit — don't persist a key-wide lockout for it.
                 let retry_after = if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
@@ -731,16 +757,6 @@ impl LlmDriver for AnthropicDriver {
                 } else {
                     crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
-                if attempt < max_retries {
-                    let delay = standard_retry_delay(attempt + 1, retry_after);
-                    warn!(
-                        status,
-                        delay_ms = delay.as_millis(),
-                        "Rate limited (stream), retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
                 // Honor the server-supplied Retry-After when surfacing
                 // the final error after retries are exhausted; fall
                 // back to 5 s when the header was absent, invalid, or
