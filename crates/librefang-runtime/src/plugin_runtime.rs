@@ -1233,21 +1233,20 @@ pub async fn run_hook_json(
             cmd.env(var, val);
         }
     }
+    // Caller-allowed passthrough — filtered exactly as the persistent path (`hook_baseline_env`) filters it, so a manifest cannot smuggle a reserved secret in through whichever of the two spawn paths is less guarded.
     for var in &config.allowed_env_vars {
+        if crate::subprocess_sandbox::is_blocked_env_var(var) {
+            warn!(var = %var, "refusing to pass reserved/secret env var to hook");
+            continue;
+        }
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
     }
     // Plugin-declared env vars from [env] in plugin.toml.
-    // Values of the form `${VAR_NAME}` are expanded from the daemon's env.
+    // Values of the form `${VAR_NAME}` are expanded from the daemon's env by `expand_env_value`, which both spawn paths share so their filtering cannot drift.
     for (key, val) in &config.plugin_env {
-        let expanded = if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
-        {
-            std::env::var(inner).unwrap_or_default()
-        } else {
-            val.clone()
-        };
-        cmd.env(key, expanded);
+        cmd.env(key, expand_env_value(val));
     }
 
     // Soft network isolation: inject proxy-blocking env vars so well-behaved
@@ -1629,9 +1628,31 @@ fn uuid_v4_hex() -> String {
 }
 
 /// Expand a plugin env value: `${VAR_NAME}` → parent env lookup, otherwise literal.
+///
+/// An unset `${VAR_NAME}` expands to the empty string and logs a `warn`, which is the contract `docs/src/app/agent/plugins/page.mdx` states for the `[env]` table; expanding silently left the operator with a hook that read `""` from a variable they believed they had exported.
+///
+/// A `${VAR_NAME}` reference naming one of the daemon's own reserved secrets ([`crate::subprocess_sandbox::is_reserved_env_var`] — `LIBREFANG_VAULT_KEY`, `ANTHROPIC_API_KEY`, …) expands to the empty string instead of the secret.
+/// Those names may never reach a child process "no matter who asks", and a plugin's `[env]` table is written by whoever shipped the plugin, so `X = "${LIBREFANG_VAULT_KEY}"` would otherwise hand the vault master key — which is deliberately never written to disk — to the plugin's own hook script after `env_clear()` was called to prevent exactly that.
+/// The broader `is_blocked_env_var` heuristic is deliberately NOT used here: it rejects any name ending in `KEY` / `TOKEN` / `SECRET` and would break the documented `QDRANT_API_KEY = "${QDRANT_API_KEY}"` form, which is the whole point of the `[env]` table (#6458 draws the same line for operator-declared names).
 fn expand_env_value(val: &str) -> String {
     if let Some(inner) = val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-        std::env::var(inner).unwrap_or_default()
+        if crate::subprocess_sandbox::is_reserved_env_var(inner) {
+            warn!(
+                var = %inner,
+                "plugin [env] references a reserved daemon secret — expanding to empty"
+            );
+            return String::new();
+        }
+        match std::env::var(inner) {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                warn!(
+                    var = %inner,
+                    "plugin [env] references an unset daemon variable — expanding to empty"
+                );
+                String::new()
+            }
+        }
     } else {
         val.to_string()
     }
@@ -1639,7 +1660,7 @@ fn expand_env_value(val: &str) -> String {
 
 /// Build the safe baseline environment for a hook subprocess.
 ///
-/// SECURITY: the daemon's environment is NOT inherited wholesale — only the same allowlist the non-persistent path (`run_hook_json`) uses: `PATH` / `HOME` (+ the Windows-safe vars), `LIBREFANG_RUNTIME`, the runtime passthrough vars, the caller's `allowed_env_vars` minus any reserved secret (via [`crate::subprocess_sandbox::is_blocked_env_var`]), and `plugin_env`.
+/// SECURITY: the daemon's environment is NOT inherited wholesale — only the same allowlist the non-persistent path (`run_hook_json`) uses: `PATH` / `HOME` (+ the Windows-safe vars), `LIBREFANG_RUNTIME`, the runtime passthrough vars, the caller's `allowed_env_vars` minus any reserved secret (via [`crate::subprocess_sandbox::is_blocked_env_var`]), and `plugin_env` expanded through [`expand_env_value`], which refuses to resolve a `${VAR}` reference to a reserved daemon secret.
 /// Returning the `(key, value)` pairs (rather than mutating a `Command`) keeps it unit-testable without spawning a subprocess.
 fn hook_baseline_env(runtime: &PluginRuntime, config: &HookConfig) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();

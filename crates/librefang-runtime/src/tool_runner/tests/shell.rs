@@ -1560,6 +1560,32 @@ async fn test_shell_exec_full_mode_blocks_ifs_hidden_recursive_delete() {
     assert_eq!(approvals, 0);
 }
 
+/// The same gate must survive shell quoting: `mode = "full"` hands the command straight to `sh -c`, which strips the quotes, so a quoted program name used to walk past every name-anchored pattern.
+/// The probe is a `chmod` against a path that does not exist, so a regression fails the assertion rather than damaging the host.
+#[tokio::test]
+async fn test_shell_exec_full_mode_blocks_quoted_dangerous_command() {
+    let policy = librefang_types::config::ExecPolicy {
+        mode: librefang_types::config::ExecSecurityMode::Full,
+        ..Default::default()
+    };
+
+    let (result, approvals) = run_full_mode_approval_case(
+        &policy,
+        r#""chmod" 777 /nonexistent-librefang-quoted-gate-probe"#,
+        None,
+        Some(false),
+    )
+    .await;
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("dangerous command detected"),
+        "a quoted program name must not walk past the dangerous-command gate: {}",
+        result.content
+    );
+    assert_eq!(approvals, 0);
+}
+
 /// #6594: with the flag off, `Full` no longer speaks for `[approval]` — a `shell_exec` named in the global `require_approval` list routes through the approval queue while still running unrestricted commands.
 #[tokio::test]
 async fn test_shell_exec_full_mode_honours_require_approval_when_flag_disabled() {

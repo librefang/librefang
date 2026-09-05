@@ -132,6 +132,15 @@ async fn boot_router_strict_reads() -> RouterHarness {
     }
 }
 
+/// Mirror of `middleware::matches_route`'s `PublicMatch::SingleSegment` arm: `route` (which ends in `/`) plus exactly one more segment.
+fn matches_single_segment(route: &str, path: &str) -> bool {
+    route
+        .strip_suffix('/')
+        .and_then(|base| path.strip_prefix(base))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|segment| !segment.is_empty() && !segment.contains('/'))
+}
+
 /// Returns `true` if `path` is unconditionally public on GET requests — i.e.
 /// it appears in `PUBLIC_ROUTES_ALWAYS`, `PUBLIC_ROUTES_GET_ONLY`, or is
 /// handled by the dedicated `is_mcp_oauth_callback` guard in the middleware
@@ -141,6 +150,7 @@ fn is_in_always_public(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -154,6 +164,7 @@ fn is_in_always_public(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -173,6 +184,7 @@ fn is_in_dashboard_reads(path: &str) -> bool {
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
+            PublicMatch::SingleSegment => matches_single_segment(r.path, path),
         };
         if ok {
             return true;
@@ -341,6 +353,26 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).
     re("/api/mcp/servers/test-srv", Expect::Authed),
     re("/api/mcp/servers/test-srv/auth/status", Expect::Authed),
+    // The `/api/hands/` prefix used to publish everything under an item, in the same class as the `/api/cron/` removal: the linked agent session (every message plus tool inputs and results), the raw HAND.toml with its authored prompt, the instance config, and a live browser screenshot the handler takes by driving the agent's browser on a GET.
+    // Only the item read itself (`/api/hands/{id}`, above) stays in the dashboard-read group.
+    re("/api/hands/my-hand/manifest", Expect::Authed),
+    re("/api/hands/my-hand/settings", Expect::Authed),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/session",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/browser",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/status",
+        Expect::Authed,
+    ),
+    re(
+        "/api/hands/instances/00000000-0000-0000-0000-000000000001/stats",
+        Expect::Authed,
+    ),
     re("/api/agents/some-id/session", Expect::Authed),
     re("/api/agents/some-id/metrics", Expect::Authed),
     re("/api/agents/some-id/logs", Expect::Authed),

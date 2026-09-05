@@ -1,0 +1,3 @@
+Close a one-character bypass of the dangerous-command gate: quoting the program name defeated every pattern in the denylist, because the normalizer modelled `$IFS` expansion and brace lists but not the shell's quote removal.
+`"rm" -rf /`, `'rm' -rf /`, `r"m" -rf /` and `r\m -rf /` all scored `Safe` and were then handed to `sh -c`, which strips the quotes and runs the same destructive argv the plain form is blocked for; the same evasion applied to every other program-anchored pattern, including `git push --force` and `find … -delete`.
+Commands are now normalised through a quote-removal pass before matching, so what the gate inspects is what the shell will execute (#8193) (@houko)

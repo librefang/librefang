@@ -1,0 +1,3 @@
+Stop leaking the last four digits of every credit-card number to the LLM provider when `privacy.mode` is `redact` or `pseudonymize`.
+The `phone` pattern ran ahead of `credit_card` and consumed the leading twelve digits of a 16-digit PAN, so `4111 1111 1111 1111` reached the prompt as `[REDACTED] 1111` and the `credit_card` pattern never fired for any card format at all.
+It now runs before `phone`, matching the ordering rule the WhatsApp-JID pattern already documents, and also covers American Express, whose 15-digit 4-6-5 grouping the old shape could not express and which leaked up to five digits (#8193) (@houko)

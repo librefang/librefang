@@ -1,0 +1,3 @@
+Narrow the `/api/hands/` entry in the pre-auth dashboard-read group from a broad prefix to the single item read, closing the same exposure that removed `/api/cron/` from that group.
+The prefix also published `GET /api/hands/instances/{id}/session` — every message of the linked agent session with its tool inputs and tool results — plus the raw HAND.toml including its authored prompt, the instance config verbatim, and a live browser screenshot the handler produces by driving the agent's browser on a GET, while the sibling public `/api/hands/active` supplied the instance ids needed to address them.
+`GET /api/hands/{id}` stays public because it returns the same catalogue metadata as `/api/hands`; everything below an item now requires a token (#8193) (@houko)
