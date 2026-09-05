@@ -410,12 +410,12 @@ impl LibreFangKernel {
 
     /// Dispatch a list of trigger matches to their agents.
     ///
-    /// Single point where "a match exists" becomes "an agent runs", shared by both producers: the event-driven pass in [`Self::publish_event_inner`] and the state-driven reconcile in the Task Board sweeper (#6728).
-    /// Both must inherit the same concurrency, ordering and timeout guarantees, and the only way to guarantee that is for there to be one implementation.
+    /// Single point where "a match exists" becomes "an agent runs", shared by all three producers: the event-driven pass in [`Self::publish_event_inner`], the state-driven reconcile in the Task Board sweeper (#6728), and the synchronous `Spawned` lifecycle evaluation in `spawn_agent_inner`.
+    /// All of them must inherit the same concurrency, ordering and timeout guarantees, and the only way to guarantee that is for there to be one implementation.
     ///
     /// `fire_time` is the instant the matches were resolved.
     /// It keys the deterministic `SessionMode::New` session ids, so callers pass the event timestamp (event path) or the tick instant (reconcile path) rather than reading the clock here — the id must be reproducible from a log line.
-    fn dispatch_trigger_matches(
+    pub(super) fn dispatch_trigger_matches(
         &self,
         matches: &[crate::triggers::TriggerMatch],
         fire_time: chrono::DateTime<chrono::Utc>,
@@ -2154,6 +2154,85 @@ mod task_board_reconcile_tests {
         assert!(
             kernel.reconcile_pending_task_wakes().await.is_empty(),
             "90s after an event wake the activation may still be running; the floor waits"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spawn_lifecycle_trigger_dispatch_tests {
+    //! `spawn_agent_inner` evaluates triggers against the `Spawned` lifecycle event.
+    //!
+    //! That evaluation charges every match its `fire_count`, its cooldown stamp and a step towards `max_fires`, so the matches have to be dispatched — dropping them spends a trigger's budget on a fire that delivered nothing, and an `agent_spawned` trigger never reaches its agent.
+    //!
+    //! The assertion seam is `agents.agent_concurrency`: `dispatch_trigger_matches` resolves the recipient's per-agent semaphore synchronously, before it spawns the task that would need an LLM behind `send_message_full`.
+    //! A populated cache entry therefore proves the match was handed to the dispatcher rather than discarded, without the test needing a provider.
+
+    use super::*;
+    use librefang_types::agent::{AgentManifest, ManifestCapabilities};
+
+    fn agent(name: &str) -> AgentManifest {
+        AgentManifest {
+            name: name.to_string(),
+            source_template: None,
+            description: "spawn trigger dispatch".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            capabilities: ManifestCapabilities::default(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_dispatches_agent_spawned_trigger_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("spawn-trigger-dispatch");
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            network_enabled: false,
+            // The dispatched fire reaches `send_message_full`; the driverless
+            // provider refuses there without touching the network.
+            default_model: librefang_types::config::DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boots"));
+        LibreFangKernel::set_self_handle(&kernel);
+
+        let watcher = kernel
+            .spawn_agent_inner(agent("watcher"), None, None, None)
+            .expect("watcher spawns");
+        kernel
+            .workflows
+            .triggers
+            .register(
+                watcher,
+                TriggerPattern::AgentSpawned {
+                    name_pattern: "coder".to_string(),
+                },
+                "A coder appeared: {{event}}".to_string(),
+                0,
+            )
+            .expect("trigger registers");
+
+        assert!(
+            !kernel.agents.agent_concurrency.contains_key(&watcher),
+            "precondition: nothing has dispatched to the watcher yet"
+        );
+
+        kernel
+            .spawn_agent_inner(agent("coder"), None, None, None)
+            .expect("coder spawns");
+
+        let triggers = kernel.workflows.triggers.list_agent_triggers(watcher);
+        assert_eq!(triggers.len(), 1, "the watcher owns exactly one trigger");
+        assert_eq!(
+            triggers[0].fire_count, 1,
+            "the spawn must have been charged to the trigger"
+        );
+        assert!(
+            kernel.agents.agent_concurrency.contains_key(&watcher),
+            "a charged agent_spawned match must be dispatched, not evaluated and discarded"
         );
     }
 }

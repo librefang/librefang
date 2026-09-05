@@ -513,6 +513,7 @@ impl LibreFangKernel {
             }),
         );
         // Evaluate triggers synchronously (we can't await in a sync fn, so just evaluate)
+        let event_timestamp = event.timestamp;
         let (triggered, trigger_state_mutated) = self
             .workflows
             .triggers
@@ -523,6 +524,14 @@ impl LibreFangKernel {
             if let Err(e) = self.workflows.triggers.persist() {
                 warn!("Failed to persist trigger jobs after spawn event: {e}");
             }
+        }
+        // Evaluation already charged each match its `fire_count`, its cooldown stamp and a
+        // step towards `max_fires`, so dropping the matches here would spend a trigger's
+        // budget on a fire that delivered nothing. Dispatch through the same path the event
+        // bus uses so an `agent_spawned` trigger reaches its agent or starts its workflow
+        // under the same concurrency, ordering and timeout guarantees.
+        if !triggered.is_empty() {
+            self.dispatch_trigger_matches(&triggered, event_timestamp);
         }
 
         Ok(agent_id)

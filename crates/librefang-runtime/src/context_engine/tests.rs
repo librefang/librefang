@@ -223,6 +223,107 @@ async fn test_assemble_triggers_overflow_recovery() {
 }
 
 #[tokio::test]
+async fn test_assemble_leaves_history_starting_with_user_after_stage_1_trim() {
+    let config = ContextEngineConfig::default();
+    let engine = DefaultContextEngine::new(config, make_memory(), None);
+
+    // 21 alternating turns, each 30 estimated tokens + 4 framing = 34, plus a 2-token
+    // system prompt: 716 estimated tokens against a 1000-token window sits between the
+    // 70% and 90% thresholds, so overflow recovery takes Stage 1 (keep the last 10).
+    // The drain boundary then lands on message 11, an assistant turn.
+    let mut messages: Vec<Message> = (0..21)
+        .map(|i| {
+            if i % 2 == 0 {
+                Message::user("x".repeat(120))
+            } else {
+                Message::assistant("x".repeat(120))
+            }
+        })
+        .collect();
+
+    let result = engine
+        .assemble(AgentId::new(), &mut messages, "system", &[], 1000)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.recovery,
+        RecoveryStage::AutoCompaction { removed: 11 }
+    );
+    assert_eq!(
+        messages[0].role,
+        librefang_types::message::Role::User,
+        "assemble must re-establish the leading-user invariant after a front drain"
+    );
+}
+
+#[tokio::test]
+async fn test_assemble_keeps_history_when_leading_user_repair_would_empty_it() {
+    use librefang_types::message::{ContentBlock, MessageContent, Role};
+
+    let config = ContextEngineConfig::default();
+    let engine = DefaultContextEngine::new(config, make_memory(), None);
+
+    // A tool-heavy window: nothing but assistant(ToolUse) / user(ToolResult) pairs, no plain-text user turn.
+    // Dropping the leading assistant turn orphans the ToolResult that answered it, which empties the user turn carrying it, which orphans the next pair — the leading-user repair cascades the whole window away.
+    let mut messages: Vec<Message> = (0..12)
+        .flat_map(|i| {
+            let id = format!("call_{i:02}");
+            [
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({ "path": "/tmp/a.txt" }),
+                        provider_metadata: None,
+                    }]),
+                    pinned: false,
+                    timestamp: None,
+                },
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        tool_name: "read_file".to_string(),
+                        content: "x".repeat(200),
+                        is_error: false,
+                        status: librefang_types::tool::ToolExecutionStatus::default(),
+                        approval_request_id: None,
+                    }]),
+                    pinned: false,
+                    timestamp: None,
+                },
+            ]
+        })
+        .collect();
+
+    // Size the context window so the history sits at ~80% of it: past the 70% floor that triggers recovery, under the 90% ceiling that would escalate beyond Stage 1's keep-the-last-10 trim.
+    // An empty tool list contributes nothing to the estimate, so `None` here matches what `assemble` computes from `&[]`.
+    let estimated = crate::compactor::estimate_token_count(&messages, Some("system"), None);
+    let context_window = (estimated as f64 / 0.8).ceil() as usize;
+
+    let result = engine
+        .assemble(AgentId::new(), &mut messages, "system", &[], context_window)
+        .await
+        .unwrap();
+
+    // 24 messages, keep the last 10: the boundary lands on message 14, an assistant tool call.
+    assert_eq!(
+        result.recovery,
+        RecoveryStage::AutoCompaction { removed: 14 }
+    );
+    assert!(
+        !messages.is_empty(),
+        "assemble must never hand the driver a zero-message request"
+    );
+    assert!(
+        messages.iter().any(|m| m.role == Role::User),
+        "a user turn must survive the leading-user repair"
+    );
+}
+
+#[tokio::test]
 async fn test_truncate_tool_result() {
     let config = ContextEngineConfig {
         context_window_tokens: 500,

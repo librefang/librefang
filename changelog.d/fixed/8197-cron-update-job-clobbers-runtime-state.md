@@ -1,0 +1,4 @@
+Editing a cron job no longer rolls back scheduling state that the tick loop or an in-flight fire wrote while the edit was being validated.
+`update_job` clones the job, releases the shard guard to run the same validation `add_job` runs, then swaps the whole clone back in — and `CronJob` carries `last_run`, `next_run` and `enabled`, which the scheduler writes from elsewhere without going through this method.
+A rename or a delivery patch that happened to land inside that window restored the pre-validation snapshot: a job whose `next_run` had just been advanced by `due_jobs` fired a second time on the following tick while the first fire was still running, a failure backoff step was discarded, `last_run` reverted so the API reported a job as never having run, and a job the scheduler had just auto-disabled came back until its next failure.
+The three runtime fields are now carried across from the live row unless the update itself set them (#8197) (@houko)
