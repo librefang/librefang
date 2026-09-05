@@ -998,7 +998,13 @@ jobs:
     env:
       # Registry fetches in test-booted kernels are non-hermetic (network-dependent test outcomes, one git clone per kernel boot) — see #6404 and the PR #6384 CI failure this switch prevents.
       LIBREFANG_REGISTRY_OFFLINE: "1"
-    timeout-minutes: 20
+    # 35, not 20: this lane outgrew a 20-minute budget and was being killed at the cap on most runs.
+    # Measured across four consecutive `main` commits — 18.7min pass, 19.7min pass, 20.1min killed, 20.1min killed, 20.3min killed — so it was running at 94-102% of budget and passing or failing by a coin flip, with the outcome unrelated to the diff under test.
+    # A timeout-killed job reports as `cancelled`, and `CI Gate` fails on `cancelled` without re-evaluating, so each of those became a red gate that a re-run could not clear — the re-run hits the same wall.
+    # That reads as flaky infrastructure, and it was diagnosed as merge-sweep collateral more than once before anyone measured the durations.
+    # The sibling `Test / Ubuntu (shard N/4)` lane already carries 45 minutes for strictly more work, so this lane was under-budgeted relative to its own family rather than newly slow.
+    # Keep a real ceiling rather than removing it: the `workflow-timeouts` guard exists because a hung job holds a runner slot for six hours and starves the queue behind it, and on `main` the per-sha concurrency group sets `cancel-in-progress: false`, so nothing but the timeout ends a hung run.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # ubuntu-latest leaves only ~14 GB free; a full-workspace `cargo nextest run --workspace` debug-compiles every lib+bin target (librefang-desktop's static archive alone is large) and overruns it — the linker dies with "No space left on device".
