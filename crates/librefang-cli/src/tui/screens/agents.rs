@@ -105,6 +105,7 @@ pub struct AgentSelectState {
     pub available_channels: Vec<(String, bool)>,
     pub channel_cursor: usize,
 
+    pub token_usage: Option<AgentTokenUsage>,
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
 
@@ -152,6 +153,12 @@ pub struct AgentDetail {
     pub channels_mode: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct AgentTokenUsage {
+    pub total_tokens: u64,
+    pub recent: Vec<(String, u64, u64, f64)>,
+}
+
 /// What the agent screen decided.
 pub enum AgentAction {
     /// No action yet, keep rendering.
@@ -161,15 +168,27 @@ pub enum AgentAction {
     /// User pressed Esc from the top-level list.
     Back,
     /// User wants to chat with a specific agent (from detail view).
-    ChatWithAgent { id: String, name: String },
+    ChatWithAgent {
+        id: String,
+        name: String,
+    },
     /// User wants to kill an agent (from detail view).
     KillAgent(String),
     /// Update skills for an agent.
-    UpdateSkills { id: String, skills: Vec<String> },
+    UpdateSkills {
+        id: String,
+        skills: Vec<String>,
+    },
     /// Update MCP servers for an agent.
-    UpdateMcpServers { id: String, servers: Vec<String> },
+    UpdateMcpServers {
+        id: String,
+        servers: Vec<String>,
+    },
     /// Update the channel allowlist for an agent.
-    UpdateChannels { id: String, channels: Vec<String> },
+    UpdateChannels {
+        id: String,
+        channels: Vec<String>,
+    },
     /// Fetch skills/mcp data for an agent.
     FetchAgentSkills(String),
     /// Fetch MCP data for an agent.
@@ -182,6 +201,7 @@ pub enum AgentAction {
     /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
+    FetchAgentTokenUsage(String),
     /// Fetch the agent's current inference parameters before editing them.
     FetchAgentModelParams(String),
     /// Persist edited inference parameters. `None` in a pair clears the agent's
@@ -218,6 +238,7 @@ impl AgentSelectState {
             available_channels: Vec::new(),
             channel_cursor: 0,
             mcp_cursor: 0,
+            token_usage: None,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -245,6 +266,18 @@ impl AgentSelectState {
         self.search_query.clear();
         self.filtered_indices.clear();
         self.detail = None;
+        self.token_usage = None;
+    }
+
+    /// Fold a token-usage payload in, if it is still the one being looked at.
+    ///
+    /// The fetch is two sequential HTTP calls; a selection change in between
+    /// leaves the answer describing an agent nobody is looking at any more,
+    /// and the panel has nothing on it saying whose numbers these are.
+    pub fn apply_token_usage(&mut self, agent_id: &str, usage: AgentTokenUsage) {
+        if self.detail.as_ref().is_some_and(|d| d.id == agent_id) {
+            self.token_usage = Some(usage);
+        }
     }
 
     /// Load daemon agents from the daemon API.
@@ -487,6 +520,11 @@ impl AgentSelectState {
                                     self.detail = Some(self.build_detail_inprocess(local));
                                 }
                             }
+                            // The figures on screen belong to the agent that
+                            // was open; leaving them up shows one agent's
+                            // token count and cost under another's name until
+                            // this one's own fetch returns.
+                            self.token_usage = None;
                             self.sub = AgentSubScreen::AgentDetail;
                             if let Some(ref detail) = self.detail {
                                 return AgentAction::LoadAgentDetail(detail.id.clone());
@@ -547,6 +585,11 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditChannels;
                     return AgentAction::FetchAgentChannels(id);
+                }
+            }
+            KeyCode::Char('$') => {
+                if let Some(ref detail) = self.detail {
+                    return AgentAction::FetchAgentTokenUsage(detail.id.clone());
                 }
             }
             KeyCode::Char('p') => {
@@ -1426,6 +1469,30 @@ fn draw_detail(f: &mut Frame, area: Rect, state: &AgentSelectState) {
                 ]));
             }
 
+            if let Some(usage) = &state.token_usage {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    crate::i18n::t("tui-agents-detail-tokens"),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {} {}",
+                        crate::i18n::t("tui-agents-detail-tokens-injected"),
+                        usage.total_tokens
+                    ),
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                )));
+                for (model, input, output, cost) in usage.recent.iter().take(5) {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {model:<20} {input}/{output}  ${cost:.4}"),
+                        Style::default().fg(theme::TEXT_TERTIARY),
+                    )));
+                }
+            }
+
             f.render_widget(Paragraph::new(lines), chunks[0]);
         }
         None => {
@@ -1819,6 +1886,97 @@ mod tests {
         assert!(
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
+        );
+    }
+
+    #[test]
+    fn dollar_key_requests_the_footprint_for_the_open_agent_only() {
+        let mut state = AgentSelectState::new();
+        // No detail open: the key must not fire a request against nothing.
+        assert!(matches!(
+            state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)),
+            AgentAction::Continue
+        ));
+        state.detail = Some(AgentDetail {
+            id: "agent-7".to_string(),
+            ..AgentDetail::default()
+        });
+        match state.handle_detail(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)) {
+            AgentAction::FetchAgentTokenUsage(id) => assert_eq!(id, "agent-7"),
+            _ => panic!("the open agent's id must be the one fetched"),
+        }
+    }
+
+    fn usage(total: u64) -> AgentTokenUsage {
+        AgentTokenUsage {
+            total_tokens: total,
+            recent: Vec::new(),
+        }
+    }
+
+    /// Two sequential HTTP calls back one `$`, so a selection change lands
+    /// between the request and the answer whenever the daemon is slow.
+    #[test]
+    fn a_footprint_for_another_agent_is_ignored() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+
+        state.apply_token_usage("agent-1", usage(9_999));
+
+        assert!(
+            state.token_usage.is_none(),
+            "agent A's figures must not render under agent B's name"
+        );
+
+        state.apply_token_usage("agent-2", usage(42));
+
+        assert_eq!(
+            state.token_usage.as_ref().map(|u| u.total_tokens),
+            Some(42),
+            "the open agent's own answer must still land"
+        );
+    }
+
+    /// Without this the previous agent's numbers stay on screen until this
+    /// agent's own fetch returns — on every selection change, race or no race.
+    #[test]
+    fn opening_another_agent_drops_the_previous_footprint() {
+        let mut state = AgentSelectState::new();
+        state.daemon_agents = vec![
+            DaemonAgent {
+                id: "agent-1".to_string(),
+                name: "a".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+            DaemonAgent {
+                id: "agent-2".to_string(),
+                name: "b".to_string(),
+                state: "running".to_string(),
+                provider: String::new(),
+                model: String::new(),
+            },
+        ];
+        state.list.select(Some(0));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.apply_token_usage("agent-1", usage(1_234));
+        assert!(state.token_usage.is_some());
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        state.list.select(Some(1));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            state.detail.as_ref().map(|d| d.id.as_str()),
+            Some("agent-2")
+        );
+        assert!(
+            state.token_usage.is_none(),
+            "the panel must not show agent A's figures for agent B"
         );
     }
 }

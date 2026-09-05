@@ -882,7 +882,10 @@
     "tools_declared_desc": "Narzędzia, których ten agent może używać. Pozostaw puste, aby uzyskać nieograniczony dostęp do wszystkich narzędzi.",
     "providers_error_loading": "Błąd ładowania",
     "no_providers": "Brak dostawców",
-    "select_provider_first": "Najpierw wybierz dostawcę"
+    "select_provider_first": "Najpierw wybierz dostawcę",
+    "token_usage_title": "Zużycie tokenów",
+    "token_injected_total": "Wstrzykiwane na żądanie",
+    "token_recent": "Ostatnie wywołania"
   },
   "providers": {
     "title": "Dostawcy",

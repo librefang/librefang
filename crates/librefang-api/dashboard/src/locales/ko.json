@@ -879,7 +879,10 @@
     "tools_declared_desc": "이 에이전트가 사용할 수 있는 도구입니다. 모든 도구에 제한 없이 액세스하려면 비워 두세요.",
     "providers_error_loading": "로드 중 오류 발생",
     "no_providers": "제공업체 없음",
-    "select_provider_first": "먼저 제공업체를 선택하세요."
+    "select_provider_first": "먼저 제공업체를 선택하세요.",
+    "token_usage_title": "토큰 사용량",
+    "token_injected_total": "요청당 주입량",
+    "token_recent": "최근 호출"
   },
   "providers": {
     "title": "공급자",

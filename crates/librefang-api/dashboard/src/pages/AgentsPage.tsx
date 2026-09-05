@@ -3130,6 +3130,37 @@ export function AgentsPage() {
                 )}
               </div>
 
+              {detailAgent.injected_footprint_tokens != null && detailAgent.injected_footprint_tokens > 0 && (
+                <div className="rounded-lg bg-main/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold text-text-dim">
+                    {t("agents.token_usage_title", { defaultValue: "Token footprint" })}
+                  </p>
+                  <div className="flex justify-between text-[11px] border-t border-border/40 pt-1.5">
+                    <span className="font-bold">
+                      {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
+                    </span>
+                    <span className="font-mono font-bold">
+                      {detailAgent.injected_footprint_tokens.toLocaleString()}
+                    </span>
+                  </div>
+                  {(agentEventsQuery.data ?? []).length > 0 && (
+                    <div className="border-t border-border/40 pt-1.5 space-y-1">
+                      <p className="text-[10px] text-text-dim">
+                        {t("agents.token_recent", { defaultValue: "Recent calls" })}
+                      </p>
+                      {(agentEventsQuery.data ?? []).slice(0, 5).map((call, i) => (
+                        <div key={`${call.timestamp}-${i}`} className="flex justify-between text-[10px]">
+                          <span className="text-text-dim truncate">{call.model}</span>
+                          <span className="font-mono">
+                            {call.input_tokens}/{call.output_tokens} · ${call.cost_usd.toFixed(4)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <Button
                 variant="secondary"
                 size="sm"

@@ -882,7 +882,10 @@
     "tools_declared_title": "Оголошені інструменти",
     "providers_error_loading": "Помилка завантаження",
     "no_providers": "Немає провайдерів",
-    "select_provider_first": "Спочатку оберіть провайдера"
+    "select_provider_first": "Спочатку оберіть провайдера",
+    "token_usage_title": "Обсяг токенів",
+    "token_injected_total": "Додається до запиту",
+    "token_recent": "Останні виклики"
   },
   "providers": {
     "title": "Провайдери",
