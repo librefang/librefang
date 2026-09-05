@@ -8,6 +8,8 @@ import {
   useDeleteGoal,
   useStartGoalRun,
   useStopGoalRun,
+  usePauseGoalRun,
+  useResumeGoalRun,
 } from "../lib/mutations/goals";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
@@ -17,7 +19,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -130,6 +132,7 @@ const goalRunPhaseBadge = (
 ): { bg: string; text: string; dot: string } => {
   switch (phase) {
     case "running":                 return { bg: "bg-brand/10",   text: "text-brand",    dot: "bg-brand" };
+    case "paused":                  return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
     case "finished":                return { bg: "bg-success/10", text: "text-success",  dot: "bg-success" };
     case "stopped":                 return { bg: "bg-warning/10", text: "text-warning",  dot: "bg-warning" };
     case "rate_limited":            return { bg: "bg-error/10",   text: "text-error",    dot: "bg-error" };
@@ -175,9 +178,12 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
   const runQuery = useGoalRun(goal.id, { enabled: hasAgent });
   const startMutation = useStartGoalRun();
   const stopMutation = useStopGoalRun();
+  const pauseMutation = usePauseGoalRun();
+  const resumeMutation = useResumeGoalRun();
 
   const run = runQuery.data?.run;
   const isRunning = runQuery.data?.running === true && run?.phase === "running";
+  const isPaused = run?.phase === "paused";
 
   if (!hasAgent) {
     return (
@@ -206,26 +212,88 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
       addToast(toastErr(err, t("common.error")), "error");
     }
   };
+  const onPause = async () => {
+    try {
+      await pauseMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
+  const onResume = async () => {
+    try {
+      await resumeMutation.mutateAsync(goal.id);
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
+    }
+  };
 
   if (isRunning) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={
-          run
-            ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
-            : t("goals.run_stop")
-        }
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onPause()}
+          disabled={pauseMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-colors"
+          title={t("goals.run_pause")}
+        >
+          {pauseMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Pause className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={
+            run
+              ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
+              : t("goals.run_stop")
+          }
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  if (isPaused) {
+    return (
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={() => void onResume()}
+          disabled={resumeMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+          title={t("goals.run_resume")}
+        >
+          {resumeMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Play className="h-3.5 w-3.5" />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
     );
   }
 

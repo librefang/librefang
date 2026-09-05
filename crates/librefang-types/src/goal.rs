@@ -104,6 +104,10 @@ pub struct Goal {
     /// Optional agent assigned to this goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<AgentId>,
+    /// Configurable pause between the autonomous runner's loop iterations, in
+    /// seconds. `None` uses [`DEFAULT_GOAL_TICK_INTERVAL_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_interval_secs: Option<u64>,
     /// When the goal was created.
     pub created_at: DateTime<Utc>,
     /// When the goal was last updated.
@@ -190,6 +194,9 @@ pub fn parse_goal_args(args: &str) -> Option<(String, bool)> {
 pub enum GoalRunPhase {
     /// The runner loop is active and driving the assigned agent.
     Running,
+    /// An operator paused the run; iteration count and progress are
+    /// checkpointed so a later start resumes rather than restarts.
+    Paused,
     /// The goal reached `Completed`/`Cancelled` (or 100% progress); loop ended.
     Finished,
     /// The iteration cap was hit before the goal completed.
@@ -204,6 +211,7 @@ impl std::fmt::Display for GoalRunPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GoalRunPhase::Running => write!(f, "running"),
+            GoalRunPhase::Paused => write!(f, "paused"),
             GoalRunPhase::Finished => write!(f, "finished"),
             GoalRunPhase::MaxIterationsReached => write!(f, "max_iterations_reached"),
             GoalRunPhase::RateLimited => write!(f, "rate_limited"),
@@ -215,6 +223,22 @@ impl std::fmt::Display for GoalRunPhase {
 /// Default per-run iteration cap when a start request omits one. Bounds a
 /// long-horizon run so a goal the agent never marks done cannot loop forever.
 pub const DEFAULT_GOAL_MAX_ITERATIONS: u32 = 25;
+
+/// Default pause between loop iterations when a goal has no
+/// `tick_interval_secs` override. Short — the agent turn itself dominates
+/// wall-clock; this just yields and lets shutdown / stop / pause signals be
+/// observed promptly.
+pub const DEFAULT_GOAL_TICK_INTERVAL_SECS: u64 = 2;
+
+/// Minimum accepted `tick_interval_secs`. 1, not 0: a zero-second cadence
+/// removes the only gap between consecutive provider calls, turning a run
+/// into a tight loop billing tokens as fast as the provider answers.
+pub const MIN_GOAL_TICK_INTERVAL_SECS: u64 = 1;
+
+/// Maximum accepted `tick_interval_secs`, matching cron's own scheduling
+/// ceiling so the two recurring-work surfaces agree on how far apart
+/// repetitions may sit.
+pub const MAX_GOAL_TICK_INTERVAL_SECS: u64 = 86400;
 
 /// Observable state of a goal's autonomous run, surfaced via the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +281,7 @@ mod tests {
             status: GoalStatus::Pending,
             progress: 0,
             agent_id: None,
+            tick_interval_secs: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

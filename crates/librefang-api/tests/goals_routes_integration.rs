@@ -1092,6 +1092,208 @@ async fn goal_run_start_then_stop_with_agent() {
     assert_eq!(stop2["stopped"].as_bool(), Some(false));
 }
 
+// ---------------------------------------------------------------------------
+// Pause / resume — suspending a run without losing it
+// ---------------------------------------------------------------------------
+
+/// `/pause` must be reachable and signal the live run. Before this route
+/// existed, `/stop` was the only way to halt a goal and it deleted the run's
+/// durable checkpoint, so "pause" was only expressible as "start over".
+///
+/// Does not wait for the loop to actually reach the `paused` phase: pause is
+/// cooperative (the loop finishes its current turn before checkpointing), and
+/// that turn is a real agent send against an agent id with no manifest —
+/// mirrors `goal_run_start_then_stop_with_agent`'s use of `stop()`'s hard
+/// abort for the same reason. `GoalRunner::pause` / the checkpoint mechanics
+/// are covered directly, with a fake `send_message`, by the
+/// `goal_runner::tests` pause/resume suite.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_pause_signals_a_live_run() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Pausable", "agent_id": agent}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/start"), None).await;
+    assert_eq!(status, StatusCode::OK, "start failed: {body:?}");
+
+    let (ps, pause) = json_request(&h, Method::POST, &format!("/api/goals/{id}/pause"), None).await;
+    assert_eq!(ps, StatusCode::OK);
+    assert_eq!(pause["paused"].as_bool(), Some(true));
+
+    // Clean up the live loop.
+    json_request(&h, Method::POST, &format!("/api/goals/{id}/stop"), None).await;
+}
+
+/// Pausing an idle goal is reported, not invented — mirrors `/stop`'s shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_pause_on_an_idle_goal_reports_false() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Idle"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/pause"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["paused"].as_bool(), Some(false));
+}
+
+/// `/resume` refuses when there is no checkpoint. Without this guard resume
+/// would silently restart the goal from iteration 0 — precisely the surprise
+/// the pause/cancel split exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_resume_without_a_paused_run_is_a_conflict() {
+    let h = boot().await;
+    let agent = "11111111-1111-1111-1111-111111111111";
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Nothing to resume", "agent_id": agent}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, body) =
+        json_request(&h, Method::POST, &format!("/api/goals/{id}/resume"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body:?}");
+    assert!(body["error"].as_str().unwrap_or_default().contains("start"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_run_pause_and_resume_reject_a_malformed_id() {
+    let h = boot().await;
+    for route in ["pause", "resume"] {
+        let (status, _) = json_request(
+            &h,
+            Method::POST,
+            &format!("/api/goals/not-a-uuid/{route}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "route: {route}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configurable cadence
+// ---------------------------------------------------------------------------
+
+/// The cadence survives the create → read round-trip, so a goal's own
+/// document is what drives the loop rather than a hard-wired constant.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_create_persists_a_tick_interval() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Slow burn", "tick_interval_secs": 900}),
+    )
+    .await;
+    assert_eq!(goal["tick_interval_secs"].as_u64(), Some(900));
+
+    let id = goal["id"].as_str().unwrap().to_string();
+    let (status, fetched) = json_request(&h, Method::GET, &format!("/api/goals/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["tick_interval_secs"].as_u64(), Some(900));
+}
+
+/// A goal created without the field keeps it absent, so existing documents
+/// and clients that never send it are untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_create_without_a_tick_interval_omits_the_field() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Default cadence"})).await;
+    assert!(goal.get("tick_interval_secs").is_none());
+}
+
+/// Zero is refused rather than silently clamped: an operator who asks for a
+/// gapless loop should be told, not quietly given a different number.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_create_rejects_an_out_of_range_tick_interval() {
+    let h = boot().await;
+    for bad in [serde_json::json!(0), serde_json::json!(86_401)] {
+        let (status, body) = json_request(
+            &h,
+            Method::POST,
+            "/api/goals",
+            Some(serde_json::json!({"title": "Bad cadence", "tick_interval_secs": bad})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "value {bad}: {body:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_update_rejects_an_out_of_range_tick_interval() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Retune me"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, _) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"tick_interval_secs": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// `null` clears the override back to the default cadence.
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_update_can_set_and_clear_the_tick_interval() {
+    let h = boot().await;
+    let goal = create_goal(&h, serde_json::json!({"title": "Retune me"})).await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, updated) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"tick_interval_secs": 30})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["tick_interval_secs"].as_u64(), Some(30));
+
+    let (status, cleared) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"tick_interval_secs": null})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cleared.get("tick_interval_secs").is_none());
+}
+
+/// A blank string clears the cadence override exactly as `null` does — a
+/// cleared number input submits `""`, so this must not answer 400 the way a
+/// genuinely malformed value does (#6562's clear-signal rule, applied here).
+#[tokio::test(flavor = "multi_thread")]
+async fn goal_update_clears_the_tick_interval_with_a_blank_string() {
+    let h = boot().await;
+    let goal = create_goal(
+        &h,
+        serde_json::json!({"title": "Retune me", "tick_interval_secs": 30}),
+    )
+    .await;
+    let id = goal["id"].as_str().unwrap().to_string();
+
+    let (status, cleared) = json_request(
+        &h,
+        Method::PUT,
+        &format!("/api/goals/{id}"),
+        Some(serde_json::json!({"tick_interval_secs": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "blank string: {cleared:?}");
+    assert!(cleared.get("tick_interval_secs").is_none());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_goal_stops_its_active_run() {
     let h = boot().await;

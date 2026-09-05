@@ -1,0 +1,2 @@
+The Goals page gains pause and resume controls for the autonomous goal run: a pause button next to stop while the run is active, and a resume button (with stop) while the run sits at its checkpoint.
+The controls call the new `POST /api/goals/{id}/pause` and `/api/goals/{id}/resume` endpoints, pause stays a run-level phase rather than a goal status, and the badge and progress display keep deriving from the run phase (#8029) (@DaBlitzStein)
