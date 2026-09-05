@@ -27,14 +27,13 @@
 //!   /api/memory/items/{id}` against the default store return 5xx with a
 //!   JSON `error` field — pinning that they emit JSON, not a panic / empty
 //!   body, which is exactly the regression class #3571 calls out.
+//! - `GET /api/memory/items/{memory_id}/history` against that same store: 400 for a malformed id, 404 for a well-formed id that matches no row, and 403 when the caller's namespace ACL excludes `proactive`.
 //!
 //! Out of scope (skipped, with reason):
-//! - Endpoints that require an actual `ProactiveMemoryStore` populated with
-//!   data (search-by-content, history, consolidate, export/import, relations,
-//!   duplicates, decay/cleanup side effects). The default kernel boot leaves
-//!   `proactive_memory_store()` as `None`; surfacing a real store requires
-//!   embedding-provider config that pulls in network dependencies. Covered
-//!   by unit tests inside `librefang-memory` instead.
+//! - Endpoints whose behaviour only becomes observable once the store holds rows: search-by-content, consolidate, export/import, relations, duplicates, decay/cleanup side effects.
+//!   The store itself is real in this harness — `proactive_memory.enabled`, `auto_retrieve` and `auto_memorize` all default to `true`, so `LibreFangKernel::boot_with_config` surfaces a live `proactive_memory_store()`, which is what `get_memory_returns_empty_list_with_documented_shape` pins by asserting `proactive_enabled: true`.
+//!   It just boots empty, and filling it over HTTP needs the embedding / extraction provider the test kernel has no credentials for.
+//!   Covered by unit tests inside `librefang-memory` instead.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -1315,5 +1314,126 @@ async fn min_similarity_is_visible_in_the_memory_config_surface() {
     assert!(
         (reported - 0.3).abs() < 1e-6,
         "the configured floor must be reported verbatim, got {reported}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/items/{memory_id}/history — status codes and the namespace gate
+// ---------------------------------------------------------------------------
+
+fn get_with_bearer(path: &str, key: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// A path segment that is not a UUID is a client mistake, so it must read as one.
+/// `ProactiveMemoryStore::history` used to report the parse failure as `LibreFangError::Internal`, which the route's error mapping collapses to `500 Internal server error` — hiding the actual problem from the caller and writing an `ERROR` line into the operator's log for every mistyped id.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_history_answers_400_for_a_malformed_memory_id() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory/items/not-a-uuid/history"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-UUID memory id is the caller's mistake, not a server fault"
+    );
+    let body = read_json(resp).await;
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.to_lowercase().contains("memory_id"),
+        "the 400 body must name the offending parameter, got: {body}"
+    );
+}
+
+/// A well-formed id that matches no row is absence — the same 404 the sibling `PUT` / `DELETE` on `/api/memory/items/{memory_id}` return.
+/// It used to be a 500, so a client polling a memory it had just deleted could not tell "gone" apart from "the daemon is broken".
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_history_answers_404_for_an_unknown_memory_id() {
+    let harness = boot_router_with_api_key(TEST_KEY).await;
+
+    let unknown = uuid::Uuid::new_v4();
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get(&format!("/api/memory/items/{unknown}/history")))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "an id that matches no memory must 404, matching PUT/DELETE on the same path"
+    );
+    let body = read_json(resp).await;
+    assert!(body.get("error").is_some(), "missing error field: {body}");
+}
+
+/// The history route was the one proactive-memory read that built no `MemoryNamespaceGuard`, so a user whose ACL excludes the `proactive` namespace was refused by `GET /api/memory` and served by this route — with no `PermissionDenied` audit row for the read that should have been denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_history_denies_a_caller_whose_acl_excludes_the_proactive_namespace() {
+    const RESTRICTED_KEY: &str = "restricted-memory-user-key";
+
+    let harness = boot_router_with_config(TEST_KEY, |config| {
+        let hash = librefang_api::password_hash::hash_password(RESTRICTED_KEY)
+            .expect("hash the restricted user's key");
+        config.users = vec![librefang_types::config::UserConfig {
+            name: "Restricted".to_string(),
+            role: "user".to_string(),
+            api_key_hash: Some(hash),
+            // Explicitly configured (non-empty readable list), so this ACL is used verbatim rather than falling back to the role default.
+            memory_access: Some(librefang_types::user_policy::UserMemoryAccess {
+                readable_namespaces: vec!["kv:*".to_string()],
+                writable_namespaces: vec![],
+                pii_access: false,
+                export_allowed: false,
+                delete_allowed: false,
+            }),
+            ..Default::default()
+        }];
+    })
+    .await;
+
+    // The sibling read this route must agree with.
+    let listing = harness
+        .app
+        .clone()
+        .oneshot(get_with_bearer("/api/memory", RESTRICTED_KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.status(),
+        StatusCode::FORBIDDEN,
+        "precondition: the ACL must deny the proactive namespace on the listing route"
+    );
+
+    let memory_id = uuid::Uuid::new_v4();
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(get_with_bearer(
+            &format!("/api/memory/items/{memory_id}/history"),
+            RESTRICTED_KEY,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "prior versions are memory content; the history route must apply the same namespace gate"
+    );
+    let body = read_json(resp).await;
+    let err = body["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("proactive"),
+        "the denial must name the namespace that was refused, got: {body}"
     );
 }

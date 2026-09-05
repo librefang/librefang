@@ -1,0 +1,4 @@
+Stop the nightly memory consolidation sweep from merging memories that belong to different peers, chats or sessions of the same agent.
+Merge candidates were partitioned by `agent_id` alone, but one agent serves many users (`peer_id`), many chats (the #5227 `chat_scope` stamp) and many sessions (the #7605 `session_scope` stamp), and every read path filters on all three — so two rows that no single reader can ever see together were judged duplicates.
+The consequences were silent in both directions: the lower-confidence row was soft-deleted, permanently removing the fact from the peer, chat or session that stored it, and the metadata union handed the survivor the loser's scope stamps, hiding a previously scope-agnostic memory from its own reads.
+Candidates are now grouped by peer and by both scope stamps as well as by agent, and rows that agree on all of them still merge as before (#8196) (@houko)

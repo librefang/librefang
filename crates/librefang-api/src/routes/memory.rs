@@ -1217,6 +1217,7 @@ pub async fn memory_duplicates(
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(memory_id): Path<String>,
 ) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1224,8 +1225,18 @@ pub async fn memory_history(
         Err(e) => return e,
     };
 
+    // Prior versions of a memory are memory content, so this read takes the same `proactive` namespace gate as every sibling read.
+    // It was the one memory read that built no guard at all: a caller whose ACL excludes `proactive` was answered 200 here and 403 on `GET /api/memory`, and the denial that never happened left no `PermissionDenied` audit row either.
+    let user_ref = api_user.as_ref().map(|e| &e.0);
+    let guard = guard_for_user(&state, user_ref);
+    if let librefang_memory::namespace_acl::NamespaceGate::Deny(reason) =
+        guard.check_read("proactive")
+    {
+        return auth_denied_for(&state, user_ref, reason);
+    }
+
     match store.history(&memory_id) {
-        Ok(history) => {
+        Ok(Some(history)) => {
             let count = history.len();
             (
                 StatusCode::OK,
@@ -1236,6 +1247,9 @@ pub async fn memory_history(
                 })),
             )
         }
+        // Absent memory → 404, matching the sibling PUT / DELETE on the same id.
+        // A malformed id arrives as `InvalidInput` and `internal_error` maps it to 400; neither is a server fault worth a 500 and an ERROR log line.
+        Ok(None) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
         Err(e) => internal_error(e),
     }
 }

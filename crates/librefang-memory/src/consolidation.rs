@@ -5,7 +5,9 @@
 
 use chrono::Utc;
 use librefang_types::error::{LibreFangError, LibreFangResult};
-use librefang_types::memory::{text_similarity, ConsolidationReport};
+use librefang_types::memory::{
+    text_similarity, ConsolidationReport, CHAT_SCOPE_METADATA_KEY, SESSION_SCOPE_METADATA_KEY,
+};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
@@ -113,6 +115,11 @@ impl ConsolidationEngine {
         // that belong to different agents must never be compared or merged, even
         // when the global consolidation sweep runs across the shared database.
         //
+        // `agent_id` alone is not the whole tenant, though.
+        // One agent serves many peers (`memories.peer_id`, v16), many chats (the #5227 `chat_scope` metadata stamp) and many sessions (the #7605 `session_scope` stamp), and every read path hard-filters on all three.
+        // Merging across any of them destroys availability in both directions: the lower-confidence row is soft-deleted, so the peer / chat / session it belonged to loses the fact outright with no read path left that can reach it, and `merge_metadata_json` unions loser-only keys into the keeper, so a keeper written through an unstamped path (dashboard, REST) inherits the loser's stamps and vanishes from its own reads as well.
+        // A pair therefore only becomes a merge candidate when it agrees on all three — that is what [`TenantKey`] captures.
+        //
         // Two independent caps bound the cost of this phase:
         //   - MAX_CANDIDATES_PER_AGENT bounds the *input* — the per-agent SELECT
         //     is `LIMIT`ed, so the O(N²) similarity loop and the resident row
@@ -167,7 +174,7 @@ impl ConsolidationEngine {
             // confidence-weight embeddings before soft-deleting.
             let mut stmt = outer_tx
                 .prepare(
-                    "SELECT id, content, confidence, metadata, access_count, embedding \
+                    "SELECT id, content, confidence, metadata, access_count, embedding, peer_id \
                      FROM memories \
                      WHERE deleted = 0 AND agent_id = ?1 \
                      ORDER BY confidence DESC \
@@ -176,7 +183,15 @@ impl ConsolidationEngine {
                 .map_err(LibreFangError::memory)?;
 
             #[allow(clippy::type_complexity)]
-            let mut rows: Vec<(String, String, f64, String, i64, Option<Vec<u8>>)> = stmt
+            let mut rows: Vec<(
+                String,
+                String,
+                f64,
+                String,
+                i64,
+                Option<Vec<u8>>,
+                Option<String>,
+            )> = stmt
                 .query_map(
                     rusqlite::params![agent_id, MAX_CANDIDATES_PER_AGENT],
                     |row| {
@@ -187,6 +202,7 @@ impl ConsolidationEngine {
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
                             row.get::<_, Option<Vec<u8>>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     },
                 )
@@ -198,6 +214,12 @@ impl ConsolidationEngine {
             // and `text_similarity` lowercases its inputs on every call —
             // doing it up front collapses N² lowercase allocations to N.
             let lowered: Vec<String> = rows.iter().map(|r| r.1.to_lowercase()).collect();
+            // Same reasoning for the tenant key: parsing the metadata JSON is O(N) up front instead of O(N²) inside the comparison loop.
+            // A merge only ever unifies rows whose keys are equal, so the keeper's key is unchanged by `merge_metadata_json` and these stay valid as `rows` is mutated below.
+            let tenants: Vec<TenantKey> = rows
+                .iter()
+                .map(|r| TenantKey::from_row(r.6.as_deref(), &r.3))
+                .collect();
 
             // Track which row indices have been absorbed into a keeper.
             // Keyed by `usize` (row index in `rows`) rather than memory
@@ -219,6 +241,11 @@ impl ConsolidationEngine {
                 }
                 for j in (i + 1)..rows.len() {
                     if absorbed.contains(&j) {
+                        continue;
+                    }
+                    // Different peer, chat or session → different tenant, not a duplicate.
+                    // Skipping the pair is the whole fix: without it one tenant's row is soft-deleted beyond the reach of any read path, and the survivor inherits the loser's scope stamps.
+                    if tenants[i] != tenants[j] {
                         continue;
                     }
                     let sim = text_similarity(&lowered[i], &lowered[j]);
@@ -327,6 +354,43 @@ impl ConsolidationEngine {
             memories_decayed: decayed as u64,
             duration_ms,
         })
+    }
+}
+
+/// The isolation axes a merge must not cross, read off one `memories` row.
+///
+/// `peer_id` is a column; `chat_scope` (#5227) and `session_scope` (#7605) are metadata stamps.
+/// All three are enforced by every read path — `peer_id` as a SQL predicate, the two stamps by `memory_scope_allows_recall` / `memory_session_scope_allows_recall` — so two rows that disagree on any of them are never both visible to the same reader and cannot be duplicates of each other.
+///
+/// Absent, empty and whitespace-only stamps all normalise to `None`, matching the "untagged means scope-agnostic" reading the recall filters use.
+/// That makes an unstamped row its own tenant rather than a wildcard: it is visible everywhere, so folding a stamped row into it would delete the stamped copy, and folding it into a stamped row would restrict a fact that was deliberately global.
+#[derive(Debug, PartialEq, Eq)]
+struct TenantKey {
+    peer_id: Option<String>,
+    chat_scope: Option<String>,
+    session_scope: Option<String>,
+}
+
+impl TenantKey {
+    fn from_row(peer_id: Option<&str>, metadata: &str) -> Self {
+        let parsed = serde_json::from_str::<serde_json::Value>(metadata).ok();
+        let stamp = |key: &str| -> Option<String> {
+            parsed
+                .as_ref()
+                .and_then(|v| v.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            peer_id: peer_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            chat_scope: stamp(CHAT_SCOPE_METADATA_KEY),
+            session_scope: stamp(SESSION_SCOPE_METADATA_KEY),
+        }
     }
 }
 
@@ -699,6 +763,177 @@ mod tests {
         // Both memories from different agents must survive intact.
         assert!(!is_deleted(&conn, "agent-a-mem"));
         assert!(!is_deleted(&conn, "agent-b-mem"));
+    }
+
+    /// Helper: insert one `agent-1` memory with an explicit `peer_id` and metadata blob, for the tenant-isolation tests below.
+    fn insert_memory_scoped(
+        conn: &Connection,
+        id: &str,
+        content: &str,
+        confidence: f64,
+        peer_id: Option<&str>,
+        metadata: &str,
+    ) {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted, peer_id)
+             VALUES (?1, 'agent-1', ?2, '\"conversation\"', 'episodic', ?3, ?4, ?5, ?5, 0, 0, ?6)",
+            rusqlite::params![id, content, confidence, metadata, now, peer_id],
+        ).unwrap();
+    }
+
+    /// Helper: read a memory's stored metadata JSON back.
+    fn metadata_of(conn: &Connection, id: &str) -> serde_json::Value {
+        let raw: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    /// One agent serving two peers: identical content from peer A and peer B is not a duplicate, because no read path can ever see both rows — `SemanticStore::recall` filters `peer_id = ?`.
+    /// Before the fix the candidate SELECT partitioned on `agent_id` alone, so the two rows landed in the same comparison batch and the lower-confidence peer's row was soft-deleted, permanently removing the fact from that peer's recalls.
+    #[test]
+    fn test_no_cross_peer_merge() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory_scoped(
+                &conn,
+                "peer-a-mem",
+                "prefers morning appointments",
+                0.7,
+                Some("peer-a"),
+                "{}",
+            );
+            insert_memory_scoped(
+                &conn,
+                "peer-b-mem",
+                "prefers morning appointments",
+                0.9,
+                Some("peer-b"),
+                "{}",
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(
+            report.memories_merged, 0,
+            "two peers of the same agent are two tenants, not duplicates"
+        );
+
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(
+            !is_deleted(&conn, "peer-a-mem"),
+            "peer A's row was soft-deleted; no recall path can reach it again"
+        );
+        assert!(!is_deleted(&conn, "peer-b-mem"));
+    }
+
+    /// Same isolation argument for the #5227 `chat_scope` stamp: a DM row and a group row are never both visible to one reader, so merging them costs the losing chat the fact.
+    #[test]
+    fn test_no_cross_chat_scope_merge() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory_scoped(
+                &conn,
+                "dm-mem",
+                "the deadline is friday",
+                0.7,
+                Some("peer-a"),
+                r#"{"chat_scope":"telegram:dm-7777"}"#,
+            );
+            insert_memory_scoped(
+                &conn,
+                "group-mem",
+                "the deadline is friday",
+                0.9,
+                Some("peer-a"),
+                r#"{"chat_scope":"telegram:group--999"}"#,
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 0);
+
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "dm-mem"));
+        assert!(!is_deleted(&conn, "group-mem"));
+    }
+
+    /// The asymmetric case, which is the one that rewrites the survivor: an unstamped keeper (written through the dashboard / REST, hence session-agnostic) absorbing a `session_scope`-stamped loser used to inherit that stamp through the metadata union, so the merged row stopped being visible to the keeper's own reads as well.
+    /// Treating "no stamp" as its own tenant keeps both rows and leaves the keeper agnostic.
+    #[test]
+    fn test_no_merge_between_stamped_and_unstamped_session_rows() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            insert_memory_scoped(
+                &conn,
+                "agnostic-mem",
+                "customer code is pine-77",
+                0.9,
+                None,
+                "{}",
+            );
+            insert_memory_scoped(
+                &conn,
+                "session-mem",
+                "customer code is pine-77",
+                0.7,
+                None,
+                r#"{"session_scope":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#,
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 0);
+
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "session-mem"));
+        assert!(
+            metadata_of(&conn, "agnostic-mem")
+                .get("session_scope")
+                .is_none(),
+            "the session-agnostic keeper must not inherit the loser's session stamp"
+        );
+    }
+
+    /// Positive control for the three tests above: rows that agree on peer and on both scope stamps still merge, so the partition did not simply switch consolidation off.
+    #[test]
+    fn test_same_tenant_still_merges() {
+        let engine = setup();
+        {
+            let conn = engine.pool.get().expect("consolidation pool get");
+            let meta = r#"{"chat_scope":"telegram:dm-7777","session_scope":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}"#;
+            insert_memory_scoped(
+                &conn,
+                "keeper-mem",
+                "prefers morning appointments",
+                0.9,
+                Some("peer-a"),
+                meta,
+            );
+            insert_memory_scoped(
+                &conn,
+                "loser-mem",
+                "prefers morning appointments",
+                0.7,
+                Some("peer-a"),
+                meta,
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 1);
+
+        let conn = engine.pool.get().expect("consolidation pool get");
+        assert!(!is_deleted(&conn, "keeper-mem"));
+        assert!(is_deleted(&conn, "loser-mem"));
     }
 
     /// Helper: insert with explicit metadata, access_count, and embedding.
