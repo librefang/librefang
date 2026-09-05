@@ -21,8 +21,14 @@ permissions:
 # Two paths with different safety properties share this workflow.
 # The `pull_request_target` path only removes `stale-pr` from the single PR that was pushed to, so it is idempotent and safe to cancel — the newer push repeats the same removal.
 # The `schedule` / `workflow_dispatch` path sweeps up to 100 open PRs and adds or removes a label one PR at a time, so cancelling it mid-flight would leave a partially swept repository; every sweep shares the constant `sweep` group key and is never cancelled, which makes two overlapping cron fires serialise instead of racing.
+#
+# The per-PR key is `github.head_ref` and not `github.event.pull_request.number` (#7837), because in practice the number did not isolate PRs from one another and every `pull_request_target` run landed in one bucket.
+# On 2026-09-04 a single `auto-update-branches` sweep created 33 runs across 33 distinct branches between 15:53:25 and 15:55:47, and 31 of them were cancelled — each new run killing the previous, which is what a shared group key with `cancel-in-progress` does and is impossible if the key varies per PR.
+# The damage was not functional (the label removal is idempotent) but informational: a cancelled run reports its check as failed, so nearly every open PR sat at `mergeStateStatus = UNSTABLE` with `CI Gate` green, and a real failure was indistinguishable from this bookkeeping noise at a glance.
+# `head_ref` is set on `pull_request` / `pull_request_target` and empty elsewhere, so the sweep still falls through to the constant `sweep` key.
+# It is distinct from `github.ref`, which #7837 correctly rejected because `pull_request_target` reports it as a branch of the base repository and would bucket every PR together.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'sweep' }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.pull_request.number || 'sweep' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 jobs:

@@ -17,9 +17,12 @@ permissions:
   contents: read
 
 # Each run re-derives the linked-issue set from the PR body and the PR's current open/closed state, so the newest run converges on the correct `has-pr` labels whatever a cancelled predecessor had applied so far.
-# `pull_request_target` reports `github.ref` as the base branch for every PR, so the group keys on the PR number to stay collision-free across PRs.
+# `pull_request_target` reports `github.ref` as the base branch for every PR, so the group must key on something PR-specific to stay collision-free across PRs.
+#
+# That something is `github.head_ref`, not `github.event.pull_request.number`, which did not isolate PRs in practice: on 2026-09-05 a three-PR merge sweep produced runs on three distinct branches between 13:28:59 and 13:29:09 and cancelled the middle one, and the same shape recurs on every burst of opens or closes.
+# A cancelled run reports its check as failed, which left open PRs sitting at `mergeStateStatus = UNSTABLE` over a bookkeeping label job while `CI Gate` was green.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.pull_request.number || 'reconcile' }}
   cancel-in-progress: true
 
 jobs:
