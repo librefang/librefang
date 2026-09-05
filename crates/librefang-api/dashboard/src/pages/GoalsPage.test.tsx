@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   GoalsPage,
+  GoalRunPhaseBadge,
   buildGoalRows,
   goalStatusBadgeVariant,
   progressForGoalStatus,
@@ -475,5 +476,44 @@ describe("GoalsPage helpers", () => {
     expect(goalStatusBadgeVariant("completed")).toBe("success");
     expect(goalStatusBadgeVariant("in_progress")).toBe("warning");
     expect(goalStatusBadgeVariant("pending")).toBe("default");
+  });
+});
+
+// #8067 review: the badge must reuse the already-translated `goals.run_phase_*`
+// keys, and an unknown phase must render honestly rather than as a confident "Stopped".
+describe("GoalRunPhaseBadge", () => {
+  const API_PHASES = [
+    "running",
+    "finished",
+    "max_iterations_reached",
+    "rate_limited",
+    "stopped",
+  ] as const;
+
+  it("renders each API-emittable phase from the existing translated goals.run_phase_* keys", () => {
+    render(
+      <div>
+        {API_PHASES.map((phase) => (
+          <GoalRunPhaseBadge key={phase} phase={phase} iteration={1} maxIterations={5} />
+        ))}
+      </div>,
+    );
+
+    for (const phase of API_PHASES) {
+      expect(
+        screen.getByText(
+          `goals.run_phase_${phase}:{"defaultValue":"${phase.replace(/_/g, " ")}"}`,
+        ),
+      ).toBeInTheDocument();
+    }
+    // The parallel English-only `goals.phase_*` set from the first push is gone.
+    expect(screen.queryByText(/goals\.phase_/)).not.toBeInTheDocument();
+  });
+
+  it("renders an unknown phase as the raw value under the neutral variant, not a confident Stopped", () => {
+    // "paused" is the phase #7973 will add later — the unknown-phase case the review said fires first.
+    render(<GoalRunPhaseBadge phase="paused" iteration={0} maxIterations={5} />);
+    expect(screen.getByText("paused")).toBeInTheDocument();
+    expect(screen.queryByText(/goals\.run_phase_stopped/)).not.toBeInTheDocument();
   });
 });

@@ -1,0 +1,2 @@
+The Goals page displays the autonomous goal run phase as a badge next to the play/stop controls, for the active run and for runs in a terminal state (finished, max-iterations, rate-limited, stopped).
+Each phase renders from the existing translated `goals.run_phase_*` keys, and a phase the build does not know renders the raw value under the neutral badge variant rather than a confident "Stopped" (#8067) (@DaBlitzStein)

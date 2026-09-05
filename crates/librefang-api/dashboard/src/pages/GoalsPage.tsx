@@ -17,7 +17,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -162,6 +162,30 @@ function GoalRunInfo({ goal }: { goal: GoalItem }) {
   );
 }
 
+const RUN_PHASE_CONFIG: Record<string, { variant: "success" | "warning" | "error" | "info" | "default"; icon?: React.ComponentType<{ className?: string }>; labelKey?: string }> = {
+  running: { variant: "success", icon: Play, labelKey: "goals.run_phase_running" },
+  finished: { variant: "info", icon: CheckCircle2, labelKey: "goals.run_phase_finished" },
+  max_iterations_reached: { variant: "warning", icon: Zap, labelKey: "goals.run_phase_max_iterations_reached" },
+  rate_limited: { variant: "error", icon: AlertTriangle, labelKey: "goals.run_phase_rate_limited" },
+  stopped: { variant: "default", icon: Ban, labelKey: "goals.run_phase_stopped" },
+};
+
+// `phase` stays `string` (not the wire union) so an out-of-union value still reaches the fallback branch.
+export function GoalRunPhaseBadge({ phase, iteration, maxIterations }: { phase: string; iteration: number; maxIterations: number }) {
+  const { t } = useTranslation();
+  const cfg = RUN_PHASE_CONFIG[phase] ?? {};
+  const Icon = cfg.icon;
+  return (
+    <Badge variant={cfg.variant ?? "default"} dot>
+      {Icon && <Icon className="h-3 w-3 mr-0.5 inline-block" />}
+      {cfg.labelKey
+        ? t(cfg.labelKey, { defaultValue: phase.replace(/_/g, " ") })
+        : phase.replace(/_/g, " ")}
+      {phase === "running" && <span className="ml-1 font-mono text-[10px]">{iteration}/{maxIterations}</span>}
+    </Badge>
+  );
+}
+
 /**
  * Start / stop the autonomous long-horizon run for a single goal (#5744).
  * Only meaningful when the goal has an agent assigned — without one there is
@@ -207,42 +231,49 @@ function GoalRunControl({ goal }: { goal: GoalItem }) {
     }
   };
 
-  if (isRunning) {
+  if (isRunning && run) {
     return (
-      <button
-        type="button"
-        onClick={() => void onStop()}
-        disabled={stopMutation.isPending}
-        className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
-        title={
-          run
-            ? t("goals.run_active", { iteration: run.iteration, max: run.max_iterations })
-            : t("goals.run_stop")
-        }
-      >
-        {stopMutation.isPending ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Square className="h-3.5 w-3.5" />
-        )}
-      </button>
+      <>
+        <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
+        <button
+          type="button"
+          onClick={() => void onStop()}
+          disabled={stopMutation.isPending}
+          className="p-1.5 rounded-lg hover:bg-warning/10 text-warning transition-colors"
+          title={t("goals.run_stop")}
+        >
+          {stopMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Square className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </>
     );
   }
 
+  // Show phase badge for non-running terminal states too (finished, stopped, etc.)
+  const showTerminalBadge = run && run.phase !== "running";
+
   return (
-    <button
-      type="button"
-      onClick={() => void onStart()}
-      disabled={startMutation.isPending}
-      className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
-      title={t("goals.run_start")}
-    >
-      {startMutation.isPending ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <Play className="h-3.5 w-3.5" />
+    <>
+      {showTerminalBadge && run && (
+        <GoalRunPhaseBadge phase={run.phase} iteration={run.iteration} maxIterations={run.max_iterations} />
       )}
-    </button>
+      <button
+        type="button"
+        onClick={() => void onStart()}
+        disabled={startMutation.isPending}
+        className="p-1.5 rounded-lg hover:bg-success/10 text-text-dim hover:text-success transition-colors"
+        title={t("goals.run_start")}
+      >
+        {startMutation.isPending ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Play className="h-3.5 w-3.5" />
+        )}
+      </button>
+    </>
   );
 }
 
