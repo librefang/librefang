@@ -1290,7 +1290,16 @@
           "GITHUB_*"
         ],
         "env_passthrough_per_skill": {},
-        "registry_repo": null
+        "registry_repo": null,
+        "promotion": {
+          "api_base_url": null,
+          "fork_owner": null,
+          "base_branch": null,
+          "head_branch_prefix": null,
+          "commit_author_name": null,
+          "commit_author_email": null,
+          "mode": "fork"
+        }
       },
       "allOf": [
         {
@@ -6190,6 +6199,88 @@
         }
       }
     },
+    "RegistryPromotionConfig": {
+      "description": "GitHub-side settings for promoting a skill or an agent type to the registry repository named by `skills.registry_repo`.\n\nThe engine lives in `librefang-skills::registry_pr` and is shared by `POST /api/skills/{name}/propose` and `POST /api/templates/{name}/promote`. Each field is optional and, when unset, reproduces exactly what the flow did before this section existed: `api.github.com`, a fork under whoever owns the token, the fork's own default branch as the PR base, a path-derived head-branch prefix, and no explicit commit author.\n\nThe GitHub token is deliberately *not* configured here. It continues to resolve from the `GITHUB_TOKEN` environment variable and then the vault, so no credential is readable back out of `GET /api/config`.",
+      "type": "object",
+      "properties": {
+        "api_base_url": {
+          "description": "Base URL of the GitHub REST API, without a trailing slash. Defaults to `https://api.github.com`. Set it to something like `https://github.example.com/api/v3` to promote against a GitHub Enterprise Server installation, which the flow could not reach at all while the host was a compiled-in constant.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_branch": {
+          "description": "Branch the pull request targets on the upstream registry, and the branch the head branch is cut from. Defaults to the default branch of the repository being pushed to.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_author_email": {
+          "description": "Email recorded as the commit author and committer. See `commit_author_name` — both are required for either to apply.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_author_name": {
+          "description": "Name recorded as the commit author and committer. Takes effect only together with `commit_author_email`; with either half missing, no author is sent and GitHub attributes the commit to the account that owns the token.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fork_owner": {
+          "description": "Account or organisation the fork is created under. Defaults to the login `GET /user` reports for the token, which is the right answer whenever the fork belongs to the token's owner and the wrong one whenever an organisation owns it. Ignored in `direct_push` mode, where there is no fork.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_branch_prefix": {
+          "description": "First path component of the generated head branch name, which is otherwise `<prefix>/<name>-<timestamp>`. Defaults to `skill` for skill promotions and to the registry directory (`agent-types`, …) for everything else.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "Whether to fork the registry or push to it directly.",
+          "default": "fork",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RegistryPromotionMode"
+            }
+          ]
+        }
+      }
+    },
+    "RegistryPromotionMode": {
+      "description": "How the promotion flow gets a branch onto the registry repository.",
+      "oneOf": [
+        {
+          "description": "Fork the upstream registry under the promoting account, push the branch to that fork, and open a cross-repository pull request. This is what the flow has always done.",
+          "type": "string",
+          "enum": [
+            "fork"
+          ]
+        },
+        {
+          "description": "Push the branch straight to the upstream registry and open a same-repository pull request. Requires the token to carry write access to the registry, and is the mode to pick when the registry is an internal repository nobody is meant to fork.",
+          "type": "string",
+          "enum": [
+            "direct_push"
+          ]
+        }
+      ]
+    },
     "ReloadConfig": {
       "description": "Configuration for config file watching and hot-reload.",
       "type": "object",
@@ -6981,6 +7072,23 @@
           "description": "Whether user-installed skills from the skills directory are loaded. Default: true.",
           "default": true,
           "type": "boolean"
+        },
+        "promotion": {
+          "description": "GitHub-side settings for the promotion flow that `registry_repo` names its target for. Every field defaults to the behaviour the flow had before the section existed, so an installation that omits `[skills.promotion]` entirely is unaffected.",
+          "default": {
+            "api_base_url": null,
+            "fork_owner": null,
+            "base_branch": null,
+            "head_branch_prefix": null,
+            "commit_author_name": null,
+            "commit_author_email": null,
+            "mode": "fork"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RegistryPromotionConfig"
+            }
+          ]
         },
         "registry_repo": {
           "description": "Upstream registry repository, in GitHub `owner/name` form, targeted by the \"Propose to Registry\" actions for skills (`POST /api/skills/{name}/propose`) and agent types (`POST /api/templates/{name}/promote`). When unset the API falls back to the built-in default (`librefang/librefang-registry`). The proposal flow forks this repo under the authenticated GitHub user, pushes the files to a branch, and opens a pull request back upstream.",

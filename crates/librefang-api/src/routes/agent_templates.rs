@@ -834,10 +834,8 @@ pub async fn promote_agent_type(
         }
     };
 
-    let registry_repo = state
-        .kernel
-        .config_snapshot()
-        .skills
+    let skills_config = state.kernel.config_snapshot().skills.clone();
+    let registry_repo = skills_config
         .registry_repo
         .clone()
         .filter(|r| !r.trim().is_empty())
@@ -864,6 +862,7 @@ pub async fn promote_agent_type(
         files: vec![("agent.toml".to_string(), manifest_toml.into_bytes())],
         pr_title: format!("agent-type: contribute `{name}`"),
         pr_body: body,
+        promotion: &skills_config.promotion,
     };
 
     match librefang_skills::registry_pr::propose_files_to_registry(req).await {

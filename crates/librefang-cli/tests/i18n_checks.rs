@@ -381,6 +381,38 @@ fn is_potential_untranslated_literal(lit: &str) -> bool {
 }
 
 #[allow(clippy::while_let_on_iterator)]
+/// True when the literal that follows `collapsed` sits inside a still-open
+/// `tracing` macro invocation, so it is a log message rather than user-facing
+/// output.
+///
+/// A suffix test on `debug!(` only recognises the message-first form. The
+/// structured form puts fields ahead of the message — `debug!(%error, "…")` —
+/// and dropping those fields to satisfy the scanner would make the logs worse,
+/// so match the whole argument list instead: inside the statement the literal
+/// belongs to, take the last log-macro opener and check its parentheses are
+/// still unbalanced where the literal starts.
+///
+/// The search stops at the enclosing statement or block boundary on purpose. A
+/// scan over the whole file prefix would exempt any literal that merely follows
+/// a log call somewhere earlier in the file.
+fn is_inside_log_macro_args(collapsed: &str) -> bool {
+    const LOG_MACRO_OPENERS: &[&str] = &["debug!(", "info!(", "warn!(", "error!(", "trace!("];
+
+    let statement = match collapsed.rfind([';', '{', '}']) {
+        Some(idx) => &collapsed[idx + 1..],
+        None => collapsed,
+    };
+    let Some(args_start) = LOG_MACRO_OPENERS
+        .iter()
+        .filter_map(|opener| statement.rfind(opener).map(|idx| idx + opener.len()))
+        .max()
+    else {
+        return false;
+    };
+    let args = &statement[args_start..];
+    args.matches('(').count() >= args.matches(')').count()
+}
+
 fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, String)> {
     let mut violations = Vec::new();
     let mut chars = content.char_indices().peekable();
@@ -424,7 +456,7 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
             let remaining = &content[idx..];
             if remaining.starts_with("r\"") {
                 chars.next(); // consume '"'
-                while let Some((_, rc)) = chars.next() {
+                for (_, rc) in chars.by_ref() {
                     if rc == '\n' {
                         line_number += 1;
                     }
@@ -435,8 +467,8 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 continue;
             } else if remaining.starts_with("r#") {
                 let mut hashes = 0;
-                let mut temp_chars = chars.clone();
-                while let Some((_, hc)) = temp_chars.next() {
+                let temp_chars = chars.clone();
+                for (_, hc) in temp_chars {
                     if hc == '#' {
                         hashes += 1;
                     } else if hc == '"' {
@@ -633,11 +665,7 @@ fn scan_file_for_untranslated_strings(content: &str) -> Vec<(usize, String, Stri
                 let collapsed: String = prefix.chars().filter(|ch| !ch.is_whitespace()).collect();
                 let is_localized = collapsed.ends_with("i18n::t(")
                     || collapsed.ends_with("i18n::t_args(")
-                    || collapsed.ends_with("debug!(")
-                    || collapsed.ends_with("info!(")
-                    || collapsed.ends_with("warn!(")
-                    || collapsed.ends_with("error!(")
-                    || collapsed.ends_with("trace!(")
+                    || is_inside_log_macro_args(&collapsed)
                     || collapsed.ends_with("about=")
                     || collapsed.ends_with("long_about=")
                     || collapsed.ends_with("help=")

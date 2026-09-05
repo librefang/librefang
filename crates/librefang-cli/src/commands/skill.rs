@@ -9,6 +9,49 @@ use crate::commands::prelude::*;
 // Skill commands
 // ---------------------------------------------------------------------------
 
+/// Resolve the GitHub token for `skill publish`: the environment first, then
+/// the vault.
+///
+/// This mirrors `resolve_github_token` in the API's skills routes
+/// (`crates/librefang-api/src/routes/skills/mod.rs`) so the same machine cannot
+/// promote a skill through the HTTP API and fail to publish one from the CLI.
+/// `GH_TOKEN` stays in the environment tier, where it always was; the vault is
+/// keyed on `GITHUB_TOKEN` only, matching the API.
+///
+/// Reading the vault needs no prompt — `CredentialVault::unlock` resolves its
+/// master key from `LIBREFANG_VAULT_KEY` or the keyring — so a locked or absent
+/// vault is a silent `None` rather than a hang.
+fn resolve_github_token(vault_path: &std::path::Path) -> Option<String> {
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(token) = std::env::var(var) {
+            if !token.trim().is_empty() {
+                return Some(token);
+            }
+        }
+    }
+    github_token_from_vault(vault_path)
+}
+
+/// Read `GITHUB_TOKEN` out of the credential vault, or `None` when the vault
+/// does not exist, cannot be unlocked, or holds no such entry.
+fn github_token_from_vault(vault_path: &std::path::Path) -> Option<String> {
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path.to_path_buf());
+    if !vault.exists() {
+        return None;
+    }
+    if let Err(error) = vault.unlock() {
+        // Not fatal: the caller falls through to the "set a token" message.
+        // Worth a line, though — a vault that holds the token but will not
+        // unlock is indistinguishable from an empty one at the call site.
+        tracing::debug!(%error, "could not unlock the vault while resolving GITHUB_TOKEN");
+        return None;
+    }
+    vault
+        .get("GITHUB_TOKEN")
+        .map(|token| token.to_string())
+        .filter(|token| !token.trim().is_empty())
+}
+
 /// Validate that a skill name from an (untrusted) manifest is safe to use as a
 /// single path component under the skills directory.
 ///
@@ -672,12 +715,10 @@ pub(crate) fn cmd_skill_publish(
         return;
     }
 
-    let token = std::env::var("GITHUB_TOKEN")
-        .or_else(|_| std::env::var("GH_TOKEN"))
-        .unwrap_or_else(|_| {
-            eprintln!("{}", i18n::t("skill-github-token-required"));
-            std::process::exit(1);
-        });
+    let token = resolve_github_token(&librefang_home().join("vault.enc")).unwrap_or_else(|| {
+        eprintln!("{}", i18n::t("skill-github-token-required"));
+        std::process::exit(1);
+    });
 
     let release_notes = format!(
         "{}\n\nSHA256: `{}`\n\nInstall with:\n`librefang skill install {}`",
@@ -1504,7 +1545,102 @@ pub(crate) fn cmd_skill_pending(sub: PendingCommands) {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_skill_name;
+    use super::{github_token_from_vault, resolve_github_token, validate_skill_name};
+
+    /// The token-resolution tests mutate process-wide environment variables,
+    /// so they cannot run alongside each other. A plain mutex keeps them
+    /// serialized without pulling in a test-ordering crate.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Seed a vault at `path` holding `GITHUB_TOKEN`.
+    ///
+    /// init → unlock → set, the same order `cmd_vault_init` / `cmd_vault_set`
+    /// use: `set` refuses on a locked handle and `init` does not unlock.
+    fn seed_vault_with_token(path: &std::path::Path, token: &str) {
+        let mut vault = librefang_extensions::vault::CredentialVault::new(path.to_path_buf());
+        vault.init().expect("vault init");
+        vault.unlock().expect("vault unlock");
+        vault
+            .set(
+                "GITHUB_TOKEN".to_string(),
+                zeroize::Zeroizing::new(token.to_string()),
+            )
+            .expect("vault set");
+    }
+
+    /// The defect this fixes: with neither environment variable set, the CLI
+    /// used to exit 1 while the HTTP routes on the same machine resolved the
+    /// token from the vault.
+    #[test]
+    fn resolves_the_token_from_the_vault_when_the_environment_has_none() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.enc");
+
+        // 32 raw bytes, base64-encoded — LIBREFANG_VAULT_KEY is checked on
+        // its decoded length, not its character count.
+        std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("GH_TOKEN");
+        // Underscore, not `vault-token`: `tests/i18n_checks.rs` treats any
+        // lowercase hyphenated literal whose first segment matches a locale key
+        // prefix as a message id, and `vault-` is one, so the hyphenated
+        // spelling would demand a `vault-token` entry in every locale.
+        seed_vault_with_token(&vault_path, "vault_token");
+
+        assert_eq!(
+            resolve_github_token(&vault_path).as_deref(),
+            Some("vault_token")
+        );
+        std::env::remove_var("LIBREFANG_VAULT_KEY");
+    }
+
+    /// Environment first, vault second — the same order as the API's
+    /// `resolve_github_token`. Reversing it would swap one split for another.
+    #[test]
+    fn the_environment_wins_over_the_vault() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.enc");
+
+        std::env::set_var("LIBREFANG_VAULT_KEY", base64_key());
+        std::env::remove_var("GH_TOKEN");
+        seed_vault_with_token(&vault_path, "vault_token");
+
+        std::env::set_var("GITHUB_TOKEN", "env-token");
+        assert_eq!(
+            resolve_github_token(&vault_path).as_deref(),
+            Some("env-token")
+        );
+
+        // GH_TOKEN stays in the environment tier, ahead of the vault.
+        std::env::remove_var("GITHUB_TOKEN");
+        std::env::set_var("GH_TOKEN", "gh-token");
+        assert_eq!(
+            resolve_github_token(&vault_path).as_deref(),
+            Some("gh-token")
+        );
+
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("LIBREFANG_VAULT_KEY");
+    }
+
+    /// A missing vault is a `None`, not a panic or a prompt — `skill publish`
+    /// on a machine that never ran `librefang vault init` must still reach the
+    /// "set a token" message.
+    #[test]
+    fn a_missing_vault_resolves_to_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            github_token_from_vault(&dir.path().join("absent.enc")),
+            None
+        );
+    }
+
+    fn base64_key() -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+    }
 
     #[test]
     fn validate_skill_name_accepts_plain_names() {

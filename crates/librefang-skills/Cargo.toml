@@ -33,6 +33,7 @@ fs2 = "0.4"
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = "4"
+wiremock = "0.6"
 
 [lints]
 workspace = true

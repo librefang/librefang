@@ -1685,6 +1685,88 @@ pub struct SkillsConfig {
     /// upstream.
     #[serde(default)]
     pub registry_repo: Option<String>,
+    /// GitHub-side settings for the promotion flow that `registry_repo`
+    /// names its target for.
+    /// Every field defaults to the behaviour the flow had before the section
+    /// existed, so an installation that omits `[skills.promotion]` entirely is
+    /// unaffected.
+    #[serde(default)]
+    pub promotion: RegistryPromotionConfig,
+}
+
+/// How the promotion flow gets a branch onto the registry repository.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryPromotionMode {
+    /// Fork the upstream registry under the promoting account, push the
+    /// branch to that fork, and open a cross-repository pull request.
+    /// This is what the flow has always done.
+    #[default]
+    Fork,
+    /// Push the branch straight to the upstream registry and open a
+    /// same-repository pull request.
+    /// Requires the token to carry write access to the registry, and is the
+    /// mode to pick when the registry is an internal repository nobody is
+    /// meant to fork.
+    DirectPush,
+}
+
+/// GitHub-side settings for promoting a skill or an agent type to the
+/// registry repository named by `skills.registry_repo`.
+///
+/// The engine lives in `librefang-skills::registry_pr` and is shared by
+/// `POST /api/skills/{name}/propose` and `POST /api/templates/{name}/promote`.
+/// Each field is optional and, when unset, reproduces exactly what the flow
+/// did before this section existed: `api.github.com`, a fork under whoever
+/// owns the token, the fork's own default branch as the PR base, a
+/// path-derived head-branch prefix, and no explicit commit author.
+///
+/// The GitHub token is deliberately *not* configured here.
+/// It continues to resolve from the `GITHUB_TOKEN` environment variable and
+/// then the vault, so no credential is readable back out of `GET /api/config`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RegistryPromotionConfig {
+    /// Base URL of the GitHub REST API, without a trailing slash.
+    /// Defaults to `https://api.github.com`.
+    /// Set it to something like `https://github.example.com/api/v3` to promote
+    /// against a GitHub Enterprise Server installation, which the flow could
+    /// not reach at all while the host was a compiled-in constant.
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+    /// Account or organisation the fork is created under.
+    /// Defaults to the login `GET /user` reports for the token, which is the
+    /// right answer whenever the fork belongs to the token's owner and the
+    /// wrong one whenever an organisation owns it.
+    /// Ignored in `direct_push` mode, where there is no fork.
+    #[serde(default)]
+    pub fork_owner: Option<String>,
+    /// Branch the pull request targets on the upstream registry, and the
+    /// branch the head branch is cut from.
+    /// Defaults to the default branch of the repository being pushed to.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// First path component of the generated head branch name, which is
+    /// otherwise `<prefix>/<name>-<timestamp>`.
+    /// Defaults to `skill` for skill promotions and to the registry directory
+    /// (`agent-types`, …) for everything else.
+    #[serde(default)]
+    pub head_branch_prefix: Option<String>,
+    /// Name recorded as the commit author and committer.
+    /// Takes effect only together with `commit_author_email`; with either half
+    /// missing, no author is sent and GitHub attributes the commit to the
+    /// account that owns the token.
+    #[serde(default)]
+    pub commit_author_name: Option<String>,
+    /// Email recorded as the commit author and committer.
+    /// See `commit_author_name` — both are required for either to apply.
+    #[serde(default)]
+    pub commit_author_email: Option<String>,
+    /// Whether to fork the registry or push to it directly.
+    #[serde(default)]
+    pub mode: RegistryPromotionMode,
 }
 
 /// Operator-side gate over skill `env_passthrough` requests.
@@ -1756,6 +1838,7 @@ impl Default for SkillsConfig {
             env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
             env_passthrough_per_skill: std::collections::HashMap::new(),
             registry_repo: None,
+            promotion: RegistryPromotionConfig::default(),
         }
     }
 }

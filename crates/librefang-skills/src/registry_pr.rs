@@ -11,6 +11,14 @@
 //! 4. opening a pull request with an auto-generated description (what
 //!    changed, why, version diff) back to the upstream registry.
 //!
+//! Each of those steps takes its GitHub-side settings from
+//! `[skills.promotion]` ([`RegistryPromotionConfig`]): the API base URL, the
+//! owner the fork lands under, the branch the PR targets, the head-branch
+//! prefix, the commit author, and whether to fork at all or push straight to
+//! the registry.
+//! Every setting is optional and reproduces the behaviour above when unset,
+//! so an installation that configures nothing sees no change.
+//!
 //! The whole flow runs against the GitHub REST API with `reqwest` — no
 //! local `git` / `gh` binary is required, so it works from inside the
 //! daemon process and inside containers. Authentication uses a GitHub
@@ -20,6 +28,7 @@
 use crate::evolution::SkillEvolutionMeta;
 use crate::{InstalledSkill, SkillError};
 use base64::Engine as _;
+use librefang_types::config::{RegistryPromotionConfig, RegistryPromotionMode};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -27,8 +36,8 @@ use std::time::Duration;
 /// Default upstream registry repository in `owner/name` form.
 pub const DEFAULT_REGISTRY_REPO: &str = "librefang/librefang-registry";
 
-/// GitHub REST API base URL.
-const GITHUB_API: &str = "https://api.github.com";
+/// GitHub REST API base URL used when `skills.promotion.api_base_url` is unset.
+pub const DEFAULT_GITHUB_API: &str = "https://api.github.com";
 
 /// Maximum size of a single supporting file we will push to the registry,
 /// in bytes. The Contents API base64-inflates payloads ~33%, and large
@@ -43,7 +52,8 @@ pub struct ProposedSkillPr {
     pub pr_url: String,
     /// Upstream repository the PR targets (`owner/name`).
     pub repo: String,
-    /// Head branch created on the fork.
+    /// Head branch created on the fork, or on the upstream repository itself
+    /// under `skills.promotion.mode = "direct_push"`.
     pub branch: String,
 }
 
@@ -67,6 +77,9 @@ pub struct GenericProposeRequest<'a> {
     pub pr_title: String,
     /// PR body (markdown).
     pub pr_body: String,
+    /// GitHub-side settings: API base URL, fork owner, base branch,
+    /// head-branch prefix, commit author, fork-vs-direct-push.
+    pub promotion: &'a RegistryPromotionConfig,
 }
 
 /// Inputs for [`propose_skill_to_registry`].
@@ -80,6 +93,9 @@ pub struct ProposeRequest<'a> {
     pub registry_repo: &'a str,
     /// GitHub token with `repo` scope (fork + push + open PR).
     pub token: &'a str,
+    /// GitHub-side settings: API base URL, fork owner, base branch,
+    /// head-branch prefix, commit author, fork-vs-direct-push.
+    pub promotion: &'a RegistryPromotionConfig,
 }
 
 /// Fork the registry, push the skill files to a branch, and open a PR.
@@ -109,23 +125,18 @@ pub async fn propose_skill_to_registry(
         ));
     }
 
-    let client = RegistryGithubClient::new(req.token.to_string());
+    let client = RegistryGithubClient::new(req.token.to_string(), req.promotion)?;
 
-    // 1. Who are we? The fork lands under this login.
-    let login = client.authenticated_login().await?;
-
-    // 2. Ensure a fork exists under our account (idempotent).
-    let fork_repo = format!("{login}/{}", repo_name(req.registry_repo));
-    client.ensure_fork(req.registry_repo, &fork_repo).await?;
-
-    // 3. Branch off the fork's default branch.
-    let (default_branch, base_sha) = client.fork_default_branch_head(&fork_repo).await?;
-    let branch = format!(
-        "skill/{}-{}",
-        sanitize_branch_component(&name),
-        chrono::Utc::now().format("%Y%m%d%H%M%S")
-    );
-    client.create_branch(&fork_repo, &branch, &base_sha).await?;
+    // 1-3. Resolve where the branch is pushed and what it is cut from —
+    // fork under the configured (or derived) owner, or the upstream repo
+    // itself in direct-push mode.
+    let target = client
+        .resolve_target(req.registry_repo, req.promotion)
+        .await?;
+    let branch = build_head_branch(req.promotion, "skill", &name);
+    client
+        .create_branch(&target.push_repo, &branch, &target.base_sha)
+        .await?;
 
     // 4. Push each skill file under skills/<name>/ on the new branch.
     let files = collect_skill_files(req.skill)?;
@@ -138,7 +149,7 @@ pub async fn propose_skill_to_registry(
         let dest = format!("skills/{name}/{}", file.rel_path);
         client
             .put_file(
-                &fork_repo,
+                &target.push_repo,
                 &branch,
                 &dest,
                 &file.contents,
@@ -150,9 +161,9 @@ pub async fn propose_skill_to_registry(
     // 5. Open the PR upstream.
     let title = format!("skill: contribute `{name}`");
     let body = build_pr_body(req.skill, req.evolution);
-    let head = format!("{login}:{branch}");
+    let head = target.head_ref(&branch);
     let pr_url = client
-        .open_pull_request(req.registry_repo, &default_branch, &head, &title, &body)
+        .open_pull_request(req.registry_repo, &target.base_branch, &head, &title, &body)
         .await?;
 
     Ok(ProposedSkillPr {
@@ -185,33 +196,34 @@ pub async fn propose_files_to_registry(
         )));
     }
 
-    let client = RegistryGithubClient::new(req.token.to_string());
+    let client = RegistryGithubClient::new(req.token.to_string(), req.promotion)?;
 
-    let login = client.authenticated_login().await?;
-    let fork_repo = format!("{login}/{}", repo_name(req.registry_repo));
-    client.ensure_fork(req.registry_repo, &fork_repo).await?;
-
-    let (default_branch, base_sha) = client.fork_default_branch_head(&fork_repo).await?;
-    let branch = format!(
-        "{}/{}-{}",
-        sanitize_branch_component(req.prefix),
-        sanitize_branch_component(req.name),
-        chrono::Utc::now().format("%Y%m%d%H%M%S")
-    );
-    client.create_branch(&fork_repo, &branch, &base_sha).await?;
+    let target = client
+        .resolve_target(req.registry_repo, req.promotion)
+        .await?;
+    let branch = build_head_branch(req.promotion, req.prefix, req.name);
+    client
+        .create_branch(&target.push_repo, &branch, &target.base_sha)
+        .await?;
 
     for (rel_path, contents) in &req.files {
         let dest = format!("{}/{}/{}", req.prefix, req.name, rel_path);
         client
-            .put_file(&fork_repo, &branch, &dest, contents, &format!("Add {dest}"))
+            .put_file(
+                &target.push_repo,
+                &branch,
+                &dest,
+                contents,
+                &format!("Add {dest}"),
+            )
             .await?;
     }
 
-    let head = format!("{login}:{branch}");
+    let head = target.head_ref(&branch);
     let pr_url = client
         .open_pull_request(
             req.registry_repo,
-            &default_branch,
+            &target.base_branch,
             &head,
             &req.pr_title,
             &req.pr_body,
@@ -399,6 +411,76 @@ fn validate_repo_slug(slug: &str) -> Result<(), SkillError> {
     }
 }
 
+/// Reject a configured fork owner that is not a clean GitHub login or
+/// organisation name. It is interpolated into API paths and into the PR's
+/// `head`, so the same characters `validate_repo_slug` allows per segment are
+/// the ones allowed here.
+fn validate_owner(owner: &str) -> Result<(), SkillError> {
+    let ok = !owner.is_empty()
+        && owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if ok {
+        Ok(())
+    } else {
+        Err(SkillError::InvalidManifest(format!(
+            "Invalid skills.promotion.fork_owner '{owner}' (expected a GitHub login or org name)"
+        )))
+    }
+}
+
+/// Reject an API base URL that is not a plain `http`/`https` origin.
+///
+/// The value is the prefix of every request the promotion flow makes with the
+/// GitHub token attached, so a scheme-less or otherwise malformed value must
+/// fail loudly here rather than send the token somewhere unintended.
+fn validate_api_base_url(url: &str) -> Result<(), SkillError> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    let ok = rest.is_some_and(|host_and_path| {
+        !host_and_path.is_empty()
+            && !host_and_path.starts_with('/')
+            && !host_and_path.contains(char::is_whitespace)
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(SkillError::InvalidManifest(format!(
+            "Invalid skills.promotion.api_base_url '{url}' (expected an http(s) URL such as https://github.example.com/api/v3)"
+        )))
+    }
+}
+
+/// Build the `author` / `committer` object sent with every Contents API
+/// write, or `None` when the operator configured neither.
+///
+/// GitHub requires both a name and an email, so a half-configured identity is
+/// dropped with a warning rather than sent as a request GitHub would reject.
+fn resolve_commit_identity(cfg: &RegistryPromotionConfig) -> Option<Value> {
+    let name = cfg
+        .commit_author_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let email = cfg
+        .commit_author_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    match (name, email) {
+        (Some(name), Some(email)) => Some(json!({ "name": name, "email": email })),
+        (None, None) => None,
+        _ => {
+            tracing::warn!(
+                "skills.promotion sets only one of commit_author_name / commit_author_email; \
+                 GitHub requires both, so the commit will be attributed to the token owner"
+            );
+            None
+        }
+    }
+}
+
 fn repo_name(slug: &str) -> &str {
     slug.split('/').next_back().unwrap_or(slug)
 }
@@ -423,17 +505,79 @@ fn sanitize_branch_component(name: &str) -> String {
     }
 }
 
+/// Build the timestamped head branch name, `<prefix>/<name>-<timestamp>`.
+///
+/// `default_prefix` is what the call site used before the setting existed:
+/// the literal `skill` for skill promotions, and the registry directory for
+/// the generic path.
+/// A configured `head_branch_prefix` replaces it.
+fn build_head_branch(cfg: &RegistryPromotionConfig, default_prefix: &str, name: &str) -> String {
+    let prefix = cfg
+        .head_branch_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or(default_prefix);
+    format!(
+        "{}/{}-{}",
+        sanitize_branch_component(prefix),
+        sanitize_branch_component(name),
+        chrono::Utc::now().format("%Y%m%d%H%M%S")
+    )
+}
+
+/// Where one promotion run pushes, and what its pull request targets.
+struct PromotionTarget {
+    /// Repository the head branch and the files are pushed to, `owner/name`.
+    /// The fork in `fork` mode, the upstream registry itself in `direct_push`.
+    push_repo: String,
+    /// Branch the pull request targets upstream, and the branch the head
+    /// branch was cut from.
+    base_branch: String,
+    /// Commit the head branch is cut from.
+    base_sha: String,
+    /// Owner qualifying the `head` field of the pull request. `Some` for a
+    /// cross-repository PR from a fork, `None` when pushing directly.
+    head_owner: Option<String>,
+}
+
+impl PromotionTarget {
+    /// The `head` value GitHub expects: `owner:branch` across repositories,
+    /// a bare branch name within one.
+    fn head_ref(&self, branch: &str) -> String {
+        match &self.head_owner {
+            Some(owner) => format!("{owner}:{branch}"),
+            None => branch.to_string(),
+        }
+    }
+}
+
 // ── GitHub REST client ──────────────────────────────────────────────────
 
 /// Thin GitHub REST wrapper scoped to what the proposal flow needs.
 struct RegistryGithubClient {
     http: reqwest::Client,
     token: String,
+    /// REST API root, no trailing slash. `api.github.com` unless the
+    /// operator points the flow at a GitHub Enterprise installation.
+    api_base: String,
+    /// `{"name": …, "email": …}` sent as both `author` and `committer` on
+    /// every Contents API write, or `None` to let GitHub attribute the
+    /// commit to the account owning the token.
+    commit_identity: Option<Value>,
 }
 
 impl RegistryGithubClient {
-    fn new(token: String) -> Self {
-        Self {
+    fn new(token: String, cfg: &RegistryPromotionConfig) -> Result<Self, SkillError> {
+        let api_base = match cfg.api_base_url.as_deref().map(str::trim) {
+            Some(url) if !url.is_empty() => {
+                validate_api_base_url(url)?;
+                url.trim_end_matches('/').to_string()
+            }
+            _ => DEFAULT_GITHUB_API.to_string(),
+        };
+        let commit_identity = resolve_commit_identity(cfg);
+        Ok(Self {
             // Local timeouts (not on the shared `client_builder` default, which
             // four other callers rely on) so a hung TCP connection to GitHub
             // can't pin the `POST /api/skills/{name}/propose` handler — and a
@@ -445,7 +589,9 @@ impl RegistryGithubClient {
                 .build()
                 .expect("Failed to build HTTP client"),
             token,
-        }
+            api_base,
+            commit_identity,
+        })
     }
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -519,7 +665,8 @@ impl RegistryGithubClient {
     }
 
     async fn authenticated_login(&self) -> Result<String, SkillError> {
-        let user = self.get_json(&format!("{GITHUB_API}/user")).await?;
+        let api = &self.api_base;
+        let user = self.get_json(&format!("{api}/user")).await?;
         user["login"]
             .as_str()
             .map(|s| s.to_string())
@@ -532,20 +679,21 @@ impl RegistryGithubClient {
     /// `fork_repo` already resolves, reuse it; otherwise request a fork
     /// and poll until GitHub finishes creating it.
     async fn ensure_fork(&self, upstream: &str, fork_repo: &str) -> Result<(), SkillError> {
+        let api = &self.api_base;
         if self
-            .get_json(&format!("{GITHUB_API}/repos/{fork_repo}"))
+            .get_json(&format!("{api}/repos/{fork_repo}"))
             .await
             .is_ok()
         {
             return Ok(());
         }
         // Kick off the fork.
-        self.post_json(&format!("{GITHUB_API}/repos/{upstream}/forks"), &json!({}))
+        self.post_json(&format!("{api}/repos/{upstream}/forks"), &json!({}))
             .await?;
         // Fork creation is async on GitHub's side — poll briefly.
         for _ in 0..20 {
             if self
-                .get_json(&format!("{GITHUB_API}/repos/{fork_repo}"))
+                .get_json(&format!("{api}/repos/{fork_repo}"))
                 .await
                 .is_ok()
             {
@@ -558,28 +706,76 @@ impl RegistryGithubClient {
         )))
     }
 
-    /// Return `(default_branch, head_sha)` for the fork.
-    async fn fork_default_branch_head(
+    /// Resolve which repository the head branch is pushed to and which
+    /// branch it is cut from, creating the fork on the way when the mode
+    /// calls for one.
+    ///
+    /// In `fork` mode the push target is `<fork_owner>/<upstream repo name>`,
+    /// with `fork_owner` falling back to the login `GET /user` reports — the
+    /// derivation the flow has always used.
+    /// In `direct_push` mode the push target is the upstream registry itself
+    /// and no fork is requested.
+    async fn resolve_target(
         &self,
-        fork_repo: &str,
-    ) -> Result<(String, String), SkillError> {
-        let repo = self
-            .get_json(&format!("{GITHUB_API}/repos/{fork_repo}"))
+        upstream: &str,
+        cfg: &RegistryPromotionConfig,
+    ) -> Result<PromotionTarget, SkillError> {
+        let (push_repo, head_owner) = match cfg.mode {
+            RegistryPromotionMode::DirectPush => (upstream.to_string(), None),
+            RegistryPromotionMode::Fork => {
+                let owner = match cfg.fork_owner.as_deref().map(str::trim) {
+                    Some(o) if !o.is_empty() => {
+                        validate_owner(o)?;
+                        o.to_string()
+                    }
+                    _ => self.authenticated_login().await?,
+                };
+                let fork_repo = format!("{owner}/{}", repo_name(upstream));
+                self.ensure_fork(upstream, &fork_repo).await?;
+                (fork_repo, Some(owner))
+            }
+        };
+
+        let (base_branch, base_sha) = self
+            .branch_head(&push_repo, cfg.base_branch.as_deref())
             .await?;
-        let default_branch = repo["default_branch"]
-            .as_str()
-            .unwrap_or("main")
-            .to_string();
+        Ok(PromotionTarget {
+            push_repo,
+            base_branch,
+            base_sha,
+            head_owner,
+        })
+    }
+
+    /// Return `(branch, head_sha)` for `repo`, using the configured base
+    /// branch when there is one and the repository's own default branch
+    /// otherwise.
+    async fn branch_head(
+        &self,
+        repo_slug: &str,
+        configured: Option<&str>,
+    ) -> Result<(String, String), SkillError> {
+        let api = &self.api_base;
+        let branch = match configured.map(str::trim) {
+            Some(b) if !b.is_empty() => b.to_string(),
+            _ => {
+                let repo = self.get_json(&format!("{api}/repos/{repo_slug}")).await?;
+                repo["default_branch"]
+                    .as_str()
+                    .unwrap_or("main")
+                    .to_string()
+            }
+        };
         let reference = self
-            .get_json(&format!(
-                "{GITHUB_API}/repos/{fork_repo}/git/ref/heads/{default_branch}"
-            ))
+            .get_json(&format!("{api}/repos/{repo_slug}/git/ref/heads/{branch}"))
             .await?;
         let sha = reference["object"]["sha"]
             .as_str()
-            .ok_or_else(|| SkillError::Network("fork ref missing sha".to_string()))?
+            .ok_or_else(|| {
+                SkillError::Network(format!("ref heads/{branch} on {repo_slug} missing sha"))
+            })?
             .to_string();
-        Ok((default_branch, sha))
+        Ok((branch, sha))
     }
 
     async fn create_branch(
@@ -588,8 +784,9 @@ impl RegistryGithubClient {
         branch: &str,
         base_sha: &str,
     ) -> Result<(), SkillError> {
+        let api = &self.api_base;
         self.post_json(
-            &format!("{GITHUB_API}/repos/{fork_repo}/git/refs"),
+            &format!("{api}/repos/{fork_repo}/git/refs"),
             &json!({ "ref": format!("refs/heads/{branch}"), "sha": base_sha }),
         )
         .await?;
@@ -607,7 +804,8 @@ impl RegistryGithubClient {
         contents: &[u8],
         message: &str,
     ) -> Result<(), SkillError> {
-        let url = format!("{GITHUB_API}/repos/{fork_repo}/contents/{dest_path}");
+        let api = &self.api_base;
+        let url = format!("{api}/repos/{fork_repo}/contents/{dest_path}");
         let existing_sha = self
             .get_json(&format!("{url}?ref={branch}"))
             .await
@@ -623,6 +821,12 @@ impl RegistryGithubClient {
         if let Some(sha) = existing_sha {
             body["sha"] = Value::String(sha);
         }
+        // Without these GitHub credits the commit to whoever owns the token,
+        // which is the wrong identity for a shared or service token.
+        if let Some(identity) = &self.commit_identity {
+            body["author"] = identity.clone();
+            body["committer"] = identity.clone();
+        }
         self.put_json(&url, &body).await?;
         Ok(())
     }
@@ -636,9 +840,10 @@ impl RegistryGithubClient {
         title: &str,
         body: &str,
     ) -> Result<String, SkillError> {
+        let api = &self.api_base;
         let resp = self
             .post_json(
-                &format!("{GITHUB_API}/repos/{upstream}/pulls"),
+                &format!("{api}/repos/{upstream}/pulls"),
                 &json!({
                     "title": title,
                     "head": head,
@@ -661,6 +866,310 @@ mod tests {
     use crate::evolution::SkillVersionEntry;
     use crate::SkillManifest;
     use std::path::PathBuf;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    /// A skill directory with one file, ready to propose.
+    fn staged_skill(dir: &tempfile::TempDir, name: &str) -> InstalledSkill {
+        std::fs::write(dir.path().join("skill.toml"), "[skill]\nname=\"x\"").unwrap();
+        InstalledSkill {
+            manifest: manifest_from(name),
+            path: dir.path().to_path_buf(),
+            enabled: true,
+        }
+    }
+
+    /// Mount the full happy path of a promotion run against a fake GitHub.
+    ///
+    /// Every response is the shape the real API returns for the one field the
+    /// flow reads, so the request recorder is the only thing the tests assert
+    /// on — which is the point: it is the wire, not an internal, that proves a
+    /// configured value actually left the process.
+    async fn mock_github() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "tokenowner"})))
+            .mount(&server)
+            .await;
+        // Contents lookups 404 so `put_file` treats every write as a create.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+/contents/.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+/git/ref/heads/.*"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"object": {"sha": "basesha"}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"default_branch": "trunk"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+/git/refs$"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+/contents/.*"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/repos/[^/]+/[^/]+/pulls$"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({"html_url": "https://example.invalid/pr/1"})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Every request the run made, in order.
+    async fn requests(server: &MockServer) -> Vec<Request> {
+        server.received_requests().await.unwrap()
+    }
+
+    /// The single request matching `method` and a path predicate.
+    fn find<'a>(
+        reqs: &'a [Request],
+        verb: &str,
+        pred: impl Fn(&str) -> bool,
+    ) -> Option<&'a Request> {
+        reqs.iter()
+            .find(|r| r.method.as_str() == verb && pred(r.url.path()))
+    }
+
+    fn body_json(req: &Request) -> Value {
+        serde_json::from_slice(&req.body).expect("request body is JSON")
+    }
+
+    async fn propose_with(cfg: &RegistryPromotionConfig) -> Result<ProposedSkillPr, SkillError> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let skill = staged_skill(&dir, "web-summarizer");
+        let evolution = SkillEvolutionMeta::default();
+        propose_skill_to_registry(ProposeRequest {
+            skill: &skill,
+            evolution: &evolution,
+            registry_repo: "acme/registry",
+            token: "t0ken",
+            promotion: cfg,
+        })
+        .await
+    }
+
+    /// With nothing configured but the API base — which every test must set to
+    /// reach the mock — the run must be byte-for-byte the one the flow made
+    /// before `[skills.promotion]` existed: fork under the login `GET /user`
+    /// reports, base branch taken from that fork, `skill/` head prefix, and no
+    /// commit author.
+    #[tokio::test]
+    async fn defaults_reproduce_the_pre_config_behaviour() {
+        let server = mock_github().await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            ..Default::default()
+        };
+        let pr = propose_with(&cfg).await.expect("proposal succeeds");
+        let reqs = requests(&server).await;
+
+        // The login was derived rather than configured.
+        assert!(find(&reqs, "GET", |p| p == "/user").is_some());
+        // Branch and files landed on the fork under that login.
+        let create = find(&reqs, "POST", |p| p.ends_with("/git/refs")).unwrap();
+        assert_eq!(create.url.path(), "/repos/tokenowner/registry/git/refs");
+        assert!(pr.branch.starts_with("skill/web-summarizer-"));
+        let put = find(&reqs, "PUT", |p| p.contains("/contents/")).unwrap();
+        assert_eq!(
+            put.url.path(),
+            "/repos/tokenowner/registry/contents/skills/web-summarizer/skill.toml"
+        );
+        // No author is sent, so GitHub credits the token owner as before.
+        let body = body_json(put);
+        assert!(body.get("author").is_none(), "unexpected author: {body}");
+        assert!(
+            body.get("committer").is_none(),
+            "unexpected committer: {body}"
+        );
+        // The PR targets the fork's default branch, from a cross-repo head.
+        let pull = find(&reqs, "POST", |p| p.ends_with("/pulls")).unwrap();
+        assert_eq!(pull.url.path(), "/repos/acme/registry/pulls");
+        let body = body_json(pull);
+        assert_eq!(body["base"], "trunk");
+        assert_eq!(body["head"], format!("tokenowner:{}", pr.branch));
+    }
+
+    /// The injection-site test: set every value and prove each one reaches the
+    /// wire. A default of `None` compiles happily while leaving the setting
+    /// dead, so asserting on the request is the only check that means anything.
+    #[tokio::test]
+    async fn every_configured_value_reaches_the_github_request() {
+        let server = mock_github().await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            fork_owner: Some("acme-bots".to_string()),
+            base_branch: Some("release".to_string()),
+            head_branch_prefix: Some("promo".to_string()),
+            commit_author_name: Some("LibreFang Bot".to_string()),
+            commit_author_email: Some("bot@example.invalid".to_string()),
+            mode: RegistryPromotionMode::Fork,
+        };
+        let pr = propose_with(&cfg).await.expect("proposal succeeds");
+        let reqs = requests(&server).await;
+
+        // api_base_url: the mock recorded the run, which it could not have
+        // done had the requests gone to the compiled-in api.github.com — the
+        // call would have failed against the real host long before returning.
+        assert!(
+            !reqs.is_empty(),
+            "no request reached the configured API base"
+        );
+        // And `GET /user` was not needed, because the owner was configured.
+        assert!(find(&reqs, "GET", |p| p == "/user").is_none());
+
+        // fork_owner: the fork, the branch and the files live under it.
+        let create = find(&reqs, "POST", |p| p.ends_with("/git/refs")).unwrap();
+        assert_eq!(create.url.path(), "/repos/acme-bots/registry/git/refs");
+
+        // base_branch: cut from `release`, and the PR targets `release`.
+        assert!(find(&reqs, "GET", |p| p
+            == "/repos/acme-bots/registry/git/ref/heads/release")
+        .is_some());
+        let pull = body_json(find(&reqs, "POST", |p| p.ends_with("/pulls")).unwrap());
+        assert_eq!(pull["base"], "release");
+
+        // head_branch_prefix.
+        assert!(
+            pr.branch.starts_with("promo/web-summarizer-"),
+            "branch was {}",
+            pr.branch
+        );
+        assert_eq!(pull["head"], format!("acme-bots:{}", pr.branch));
+
+        // commit author / committer.
+        let put = body_json(find(&reqs, "PUT", |p| p.contains("/contents/")).unwrap());
+        let expected = json!({"name": "LibreFang Bot", "email": "bot@example.invalid"});
+        assert_eq!(put["author"], expected);
+        assert_eq!(put["committer"], expected);
+    }
+
+    /// `direct_push` skips the fork entirely: the branch is created on the
+    /// upstream registry and the PR head carries no owner prefix.
+    #[tokio::test]
+    async fn direct_push_mode_never_forks() {
+        let server = mock_github().await;
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some(server.uri()),
+            mode: RegistryPromotionMode::DirectPush,
+            ..Default::default()
+        };
+        let pr = propose_with(&cfg).await.expect("proposal succeeds");
+        let reqs = requests(&server).await;
+
+        assert!(
+            find(&reqs, "POST", |p| p.ends_with("/forks")).is_none(),
+            "direct_push must not request a fork"
+        );
+        assert!(find(&reqs, "GET", |p| p == "/user").is_none());
+        let create = find(&reqs, "POST", |p| p.ends_with("/git/refs")).unwrap();
+        assert_eq!(create.url.path(), "/repos/acme/registry/git/refs");
+        let pull = body_json(find(&reqs, "POST", |p| p.ends_with("/pulls")).unwrap());
+        assert_eq!(pull["head"], pr.branch);
+    }
+
+    #[test]
+    fn half_configured_commit_author_is_dropped() {
+        let both = RegistryPromotionConfig {
+            commit_author_name: Some("Bot".to_string()),
+            commit_author_email: Some("bot@example.invalid".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_commit_identity(&both),
+            Some(json!({"name": "Bot", "email": "bot@example.invalid"}))
+        );
+        let name_only = RegistryPromotionConfig {
+            commit_author_name: Some("Bot".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_commit_identity(&name_only), None);
+        let blank = RegistryPromotionConfig {
+            commit_author_name: Some("  ".to_string()),
+            commit_author_email: Some("  ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_commit_identity(&blank), None);
+    }
+
+    /// The GitHub Enterprise shape: the base carries a path prefix, and a
+    /// trailing slash must not double up when the request path is appended.
+    #[test]
+    fn enterprise_api_base_is_stored_verbatim_minus_the_trailing_slash() {
+        let cfg = RegistryPromotionConfig {
+            api_base_url: Some("https://github.example.invalid/api/v3/".to_string()),
+            ..Default::default()
+        };
+        let client = RegistryGithubClient::new("t0ken".to_string(), &cfg).unwrap();
+        assert_eq!(client.api_base, "https://github.example.invalid/api/v3");
+
+        let unset = RegistryGithubClient::new("t0ken".to_string(), &Default::default()).unwrap();
+        assert_eq!(unset.api_base, DEFAULT_GITHUB_API);
+    }
+
+    #[test]
+    fn api_base_url_must_be_an_http_origin() {
+        for good in [
+            "https://api.github.com",
+            "http://localhost:8080",
+            "https://github.example.com/api/v3",
+        ] {
+            assert!(validate_api_base_url(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "api.github.com",
+            "ftp://example.invalid",
+            "https://",
+            "http:///api",
+            "https://exa mple.invalid",
+            "file:///etc/passwd",
+        ] {
+            assert!(validate_api_base_url(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fork_owner_must_be_a_plain_login() {
+        assert!(validate_owner("acme-bots").is_ok());
+        assert!(validate_owner("acme.bots_1").is_ok());
+        for bad in ["", "acme/bots", "../etc", "acme bots", "acme?x=1"] {
+            assert!(validate_owner(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn head_branch_prefix_falls_back_to_the_call_site_default() {
+        let cfg = RegistryPromotionConfig::default();
+        assert!(build_head_branch(&cfg, "agent-types", "helper").starts_with("agent-types/helper-"));
+        let blank = RegistryPromotionConfig {
+            head_branch_prefix: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(build_head_branch(&blank, "skill", "helper").starts_with("skill/helper-"));
+        let set = RegistryPromotionConfig {
+            head_branch_prefix: Some("contrib/x".to_string()),
+            ..Default::default()
+        };
+        assert!(build_head_branch(&set, "skill", "helper").starts_with("contrib-x/helper-"));
+    }
 
     fn manifest_from(name: &str) -> SkillManifest {
         let toml_str = format!(

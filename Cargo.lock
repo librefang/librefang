@@ -5107,6 +5107,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "webpki-roots",
+ "wiremock",
  "zip 8.6.0",
 ]
 
