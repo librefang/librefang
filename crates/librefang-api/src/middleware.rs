@@ -1168,6 +1168,49 @@ fn default_error_code_for_status(status: StatusCode) -> &'static str {
 /// check-json-depth-unused.
 pub const MAX_JSON_BODY_DEPTH: usize = 32;
 
+/// Answer an over-cap upload with a JSON 413 the client can render, and record it in the daemon log.
+///
+/// `RequestBodyLimitLayer` alone cuts the request while the body is still being streamed, which reaches a browser as `NetworkError when attempting to fetch resource` — indistinguishable from an unreachable daemon — and leaves nothing whatsoever in the log, which is why #8181 went unnoticed until someone tried a PDF.
+/// Checking the declared `Content-Length` first lets the daemon refuse before a byte of body arrives, name the cap that was exceeded, and log the attempt.
+///
+/// ponytail: only the declared length is checked. A client that streams without `Content-Length` still meets the limit layer mid-body and gets the framework's bare 413; catching that case means draining the body to keep the connection usable, which is a cost every legitimate upload would pay.
+pub async fn reject_oversized_upload(
+    axum::extract::State(cap_bytes): axum::extract::State<usize>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let declared = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+
+    if let Some(declared) = declared {
+        if declared > cap_bytes as u64 {
+            warn!(
+                declared_bytes = declared,
+                max_upload_size_bytes = cap_bytes,
+                path = %request.uri().path(),
+                "rejecting upload larger than max_upload_size_bytes"
+            );
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "error": "upload exceeds max_upload_size_bytes",
+                        "max_upload_size_bytes": cap_bytes,
+                        "declared_bytes": declared,
+                    })
+                    .to_string(),
+                ))
+                .expect("static error response must build");
+        }
+    }
+
+    next.run(request).await
+}
+
 /// Tower middleware that enforces [`MAX_JSON_BODY_DEPTH`] on every
 /// `application/json` request body before the handler sees it.
 ///

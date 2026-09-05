@@ -1,0 +1,5 @@
+Let `max_upload_size_bytes` actually govern file uploads, in the daemon and in the dashboard.
+The global `max_request_body_bytes` cap was applied to the finished router, which wraps every route already registered — including the upload sub-router merged in earlier with its own larger cap — and the smaller of two nested limits is the one that cuts, so an operator who raised the upload cap to 100 MB still had every attachment over the 1 MB global cap killed while its body was still being sent.
+The global cap now wraps only the routes registered before the upload router is merged, and stays outside the JSON depth guard so an oversized body is refused rather than buffered to the guard's 8 MiB ceiling first.
+An upload whose declared size exceeds the cap gets a JSON 413 naming the limit instead of a dropped connection the browser reports as `NetworkError` and the daemon logs nowhere.
+The dashboard's attachment check read a hardcoded 10 MB mirror of the same setting and refused locally whatever the daemon was configured to accept; it now reads the value the server reports (#8185) (@DaBlitzStein)

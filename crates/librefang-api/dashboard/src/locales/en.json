@@ -2889,7 +2889,7 @@
     "attachment_uploading": "Uploading…",
     "attachment_remove": "Remove attachment",
     "attachment_unsupported_type": "Unsupported file type. Allowed: images, PDF, and common text/code files.",
-    "attachment_too_large": "File too large (max 10MB)",
+    "attachment_too_large": "File too large (max {{max}})",
     "attachment_drop_hint": "Drop to attach",
     "attachment_add": "Attach file",
     "open_agent_picker": "Open agent picker",

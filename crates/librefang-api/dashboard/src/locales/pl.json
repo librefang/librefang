@@ -2895,7 +2895,7 @@
     "attachment_uploading": "Przesyłanie…",
     "attachment_remove": "Usuń załącznik",
     "attachment_unsupported_type": "Nieobsługiwany typ pliku. Dozwolone: obrazy, PDF oraz popularne pliki tekstowe/kodu.",
-    "attachment_too_large": "Plik jest zbyt duży (maks. 10 MB)",
+    "attachment_too_large": "Plik jest zbyt duży (maks. {{max}})",
     "attachment_drop_hint": "Upuść, aby dołączyć",
     "attachment_add": "Dołącz plik",
     "open_agent_picker": "Otwórz wybór agenta",

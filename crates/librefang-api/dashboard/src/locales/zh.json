@@ -2855,7 +2855,7 @@
     "attachment_uploading": "正在上传…",
     "attachment_remove": "移除附件",
     "attachment_unsupported_type": "不支持的文件类型。允许：图片、PDF 和常见文本/代码文件。",
-    "attachment_too_large": "文件过大（最大 10MB）",
+    "attachment_too_large": "文件过大（最大 {{max}}）",
     "attachment_drop_hint": "松开以附加",
     "attachment_add": "附加文件",
     "open_agent_picker": "打开智能体选择器",

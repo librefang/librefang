@@ -9,6 +9,9 @@ const TEXT_TRUNCATION_MARKER: &str =
 
 /// Hard cap on a fetched URL attachment's body (bytes). Bounds peak memory
 /// for the streaming download in `resolve_url_attachments`.
+///
+/// This is not an upload cap and no operator setting governs it on purpose (#8181): it bounds a body the *daemon* downloads from a URL an agent supplied, not one a client sends, so it is a memory bound on our own HTTP client rather than a policy knob.
+/// `max_upload_size_bytes` and `max_request_body_bytes` cap inbound request bodies; nothing a client uploads passes through here.
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
 /// Keep CPU-heavy PDF parsing off Tokio workers and bound how many parser jobs can occupy the blocking pool at once.

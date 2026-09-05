@@ -2888,7 +2888,7 @@
     "attachment_uploading": "업로드 중…",
     "attachment_remove": "첨부파일 삭제",
     "attachment_unsupported_type": "지원되지 않는 파일 형식입니다. 허용됨: 이미지, PDF 및 일반 텍스트/코드 파일.",
-    "attachment_too_large": "파일이 너무 큼(최대 10MB)",
+    "attachment_too_large": "파일이 너무 큼(최대 {{max}})",
     "attachment_drop_hint": "드롭하여 첨부",
     "attachment_add": "파일첨부",
     "open_agent_picker": "에이전트 선택 도구 열기",

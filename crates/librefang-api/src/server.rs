@@ -1942,11 +1942,8 @@ pub async fn build_router(
     let v1_routes = api_v1_routes(webhook_body_limit);
 
     // Upload routes are defined separately so they can share the auth/rate-limit
-    // layers but bypass the *global* `RequestBodyLimitLayer` applied at
-    // `app.layer(...)` below — uploads have their own, larger, operator-
-    // configurable cap (`max_upload_size_bytes`, default 10 MB) which
-    // would otherwise be clamped by the global cap intended for JSON
-    // request bodies.
+    // layers but bypass the *global* `RequestBodyLimitLayer` — uploads have their own, larger, operator-configurable cap (`max_upload_size_bytes`, default 10 MB) which would otherwise be clamped by the global cap intended for JSON request bodies.
+    // The bypass is what the global limit is applied *to*: it wraps the route set built before this router is merged, never `app` as a whole (#8181).
     //
     // Pre-#audit, the upload sub-router was merged into `app` BEFORE the
     // global limit ran but had no limit of its own — `body: axum::body::Bytes`
@@ -1972,7 +1969,13 @@ pub async fn build_router(
             "/api/v1/agents/{id}/upload",
             axum::routing::post(routes::agents::upload_file),
         )
-        .layer(RequestBodyLimitLayer::new(upload_body_cap));
+        .layer(RequestBodyLimitLayer::new(upload_body_cap))
+        // Outermost on the upload path, so it answers before the limit layer cuts the stream: a body whose declared `Content-Length` is over the cap gets a JSON 413 naming the cap, and the daemon logs it.
+        // Without this the operator sees nothing at all and the client sees a dropped connection it cannot tell apart from an unreachable daemon (#8181).
+        .layer(axum::middleware::from_fn_with_state(
+            upload_body_cap,
+            middleware::reject_oversized_upload,
+        ));
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
@@ -2035,11 +2038,6 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
-        // Upload routes must be merged BEFORE the layer calls so that auth and
-        // rate-limit middleware apply to them.  They are intentionally excluded
-        // from RequestBodyLimitLayer (applied below) because the handler
-        // enforces its own configurable limit.
-        .merge(upload_routes)
         // JSON depth guard — buffers `application/json` bodies once,
         // checks nesting depth against MAX_JSON_BODY_DEPTH, rejects
         // adversarial `[[[[…]]]]` payloads before any handler sees them.
@@ -2051,6 +2049,16 @@ pub async fn build_router(
         // these), so it still wraps the guard and a depth rejection surfaces
         // in the request log with the right status. Audit: check-json-depth-unused.
         .layer(axum::middleware::from_fn(middleware::enforce_json_body_depth))
+        // The global JSON-body cap, applied HERE rather than to the finished `app`.
+        // `Router::layer` wraps every route registered so far and nothing registered later, so this covers every route above — including the depth guard on the line before it — and exempts `upload_routes`, merged on the next line with its own larger cap.
+        // Applying it to `app` after the merge — as this did until #8181 — wrapped the upload router too, and the smaller of two nested limits is the one that cuts: an operator's 100 MB `max_upload_size_bytes` could never take effect behind a 1 MB global cap.
+        // Staying OUTSIDE the depth guard is the other half of the ordering and is just as load-bearing: the guard buffers a JSON body whole under its own 8 MiB ceiling, so a cap placed inside it would let an authenticated caller stage 8 MiB before a 1 MB limit ever ran.
+        .layer(RequestBodyLimitLayer::new(
+            kernel.config_ref().max_request_body_bytes,
+        ))
+        // Upload routes must be merged BEFORE the layer calls below so that auth and rate-limit middleware apply to them.
+        // Merging after the depth guard also takes uploads out of it, which is what we want twice over: the upload handler writes bytes to disk and never hands them to serde_json, and the guard's 8 MiB ceiling was a third undeclared cap on `application/json` uploads (an allowed upload type — `EXTRA_ALLOWED_UPLOAD_TYPES`), overriding `max_upload_size_bytes` exactly the way the global limit did.
+        .merge(upload_routes)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -2087,19 +2095,6 @@ pub async fn build_router(
                 .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
         )
         .layer(cors);
-
-    // Apply the global request body size limit to the full app.  Upload routes
-    // were merged before the security layers above and therefore covered by
-    // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
-    // only apply to routes registered before the layer call, so routes merged
-    // after this point (channel_routes below) are also exempt.  The upload
-    // sub-router now carries its OWN `RequestBodyLimitLayer` sized to
-    // `max_upload_size_bytes` (added above), so the upload path remains
-    // wire-level capped — the global limit here is intentionally the
-    // smaller JSON-body cap and is not the upload safety net.
-    let app = app.layer(RequestBodyLimitLayer::new(
-        kernel.config_ref().max_request_body_bytes,
-    ));
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics

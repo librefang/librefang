@@ -2895,7 +2895,7 @@
     "attachment_add": "Прикріпити файл",
     "attachment_drop_hint": "Відпустіть, щоб прикріпити",
     "attachment_remove": "Видалити вкладення",
-    "attachment_too_large": "Файл завеликий (макс. 10 МБ)",
+    "attachment_too_large": "Файл завеликий (макс. {{max}})",
     "attachment_unsupported_type": "Непідтримуваний тип файлу. Дозволено: зображення, PDF і поширені текстові/код-файли.",
     "attachment_uploading": "Завантаження…",
     "open_agent_picker": "Відкрити вибір агента",
