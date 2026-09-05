@@ -1281,6 +1281,15 @@ pub struct WorkflowRun {
     pub state: WorkflowRunState,
     /// Results from each completed step.
     pub step_results: Vec<StepResult>,
+    /// Index of the currently executing step (0-based), if running.
+    /// Set at the top of each step iteration, cleared on every terminal
+    /// state transition so a finished run never reports a live step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<usize>,
+    /// Total number of steps in the workflow (copied at creation so the
+    /// UI can show "Step 2/4" without loading the definition separately).
+    #[serde(default)]
+    pub total_steps: usize,
     /// Final output (set when workflow completes).
     pub output: Option<String>,
     /// Error message if failed.
@@ -1394,6 +1403,11 @@ pub struct StepResult {
     /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits it from the JSON of successful steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Variable bindings at the time this step executed (`{{var}}` → resolved value).
+    /// Captured so the debug view can show what each placeholder resolved to.
+    /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits the field from the JSON of steps that bound nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
 }
 
 /// Preview of a single step produced by a dry-run (no LLM calls made).
@@ -1606,6 +1620,7 @@ fn mark_run_failed(
     if let Some(mut r) = runs.get_mut(run_id) {
         if !matches!(r.state, WorkflowRunState::Cancelled) {
             r.state = WorkflowRunState::Failed;
+            r.current_step_index = None;
             r.error = Some(error.to_string());
             r.completed_at = Some(Utc::now());
         }
@@ -2565,6 +2580,8 @@ impl WorkflowEngine {
             input,
             state: WorkflowRunState::Pending,
             step_results: Vec::new(),
+            current_step_index: None,
+            total_steps: workflow.steps.len(),
             output: None,
             error: None,
             started_at: Utc::now(),
@@ -2706,6 +2723,7 @@ impl WorkflowEngine {
                 "Recovering stale workflow run interrupted by daemon restart"
             );
             run.state = WorkflowRunState::Failed;
+            run.current_step_index = None;
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
@@ -2890,6 +2908,7 @@ impl WorkflowEngine {
             output_tokens: 0,
             duration_ms: 0,
             error: None,
+            variables: BTreeMap::new(),
         };
         if let Some(mut r) = runs.get_mut(&run_id) {
             r.step_results.push(step_result);
@@ -3376,6 +3395,7 @@ impl WorkflowEngine {
                 | WorkflowRunState::Paused { .. } => {
                     let was_paused = run.state.is_paused();
                     run.state = WorkflowRunState::Cancelled;
+                    run.current_step_index = None;
                     run.completed_at = Some(Utc::now());
                     // Clear any pending pause request so the executor cannot
                     // re-pause a cancelled run.
@@ -3824,6 +3844,7 @@ impl WorkflowEngine {
                 return;
             }
             r.state = WorkflowRunState::Failed;
+            r.current_step_index = None;
             r.error = Some(reason.to_string());
             r.completed_at = Some(Utc::now());
             r.clear_pause_state();
@@ -4252,6 +4273,7 @@ impl WorkflowEngine {
                     if let Some(mut run) = self.runs.get_mut(&run_id) {
                         if !matches!(run.state, WorkflowRunState::Cancelled) {
                             run.state = WorkflowRunState::Failed;
+                            run.current_step_index = None;
                             run.error = Some(msg.clone());
                             run.completed_at = Some(Utc::now());
                         }
@@ -4355,6 +4377,12 @@ impl WorkflowEngine {
         let mut all_outputs: Vec<String> = Vec::new();
 
         while i < workflow.steps.len() {
+            // Update the run's current_step_index so pollers (dashboard)
+            // can show live progress as each step begins executing.
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
+                run.current_step_index = Some(i);
+            }
+
             // Pause-request gate. Honored at the top of every step
             // iteration so an in-flight step is allowed to finish before
             // the run pauses — partial-step rollback would be a much
@@ -4369,6 +4397,7 @@ impl WorkflowEngine {
             let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                 if let Some(pause) = run.pause_request.take() {
                     run.paused_step_index = Some(i);
+                    run.current_step_index = None;
                     run.paused_variables = variables
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -4437,6 +4466,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -4485,6 +4515,11 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            // Snapshot current variable bindings for the debug view.
+                            let step_vars: BTreeMap<String, String> = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -4495,6 +4530,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4516,6 +4552,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -4560,6 +4597,7 @@ impl WorkflowEngine {
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
+                                            r.current_step_index = None;
                                             r.error = Some(e.clone());
                                             r.completed_at = Some(Utc::now());
                                         }
@@ -4596,6 +4634,15 @@ impl WorkflowEngine {
                     let results = futures::future::join_all(futures).await;
                     let duration_ms = start.elapsed().as_millis() as u64;
 
+                    // Snapshot the bindings the fan-out prompts were expanded
+                    // against, before the result loop starts inserting each
+                    // step's own `output_var`. Every fan-out step in the group
+                    // saw the same bindings, so one snapshot serves them all.
+                    let fan_out_vars: BTreeMap<String, String> = variables
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
                     for (k, result) in results.into_iter().enumerate() {
                         let (_, ref step_name, agent_id, ref agent_name) = step_infos[k];
                         let fan_step = fan_out_steps[k].1;
@@ -4612,6 +4659,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: fan_out_vars.clone(),
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4629,6 +4677,7 @@ impl WorkflowEngine {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     if !matches!(r.state, WorkflowRunState::Cancelled) {
                                         r.state = WorkflowRunState::Failed;
+                                        r.current_step_index = None;
                                         r.error = Some(error_msg.clone());
                                         r.completed_at = Some(Utc::now());
                                     }
@@ -4644,6 +4693,7 @@ impl WorkflowEngine {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     if !matches!(r.state, WorkflowRunState::Cancelled) {
                                         r.state = WorkflowRunState::Failed;
+                                        r.current_step_index = None;
                                         r.error = Some(error_msg.clone());
                                         r.completed_at = Some(Utc::now());
                                     }
@@ -4760,6 +4810,11 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            // Snapshot current variable bindings for the debug view.
+                            let step_vars: BTreeMap<String, String> = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -4770,6 +4825,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4785,6 +4841,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -4847,6 +4904,11 @@ impl WorkflowEngine {
 
                         match result {
                             Ok(Some((output, input_tokens, output_tokens))) => {
+                                // Snapshot current variable bindings for the debug view.
+                                let step_vars: BTreeMap<String, String> = variables
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
                                 let step_result = StepResult {
                                     step_name: format!("{} (iter {})", step.name, loop_iter + 1),
                                     agent_id: agent_id.to_string(),
@@ -4857,6 +4919,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: step_vars,
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4887,6 +4950,7 @@ impl WorkflowEngine {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     if !matches!(r.state, WorkflowRunState::Cancelled) {
                                         r.state = WorkflowRunState::Failed;
+                                        r.current_step_index = None;
                                         r.error = Some(e.clone());
                                         r.completed_at = Some(Utc::now());
                                     }
@@ -4936,6 +5000,7 @@ impl WorkflowEngine {
                         if let Some(mut r) = self.runs.get_mut(&run_id) {
                             if !matches!(r.state, WorkflowRunState::Cancelled) {
                                 r.state = WorkflowRunState::Failed;
+                                r.current_step_index = None;
                                 r.error = Some(err.clone());
                                 r.completed_at = Some(Utc::now());
                             }
@@ -4985,6 +5050,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms,
                         error: None,
+                        variables: BTreeMap::new(),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5036,6 +5102,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5077,6 +5144,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5094,6 +5162,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(err.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -5179,6 +5248,7 @@ impl WorkflowEngine {
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     if !matches!(r.state, WorkflowRunState::Cancelled) {
                                         r.state = WorkflowRunState::Failed;
+                                        r.current_step_index = None;
                                         r.error = Some(err.clone());
                                         r.completed_at = Some(Utc::now());
                                     }
@@ -5198,6 +5268,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5240,6 +5311,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5247,6 +5319,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(err.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -5321,6 +5394,7 @@ impl WorkflowEngine {
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
+                                            r.current_step_index = None;
                                             r.error = Some(err.clone());
                                             r.completed_at = Some(Utc::now());
                                         }
@@ -5358,6 +5432,7 @@ impl WorkflowEngine {
                                         output_tokens: 0,
                                         duration_ms,
                                         error: None,
+                                        variables: BTreeMap::new(),
                                     };
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         r.step_results.push(step_result);
@@ -5386,6 +5461,7 @@ impl WorkflowEngine {
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
+                                            r.current_step_index = None;
                                             r.error = Some(err.clone());
                                             r.completed_at = Some(Utc::now());
                                         }
@@ -5401,6 +5477,7 @@ impl WorkflowEngine {
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         if !matches!(r.state, WorkflowRunState::Cancelled) {
                                             r.state = WorkflowRunState::Failed;
+                                            r.current_step_index = None;
                                             r.error = Some(err.clone());
                                             r.completed_at = Some(Utc::now());
                                         }
@@ -5441,6 +5518,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: BTreeMap::new(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5448,6 +5526,7 @@ impl WorkflowEngine {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 if !matches!(r.state, WorkflowRunState::Cancelled) {
                                     r.state = WorkflowRunState::Failed;
+                                    r.current_step_index = None;
                                     r.error = Some(reason.clone());
                                     r.completed_at = Some(Utc::now());
                                 }
@@ -5514,6 +5593,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms: 0,
                         error: None,
+                        variables: BTreeMap::new(),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5571,6 +5651,7 @@ impl WorkflowEngine {
                     let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                         if let Some(pause) = run.pause_request.take() {
                             run.paused_step_index = Some(i);
+                            run.current_step_index = None;
                             run.paused_variables = variables
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -5658,6 +5739,7 @@ impl WorkflowEngine {
         let final_output = current_input.clone();
         if let Some(mut r) = self.runs.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
+            r.current_step_index = None;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
             r.pause_request = None;
@@ -5708,6 +5790,7 @@ impl WorkflowEngine {
             // state isn't terminal. Set Failed so the cleanup pass picks it up.
             if let Some(mut run) = self.runs.get_mut(&run_id) {
                 run.state = WorkflowRunState::Failed;
+                run.current_step_index = None;
                 run.error = Some(format!(
                     "DAG workflow refused to start: pause requested ({reason}) \
                      but pause/resume is supported on the sequential path only \
@@ -5762,6 +5845,7 @@ impl WorkflowEngine {
                                 format!("Step '{}' skipped: dependency failed", step.name);
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
+                                r.current_step_index = None;
                                 r.error = Some(error_msg.clone());
                                 r.completed_at = Some(Utc::now());
                             }
@@ -5805,6 +5889,11 @@ impl WorkflowEngine {
 
                 match result {
                     Ok(Some((output, input_tokens, output_tokens))) => {
+                        // Snapshot current variable bindings for the debug view.
+                        let step_vars: BTreeMap<String, String> = variables
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
                         let step_result = StepResult {
                             step_name: step.name.clone(),
                             agent_id: agent_id.to_string(),
@@ -5815,6 +5904,7 @@ impl WorkflowEngine {
                             output_tokens,
                             duration_ms,
                             error: None,
+                            variables: step_vars,
                         };
                         if let Some(mut r) = self.runs.get_mut(&run_id) {
                             r.step_results.push(step_result);
@@ -5838,6 +5928,7 @@ impl WorkflowEngine {
                         if matches!(step.error_mode, ErrorMode::Fail) {
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
+                                r.current_step_index = None;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
                             }
@@ -5974,6 +6065,11 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            // Snapshot current variable bindings for the debug view.
+                            let step_vars: BTreeMap<String, String> = variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
                             let step_result = StepResult {
                                 step_name: step_name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -5984,6 +6080,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms: step_duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -6006,6 +6103,7 @@ impl WorkflowEngine {
                             failed_steps.insert(step_name.clone());
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
+                                r.current_step_index = None;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
                             }
@@ -6026,6 +6124,7 @@ impl WorkflowEngine {
         // Mark workflow as completed
         if let Some(mut r) = self.runs.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
+            r.current_step_index = None;
             r.output = Some(last_output.clone());
             r.completed_at = Some(Utc::now());
         }
@@ -7188,6 +7287,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         paused_variables: paused_variables_json,
         paused_current_input: run.paused_current_input.clone(),
         step_results: step_results_json,
+        total_steps: run.total_steps as i64,
         started_at: run.started_at.to_rfc3339(),
         completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
         created_at: run.started_at.to_rfc3339(),
@@ -7304,6 +7404,8 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         input: row.input.clone(),
         state,
         step_results,
+        current_step_index: None,
+        total_steps: row.total_steps.max(0) as usize,
         output: row.output.clone(),
         error: row.error.clone(),
         started_at,
@@ -10394,6 +10496,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt(
             "summarize",
@@ -10436,6 +10539,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
         assert!(prompt.contains("..."));
@@ -10790,9 +10894,12 @@ prompt_template = "do {{x}}"
                 output_tokens: 20,
                 duration_ms: 100,
                 error: None,
+                variables: BTreeMap::new(),
             }],
             output: Some("final output".to_string()),
             error: None,
+            current_step_index: None,
+            total_steps: 0,
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             pause_request: None,
@@ -10860,6 +10967,8 @@ prompt_template = "do {{x}}"
             step_results: vec![],
             output: None,
             error: None,
+            current_step_index: None,
+            total_steps: 0,
             started_at: Utc::now(),
             completed_at: None,
             pause_request: None,
@@ -10914,6 +11023,8 @@ prompt_template = "do {{x}}"
         let future_started_at = Utc::now() + chrono::Duration::hours(1);
         let run = WorkflowRun {
             state: WorkflowRunState::Running,
+            current_step_index: None,
+            total_steps: 0,
             started_at: future_started_at,
             completed_at: None,
             ..make_terminal_run(WorkflowRunState::Pending)
@@ -10965,6 +11076,8 @@ prompt_template = "do {{x}}"
         let stale_started_at = Utc::now() - chrono::Duration::hours(1);
         let run = WorkflowRun {
             state: WorkflowRunState::Running,
+            current_step_index: None,
+            total_steps: 0,
             started_at: stale_started_at,
             completed_at: None,
             ..make_terminal_run(WorkflowRunState::Pending)

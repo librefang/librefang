@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 55;
+const SCHEMA_VERSION: u32 = 56;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -281,6 +281,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // prior configuration from the dashboard.
     run_step!(55, migrate_v55);
 
+    // v56: persist workflow_runs.total_steps so a run recovered after a
+    // daemon restart reports real progress instead of "step X of 0".
+    run_step!(56, migrate_v56);
+
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
     // applied DDL without recording its audit row — operator tooling
@@ -363,6 +367,23 @@ fn try_column_exists(
         }
     }
     Ok(false)
+}
+
+/// Whether `table` exists at all.
+///
+/// [`try_column_exists`] cannot answer this: `PRAGMA table_info` on a missing
+/// table yields zero rows, so an absent table and an absent column are
+/// indistinguishable through it — and a migration that reads `false` as "add
+/// the column" then fails the `ALTER` outright. A migration whose target table
+/// was created below the schema version a database is stamped at (so its
+/// `CREATE TABLE` step never ran) needs this distinction.
+fn try_table_exists(conn: &Connection, table: &str) -> Result<bool, rusqlite::Error> {
+    let found: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(found > 0)
 }
 
 #[cfg(test)]
@@ -1232,6 +1253,35 @@ fn migrate_v55(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (55, datetime('now'), 'Template (agent-type) version history table')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 56: persist `workflow_runs.total_steps`.
+///
+/// The workflow_runs table (v37) never stored the run's step count, so
+/// `row_to_workflow_run` hardcoded `total_steps: 0` on reload — a run
+/// recovered after a daemon restart reported "step X of 0" in the API and
+/// dashboard. Store the actual value so progress survives a restart.
+/// `try_column_exists` keeps the ADD COLUMN idempotent.
+fn migrate_v56(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // A database stamped at or above v37 without ever running v37's DDL has no
+    // `workflow_runs` table to alter. It has no runs to lose progress on either,
+    // so skipping is correct — and unlike v49, which has the same shape, this
+    // migration sits above the version such databases are stamped at, so it is
+    // the first one that would actually hit the missing table.
+    if try_table_exists(conn, "workflow_runs")?
+        && !try_column_exists(conn, "workflow_runs", "total_steps")?
+    {
+        conn.execute(
+            "ALTER TABLE workflow_runs ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (56, datetime('now'), 'Persist workflow_runs.total_steps so run progress survives restart')",
         [],
     )?;
     Ok(())
