@@ -1027,6 +1027,9 @@ pub async fn config_reload(
             let snap = state.kernel.auth_snapshot();
             crate::server::refresh_master_credential(&snap, &state.api_key_lock, &state.master_key)
                 .await;
+            // Same story for the dashboard credentials, which are classified `UpdateDashboardCredentials` with no restart flag.
+            // The middleware held a boot-time bool, so an operator whose remediation was "add a dashboard password and reload" kept the reads allowlist open and the `/dashboard/*` shell public until the daemon restarted.
+            crate::server::refresh_dashboard_auth_flag(&snap, &state.dashboard_auth_enabled);
 
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and

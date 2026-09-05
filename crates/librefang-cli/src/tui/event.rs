@@ -3898,9 +3898,8 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
 
 /// Fetch user groups (#7745).
 ///
-/// `GET /api/groups` is Admin-or-above; the write verbs are Owner-only and the
-/// screen does not offer them, so a Viewer-scoped TUI degrades to an empty list
-/// rather than a wall of permission errors.
+/// `GET /api/groups` is admitted for every authenticated role by the middleware's generic GET rule, not gated at Admin, so a Viewer-scoped TUI sees the same roster any other role does.
+/// The write verbs are Owner-only and this screen does not offer them, so no role hits a wall of permission errors here.
 pub fn spawn_fetch_groups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {

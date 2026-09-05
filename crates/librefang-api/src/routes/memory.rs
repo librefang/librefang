@@ -2583,6 +2583,7 @@ mod tests {
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             master_key: Default::default(),
+            dashboard_auth_enabled: Default::default(),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),

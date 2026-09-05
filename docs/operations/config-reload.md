@@ -99,7 +99,7 @@ classified differently — the row note spells out which is which.
 |---|---|---|
 | `api_key` | N | API bearer key, resolved from `LIBREFANG_API_KEY` / `vault:KEY` / the literal value (effective immediately via config swap). |
 | `api_key_hash` | N | Hash of the API bearer key, `$sha256$…` (recommended, from `librefang hash-api-key`) or `$argon2id$…` (effective immediately via config swap). |
-| `dashboard_user` | H | Dashboard login username (config swap suffices). |
+| `dashboard_user` | H | Dashboard login username (config swap suffices, and the auth middleware re-derives "dashboard credentials are configured" from the new value). **Exception:** on a passkey-enabled daemon the WebAuthn engine's principal is bound at boot, so after a rename registration answers `409 principal_mismatch` for the new name and an existing credential still mints a session under the old one until the daemon restarts — see `docs/architecture/passkey-webauthn.md`. |
 | `dashboard_pass` | H | Dashboard login password. |
 | `dashboard_pass_hash` | H | Argon2id hash of the dashboard password. |
 | `passkey_enabled` | R | Opt-in flag for passkey (WebAuthn/FIDO2) login — the route gating is fixed at boot. |
@@ -108,7 +108,7 @@ classified differently — the row note spells out which is which.
 | `users` | H | RBAC user list — rebuilds the `AuthManager`. |
 | `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
 | `default_owner` | N | Fleet-wide fallback owner for artifacts created by a turn with no authenticated caller (#7744) — parsed from the live config at each creation. Changing it does not rewrite owners already recorded. |
-| `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |
+| `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. Changing the flag itself needs a restart, but only the flag: the middleware re-evaluates "is any credential configured" on every request from the live credential handles, so adding the first `api_key` / `api_key_hash` or the first dashboard username/password closes the allowlist as soon as the reload refreshes them — no restart. The one credential kind that does not participate is `[[users]]`: the middleware's per-user key table is replaced by the `/api/users*` and device-pairing writes, not by a reload, so a hand-edited `[[users]]` block reaches the `AuthManager` (see the `users` row) but not the read gate until the daemon restarts. |
 | `external_auth_proxy` | R | Acknowledges an external auth proxy is in front. |
 | `channel_role_mapping` | R | Maps platform-native channel roles to LibreFang roles. |
 | `external_auth` | H/N | OAuth2/OIDC provider config. **IdP-identity** changes (`enabled`, `issuer_url`, per-provider `id`/`issuer_url`/`jwks_uri` — see `external_auth_idp_changed`) are **H**: they emit `ReloadExternalAuth` to flush the OIDC discovery + JWKS caches, no restart. **Non-IdP** sub-fields (`session_ttl_secs`, `allowed_domains`, `redirect_url`, scopes, audience, `require_email_verified`, `role_map`, `group_map`, `claim_paths`) are **N**: the OAuth layer reads them live from the ArcSwap config on every request (`oauth.rs`: `config_ref()` / `config_snapshot()`), so a bare config swap makes them effective on the next request — no restart, no cache eviction. |
