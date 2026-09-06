@@ -277,6 +277,9 @@ impl LoopGuard {
     /// Hashes `(tool_name | params_json | result_truncated)` and tracks how
     /// many times an identical call produces an identical result. Returns a
     /// warning string if outcome repetition is detected.
+    ///
+    /// The hash covers the parameters as well as the result, so this only ever fires for a call repeated with identical parameters that keeps producing identical output — the case [`Self::check`] would otherwise allow to run all the way to `block_threshold`.
+    /// The production caller is `agent_loop::tool_call::record_loop_guard_outcome`, which runs in the sequential phase of both the serial and the parallel dispatch path.
     pub fn record_outcome(
         &mut self,
         tool_name: &str,
@@ -290,16 +293,28 @@ impl LoopGuard {
         *count += 1;
         let count_val = *count;
 
-        if count_val >= self.config.outcome_block_threshold {
+        // A declared poll repeats by design, and an unchanged answer is exactly what "not ready yet" looks like for one, so it gets the multiplier `check()` would grant it.
+        // Without this the outcome path would decide a wait loop after 3 identical answers while `block_threshold * poll_multiplier` still advertises 15 — and it would win, because `check()` consults `blocked_outcomes` before it applies the multiplier.
+        // The narrow predicate, not the one `check()` uses: relaxing the outcome rule for every call whose parameters happen to contain "status" or "wait" would weaken it by 3x for ordinary tools such as `task_list {"status": "pending"}`, which is the opposite of what the rule is for.
+        let multiplier = if Self::is_declared_poll_call(tool_name, params) {
+            self.config.poll_multiplier
+        } else {
+            1
+        };
+        let effective_block = self.config.outcome_block_threshold * multiplier;
+        let effective_warn = self.config.outcome_warn_threshold * multiplier;
+
+        if count_val >= effective_block {
             // Mark the call hash so the NEXT check() auto-blocks it
             self.blocked_outcomes.insert(call_hash);
             return Some(format!(
-                "Tool '{}' is returning identical results — the approach isn't working.",
+                "Tool '{}' is returning identical results — the approach isn't working. \
+                 Another identical call will be blocked.",
                 tool_name
             ));
         }
 
-        if count_val >= self.config.outcome_warn_threshold {
+        if count_val >= effective_warn {
             return Some(format!(
                 "Tool '{}' is returning identical results — the approach isn't working.",
                 tool_name
@@ -313,8 +328,14 @@ impl LoopGuard {
     ///
     /// Returns `None` if this is not a poll call. Returns `Some(ms)` with a
     /// suggested delay from the backoff schedule, capping at the last entry.
+    ///
+    /// The delay is a suggestion the caller turns into advisory text on the tool result, never an in-loop sleep: stalling the agent loop would hold the session lock and the provider's prompt cache window for a minute at a time, so pacing is left to the model that decides whether the wait is still worth it.
+    /// Because that suggestion is read by the model, the poll test here is the narrow `is_declared_poll_call` rather than the broader `is_poll_call` — "wait roughly 5s before checking again" is false advice on a `task_list {"status": "pending"}`.
+    ///
+    /// The schedule is keyed on the call alone, not on whether the answer changed: a declared poll gets the next step on every repeat, including one that finally returned something different.
+    /// That is deliberate — the delay paces how often the agent asks, and a poll whose answer just changed is normally the last one anyway.
     pub fn get_poll_backoff(&mut self, tool_name: &str, params: &serde_json::Value) -> Option<u64> {
-        if !Self::is_poll_call(tool_name, params) {
+        if !Self::is_declared_poll_call(tool_name, params) {
             return None;
         }
         let hash = Self::compute_hash(tool_name, params);
@@ -356,7 +377,7 @@ impl LoopGuard {
         }
     }
 
-    /// Check if a tool call looks like a polling operation.
+    /// Check if a tool call looks like a polling operation, on the broad reading.
     ///
     /// Poll tools (like `shell_exec` for status checks) are expected to be
     /// called repeatedly and get relaxed loop detection thresholds.
@@ -365,30 +386,20 @@ impl LoopGuard {
     /// 1. Explicit `"poll": true` parameter — callers can mark poll intent directly.
     /// 2. Known command prefix matching — e.g. `docker ps`, `kubectl get`.
     /// 3. Keyword matching — e.g. `status`, `poll`, `health`, `check`.
+    ///
+    /// Strategies 1 and 2 are `is_declared_poll_call`; strategy 3 is the broadening this adds on top, and it is much wider than the name suggests.
+    /// The keyword scan runs over the whole serialized parameter object for *any* tool, so `task_list {"status": "pending"}` and `goal_update {"status": "in_progress"}` both read as polls.
+    /// That is tolerable where the classification only relaxes a threshold — a runaway is still stopped, just later — which is why [`Self::check`] keeps using it.
+    /// It is not tolerable where the classification turns into advice the model reads, or into a threshold the outcome rule depends on; those two callers use the narrow predicate instead.
     fn is_poll_call(tool_name: &str, params: &serde_json::Value) -> bool {
-        // Explicit poll intent via params
+        // Explicit poll intent via params.
+        // `false` is a veto and must be honoured before the generic scan below, which would otherwise match on the literal key name "poll".
         if let Some(poll) = params.get("poll").and_then(|v| v.as_bool()) {
             return poll;
         }
 
-        // Known poll tools with poll-like commands (no length restriction)
-        if POLL_TOOLS.contains(&tool_name) {
-            if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                let cmd_lower = cmd.to_lowercase();
-
-                // Check known poll command prefixes
-                if POLL_COMMAND_PREFIXES
-                    .iter()
-                    .any(|prefix| cmd_lower.starts_with(prefix))
-                {
-                    return true;
-                }
-
-                // Check poll keywords anywhere in the command
-                if POLL_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw)) {
-                    return true;
-                }
-            }
+        if Self::is_declared_poll_call(tool_name, params) {
+            return true;
         }
 
         // Generic poll detection via params keywords
@@ -396,6 +407,34 @@ impl LoopGuard {
             .unwrap_or_default()
             .to_lowercase();
         params_str.contains("status") || params_str.contains("poll") || params_str.contains("wait")
+    }
+
+    /// The narrow half of `is_poll_call`: poll intent the call itself declares, rather than poll intent inferred from a substring anywhere in its parameters.
+    ///
+    /// True for an explicit `"poll": true` parameter, or for a tool in `POLL_TOOLS` whose `command` matches a `POLL_COMMAND_PREFIXES` entry or contains a `POLL_KEYWORDS` entry — `docker ps`, `systemctl status`, `kubectl wait`, and the rest of the shell-shaped wait loop.
+    ///
+    /// This is the predicate for anything that either reaches the model or weakens the guard: [`Self::get_poll_backoff`], whose suggestion is rendered as advisory text on the tool result, and the [`Self::record_outcome`] multiplier, which decides how many identical answers a call may return before the next one is refused.
+    /// Telling the author of `task_list {"status": "pending"}` to wait five seconds is simply wrong advice, and tripling that call's outcome budget weakens the rule for precisely the ordinary tools it was written for.
+    fn is_declared_poll_call(tool_name: &str, params: &serde_json::Value) -> bool {
+        // Explicit poll intent via params
+        if let Some(poll) = params.get("poll").and_then(|v| v.as_bool()) {
+            return poll;
+        }
+
+        // Known poll tools with poll-like commands (no length restriction)
+        if !POLL_TOOLS.contains(&tool_name) {
+            return false;
+        }
+        let Some(cmd) = params.get("command").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let cmd_lower = cmd.to_lowercase();
+
+        // Known poll command prefixes, then poll keywords anywhere in the command
+        POLL_COMMAND_PREFIXES
+            .iter()
+            .any(|prefix| cmd_lower.starts_with(prefix))
+            || POLL_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw))
     }
 
     /// Detect ping-pong patterns (A-B-A-B or A-B-C-A-B-C) in recent call history.
@@ -681,6 +720,127 @@ mod tests {
         if let LoopGuardVerdict::Block(msg) = v {
             assert!(msg.contains("identical results"));
         }
+    }
+
+    #[test]
+    fn test_outcome_thresholds_use_poll_multiplier() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        // `docker ps` is a known poll prefix, so this call is a poll call.
+        // Defaults are outcome_warn = 2, outcome_block = 3 and poll_multiplier = 3, so a poll call warns on the 6th identical result and blocks on the 9th.
+        let params = serde_json::json!({"command": "docker ps"});
+        let result = "CONTAINER ID   IMAGE   STATUS";
+
+        for i in 1..=5 {
+            let w = guard.record_outcome("shell_exec", &params, result);
+            assert!(
+                w.is_none(),
+                "identical poll result {i} warned before the relaxed threshold: {w:?}"
+            );
+        }
+
+        // Sixth identical result: advisory only — an unchanged answer is what a wait loop looks like, so the call must still be runnable.
+        assert!(guard
+            .record_outcome("shell_exec", &params, result)
+            .is_some());
+        assert_eq!(
+            guard.check("shell_exec", &params),
+            LoopGuardVerdict::Allow,
+            "a poll call must keep the relaxed thresholds `check` grants it"
+        );
+
+        // Results 7, 8, 9 reach outcome_block_threshold * poll_multiplier.
+        for _ in 0..3 {
+            guard.record_outcome("shell_exec", &params, result);
+        }
+        let v = guard.check("shell_exec", &params);
+        assert!(
+            matches!(v, LoopGuardVerdict::Block(_)),
+            "a poll call repeating an identical answer 9 times is still a loop, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn test_outcome_thresholds_ignore_the_generic_poll_fallback() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        // `is_poll_call`'s third strategy scans the whole serialized parameter object for "status" / "poll" / "wait" for any tool name, so this ordinary listing reads as a poll to `check()`.
+        // The outcome rule must not inherit that: tripling its budget here would weaken the guard 3x for exactly the tools it exists to stop.
+        let params = serde_json::json!({"status": "pending"});
+        let result = "No pending tasks.";
+
+        assert!(LoopGuard::is_poll_call("task_list", &params));
+        assert!(!LoopGuard::is_declared_poll_call("task_list", &params));
+
+        assert!(guard.record_outcome("task_list", &params, result).is_none());
+        assert!(guard.record_outcome("task_list", &params, result).is_some());
+        assert!(guard.record_outcome("task_list", &params, result).is_some());
+
+        let v = guard.check("task_list", &params);
+        assert!(
+            matches!(&v, LoopGuardVerdict::Block(msg) if msg.contains("identical results")),
+            "the fourth identical listing must be blocked on the strict outcome threshold, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn test_poll_backoff_ignores_the_generic_poll_fallback() {
+        let mut guard = LoopGuard::new(LoopGuardConfig::default());
+        // The backoff is rendered as "wait roughly 5s before checking again" on the tool result, which is false advice for a call that is not a wait loop.
+        let params = serde_json::json!({"goal_id": "g1", "status": "in_progress"});
+        for i in 1..=4 {
+            assert_eq!(
+                guard.get_poll_backoff("goal_update", &params),
+                None,
+                "repeat {i} of an ordinary call must not be paced"
+            );
+        }
+
+        // An explicit `"poll": true` is a declaration, so it still is paced.
+        let declared = serde_json::json!({"goal_id": "g1", "poll": true});
+        assert_eq!(guard.get_poll_backoff("goal_update", &declared), None);
+        assert_eq!(guard.get_poll_backoff("goal_update", &declared), Some(5000));
+    }
+
+    #[test]
+    fn test_is_declared_poll_call_detection() {
+        // Explicit declaration, any tool.
+        assert!(LoopGuard::is_declared_poll_call(
+            "some_tool",
+            &serde_json::json!({"poll": true})
+        ));
+        // Explicit `false` vetoes a command that would otherwise match a prefix.
+        assert!(!LoopGuard::is_declared_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "docker ps", "poll": false})
+        ));
+        // Known prefix on a known poll tool.
+        assert!(LoopGuard::is_declared_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "systemctl status nginx.service"})
+        ));
+        // Keyword anywhere in the command of a known poll tool.
+        assert!(LoopGuard::is_declared_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "my-app --health-endpoint /api/v1/healthz"})
+        ));
+        // The same keyword outside `command` is not a declaration.
+        assert!(!LoopGuard::is_declared_poll_call(
+            "shell_exec",
+            &serde_json::json!({"script": "systemctl status nginx.service"})
+        ));
+        // A poll-shaped command on a tool that is not in POLL_TOOLS is not a declaration.
+        assert!(!LoopGuard::is_declared_poll_call(
+            "browser_navigate",
+            &serde_json::json!({"command": "docker ps"})
+        ));
+        // The generic fallback belongs to `is_poll_call` alone.
+        assert!(!LoopGuard::is_declared_poll_call(
+            "queue",
+            &serde_json::json!({"mode": "wait_for_completion"})
+        ));
+        assert!(LoopGuard::is_poll_call(
+            "queue",
+            &serde_json::json!({"mode": "wait_for_completion"})
+        ));
     }
 
     // ========================================================================

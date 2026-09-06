@@ -1268,6 +1268,11 @@ pub fn check(&mut self, tool_name: &str, params: &serde_json::Value) -> LoopGuar
 | `Block(msg)` | Same call repeated >= 5 times | Skip execution, return error |
 | `CircuitBreak(msg)` | > 30 total tool calls | Terminate the entire agent loop |
 
+`Block` has a second, earlier trigger that the call counter alone cannot see: once the same parameters have produced the same result `outcome_block_threshold` (3) times, the next call with those parameters is refused without running.
+A call that *declares* itself a poll — an explicit `"poll": true` parameter, or `shell_exec` running a recognised wait-loop command such as `docker ps` or `systemctl status` — has that threshold multiplied by `poll_multiplier` and is paced with a suggested backoff delay on its result rather than cut off, because an unchanged answer is what "not ready yet" looks like.
+The broader test `check` uses for the call-count thresholds — any parameters mentioning `status` / `poll` / `wait`, whatever the tool — deliberately does not apply here: it would put "wait roughly 5s before checking again" on an ordinary `task_list {"status": "pending"}` and triple that call's outcome budget.
+The backoff delay is keyed on the call rather than on the answer, so a declared poll gets the next step of the schedule on every repeat, including one whose result finally changed.
+
 ### 15.4 Hash Computation
 
 ```rust
@@ -1633,6 +1638,9 @@ The default `LoopGuardConfig` values are:
 | `warn_threshold` | 3 | Identical calls before warning |
 | `block_threshold` | 5 | Identical calls before blocking |
 | `global_circuit_breaker` | 30 | Total calls before circuit break |
+| `outcome_warn_threshold` | 2 | Identical results for identical parameters before an advisory |
+| `outcome_block_threshold` | 3 | Identical results before the next such call is blocked |
+| `poll_multiplier` | 3 | Multiplies the warn and block thresholds above. The call-count pair uses a broad poll test; the outcome pair and the backoff advisory use a narrow one (explicit `"poll": true`, or a recognised `shell_exec` wait-loop command). The circuit breaker is unaffected |
 
 ### 18.5 Subprocess Sandbox Allowlists
 

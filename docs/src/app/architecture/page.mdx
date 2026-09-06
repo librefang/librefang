@@ -396,6 +396,10 @@ The agent loop includes multiple hardening layers to prevent runaway behavior:
 
 - **Warn threshold** (default 3): Logs a warning and injects a hint to the LLM.
 - **Block threshold** (default 5): Refuses the tool call and returns an error to the LLM.
+- **Outcome block threshold** (default 3): after three identical results for identical parameters the next such call is refused without running — repetition the call counter alone cannot see yet.
+- **Poll multiplier** (default 3): relaxes the thresholds for calls that look like polling, and puts a suggested backoff delay on each repeat poll's result.
+  The call-count thresholds use a broad test that reads any parameters mentioning `status` / `poll` / `wait` as polling, whatever the tool; the outcome threshold and the backoff advisory use a narrow one — an explicit `"poll": true` parameter, or `shell_exec` running a recognised wait-loop command (`docker ps`, `systemctl status`, …).
+  So an ordinary `task_list {"status": "pending"}` is never told to wait, and keeps the strict outcome threshold.
 - **Circuit breaker** (default 30): Terminates the agent loop entirely.
 
 Configured via `LoopGuardConfig`.

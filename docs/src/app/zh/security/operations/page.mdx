@@ -67,6 +67,11 @@ pub fn check(&mut self, tool_name: &str, params: &serde_json::Value) -> LoopGuar
 | `Block(msg)` | 同一调用重复 >= 5 次 | 跳过执行，返回错误 |
 | `CircuitBreak(msg)` | 总调用次数 > 30 | 终止整个 Agent 循环 |
 
+`Block` 还有一条仅靠调用计数看不到的更早触发路径：同一参数连续 `outcome_block_threshold`（3）次返回相同结果后，下一次同参数调用会被直接拒绝，不再执行。
+只有*声明*自己是轮询的调用——显式的 `"poll": true` 参数，或 `shell_exec` 执行 `docker ps`、`systemctl status` 这类已知的等待类命令——才会把该阈值按 `poll_multiplier` 放宽，并在结果中附带建议的退避时长而不是被切断，因为答案不变正是"还没就绪"的样子。
+`check` 用于调用次数阈值的那套宽松判定——参数中出现 `status` / `poll` / `wait` 即算轮询，无论哪个工具——在这里刻意不适用：否则普通的 `task_list {"status": "pending"}` 会被告知"等 5 秒再看"，其结果阈值预算也会被放大三倍。
+退避时长按调用本身计数，与答案是否改变无关，因此声明为轮询的调用每次重复都会拿到调度表的下一档，包括结果终于变化的那一次。
+
 ### 哈希计算
 
 ```rust
@@ -221,6 +226,9 @@ value = 4096
 | `warn_threshold` | 3 | 相同调用多少次后发出警告 |
 | `block_threshold` | 5 | 相同调用多少次后阻止 |
 | `global_circuit_breaker` | 30 | 总调用多少次后熔断 |
+| `outcome_warn_threshold` | 2 | 同参数返回多少次相同结果后附加提示 |
+| `outcome_block_threshold` | 3 | 同参数返回多少次相同结果后阻止下一次调用 |
+| `poll_multiplier` | 3 | 上述警告/阻止阈值的乘数。调用次数那一对用宽松的轮询判定，结果次数那一对与退避提示用严格判定（显式 `"poll": true`，或已知的 `shell_exec` 等待类命令）。熔断阈值不受影响 |
 
 ### 子进程沙箱白名单
 

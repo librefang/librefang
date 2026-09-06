@@ -2503,6 +2503,225 @@ async fn parallel_dispatch_write_read_mix_groups_and_orders() {
     }
 }
 
+// --- Outcome-aware loop guard, end to end ------------------------------
+//
+// The guard's outcome half only exists if the agent loop feeds results back into it after execution.
+// These drive the real `run_agent_loop` over a tool whose answer is byte-identical every time and assert where the block lands: on the fourth identical call (the outcome rule) rather than the fifth (`block_threshold`).
+// Both dispatch paths are covered, because the recording site differs between them — the serial path records per call, the parallel dispatcher once its concurrent phase has drained.
+
+/// Driver that issues the same `tool_search` call — same name, same parameters — `calls_per_turn` times per turn for `turns` turns, then finishes with text.
+/// A query that matches nothing in the pool makes `tool_search` return a byte-identical result every time, which is what the outcome hash keys on.
+struct RepeatIdenticalCallDriver {
+    call_count: AtomicU32,
+    turns: u32,
+    calls_per_turn: usize,
+}
+
+impl RepeatIdenticalCallDriver {
+    fn new(turns: u32, calls_per_turn: usize) -> Self {
+        Self {
+            call_count: AtomicU32::new(0),
+            turns,
+            calls_per_turn,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmDriver for RepeatIdenticalCallDriver {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let turn = self.call_count.fetch_add(1, Ordering::Relaxed);
+        if turn >= self.turns {
+            return Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "Giving up on that approach.".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+                actual_provider: None,
+                actual_model: None,
+            });
+        }
+        let input = serde_json::json!({"query": "zzqq"});
+        let ids: Vec<String> = (0..self.calls_per_turn)
+            .map(|i| format!("tid_{turn}_{i}"))
+            .collect();
+        Ok(CompletionResponse {
+            content: ids
+                .iter()
+                .map(|id| ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: "tool_search".to_string(),
+                    input: input.clone(),
+                    provider_metadata: None,
+                })
+                .collect(),
+            stop_reason: StopReason::ToolUse,
+            tool_calls: ids
+                .iter()
+                .map(|id| ToolCall {
+                    id: id.clone(),
+                    name: "tool_search".to_string(),
+                    input: input.clone(),
+                })
+                .collect(),
+            usage: TokenUsage {
+                input_tokens: 10,
+                output_tokens: 3,
+                ..Default::default()
+            },
+            actual_provider: None,
+            actual_model: None,
+        })
+    }
+}
+
+/// The definition `run_repeat_call_loop` hands `run_agent_loop`.
+///
+/// `tool_search` is dispatched by name, but the outer capability allowlist is built from the tool slice, so the meta-tool still has to appear in it.
+/// The `x-parallel-safety` annotation is what makes the parallel test meaningful: `classify_by_name` does not know `tool_search`, so without it the call classifies `Unknown` → `WriteShared`, and `plan_batch` gives every `WriteShared` call a bucket of its own.
+/// The batch would then be three groups of one — `execute_tool_group` entered three times with nothing to order — and the phase-3 hazard the test exists for (results arriving in whichever order the futures finished) would never arise.
+/// `explicit_parallel_safety_from_schema` reads the annotation ahead of the name heuristic, which puts all three calls in one group.
+fn repeat_call_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "tool_search".to_string(),
+        description: "fake tool_search".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "x-parallel-safety": "read_only"
+        }),
+    }
+}
+
+async fn run_repeat_call_loop(
+    turns: u32,
+    calls_per_turn: usize,
+    parallel: Option<librefang_types::config::ParallelToolsConfig>,
+) -> librefang_memory::session::Session {
+    let memory = librefang_memory::MemorySubstrate::open_in_memory(0.01).unwrap();
+    let mut session = fresh_session();
+    let manifest = test_manifest();
+    let driver: Arc<dyn LlmDriver> =
+        Arc::new(RepeatIdenticalCallDriver::new(turns, calls_per_turn));
+    let tool_search_def = repeat_call_tool_def();
+
+    let loop_opts = LoopOptions {
+        parallel_tools_config: parallel,
+        ..LoopOptions::default()
+    };
+
+    run_agent_loop(
+        &manifest,
+        "keep searching",
+        &mut session,
+        &memory,
+        driver,
+        std::slice::from_ref(&tool_search_def),
+        None, // kernel
+        None, // skill_registry
+        None, // mcp_connections
+        None, // web_ctx
+        None, // browser_ctx
+        None, // embedding_driver
+        None, // workspace_root
+        None, // on_phase
+        None, // media_engine
+        None, // media_drivers
+        None, // tts_engine
+        None, // docker_config
+        None, // hooks
+        None, // context_window_tokens
+        None, // process_manager
+        None, // checkpoint_manager
+        None, // process_registry
+        None, // user_content_blocks
+        None, // proactive_memory
+        None, // context_engine
+        None, // pending_messages
+        &loop_opts,
+    )
+    .await
+    .expect("loop should complete without error");
+
+    session
+}
+
+/// Serial path: a tool answering identically to identical parameters is cut off on the fourth call.
+/// Without the post-execution recording the outcome counters stay empty and the fourth call runs like the three before it, with the block arriving only on the fifth.
+#[tokio::test]
+async fn identical_results_block_the_fourth_call_on_the_serial_path() {
+    let session = run_repeat_call_loop(5, 1, None).await;
+    let results = committed_tool_results(&session);
+    assert_eq!(results.len(), 5, "every tool_use must have a result");
+
+    for (i, (_, content)) in results.iter().take(3).enumerate() {
+        assert!(
+            content.contains("No tools matched"),
+            "call {i} should have run the tool, got: {content:?}"
+        );
+    }
+    // The second identical result already carries the advisory — the guard says so before it acts on it.
+    assert!(
+        results[1].1.contains("[LOOP GUARD]") && results[1].1.contains("identical results"),
+        "second identical result must carry the outcome advisory, got: {:?}",
+        results[1].1
+    );
+    assert!(
+        results[3].1.starts_with("Blocked:") && results[3].1.contains("identical results"),
+        "fourth call must be blocked by the outcome rule, got: {:?}",
+        results[3].1
+    );
+}
+
+/// Parallel path: the dispatcher records outcomes after its concurrent phase, so one batch of three identical calls — dispatched together, in a single group — arms the block for the next batch.
+/// Without that recording the next batch's first call runs and only its second, the fifth identical call overall, is blocked.
+///
+/// The group really has to be multi-member for this to test anything: recording per call in a group of one is the serial path with extra steps, and the ordering the phase-3 sort exists to fix cannot go wrong.
+/// The planner assertion below pins that, so a future classification change that splits the batch fails here instead of quietly turning this into a duplicate of the serial test.
+#[tokio::test]
+async fn identical_results_block_the_next_batch_on_the_parallel_path() {
+    use crate::parallel_dispatch::plan_batch_with_mcp;
+
+    let cfg = enabled_parallel_cfg(3);
+    let def = repeat_call_tool_def();
+    let batch: Vec<ToolCall> = (0..3)
+        .map(|i| ToolCall {
+            id: format!("tid_0_{i}"),
+            name: "tool_search".to_string(),
+            input: serde_json::json!({"query": "zzqq"}),
+        })
+        .collect();
+    assert_eq!(
+        plan_batch_with_mcp(&batch, std::slice::from_ref(&def), Some(&cfg)).groups,
+        vec![vec![0, 1, 2]],
+        "the three calls must dispatch as one group, or the parallel path is untested"
+    );
+
+    let session = run_repeat_call_loop(2, 3, Some(cfg)).await;
+    let results = committed_tool_results(&session);
+    assert_eq!(results.len(), 6, "every tool_use must have a result");
+
+    for (i, (_, content)) in results.iter().take(3).enumerate() {
+        assert!(
+            content.contains("No tools matched"),
+            "call {i} in the first batch should have run the tool, got: {content:?}"
+        );
+    }
+    for (i, (_, content)) in results.iter().skip(3).enumerate() {
+        assert!(
+            content.starts_with("Blocked:") && content.contains("identical results"),
+            "call {} in the second batch must be blocked by the outcome rule, got: {content:?}",
+            i + 3
+        );
+    }
+}
+
 /// Proxy measurement for the fat-frame half of #6659, deliberately labelled as such: it would NOT have caught the missing depth accounting on the workflow path, and it cannot fail the way a stack overflow does.
 ///
 /// `run_agent_loop`'s future is the state machine a nested agent turn stacks once per level, and the #6659 crash report works out to roughly 40 KB per frame — which reads as bounded depth with very large frames rather than deep recursion.

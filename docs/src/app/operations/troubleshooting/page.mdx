@@ -308,8 +308,8 @@ RUST_LOG=librefang_channels=debug librefang start
 
 **Automatic protection**: LibreFang has a built-in loop guard:
 - **Warn** at 3 identical tool calls
-- **Block** at 5 identical tool calls
-- **Circuit breaker** at 30 total blocked calls (stops the agent)
+- **Block** at 5 identical tool calls, or at 3 identical *results* for the same parameters — a tool that keeps answering the same way is refused on its fourth call rather than its fifth
+- **Circuit breaker** at 30 total tool calls (stops the agent)
 
 **Manual fix**: Cancel the agent's current run:
 ```bash

@@ -2306,3 +2306,179 @@ fn redact_images_for_text_only_is_noop_without_images() {
         "messages without image blocks must pass through unchanged"
     );
 }
+
+// --- Loop-guard outcome recording --------------------------------------
+//
+// `record_loop_guard_outcome` is the post-execution half of the guard: it feeds the result back in, which is what arms `blocked_outcomes` for the next `check()`.
+// Before it was wired the outcome counters stayed empty for the whole loop and only the per-call counter could ever block anything.
+
+/// One executed tool call carrying `content` as both the raw result and the content the model would see.
+/// `execution_ms` is what distinguishes a call that ran the tool body from a short-circuit (fork-allowlist rejection, incognito drop, hook block), so it is a parameter.
+fn executed_tool_call(content: &str, execution_ms: Option<u64>) -> ExecutedToolCall {
+    ExecutedToolCall {
+        result: librefang_types::tool::ToolResult {
+            tool_use_id: "tid_1".to_string(),
+            content: content.to_string(),
+            is_error: false,
+            status: librefang_types::tool::ToolExecutionStatus::Completed,
+            ..Default::default()
+        },
+        final_content: content.to_string(),
+        execution_ms,
+    }
+}
+
+#[test]
+fn record_loop_guard_outcome_blocks_the_call_after_three_identical_results() {
+    use super::super::tool_call::record_loop_guard_outcome;
+
+    let mut guard = LoopGuard::new(LoopGuardConfig::default());
+    let tool_call = ToolCall {
+        id: "tid_1".to_string(),
+        name: "task_claim".to_string(),
+        input: serde_json::json!({}),
+    };
+
+    // Three calls that run and return the same thing.
+    // The first is silent; the second and third carry the guard's advisory into the tool result.
+    for i in 1..=3 {
+        let verdict = guard.check(&tool_call.name, &tool_call.input);
+        assert!(
+            !matches!(verdict, LoopGuardVerdict::Block(_)),
+            "call {i} must still run: {verdict:?}"
+        );
+        let mut executed = executed_tool_call("The queue is empty.", Some(4));
+        record_loop_guard_outcome(&mut guard, &tool_call, &mut executed);
+        if i == 1 {
+            assert_eq!(
+                executed.final_content, "The queue is empty.",
+                "a first result has nothing to repeat and must not be annotated"
+            );
+        } else {
+            assert!(
+                executed.final_content.contains("[LOOP GUARD]")
+                    && executed.final_content.contains("identical results"),
+                "repeat {i} must carry the outcome advisory, got: {:?}",
+                executed.final_content
+            );
+        }
+    }
+
+    // Fourth call: blocked on the outcome rule, one call before `block_threshold` (5) would have stopped it.
+    let verdict = guard.check(&tool_call.name, &tool_call.input);
+    assert!(
+        matches!(&verdict, LoopGuardVerdict::Block(msg) if msg.contains("identical results")),
+        "expected an outcome block on the fourth identical call, got: {verdict:?}"
+    );
+}
+
+#[test]
+fn record_loop_guard_outcome_ignores_calls_that_never_ran() {
+    use super::super::tool_call::record_loop_guard_outcome;
+
+    let mut guard = LoopGuard::new(LoopGuardConfig::default());
+    let tool_call = ToolCall {
+        id: "tid_1".to_string(),
+        name: "task_claim".to_string(),
+        input: serde_json::json!({}),
+    };
+
+    // A hook block, a fork-allowlist rejection and an incognito drop all produce constant content without running the tool.
+    // Recording them would let the runtime's own refusals look like a tool repeating itself.
+    for _ in 0..3 {
+        guard.check(&tool_call.name, &tool_call.input);
+        let mut executed = executed_tool_call("Hook blocked tool 'task_claim': policy", None);
+        record_loop_guard_outcome(&mut guard, &tool_call, &mut executed);
+        assert_eq!(
+            executed.final_content, "Hook blocked tool 'task_claim': policy",
+            "a call that never ran must not be annotated"
+        );
+    }
+
+    // Nothing was recorded, so the fourth call is judged by the per-call counter alone — a warning, not the outcome block.
+    let verdict = guard.check(&tool_call.name, &tool_call.input);
+    assert!(
+        matches!(verdict, LoopGuardVerdict::Warn(_)),
+        "expected the plain repeat warning, got: {verdict:?}"
+    );
+}
+
+#[test]
+fn record_loop_guard_outcome_appends_the_poll_backoff_suggestion() {
+    use super::super::tool_call::record_loop_guard_outcome;
+
+    let mut guard = LoopGuard::new(LoopGuardConfig::default());
+    let tool_call = ToolCall {
+        id: "tid_1".to_string(),
+        name: "shell_exec".to_string(),
+        input: serde_json::json!({"command": "docker ps"}),
+    };
+
+    // The backoff schedule starts on the second call of the same poll.
+    let mut first = executed_tool_call("CONTAINER ID   IMAGE   STATUS", Some(7));
+    record_loop_guard_outcome(&mut guard, &tool_call, &mut first);
+    assert_eq!(
+        first.final_content, "CONTAINER ID   IMAGE   STATUS",
+        "the first poll has nothing to pace"
+    );
+
+    let mut second = executed_tool_call("CONTAINER ID   IMAGE   STATUS", Some(7));
+    record_loop_guard_outcome(&mut guard, &tool_call, &mut second);
+    assert!(
+        second.final_content.contains("Wait roughly 5s"),
+        "expected the first backoff step on the second poll, got: {:?}",
+        second.final_content
+    );
+
+    // An unchanged answer is what a wait loop looks like, so a poll call is paced rather than accused of returning identical results.
+    let mut third = executed_tool_call("CONTAINER ID   IMAGE   STATUS", Some(7));
+    record_loop_guard_outcome(&mut guard, &tool_call, &mut third);
+    assert!(
+        !third.final_content.contains("identical results"),
+        "a poll call must keep its relaxed outcome thresholds, got: {:?}",
+        third.final_content
+    );
+    assert!(
+        !matches!(
+            guard.check(&tool_call.name, &tool_call.input),
+            LoopGuardVerdict::Block(_)
+        ),
+        "three identical poll answers must not block the next poll"
+    );
+}
+
+/// The advisory text and the relaxed outcome budget are both gated on a call that *declares* itself a poll, not on the broad classifier `check` uses.
+/// `LoopGuard::is_poll_call` also treats any parameter object mentioning `status` / `poll` / `wait` as polling, for any tool name, which sweeps up ordinary listings — `task_list {"status": "pending"}` and `goal_update {"goal_id": …, "status": "in_progress"}` both match.
+/// Telling those to wait five seconds is false advice, and tripling their outcome budget would weaken the guard 3x for exactly the calls it was written to stop.
+#[test]
+fn record_loop_guard_outcome_does_not_pace_ordinary_calls_that_mention_status() {
+    use super::super::tool_call::record_loop_guard_outcome;
+
+    let mut guard = LoopGuard::new(LoopGuardConfig::default());
+    let tool_call = ToolCall {
+        id: "tid_1".to_string(),
+        name: "task_list".to_string(),
+        input: serde_json::json!({"status": "pending"}),
+    };
+
+    for i in 1..=3 {
+        let verdict = guard.check(&tool_call.name, &tool_call.input);
+        assert!(
+            !matches!(verdict, LoopGuardVerdict::Block(_)),
+            "call {i} must still run: {verdict:?}"
+        );
+        let mut executed = executed_tool_call("No pending tasks.", Some(3));
+        record_loop_guard_outcome(&mut guard, &tool_call, &mut executed);
+        assert!(
+            !executed.final_content.contains("This looks like polling"),
+            "repeat {i} of an ordinary listing must not be told to wait, got: {:?}",
+            executed.final_content
+        );
+    }
+
+    let verdict = guard.check(&tool_call.name, &tool_call.input);
+    assert!(
+        matches!(&verdict, LoopGuardVerdict::Block(msg) if msg.contains("identical results")),
+        "the fourth identical listing must hit the strict outcome threshold, got: {verdict:?}"
+    );
+}

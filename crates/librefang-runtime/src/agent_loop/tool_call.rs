@@ -786,6 +786,15 @@ pub(super) async fn execute_tool_group(
     for (_, trace) in traces {
         ctx.decision_traces.push(trace);
     }
+
+    // Phase 3 — serial outcome recording (`&mut LoopGuard` again).
+    // Sorting first is what keeps a batch's guard state independent of which future happened to finish first: the counters are order-sensitive, so they are fed in tool-call order, exactly as the serial path would feed them.
+    // Blocked members are excluded — they never ran a tool body.
+    results.sort_by_key(|(idx, _)| *idx);
+    for (idx, executed) in results.iter_mut() {
+        record_loop_guard_outcome(ctx.loop_guard, &tool_calls[*idx], executed);
+    }
+
     results.extend(blocked);
     results.sort_by_key(|(idx, _)| *idx);
     Ok(results)
@@ -905,6 +914,44 @@ pub(super) async fn precheck_loop_guard(
     }
 }
 
+/// Feed a finished tool result back into the loop guard and append whatever advice that produces to the content the model will read.
+///
+/// The counterpart to [`precheck_loop_guard`]: `check()` decides whether the call may run, this records what running it produced.
+/// Both need `&mut LoopGuard`, so both belong to the sequential phase — `execute_single_tool_call_core` deliberately holds only a shared `&ToolExecutionContext` and must not touch the guard, which is why the parallel dispatcher calls this after its concurrent phase has drained rather than from inside a dispatch future.
+///
+/// This is what makes the outcome-aware half of the guard live.
+/// Three identical results for identical parameters mark the call hash, so the next `check()` blocks it one call earlier than `block_threshold` would: a call that keeps answering the same way runs three times and is refused on the fourth, rather than running four times and being refused on the fifth.
+/// A call that *declares* itself a poll — an explicit `"poll": true` parameter, or `shell_exec` running a recognised wait-loop command such as `docker ps` or `systemctl status` — keeps the relaxed thresholds `LoopGuardConfig::poll_multiplier` grants it and gets the backoff schedule's suggestion appended instead, because an unchanged answer is the expected shape of "not ready yet" rather than evidence of a stuck agent.
+/// Both of those use `LoopGuard::is_declared_poll_call`, not the broader `is_poll_call` that `check()` uses: the broad one reads any parameter object mentioning `status` / `poll` / `wait` as a poll for any tool, which would put "wait roughly 5s before checking again" on the result of a `task_list {"status": "pending"}` and triple that call's outcome budget.
+///
+/// Only calls that actually ran the tool body are recorded (`execution_ms.is_some()`).
+/// A fork-allowlist rejection, an incognito `memory_store` drop or a hook block never produced a tool outcome, and their synthetic content is constant by construction — feeding it back would let the runtime's own refusals accumulate as if they were the tool answering the same way three times.
+pub(super) fn record_loop_guard_outcome(
+    loop_guard: &mut LoopGuard,
+    tool_call: &ToolCall,
+    executed: &mut ExecutedToolCall,
+) {
+    if executed.execution_ms.is_none() {
+        return;
+    }
+
+    // The raw `result.content` is what gets hashed, not `final_content`: the latter already carries the `[LOOP GUARD]` warn suffix and any injection-guard prefix, both of which change between otherwise identical results and would defeat the comparison.
+    if let Some(msg) =
+        loop_guard.record_outcome(&tool_call.name, &tool_call.input, &executed.result.content)
+    {
+        executed.final_content = format!("{}\n\n[LOOP GUARD] {}", executed.final_content, msg);
+    }
+
+    if let Some(delay_ms) = loop_guard.get_poll_backoff(&tool_call.name, &tool_call.input) {
+        executed.final_content = format!(
+            "{}\n\n[LOOP GUARD] This looks like polling. Wait roughly {}s before checking \
+             again, or do something else in the meantime.",
+            executed.final_content,
+            delay_ms / 1000
+        );
+    }
+}
+
 pub(super) async fn execute_single_tool_call_inner(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
@@ -927,10 +974,11 @@ pub(super) async fn execute_single_tool_call_inner(
         LoopGuardPrecheck::CircuitBreak(err) => return Err(err),
     };
 
-    let (executed, trace) = execute_single_tool_call_core(&*ctx, tool_call, &verdict).await?;
+    let (mut executed, trace) = execute_single_tool_call_core(&*ctx, tool_call, &verdict).await?;
     if let Some(trace) = trace {
         ctx.decision_traces.push(trace);
     }
+    record_loop_guard_outcome(ctx.loop_guard, tool_call, &mut executed);
     Ok(executed)
 }
 
