@@ -476,15 +476,10 @@ impl<'de> Deserialize<'de> for StepAgent {
 ///   `Loop` — route their step body to a registered agent via the
 ///   workflow's `agent_resolver`. These are the legacy modes and always
 ///   consume the step's `agent` field.
-/// * **Operator nodes** (#4980) — `Wait`, `Gate`, `Approval`, `Transform`,
-///   `Branch` — never call an agent. The step's `agent` field is ignored
-///   for these variants (today it's still required syntactically; a
-///   follow-up may relax that at the HTTP layer). Only `Wait` is fully
-///   wired in the current PR — the others log a structured `warn!` and
-///   return success so the wire format is usable from day one while the
-///   open design questions on their bodies (Gate.condition syntax,
-///   Approval operator-identity, Transform.code shape) are still being
-///   sorted out. See #4980.
+/// * **Operator nodes** (#4980, #4977) — `Wait`, `Gate`, `Approval`, `Transform`, `Branch`, `Operator` — never call an agent.
+///   The step's `agent` field is ignored for these variants (today it's still required syntactically; a follow-up may relax that at the HTTP layer).
+///   All six have real executors: `Wait` sleeps, `Gate` halts the run on a failed comparator, `Transform` renders a Tera template, `Branch` forward-jumps, and `Approval` / `Operator` suspend the run until a human answers.
+///   None of them is a no-op, and none of them may become one — an operator node that validated and then fell through would report itself as having run while doing nothing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepMode {
@@ -525,15 +520,11 @@ pub enum StepMode {
     /// shape is additive: future operators (regex, range, in-set) land
     /// as new [`GateOp`] variants without touching anything else.
     Gate { condition: GateCondition },
-    /// Operator node: human-in-the-loop pause. `recipients` is a
-    /// free-form `Vec<String>` like `["telegram:@pakman",
-    /// "email:foo@bar"]` for V1; the operator-identity model question
-    /// (per-channel UUIDs vs free-form strings vs Approval `Recipient`
-    /// type from #4977) is deferred to a follow-up. `timeout_secs` is
-    /// the wall-clock budget before a configurable timeout action
-    /// fires (also deferred — the current shape carries only the
-    /// timeout value, not the action). Executor is no-op-with-warn in
-    /// this PR (#4980).
+    /// Operator node: human-in-the-loop pause — the narrow, older spelling of [`StepMode::Operator`], and executed by the same code (see `hitl_pause_spec`).
+    /// `recipients` is a free-form `Vec<String>` like `["telegram:@pakman", "email:foo@bar"]` and maps onto `Operator::notify`.
+    /// `timeout_secs` is the wall-clock budget before the run is failed; because this shape carries a timeout value but no timeout *action*, the disposition is fixed at [`OperatorTimeoutAction::Fail`] — a gate nobody answered is not an approval.
+    /// The action vocabulary is fixed at approve/reject for the same reason: it is the whole of what this wire shape can express, and a step that needs `edit` / `provide_input` or an auto-approve timeout is written as `operator` instead.
+    /// A paused run of either variant is inspected and resolved through `GET` / `POST /api/workflows/runs/{run_id}/operator`.
     Approval {
         recipients: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -595,13 +586,8 @@ pub enum StepMode {
     /// - `timeout_action`: deterministic resolution when the budget
     ///   expires (see [`OperatorTimeoutAction`]).
     ///
-    /// **Executor state (#4977 step 1/N)**: this PR ships the types,
-    /// validate path, and a skeleton executor that pauses the run
-    /// using the existing [`WorkflowEngine::pause_run`] mechanism so
-    /// callers can already use the resume-token contract. Channel
-    /// notification dispatch, the timeout watchdog, and the operator
-    /// HTTP actions endpoint are deferred — see the per-arm
-    /// `TODO(#4977 step 2):` markers in the executor.
+    /// The executor suspends the run, dispatches the artifact and the allowed actions to every `notify` recipient (#5135), and arms the timeout watchdog (#5134).
+    /// The pause is resolved through `GET` / `POST /api/workflows/runs/{run_id}/operator` (#5133), or by the watchdog applying `timeout_action`.
     Operator {
         /// Channel addresses to notify, one per recipient. Format is
         /// `scheme:target` (e.g. `telegram:@pakman`). Validation
@@ -831,6 +817,72 @@ pub trait OperatorResumeDriver: Send + Sync {
         operator_step_index: usize,
         timeout_action: OperatorTimeoutAction,
     );
+}
+
+/// Everything the human-in-the-loop pause executor needs from a step mode, normalised across the two spellings of one concept.
+///
+/// [`StepMode::Approval`] is the narrow, older spelling of [`StepMode::Operator`]: the same suspend-until-a-human-answers pause, with the action vocabulary and the timeout disposition fixed rather than author-supplied.
+/// Normalising here — rather than rewriting the mode at parse time — keeps the persisted workflow byte-identical to what the author wrote while making it a compile-time fact that both spellings run the *same* executor.
+/// That matters because the failure mode of the alternative is silent: an approval step that is validated and then falls through lets whatever the workflow author put after the gate (deploy, spend, publish, delete) run unattended, and records the gate as having completed without error.
+struct HitlPauseSpec {
+    /// Channel addresses to notify, `scheme:target` (`StepMode::Operator::notify` / `StepMode::Approval::recipients`).
+    notify: Vec<String>,
+    /// Operator interactions authorised at this step; the resolve path rejects anything not listed here.
+    actions: Vec<OperatorAction>,
+    /// Auto-resolve budget in seconds. `None` = wait indefinitely.
+    timeout_secs: Option<u64>,
+    /// Deterministic disposition when the budget expires.
+    timeout_action: OperatorTimeoutAction,
+    /// Synthetic `StepResult.agent_name` suffix and the `kind` tag in the step's prompt trace, so a run's history still says which spelling the author used.
+    kind: &'static str,
+}
+
+/// Normalise a human-in-the-loop step mode into [`HitlPauseSpec`], or `None` for a mode that never pauses.
+///
+/// The two fixed choices for [`StepMode::Approval`] are deliberate.
+/// Its actions are approve/reject because that is the whole of what the `approval` wire shape can express — an author who needs `edit` or `provide_input` writes an `operator` step.
+/// Its timeout disposition is [`OperatorTimeoutAction::Fail`] rather than `Approve` because a gate nobody answered is not an approval; auto-approving on silence would reintroduce exactly the fail-open behaviour this normalisation exists to remove.
+fn hitl_pause_spec(mode: &StepMode) -> Option<HitlPauseSpec> {
+    match mode {
+        StepMode::Approval {
+            recipients,
+            timeout_secs,
+        } => Some(HitlPauseSpec {
+            notify: recipients.clone(),
+            actions: vec![OperatorAction::Approve, OperatorAction::Reject],
+            timeout_secs: *timeout_secs,
+            timeout_action: OperatorTimeoutAction::Fail,
+            kind: "approval",
+        }),
+        StepMode::Operator {
+            notify,
+            actions,
+            timeout_secs,
+            timeout_action,
+        } => Some(HitlPauseSpec {
+            notify: notify.clone(),
+            actions: actions.clone(),
+            timeout_secs: *timeout_secs,
+            timeout_action: timeout_action.clone(),
+            kind: "operator",
+        }),
+        _ => None,
+    }
+}
+
+/// What [`WorkflowEngine::enter_hitl_pause`] managed to do to the run.
+///
+/// A `bool` return would collapse "the run is suspended" against the ways of failing to suspend it, and there is no safe default the caller can pick for an outcome it cannot name: stepping past a human gate whose pause was never recorded is precisely the fail-open behaviour the human-in-the-loop executor exists to prevent.
+/// Naming the outcomes forces the caller to answer for each one, and makes a future fourth outcome a compile error rather than a silent fall-through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HitlPauseOutcome {
+    /// The run is now `Paused` at this step and the caller must stop executing.
+    Paused,
+    /// The run left the registry between the pause request being lodged and the snapshot being taken, so nothing was suspended.
+    /// Unreachable while the `MAX_RETAINED_RUNS` sweep only evicts terminal runs, but the caller must still not run on.
+    RunMissing,
+    /// The run's `pause_request` was consumed concurrently between the lodge and the snapshot, so nothing was suspended.
+    PauseRequestLost,
 }
 
 /// Outcome the resolve path applies to a paused operator step. Produced by
@@ -2696,6 +2748,18 @@ impl WorkflowEngine {
         self.runs.get(&run_id).map(|r| r.clone())
     }
 
+    /// The pause reason if `run_id` is currently [`WorkflowRunState::Paused`], else `None`.
+    ///
+    /// [`WorkflowEngine::execute_run`] returns `Ok(output)` both for a run that finished and for a run that suspended itself at a human-in-the-loop gate, because in both cases execution left the step loop without an error.
+    /// Anything that renders that `Ok` to a person or to an agent has to tell the two apart, or it reports a gate nobody has answered yet as a completed workflow and hands out the pre-gate artifact as the result — the same fail-open shape as a gate that does not gate, one layer up.
+    /// Callers that need more than the reason (the artifact, the authorised actions) want [`WorkflowEngine::inspect_operator_pause`] instead.
+    pub async fn paused_reason(&self, run_id: WorkflowRunId) -> Option<String> {
+        self.runs.get(&run_id).and_then(|r| match &r.state {
+            WorkflowRunState::Paused { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+    }
+
     /// Recover workflow runs left in `Running` or `Pending` state after a daemon crash.
     ///
     /// Called once at boot. Any run whose `started_at` age exceeds `stale_timeout` is
@@ -2920,49 +2984,6 @@ impl WorkflowEngine {
             Some(preamble) => format!("{preamble}{prompt}"),
             None => prompt.to_string(),
         }
-    }
-
-    /// Record a synthetic [`StepResult`] for an operator-node step whose
-    /// executor is intentionally a no-op. After steps 2–4 of #4980 only
-    /// `Approval` still routes through here; `Gate`, `Transform`, and
-    /// `Branch` build their own `StepResult` inline with operator-specific
-    /// trace data in the `prompt` field. Preserves `current_input` by
-    /// echoing it as the step's `output`, so downstream
-    /// `{{input}}` / `output_var` substitutions keep working as if the
-    /// operator step were absent.
-    ///
-    /// Pulled out as a static helper rather than a closure so the
-    /// Approval callsite stays one line; will remain the no-op surface for
-    /// any future operator-node variant whose body lands in a follow-up.
-    fn record_operator_noop_step_result(
-        runs: &Arc<DashMap<WorkflowRunId, WorkflowRun>>,
-        run_id: WorkflowRunId,
-        step: &WorkflowStep,
-        agent_name: &str,
-        current_input: &str,
-        variables: &mut HashMap<String, String>,
-        all_outputs: &mut Vec<String>,
-    ) {
-        let output = current_input.to_string();
-        let step_result = StepResult {
-            step_name: step.name.clone(),
-            agent_id: String::new(),
-            agent_name: agent_name.to_string(),
-            prompt: String::new(),
-            output: output.clone(),
-            input_tokens: 0,
-            output_tokens: 0,
-            duration_ms: 0,
-            error: None,
-            variables: Self::snapshot_variables(variables),
-        };
-        if let Some(mut r) = runs.get_mut(&run_id) {
-            r.step_results.push(step_result);
-        }
-        if let Some(ref var) = step.output_var {
-            variables.insert(var.clone(), output.clone());
-        }
-        all_outputs.push(output);
     }
 
     /// Max prefix of an operator-node's decision input that gets folded
@@ -3663,6 +3684,165 @@ impl WorkflowEngine {
     // timeout watchdog (#5134), action → resume resolution (#5133).
     // ====================================================================
 
+    /// Enter a human-in-the-loop pause at `step` and suspend the run there.
+    ///
+    /// Shared by both spellings of the gate — [`StepMode::Operator`] and [`StepMode::Approval`] — via [`hitl_pause_spec`], so the narrower `approval` shape cannot end up on a different (or absent) executor.
+    /// Records the synthetic `_operator:<kind>` [`StepResult`], lodges a pause request, snapshots `(resume index, variables, current_input)` onto the run, persists it, dispatches the artifact and the allowed actions to every `spec.notify` recipient (#5135), and arms the timeout watchdog (#5134).
+    /// The resume re-enters at the step AFTER `step_index` with the resolved operator output as `{{input}}`, which is why the snapshot's index is `step_index + 1`.
+    ///
+    /// The return value is the gate itself: only [`HitlPauseOutcome::Paused`] means the run was actually suspended, and a caller that runs on for any other outcome turns a human-approval step into a step that records itself as approved while nobody approved anything.
+    /// The other two outcomes are races rather than ordinary control flow — the run left the registry, or its `pause_request` was consumed concurrently — and neither is an instruction to continue.
+    #[allow(clippy::too_many_arguments)]
+    fn enter_hitl_pause(
+        &self,
+        run_id: WorkflowRunId,
+        step: &WorkflowStep,
+        step_index: usize,
+        spec: &HitlPauseSpec,
+        current_input: &str,
+        variables: &mut HashMap<String, String>,
+        all_outputs: &mut Vec<String>,
+    ) -> HitlPauseOutcome {
+        let input_trace = Self::truncate_operator_input_trace(current_input);
+        let notify_count = spec.notify.len();
+        let action_count = spec.actions.len();
+        let timeout_action_label = match &spec.timeout_action {
+            OperatorTimeoutAction::Approve => "approve",
+            OperatorTimeoutAction::Reject => "reject",
+            OperatorTimeoutAction::Fail => "fail",
+            OperatorTimeoutAction::Continue => "continue",
+        };
+        let actions_json: Vec<serde_json::Value> = spec
+            .actions
+            .iter()
+            .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let output = current_input.to_string();
+        let step_result = StepResult {
+            step_name: step.name.clone(),
+            agent_id: String::new(),
+            agent_name: format!("_operator:{}", spec.kind),
+            prompt: Self::operator_prompt_trace(
+                spec.kind,
+                serde_json::json!({
+                    "notify": spec.notify,
+                    "actions": actions_json,
+                    "timeout_secs": spec.timeout_secs,
+                    "timeout_action": timeout_action_label,
+                    "input": input_trace,
+                }),
+            ),
+            output: output.clone(),
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            error: None,
+        };
+        if let Some(mut r) = self.runs.get_mut(&run_id) {
+            r.step_results.push(step_result);
+        }
+        if let Some(ref var) = step.output_var {
+            variables.insert(var.clone(), output.clone());
+        }
+        all_outputs.push(output);
+
+        info!(
+            step = step_index + 1,
+            name = %step.name,
+            kind = spec.kind,
+            notify_count,
+            action_count,
+            timeout_secs = ?spec.timeout_secs,
+            timeout_action = %timeout_action_label,
+            "Operator step entered — pausing run for human-in-the-loop (#4977)"
+        );
+
+        // Lodge a pause request, then drive the snapshot inline — mirroring the loop-top gate exactly, so the last-step case can't fall through to Completed with an orphan pause.
+        let resume_index = step_index + 1;
+        let reason = format!(
+            "{} step '{}' awaiting human response ({} recipient(s), {} action(s))",
+            spec.kind, step.name, notify_count, action_count,
+        );
+        let token = Uuid::new_v4();
+        let hash = Self::hash_resume_token(&token);
+        if let Some(mut r) = self.runs.get_mut(&run_id) {
+            // Only lodge if no caller-driven pause is already pending — the operator step's pause is implicit and must not clobber a pre-existing one (idempotency parity with `pause_run`).
+            // Either way the run ends up suspended below; which reason and token it carries is what this branch decides.
+            if r.pause_request.is_none() {
+                r.pause_request = Some(PauseRequest {
+                    reason: reason.clone(),
+                    resume_token_hash: hash,
+                });
+            }
+        }
+        info!(
+            run_id = %run_id,
+            step = step_index + 1,
+            resume_token = %token,
+            "Operator step pause token generated"
+        );
+
+        // Take the request and apply the Paused transition under one `get_mut` shard lock, for the same reason the loop-top gate does: splitting them would let a concurrent `pause_run` lodge a fresh request in between, leaving `state = Paused{token=A}` against `pause_request = Some{token=B}` (#3716).
+        // Both `else` arms mean the run was NOT suspended, so each returns its own outcome rather than a shared `false` the caller would have to guess at.
+        let pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
+            let Some(pause) = run.pause_request.take() else {
+                return HitlPauseOutcome::PauseRequestLost;
+            };
+            run.paused_step_index = Some(resume_index);
+            run.paused_variables = variables
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            run.paused_current_input = Some(current_input.to_string());
+            run.state = WorkflowRunState::Paused {
+                resume_token_hash: pause.resume_token_hash.clone(),
+                reason: pause.reason.clone(),
+                paused_at: Utc::now(),
+            };
+            pause
+        } else {
+            return HitlPauseOutcome::RunMissing;
+        };
+
+        // Persist immediately — same SIGKILL-safety reasoning as the loop-top gate.
+        if let Some(run) = self.runs.get(&run_id) {
+            self.upsert_run_to_store(&run);
+        }
+        info!(
+            run_id = %run_id,
+            resume_step = resume_index,
+            reason = %pause.reason,
+            "Workflow run paused at operator step boundary"
+        );
+
+        // #5135 — dispatch the artifact + allowed actions to every configured recipient.
+        // Best-effort: a failed send is logged but never aborts the pause, because the run is already Paused + persisted and resumable via the HTTP layer regardless.
+        let notify_message = Self::render_operator_notification(
+            &step.name,
+            &spec.actions,
+            current_input,
+            spec.timeout_secs,
+            &spec.timeout_action,
+        );
+        self.dispatch_operator_notifications(run_id, &step.name, &spec.notify, &notify_message);
+
+        // #5134 — spawn the timeout watchdog.
+        // `Continue` (the default for `operator`) leaves the run Paused forever, so there is nothing to wait for; only Approve / Reject / Fail need a watchdog.
+        // Skipped entirely when `timeout_secs` is None, which is the documented "wait indefinitely" shape for both spellings of the gate.
+        if let (Some(secs), true) = (
+            spec.timeout_secs,
+            !matches!(&spec.timeout_action, OperatorTimeoutAction::Continue),
+        ) {
+            self.spawn_operator_timeout_watchdog(
+                run_id,
+                step_index,
+                secs,
+                spec.timeout_action.clone(),
+            );
+        }
+        HitlPauseOutcome::Paused
+    }
+
     /// Render the operator-step notification body. Mirrors the
     /// approval-notification shape (`push_approval_interactive`): a short
     /// header, the artifact preview (truncated via the same helper the
@@ -3944,15 +4124,15 @@ impl WorkflowEngine {
         drop(run);
         let workflow = self.get_workflow(workflow_id).await?;
         let step = workflow.steps.get(operator_step_index)?;
-        match &step.mode {
-            StepMode::Operator { actions, .. } => Some(OperatorPause {
-                operator_step_index,
-                step_name: step.name.clone(),
-                artifact,
-                actions: actions.clone(),
-            }),
-            _ => None,
-        }
+        // Both spellings of the gate resolve through here.
+        // Reading the authorised actions back out of `hitl_pause_spec` — rather than matching the mode a second time — keeps the HTTP layer from drifting away from what the executor actually paused on.
+        let spec = hitl_pause_spec(&step.mode)?;
+        Some(OperatorPause {
+            operator_step_index,
+            step_name: step.name.clone(),
+            artifact,
+            actions: spec.actions,
+        })
     }
 
     /// List every run currently paused at an operator step, paired with
@@ -5220,35 +5400,49 @@ impl WorkflowEngine {
                     }
                 }
 
-                StepMode::Approval {
-                    recipients,
-                    timeout_secs,
-                } => {
-                    // Cross-issue dependency marker, not a vanilla TODO:
-                    // the Approval executor needs the async-task-tracker
-                    // landing in #4983 to suspend the run on a channel
-                    // and resume it when a human replies. Until #4983
-                    // lands the stub stays a structured warn-and-noop so
-                    // a workflow that includes Approval still completes
-                    // visibly rather than failing closed.
-                    // TODO(#4983): wire real Approval executor once the
-                    // long-pending async-task tracker is available.
-                    warn!(
-                        step = i + 1,
-                        name = %step.name,
-                        recipients = ?recipients,
-                        timeout_secs = ?timeout_secs,
-                        "Approval executor not yet implemented — blocked on async-task-tracker landing in #4983 (refs #4980)"
-                    );
-                    Self::record_operator_noop_step_result(
-                        &self.runs,
+                StepMode::Approval { .. } | StepMode::Operator { .. } => {
+                    // Human-in-the-loop pause.
+                    // `approval` and `operator` are two spellings of one gate, so both run the same executor — `hitl_pause_spec` is where the narrower `approval` shape's fixed action vocabulary and fail-closed timeout disposition are pinned down.
+                    //
+                    // Every path out of this arm returns from `execute_run_sequential`: the run is either suspended here or failed here.
+                    // There is deliberately no path that falls through to the next step, because that is what a gate nobody answered would have to do to be fail-open.
+                    let Some(spec) = hitl_pause_spec(&step.mode) else {
+                        // Unreachable today: this arm's pattern and `hitl_pause_spec` enumerate the same two variants.
+                        // If they ever drift apart, fail the run — continuing past a gate whose executor could not be built is the one outcome a human-approval step must never have.
+                        let e = format!(
+                            "step '{}' uses a human-in-the-loop mode the pause \
+                             executor does not recognise — refusing to run the \
+                             rest of the workflow past an unenforced gate",
+                            step.name
+                        );
+                        mark_run_failed(&self.runs, &run_id, &e);
+                        return Err(e);
+                    };
+                    // The pause step itself is at the CURRENT `i`; `enter_hitl_pause` snapshots `i + 1` as the resume index so the run re-enters at the NEXT step with the resolved operator output as `{{input}}`.
+                    let outcome = self.enter_hitl_pause(
                         run_id,
                         step,
-                        "_operator:approval",
+                        i,
+                        &spec,
                         &current_input,
                         &mut variables,
                         &mut all_outputs,
                     );
+                    let race = match outcome {
+                        HitlPauseOutcome::Paused => return Ok(current_input),
+                        HitlPauseOutcome::RunMissing => "the run is no longer registered",
+                        HitlPauseOutcome::PauseRequestLost => {
+                            "its pause request was consumed concurrently"
+                        }
+                    };
+                    // The run was not suspended, so the gate is not in force, so the workflow does not continue.
+                    let e = format!(
+                        "{} step '{}' could not be suspended for human review ({race}) \
+                         — refusing to run the rest of the workflow past an unenforced gate",
+                        spec.kind, step.name
+                    );
+                    mark_run_failed(&self.runs, &run_id, &e);
+                    return Err(e);
                 }
 
                 StepMode::Transform { code } => {
@@ -5577,197 +5771,6 @@ impl WorkflowEngine {
                         }
                     }
                 }
-
-                StepMode::Operator {
-                    notify,
-                    actions,
-                    timeout_secs,
-                    timeout_action,
-                } => {
-                    // #4977 step 2 — full HITL operator-step executor.
-                    //
-                    // Pause mechanics are unchanged from the #4977 step 1
-                    // skeleton: record a synthetic `_operator:operator`
-                    // StepResult, lodge a `pause_request`, advance `i` past
-                    // this step, then drive the pause snapshot inline so
-                    // the resume re-enters at the NEXT step with the
-                    // resolved operator output as `{{input}}`.
-                    //
-                    // On top of that this arm now (a) dispatches the
-                    // artifact + allowed-action instructions to every
-                    // configured `notify` recipient via the channel-bridge
-                    // notifier (#5135), and (b) spawns a timeout watchdog
-                    // that auto-resolves the pause with `timeout_action`
-                    // when `timeout_secs` elapses without an operator
-                    // response (#5134). The HTTP actions endpoint
-                    // (#5133) resolves the pause via
-                    // `resolve_operator_step`, which cancels the watchdog.
-                    let input_trace = Self::truncate_operator_input_trace(&current_input);
-                    let notify_count = notify.len();
-                    let action_count = actions.len();
-                    let timeout_action_label = match timeout_action {
-                        OperatorTimeoutAction::Approve => "approve",
-                        OperatorTimeoutAction::Reject => "reject",
-                        OperatorTimeoutAction::Fail => "fail",
-                        OperatorTimeoutAction::Continue => "continue",
-                    };
-                    let actions_json: Vec<serde_json::Value> = actions
-                        .iter()
-                        .map(|a| serde_json::to_value(a).unwrap_or(serde_json::Value::Null))
-                        .collect();
-                    let output = current_input.clone();
-                    let step_result = StepResult {
-                        step_name: step.name.clone(),
-                        agent_id: String::new(),
-                        agent_name: "_operator:operator".to_string(),
-                        prompt: Self::operator_prompt_trace(
-                            "operator",
-                            serde_json::json!({
-                                "notify": notify,
-                                "actions": actions_json,
-                                "timeout_secs": timeout_secs,
-                                "timeout_action": timeout_action_label,
-                                "input": input_trace,
-                            }),
-                        ),
-                        output: output.clone(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        duration_ms: 0,
-                        error: None,
-                        variables: Self::snapshot_variables(&variables),
-                    };
-                    if let Some(mut r) = self.runs.get_mut(&run_id) {
-                        r.step_results.push(step_result);
-                    }
-                    if let Some(ref var) = step.output_var {
-                        variables.insert(var.clone(), output.clone());
-                    }
-                    all_outputs.push(output);
-
-                    info!(
-                        step = i + 1,
-                        name = %step.name,
-                        notify_count,
-                        action_count,
-                        timeout_secs = ?timeout_secs,
-                        timeout_action = %timeout_action_label,
-                        "Operator step entered — pausing run for human-in-the-loop (#4977)"
-                    );
-
-                    // Lodge a pause request, then drive the snapshot
-                    // inline (mirrors the loop-top gate exactly so the
-                    // last-step case can't fall through to Completed with
-                    // an orphan pause).
-                    let reason = format!(
-                        "operator step '{}' awaiting human response ({} recipient(s), {} action(s))",
-                        step.name, notify_count, action_count,
-                    );
-                    let token = Uuid::new_v4();
-                    let hash = Self::hash_resume_token(&token);
-                    if let Some(mut r) = self.runs.get_mut(&run_id) {
-                        // Only lodge if no caller-driven pause is already
-                        // pending — the operator step's pause is implicit
-                        // and must not clobber a pre-existing one
-                        // (idempotency parity with `pause_run`).
-                        if r.pause_request.is_none() {
-                            r.pause_request = Some(PauseRequest {
-                                reason: reason.clone(),
-                                resume_token_hash: hash,
-                            });
-                        }
-                    }
-                    info!(
-                        run_id = %run_id,
-                        step = i + 1,
-                        resume_token = %token,
-                        "Operator step pause token generated"
-                    );
-
-                    // The operator step itself is at the CURRENT `i`. The
-                    // resume must re-enter at the NEXT step with the
-                    // resolved operator output as `{{input}}`, so capture
-                    // the operator-step index before advancing.
-                    let operator_step_index = i;
-                    i += 1;
-                    let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
-                        if let Some(pause) = run.pause_request.take() {
-                            run.paused_step_index = Some(i);
-                            run.current_step_index = None;
-                            run.paused_variables = variables
-                                .iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
-                                .collect();
-                            run.paused_current_input = Some(current_input.clone());
-                            run.state = WorkflowRunState::Paused {
-                                resume_token_hash: pause.resume_token_hash.clone(),
-                                reason: pause.reason.clone(),
-                                paused_at: Utc::now(),
-                            };
-                            Some(pause)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(pause) = pending_pause {
-                        // Persist immediately — same SIGKILL-safety
-                        // reasoning as the loop-top gate.
-                        if let Some(run) = self.runs.get(&run_id) {
-                            self.upsert_run_to_store(&run);
-                        }
-                        info!(
-                            run_id = %run_id,
-                            resume_step = i,
-                            reason = %pause.reason,
-                            "Workflow run paused at operator step boundary"
-                        );
-
-                        // #5135 — dispatch the artifact + allowed actions
-                        // to every configured recipient. Best-effort: a
-                        // failed send is logged but never aborts the
-                        // pause (the run is already Paused + persisted and
-                        // resumable via the HTTP layer regardless).
-                        let notify_message = Self::render_operator_notification(
-                            &step.name,
-                            actions,
-                            &current_input,
-                            *timeout_secs,
-                            timeout_action,
-                        );
-                        self.dispatch_operator_notifications(
-                            run_id,
-                            &step.name,
-                            notify,
-                            &notify_message,
-                        );
-
-                        // #5134 — spawn the timeout watchdog. `Continue`
-                        // (the default) leaves the run Paused forever, so
-                        // there is nothing to wait for; only Approve /
-                        // Reject / Fail need a watchdog. Skipped entirely
-                        // when `timeout_secs` is None (wait-forever).
-                        if let (Some(secs), true) = (
-                            *timeout_secs,
-                            !matches!(timeout_action, OperatorTimeoutAction::Continue),
-                        ) {
-                            self.spawn_operator_timeout_watchdog(
-                                run_id,
-                                operator_step_index,
-                                secs,
-                                timeout_action.clone(),
-                            );
-                        }
-                        return Ok(current_input);
-                    }
-                    // No pause was actually lodged (idempotency branch
-                    // above declined because a caller-driven pause was
-                    // already pending). Continue so the loop-top gate
-                    // handles that pre-existing pause on the next
-                    // iteration.
-                    continue;
-                }
             }
 
             i += 1;
@@ -5842,6 +5845,32 @@ impl WorkflowEngine {
                 "Pause requested ({reason}) but the workflow uses DAG dependencies; \
                  pause/resume is supported on the sequential path only (#3335 follow-up)"
             ));
+        }
+
+        // Human-in-the-loop gates have no DAG semantics, and unlike the other operator nodes they cannot be allowed to degrade quietly.
+        // This executor never matches on `StepMode` — every step goes through `agent_resolver` — so an `approval` / `operator` step landing here is dispatched to an LLM like any agent step, and whatever the model answers flows on to the dependents as if a human had signed off.
+        //
+        // `Workflow::validate` rejects an operator node that itself carries `depends_on`, but that is narrower than the condition that actually routes a run here: `execute_run` picks the DAG path when ANY step has `depends_on`, so a dependency-free gate in an otherwise-DAG workflow passes validation and still reaches this executor.
+        // Validation is also only advisory — it runs at the two HTTP registration routes and NOT in `load_from_dir_sync`, which auto-registers `*.workflow.toml` / `*.workflow.json` from disk at boot.
+        // The executor is therefore the layer that has to enforce it, and it refuses before any step runs rather than mid-DAG with half the layers' side effects already committed.
+        //
+        // Scoped to the two gates on purpose.
+        // `wait` / `gate` / `transform` / `branch` on the DAG path are mis-executed the same way, but that is pre-existing behaviour whose failure mode is a wrong output rather than an unreviewed deploy, and hard-failing runs that work today is not this change's call to make.
+        if let Some(step) = workflow.steps.iter().find(|s| {
+            matches!(
+                s.mode,
+                StepMode::Approval { .. } | StepMode::Operator { .. }
+            )
+        }) {
+            let err = format!(
+                "DAG workflow refused to start: step '{}' is a human-in-the-loop gate \
+                 (mode={}) and gates execute on the sequential path only — remove \
+                 `depends_on` from this workflow's steps or change the step mode",
+                step.name,
+                operator_step_mode_label(&step.mode)
+            );
+            mark_run_failed(&self.runs, &run_id, &err);
+            return Err(err);
         }
 
         let layers = Self::topological_sort(&workflow.steps)?;
@@ -13691,13 +13720,8 @@ name = "topic"
 
     #[tokio::test]
     async fn execute_run_operator_step_pauses_with_resume_token() {
-        // End-to-end skeleton-executor smoke: an operator step must
-        // pause the run, record a `_operator:operator` step result,
-        // and store a resume_token_hash on the run state. We can't
-        // verify the plaintext token from outside `execute_run`
-        // today (the follow-up will surface it via an event); we
-        // just verify the run reached `Paused` with a hash and the
-        // synthetic StepResult landed.
+        // End-to-end smoke over `enter_hitl_pause`: an operator step must pause the run, record a `_operator:operator` step result, and store a resume_token_hash on the run state.
+        // The plaintext token is not observable from outside `execute_run` today, so this asserts the run reached `Paused` with a hash and that the synthetic StepResult landed.
         let engine = WorkflowEngine::new();
         let wf = workflow_with_operator_step();
         let wf_id = engine.register(wf).await;
@@ -13711,9 +13735,7 @@ name = "topic"
                 Ok(("ignored".to_string(), 0u64, 0u64))
             })
             .await;
-        // The skeleton executor pauses cleanly — `execute_run` returns
-        // Ok with the input value (pass-through) once Paused state is
-        // observed at the next step boundary.
+        // A pause is not a failure: the executor returns `Ok` with the pre-gate input as the pass-through value and leaves the run suspended.
         assert!(
             result.is_ok(),
             "operator pause should return Ok: {result:?}"

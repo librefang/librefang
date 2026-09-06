@@ -458,8 +458,21 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                 )
                                 .await
                                 {
-                                    Ok(Ok((_run_id, output))) => {
-                                        tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                    Ok(Ok((run_id, output))) => {
+                                        // `run_workflow` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike.
+                                        // The fire itself succeeded either way, which is what `record_success` records — but the delivered body must not present the pre-gate artifact as the job's result, or the reviewer the gate was raised for never learns there is anything to review.
+                                        let paused_reason =
+                                            kernel_job.workflows.engine.paused_reason(run_id).await;
+                                        let delivered = match &paused_reason {
+                                            Some(reason) => {
+                                                tracing::info!(job = %job_name, run_id = %run_id, %reason, "Cron workflow paused at a human-in-the-loop gate");
+                                                format!("[workflow paused awaiting a human — {reason}; not finished]\n{output}")
+                                            }
+                                            None => {
+                                                tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                                output.clone()
+                                            }
+                                        };
                                         kernel_job.workflows.cron_scheduler.record_success(job_id);
                                         if let Err(e) =
                                             kernel_job.workflows.cron_scheduler.persist()
@@ -470,7 +483,7 @@ pub(super) async fn run_cron_scheduler_loop(kernel: Arc<LibreFangKernel>) {
                                             .deliver_cron_output(
                                                 agent_id,
                                                 &job_name,
-                                                &output,
+                                                &delivered,
                                                 false,
                                                 &delivery,
                                                 &delivery_targets,

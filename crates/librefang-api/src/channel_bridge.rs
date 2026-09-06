@@ -1356,8 +1356,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             )
             .await;
 
+        // `execute_run` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike, so the run's own state decides which of the two this reply reports.
+        // Telling a chat that a workflow "completed" while it is parked on an unanswered approval hands the reader the pre-gate artifact as the final answer and leaves nobody looking for the review.
         match result {
-            Ok(output) => format!("Workflow '{}' completed:\n{}", wf.name, output),
+            Ok(output) => match self
+                .kernel
+                .workflow_engine()
+                .paused_reason(run_id)
+                .await
+            {
+                Some(reason) => format!(
+                    "Workflow '{}' is paused and waiting for a human — {}\nRun {} is not finished; review it at GET/POST /api/workflows/runs/{}/operator.\nOutput so far:\n{}",
+                    wf.name, reason, run_id, run_id, output
+                ),
+                None => format!("Workflow '{}' completed:\n{}", wf.name, output),
+            },
             Err(e) => format!("Workflow '{}' failed: {}", wf.name, e),
         }
     }
@@ -1650,11 +1663,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                             .run_workflow_typed(wf_id, input_text)
                                             .await
                                         {
-                                            Ok((_run_id, output)) => {
-                                                format!(
-                                                    "Job [{id_short}] workflow ran:\n{}",
-                                                    output
-                                                )
+                                            // A run suspended at a human-in-the-loop gate also returns `Ok`, and "workflow ran" over the pre-gate artifact reads as the job's result.
+                                            Ok((run_id, output)) => {
+                                                match self
+                                                    .kernel
+                                                    .workflow_engine()
+                                                    .paused_reason(run_id)
+                                                    .await
+                                                {
+                                                    Some(reason) => format!(
+                                                        "Job [{id_short}] workflow is paused and waiting for a human — {reason}\nRun {run_id} is not finished.\nOutput so far:\n{output}"
+                                                    ),
+                                                    None => format!(
+                                                        "Job [{id_short}] workflow ran:\n{output}"
+                                                    ),
+                                                }
                                             }
                                             Err(e) => format!("Failed to run workflow: {e}"),
                                         }

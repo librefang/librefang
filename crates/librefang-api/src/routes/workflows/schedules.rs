@@ -576,13 +576,25 @@ pub async fn run_schedule(
                 .unwrap_or_else(|| format!("[Scheduled workflow '{}' triggered]", name));
             match state.kernel.run_workflow_typed(wid, wf_input).await {
                 Ok((run_id, output)) => {
+                    // `run_workflow_typed` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike, so the run's own state decides what this reports and what gets delivered.
+                    // Calling a run parked on an unanswered approval "completed" hands the caller — and whoever the delivery targets are — the pre-gate artifact as the schedule's result.
+                    let paused_reason = state.kernel.workflow_engine().paused_reason(run_id).await;
+                    let (run_status, delivered) = match &paused_reason {
+                        Some(reason) => (
+                            "paused",
+                            format!(
+                                "[workflow paused awaiting a human — {reason}; not finished]\n{output}"
+                            ),
+                        ),
+                        None => ("completed", output.clone()),
+                    };
                     state
                         .kernel
                         .clone()
                         .deliver_cron_output(
                             agent_id,
                             &name,
-                            &output,
+                            &delivered,
                             false,
                             &job.delivery,
                             &job.delivery_targets,
@@ -591,7 +603,8 @@ pub async fn run_schedule(
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
-                            "status": "completed",
+                            "status": run_status,
+                            "reason": paused_reason,
                             "schedule_id": id,
                             "workflow_id": workflow_id,
                             "run_id": run_id.to_string(),

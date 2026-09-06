@@ -578,7 +578,12 @@ fn workflow_running_response(run_id: WorkflowRunId) -> (StatusCode, Json<serde_j
     )
 }
 
-async fn workflow_completed_response(
+/// Render the terminal response for a `?wait=true` run whose executor returned `Ok`.
+///
+/// `execute_run` returns `Ok(output)` both for a run that finished and for a run that suspended itself at a human-in-the-loop gate, so the run's own state — not the `Ok` — decides which status this reports.
+/// A gate nobody has answered yet must not come back as `200 {"status":"completed"}` carrying the pre-gate artifact: the caller would take the artifact as the workflow's result and never look for the pending review.
+/// A paused run is reported the same way an unfinished one is, `202` plus a pointer to poll, with the pause reason and the partial output attached.
+async fn workflow_wait_response(
     state: &Arc<AppState>,
     run_id: WorkflowRunId,
     output: String,
@@ -605,6 +610,24 @@ async fn workflow_completed_response(
         })
         .unwrap_or_default();
 
+    let paused_reason = run.as_ref().and_then(|run| match &run.state {
+        WorkflowRunState::Paused { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    if let Some(reason) = paused_reason {
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "run_id": run_id.to_string(),
+                "output": output,
+                "status": "paused",
+                "reason": reason,
+                "step_results": step_results,
+                "message": "workflow is paused awaiting a human response; inspect it at GET /api/workflows/runs/{run_id}/operator",
+            })),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -622,10 +645,11 @@ async fn workflow_completed_response(
 /// in the background and a 202 is returned immediately with `{"run_id":"..."}`.
 /// The caller can poll `GET /api/workflows/runs/{run_id}` to track progress.
 ///
-/// With `?wait=true` the request blocks until completion (original behavior,
-/// kept for backward compat). With `?wait=true&timeout_ms=N` the block is
-/// capped at N milliseconds; if the run hasn't finished, 202 is returned
-/// and the run continues in the background.
+/// With `?wait=true` the request blocks until the executor returns (original behavior, kept for backward compat).
+/// With `?wait=true&timeout_ms=N` the block is capped at N milliseconds; if the run hasn't finished, 202 is returned and the run continues in the background.
+///
+/// "The executor returned" is not the same as "the workflow finished": a run that reaches a `mode = "approval"` / `mode = "operator"` step suspends there, and a suspended run answers `202 {"status":"paused"}` with the pause reason rather than `200 {"status":"completed"}`.
+/// Its `output` is the artifact put in front of the reviewer, not the workflow's result.
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), request_body(content = crate::types::JsonObject, description = "Workflow input variables (free-form key/value object)"), responses((status = 200, description = "Workflow run completed (wait=true)"), (status = 202, description = "Workflow run started asynchronously")))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
@@ -646,7 +670,7 @@ pub async fn run_workflow(
         // Preserve the original fully synchronous kernel runner, including
         // its global execution timeout and nested-agent depth accounting.
         match state.kernel.run_workflow_typed(workflow_id, input).await {
-            Ok((run_id, output)) => workflow_completed_response(&state, run_id, output).await,
+            Ok((run_id, output)) => workflow_wait_response(&state, run_id, output).await,
             Err(e) => {
                 tracing::warn!("Workflow run failed for {id}: {e}");
                 (
@@ -677,7 +701,7 @@ pub async fn run_workflow(
             match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), &mut run_task)
                 .await
             {
-                Ok(Ok(Ok(output))) => workflow_completed_response(&state, run_id, output).await,
+                Ok(Ok(Ok(output))) => workflow_wait_response(&state, run_id, output).await,
                 Ok(Ok(Err(e))) => {
                     tracing::warn!("Workflow run failed for {id}: {e}");
                     (

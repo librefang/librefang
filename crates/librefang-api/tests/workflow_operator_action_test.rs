@@ -661,3 +661,236 @@ async fn operator_http_unauthorised_action_leaves_run_paused() {
         "run must remain Paused — Reject was not authorised at this step"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `StepMode::Approval` — the narrow spelling, resolved on the same endpoint
+// ---------------------------------------------------------------------------
+
+/// produce (Sequential, mock-resolved) → sign_off (`approval`, LAST step).
+///
+/// Same shape as `produce_then_operator`, spelled with the older `approval` variant so the tests below pin that it routes through the identical executor and the identical HTTP surface rather than a second mechanism.
+fn produce_then_approval(timeout_secs: Option<u64>) -> Workflow {
+    let mut wf = produce_then_operator(vec![OperatorAction::Approve, OperatorAction::Reject]);
+    wf.name = "approval-action-it".to_string();
+    wf.steps[1].name = "sign_off".to_string();
+    wf.steps[1].mode = StepMode::Approval {
+        recipients: vec!["telegram:@op".to_string()],
+        timeout_secs,
+    };
+    wf
+}
+
+/// `GET /api/workflows/runs/{run_id}/operator` on an approval-paused run returns the artifact and the approve/reject vocabulary.
+///
+/// Pre-fix there was nothing to inspect: the approval step never paused, so the run had already completed past the gate by the time anyone looked.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_step_http_inspect_returns_artifact_and_actions() {
+    let h = boot().await;
+    let run_id = run_to_operator_pause(&h, produce_then_approval(None)).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::GET,
+        &format!("/api/workflows/runs/{run_id}/operator"),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "inspect must be 200: {body:?}");
+    assert_eq!(body["step_name"].as_str(), Some("sign_off"), "{body:?}");
+    assert_eq!(body["artifact"].as_str(), Some("ARTIFACT"), "{body:?}");
+    let actions: Vec<&str> = body["actions"]
+        .as_array()
+        .expect("actions array")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert_eq!(actions, vec!["approve", "reject"], "{body:?}");
+}
+
+/// Approve an `approval` step over HTTP → the run resumes and completes with the approved artifact, proving the gate is a real round-trip and not just a dead end that halts the workflow.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_step_http_approve_resumes_and_completes() {
+    let h = boot().await;
+    let run_id = run_to_operator_pause(&h, produce_then_approval(None)).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{run_id}/operator"),
+        serde_json::json!({"action": "approve"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "approve must be 200: {body:?}");
+
+    let final_state = wait_terminal(&h, run_id).await;
+    assert!(
+        matches!(final_state, WorkflowRunState::Completed),
+        "run must Complete after approving the gate; got {final_state:?}"
+    );
+    let run = h
+        .state
+        .kernel
+        .workflow_engine()
+        .get_run(run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        run.output.as_deref(),
+        Some("ARTIFACT"),
+        "approve must carry the artifact through as the final output; got {:?}",
+        run.output
+    );
+}
+
+/// Reject an `approval` step over HTTP → the run goes Failed with a reason naming the rejection, and produces no workflow output.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_step_http_reject_fails_run() {
+    let h = boot().await;
+    let run_id = run_to_operator_pause(&h, produce_then_approval(None)).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/runs/{run_id}/operator"),
+        serde_json::json!({"action": "reject"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "reject must be 200: {body:?}");
+
+    let final_state = wait_terminal(&h, run_id).await;
+    assert!(
+        matches!(final_state, WorkflowRunState::Failed),
+        "run must be Failed after rejecting the gate; got {final_state:?}"
+    );
+    let run = h
+        .state
+        .kernel
+        .workflow_engine()
+        .get_run(run_id)
+        .await
+        .unwrap();
+    assert!(
+        run.error.as_deref().unwrap_or("").contains("reject"),
+        "Failed reason must mention reject; got {:?}",
+        run.error
+    );
+    assert!(
+        run.output.is_none(),
+        "rejected run must have no workflow output; got {:?}",
+        run.output
+    );
+}
+
+/// An unanswered `approval` step fails the run when its `timeout_secs` elapses.
+///
+/// The `approval` wire shape carries a timeout value but no timeout action, so the disposition is fixed at `Fail`.
+/// Auto-approving on silence would put the fail-open behaviour straight back: the operator asked for a gate, and nobody answering is not an approval.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_step_timeout_fails_the_run_rather_than_approving_it() {
+    let h = boot().await;
+    let run_id = run_to_operator_pause(&h, produce_then_approval(Some(1))).await;
+
+    let final_state = wait_terminal(&h, run_id).await;
+    assert!(
+        matches!(final_state, WorkflowRunState::Failed),
+        "an unanswered approval must fail the run, not approve it; got {final_state:?}"
+    );
+    let run = h
+        .state
+        .kernel
+        .workflow_engine()
+        .get_run(run_id)
+        .await
+        .unwrap();
+    assert!(
+        run.error.as_deref().unwrap_or("").contains("timeout"),
+        "Failed reason must name the timeout; got {:?}",
+        run.error
+    );
+    assert!(
+        run.output.is_none(),
+        "timed-out run must have no workflow output; got {:?}",
+        run.output
+    );
+}
+
+/// `POST /api/workflows/{id}/run?wait=true` must not call a suspended run finished.
+///
+/// `execute_run` returns `Ok` for a run parked on a human gate exactly as it does for one that finished, and the handler turned every `Ok` into `200 {"status":"completed"}` with the pre-gate artifact as `output`.
+/// A caller that trusted that answer would take the artifact as the workflow's result and never look for the review the gate exists to collect — the same fail-open shape as a gate that does not gate, one layer up.
+///
+/// The workflow is a single `approval` step, which reaches the pause without dispatching any agent, so it exercises the real synchronous `run_workflow_typed` path against a mock kernel that has no agents.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_paused_run_answers_wait_true_with_paused_not_completed() {
+    let h = boot().await;
+
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "approval-wait-true".to_string(),
+        description: "single approval gate".to_string(),
+        steps: vec![WorkflowStep {
+            name: "sign_off".to_string(),
+            agent: StepAgent::ByName {
+                name: "_op".to_string(),
+            },
+            prompt_template: "{{input}}".to_string(),
+            mode: StepMode::Approval {
+                recipients: vec!["telegram:@op".to_string()],
+                timeout_secs: None,
+            },
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+            depends_on: vec![],
+            session_mode: None,
+            required_skills: Vec::new(),
+        }],
+        owner: None,
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+    };
+    let wf_id = h.state.kernel.workflow_engine().register(wf).await;
+
+    let (status, body) = json_request(
+        &h,
+        Method::POST,
+        &format!("/api/workflows/{wf_id}/run?wait=true"),
+        serde_json::json!({"input": "ARTIFACT"}),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a run parked on a gate must not answer 200 completed: {body:?}"
+    );
+    assert_eq!(body["status"].as_str(), Some("paused"), "{body:?}");
+    assert!(
+        body["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sign_off"),
+        "the paused response must name the gate that is waiting; got {body:?}"
+    );
+
+    let run_id: WorkflowRunId = body["run_id"]
+        .as_str()
+        .expect("run_id in body")
+        .parse()
+        .expect("run_id parses");
+    let run = h
+        .state
+        .kernel
+        .workflow_engine()
+        .get_run(run_id)
+        .await
+        .expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Paused { .. }),
+        "the engine must agree the run is Paused, got {:?}",
+        run.state
+    );
+}

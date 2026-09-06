@@ -31,8 +31,9 @@
 //!   reason (backward jumps forbidden — `Loop` exists for that
 //!   semantic). Range / regex / in-set matchers will land as
 //!   additive `BranchArm` fields in a follow-up.
-//! * `Approval` — no-op-with-warn; blocked on #4983 (async-task
-//!   tracker). The executor will wire there once the dependency lands.
+//! * `Approval` — fully wired: the narrow spelling of `Operator`, running the same human-in-the-loop executor.
+//!   Entering the step suspends the run at `WorkflowRunState::Paused` with the approve/reject vocabulary, so nothing after the gate runs until a human resolves it through `POST /api/workflows/runs/{run_id}/operator` (or the timeout watchdog fails the run).
+//!   It previously logged a warning and fell through, which reported the gate as passed while nobody had approved anything.
 //!
 //! The tests run the workflow engine directly (no HTTP) via
 //! `kernel.workflow_engine().execute_run(...)` with a mock
@@ -43,8 +44,8 @@
 //! the mock panic on call.
 
 use librefang_kernel::workflow::{
-    BranchArm, ErrorMode, GateCondition, GateOp, StepAgent, StepMode, Workflow, WorkflowId,
-    WorkflowRunState, WorkflowStep, MAX_TRANSFORM_OUTPUT_BYTES, MAX_WAIT_SECS,
+    BranchArm, ErrorMode, GateCondition, GateOp, OperatorAction, StepAgent, StepMode, Workflow,
+    WorkflowId, WorkflowRunState, WorkflowStep, MAX_TRANSFORM_OUTPUT_BYTES, MAX_WAIT_SECS,
 };
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::{AgentId, SessionMode};
@@ -204,19 +205,6 @@ async fn wait_step_zero_duration_completes_immediately() {
     assert!(matches!(run.state, WorkflowRunState::Completed));
     assert_eq!(run.step_results.len(), 1);
 }
-
-// ---------------------------------------------------------------------------
-// `Approval` / `Transform` / `Branch` — no-op-with-warn for V1
-// ---------------------------------------------------------------------------
-//
-// These three log a structured `warn!` and return success. We can't
-// easily capture `tracing` output from within an integration test
-// without pulling in a subscriber dependency, so each test asserts the
-// observable behaviour: the run completes successfully, exactly one
-// step result is recorded with the matching `_operator:<kind>` agent
-// name, and no agent was dispatched (mock resolver / sender would
-// panic). The "not yet implemented" warn-log itself is exercised
-// manually when the file is run with `RUST_LOG=warn cargo test ...`.
 
 // ---------------------------------------------------------------------------
 // `Gate` — fully wired in #4980 step 2/N
@@ -405,17 +393,67 @@ async fn gate_step_completed_when_field_omitted_compares_whole_input() {
     assert!(matches!(run.state, WorkflowRunState::Completed));
 }
 
+// ---------------------------------------------------------------------------
+// `Approval` — the narrow spelling of `Operator`, running the same executor
+// ---------------------------------------------------------------------------
+
+/// The gate has to actually gate.
+///
+/// The workflow is `approval` followed by a vanilla `Sequential` step whose resolver and sender both panic on call: if the approval step falls through, the downstream step dispatches and the test dies.
+/// That is exactly what the pre-fix executor did — it logged a warning, recorded a `_operator:approval` step result with `error: None` and `output == input`, and let the run walk on to whatever the author had put after the gate (deploy, spend, publish, delete), finishing `Completed` as though a human had approved it.
+///
+/// Post-fix the run suspends at the approval step: `execute_run` returns `Ok` (a pause is not a failure), the state is `Paused`, only the approval step is recorded, and the pause snapshot points at the step *after* the gate so a later resolve re-enters there.
 #[tokio::test(flavor = "multi_thread")]
-async fn approval_step_is_noop_with_warn_and_completes() {
+async fn approval_step_pauses_run_and_blocks_downstream_steps() {
     let test = boot();
     let engine = test.state.kernel.workflow_engine();
-    let workflow = workflow_with_op_step(
-        "approval-stub",
-        StepMode::Approval {
-            recipients: vec!["telegram:@pakman".into(), "email:foo@bar".into()],
-            timeout_secs: Some(86400),
+
+    let gate = WorkflowStep {
+        name: "sign_off".to_string(),
+        agent: StepAgent::ByName {
+            name: "_operator_placeholder".to_string(),
         },
-    );
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Approval {
+            recipients: vec!["telegram:@pakman".into(), "email:foo@bar".into()],
+            timeout_secs: None,
+        },
+        timeout_secs: 120,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    // The step the operator is being asked to authorise.
+    // Nothing about it is special — that is the point: it must not run.
+    let after_gate = WorkflowStep {
+        name: "deploy".to_string(),
+        agent: StepAgent::ByName {
+            name: "_deployer".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Sequential,
+        timeout_secs: 120,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let workflow = Workflow {
+        id: WorkflowId::new(),
+        name: "approval-gates-downstream".to_string(),
+        description: "approval step must suspend the run".to_string(),
+        steps: vec![gate, after_gate],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
     let wf_id = workflow.id;
     engine.register(workflow).await;
 
@@ -426,6 +464,68 @@ async fn approval_step_is_noop_with_warn_and_completes() {
     let result = engine
         .execute_run(
             run_id,
+            |_agent: &StepAgent| -> Option<(AgentId, String, bool)> {
+                panic!("no step past the approval gate may resolve an agent");
+            },
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("no step past the approval gate may be dispatched");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "pausing at an approval step is not a run failure: {result:?}"
+    );
+
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Paused { .. }),
+        "approval step must leave the run Paused, got {:?}",
+        run.state
+    );
+    assert_eq!(
+        run.step_results.len(),
+        1,
+        "only the approval step may be recorded; got {:?}",
+        run.step_results
+    );
+    assert_eq!(run.step_results[0].agent_name, "_operator:approval");
+    assert_eq!(
+        run.paused_step_index,
+        Some(1),
+        "the resume index must point at the step after the gate"
+    );
+    assert!(
+        run.output.is_none(),
+        "a suspended run has no workflow output yet"
+    );
+}
+
+/// A paused approval step is inspectable through the same operator-pause surface `operator` steps use, carrying the fixed approve/reject vocabulary.
+/// Without this the dashboard worklist and `POST /api/workflows/runs/{run_id}/operator` would see the run as paused but not as an operator pause, leaving a human with a run they can see and cannot resolve.
+#[tokio::test(flavor = "multi_thread")]
+async fn approval_pause_is_visible_on_the_operator_pause_surface() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+    let workflow = workflow_with_op_step(
+        "approval-inspect",
+        StepMode::Approval {
+            recipients: vec!["telegram:@pakman".into()],
+            timeout_secs: None,
+        },
+    );
+    let wf_id = workflow.id;
+    engine.register(workflow).await;
+
+    let run_id = engine
+        .create_run(wf_id, "ARTIFACT".to_string())
+        .await
+        .expect("create_run");
+    engine
+        .execute_run(
+            run_id,
             panicking_agent_resolver,
             |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
                 panic!("operator-node executor must not call send_message");
@@ -433,13 +533,35 @@ async fn approval_step_is_noop_with_warn_and_completes() {
                 Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
             },
         )
-        .await;
-    assert!(result.is_ok(), "Approval stub must succeed: {result:?}");
+        .await
+        .expect("execute_run pauses cleanly at the approval step");
 
-    let run = engine.get_run(run_id).await.expect("run exists");
-    assert!(matches!(run.state, WorkflowRunState::Completed));
-    assert_eq!(run.step_results.len(), 1);
-    assert_eq!(run.step_results[0].agent_name, "_operator:approval");
+    let pause = engine
+        .inspect_operator_pause(run_id)
+        .await
+        .expect("an approval pause is an operator pause");
+    assert_eq!(pause.step_name, "op_step");
+    assert_eq!(pause.operator_step_index, 0);
+    assert_eq!(pause.artifact, "ARTIFACT");
+    assert_eq!(
+        pause.actions,
+        vec![OperatorAction::Approve, OperatorAction::Reject],
+        "the `approval` wire shape can only express approve/reject"
+    );
+
+    // This harness boots a fresh engine and creates exactly one run, so the worklist has to be exactly that run — an `any` over the list would also pass if the approval pause were missing and some other row were present.
+    let pending = engine.list_pending_operator_runs().await;
+    let pending_ids: Vec<_> = pending.iter().map(|(r, _)| r.id).collect();
+    assert_eq!(
+        pending_ids,
+        vec![run_id],
+        "the paused approval run must be the pending-operator worklist"
+    );
+    assert_eq!(
+        pending[0].1.actions,
+        vec![OperatorAction::Approve, OperatorAction::Reject],
+        "the worklist row must carry the same approve/reject vocabulary as the inspect call"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,6 +1294,191 @@ async fn validate_rejects_dag_workflow_with_operator_node_step() {
     assert!(
         errs.iter().any(|(s, r)| s == "op" && r.contains("DAG")),
         "validate must reject DAG + operator-node combination; got: {errs:?}"
+    );
+}
+
+/// `Workflow::validate` is advisory, so the DAG executor has to enforce the human-in-the-loop rule itself.
+///
+/// Validate runs at the two HTTP registration routes and NOT in `WorkflowEngine::load_from_dir_sync`, which auto-registers `*.workflow.toml` from disk at boot.
+/// This test registers the workflow straight on the engine, exactly as that disk path does, and drives a run.
+///
+/// The DAG executor never matches on `StepMode` — every step goes through `agent_resolver` — so pre-fix the approval gate was handed to whatever agent its (syntactically required) `agent` field named and the model's reply flowed on to the dependent step as if a human had signed off.
+/// Here the resolver resolves successfully, so nothing but the executor's own guard can stop it: the run must fail before any step is dispatched.
+#[tokio::test(flavor = "multi_thread")]
+async fn dag_run_refuses_to_start_when_a_step_is_a_human_gate() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    let producer = WorkflowStep {
+        name: "producer".to_string(),
+        agent: StepAgent::ByName {
+            name: "_producer".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Sequential,
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let gate = WorkflowStep {
+        name: "sign_off".to_string(),
+        agent: StepAgent::ByName {
+            name: "_producer".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode: StepMode::Approval {
+            recipients: vec!["telegram:@pakman".into()],
+            timeout_secs: None,
+        },
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec!["producer".to_string()],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dag-plus-approval".to_string(),
+        description: "human gate reached via the DAG executor".to_string(),
+        steps: vec![producer, gate],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
+    let wf_id = wf.id;
+    engine.register(wf).await;
+
+    let run_id = engine
+        .create_run(wf_id, "seed".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            |_agent: &StepAgent| Some((AgentId::new(), "mock".to_string(), false)),
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("no step may be dispatched from a DAG run containing a human gate");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+
+    let err = result.expect_err("a DAG run with a human gate must be refused");
+    assert!(
+        err.contains("sign_off") && err.contains("approval"),
+        "the refusal must name the offending step and its mode; got: {err}"
+    );
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Failed),
+        "refused DAG run must be Failed, got {:?}",
+        run.state
+    );
+    assert!(
+        run.step_results.is_empty(),
+        "no step may run before the refusal; got {:?}",
+        run.step_results
+    );
+}
+
+/// The executor guard is deliberately broader than `Workflow::validate`, and this pins the gap it covers.
+///
+/// `validate` rejects only a step that is BOTH an operator node AND carries its own `depends_on`, but `execute_run` routes to the DAG executor whenever ANY step in the workflow has `depends_on`.
+/// So a dependency-free approval gate sitting beside a dependent step passes validation at both HTTP registration routes and still lands on the executor that never matches on `StepMode` — which is where the gate would be dispatched to an LLM.
+/// The workflow here is exactly that shape: `producer` (no deps), `sign_off` (approval, no deps), `deploy` (depends on `producer`).
+#[tokio::test(flavor = "multi_thread")]
+async fn dag_run_refuses_a_dependency_free_gate_that_validate_accepts() {
+    let test = boot();
+    let engine = test.state.kernel.workflow_engine();
+
+    let step = |name: &str, mode: StepMode, depends_on: Vec<String>| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "_producer".to_string(),
+        },
+        prompt_template: "{{input}}".to_string(),
+        mode,
+        timeout_secs: 30,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on,
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "dag-beside-gate".to_string(),
+        description: "gate carries no depends_on of its own".to_string(),
+        steps: vec![
+            step("producer", StepMode::Sequential, vec![]),
+            step(
+                "sign_off",
+                StepMode::Approval {
+                    recipients: vec!["telegram:@pakman".into()],
+                    timeout_secs: None,
+                },
+                vec![],
+            ),
+            step("deploy", StepMode::Sequential, vec!["producer".to_string()]),
+        ],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
+
+    // The premise: this workflow registers cleanly today.
+    // If `validate` ever grows the executor's condition, this assertion is the thing that says so.
+    assert!(
+        wf.validate().is_empty(),
+        "premise of this test: a dependency-free gate passes validate; got {:?}",
+        wf.validate()
+    );
+
+    let wf_id = wf.id;
+    engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "seed".to_string())
+        .await
+        .expect("create_run");
+    let result = engine
+        .execute_run(
+            run_id,
+            |_agent: &StepAgent| Some((AgentId::new(), "mock".to_string(), false)),
+            |_id: AgentId, _msg: String, _sm: Option<SessionMode>| async move {
+                panic!("no step may be dispatched from a DAG run containing a human gate");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(("unreachable".to_string(), 0u64, 0u64))
+            },
+        )
+        .await;
+
+    let err = result.expect_err("a DAG run beside a human gate must be refused");
+    assert!(
+        err.contains("sign_off") && err.contains("approval"),
+        "the refusal must name the offending step and its mode; got: {err}"
+    );
+    let run = engine.get_run(run_id).await.expect("run exists");
+    assert!(
+        matches!(run.state, WorkflowRunState::Failed),
+        "refused DAG run must be Failed, got {:?}",
+        run.state
+    );
+    assert!(
+        run.step_results.is_empty(),
+        "no step may run before the refusal; got {:?}",
+        run.step_results
     );
 }
 

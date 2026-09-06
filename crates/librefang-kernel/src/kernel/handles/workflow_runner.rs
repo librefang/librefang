@@ -598,10 +598,24 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
             // completion event if a registration happened above.
             if let Some(task_id) = task_id {
                 let terminal_status = match &exec_result {
-                    Ok(Ok(output)) => TaskStatus::Completed(serde_json::json!({
-                        "run_id": run_id.0.to_string(),
-                        "output": output,
-                    })),
+                    // `execute_run` returns `Ok` for a run that finished and for a run that suspended itself at a human-in-the-loop gate alike, so read the run's own state before telling the agent anything.
+                    // `TaskStatus` has no Paused variant and the executor call really has ended, so the event still completes the task — but its payload has to say which of the two happened, or the agent that called `workflow_start` treats the pre-gate artifact as the workflow's answer and never resumes the run.
+                    Ok(Ok(output)) => {
+                        match kernel_arc.workflows.engine.paused_reason(run_id).await {
+                            Some(reason) => TaskStatus::Completed(serde_json::json!({
+                                "run_id": run_id.0.to_string(),
+                                "state": "paused",
+                                "reason": reason,
+                                "message": "the workflow is NOT finished — it is suspended at a human-in-the-loop gate; `output` is the artifact shown to the reviewer, not the workflow's result",
+                                "output": output,
+                            })),
+                            None => TaskStatus::Completed(serde_json::json!({
+                                "run_id": run_id.0.to_string(),
+                                "state": "completed",
+                                "output": output,
+                            })),
+                        }
+                    }
                     Ok(Err(e)) => TaskStatus::Failed(format!("workflow run failed: {e}")),
                     Err(()) => {
                         let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
