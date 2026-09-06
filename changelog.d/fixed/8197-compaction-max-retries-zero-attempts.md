@@ -1,0 +1,4 @@
+`[compaction] max_retries` now counts retries on top of the one attempt that always runs, instead of being the total attempt count.
+`max_retries = 0` is the natural way to write "summarize once, do not retry", and it is what the neighbouring config field's own documentation trains an operator to expect, but it made the retry loop empty: no LLM call was issued at all, single-pass and chunked summarization both failed, and compaction fell through to the placeholder that says summarization was unavailable.
+That placeholder is applied verbatim — the agent loop and the manual compaction route both overwrite the durable session with it — so every message older than `keep_recent` was destroyed and replaced by a marker containing none of their content, with a single `warn!` to show for it.
+Every other value also gained back the retry its name promised, so `max_retries = 3` now means one attempt plus three retries rather than three attempts in total (#8197) (@houko)

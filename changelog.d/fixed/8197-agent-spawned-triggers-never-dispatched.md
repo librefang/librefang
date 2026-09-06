@@ -1,0 +1,5 @@
+Triggers that watch for an agent spawning now actually fire.
+`spawn_agent_inner` evaluated every registered trigger against the `Spawned` lifecycle event and then dropped the matches on the floor, so an `agent_spawned` trigger — or any `Lifecycle` or catch-all trigger, or a proactive agent whose condition is `event:agent_spawned` — never delivered its message and never started its workflow.
+The evaluation is not free: it charges each match a `fire_count`, stamps its cooldown window and steps it towards `max_fires`, and persists all of that, so a spend that bought nothing was recorded as a fire.
+For a trigger whose cooldown window is trigger-wide that was worse than silence — each spawn burned the default five-second window, suppressing a genuine event that arrived just after, and the budget eventually disabled the trigger outright.
+The matches now go through `dispatch_trigger_matches`, the same single dispatch path the event bus and the Task Board reconcile use, so they inherit its concurrency, ordering and per-fire timeout guarantees (#8197) (@houko)
