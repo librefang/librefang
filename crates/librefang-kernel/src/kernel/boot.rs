@@ -1741,6 +1741,8 @@ impl LibreFangKernel {
                 "approval_requested",
                 "task_completed",
                 "task_failed",
+                // Provider-safety refusals, split out of task_failed by #3450 so they can be routed separately — a rule listing this is valid and must not be warned about.
+                "content_filtered",
                 "tool_failure",
                 "health_check_failed",
                 "model_migrated",

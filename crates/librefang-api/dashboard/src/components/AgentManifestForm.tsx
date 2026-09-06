@@ -889,7 +889,10 @@ export function AgentManifestForm({
                 className={inputClass}
               />
             </Field>
-            <Field label={t("agents.form.heartbeat_channel")}>
+            <Field
+              label={t("agents.form.heartbeat_channel")}
+              hint={t("agents.form.heartbeat_channel_hint")}
+            >
               <input
                 type="text"
                 value={value.autonomous.heartbeat_channel}

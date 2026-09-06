@@ -1,0 +1,4 @@
+Match `[[notification.agent_rules]]` `agent_pattern` against the agent's name, which is what the field's own documentation describes (`"social-*"`) and the only form an operator can write ahead of time.
+Every notification the daemon pushes identifies the agent by the UUID minted at registration, so a rule naming the agent it was written for never selected anything and the alert fell through to the global `approval_channels` / `alert_channels`; the bare `"*"` wildcard was the only pattern that ever matched.
+The id is still matched too, so a rule written against a UUID keeps working.
+A rule listing `content_filtered` also stops drawing a "references unknown event type" warning at boot — the event has been pushed since provider-safety refusals were split out of `task_failed`, but the boot-time validator was never told about it (#8208) (@houko)

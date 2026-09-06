@@ -765,27 +765,39 @@ approval 请求和任务状态告警发到哪。默认空 = approval 只显示�
 [notification]
 # 所有 approval 同时扇出到 Telegram 和 Slack
 approval_channels = [
-  { kind = "telegram", target = "123456789" },
-  { kind = "slack", target = "C0123456" },
+  { channel_type = "telegram", recipient = "123456789" },
+  { channel_type = "slack", recipient = "C0123456" },
 ]
 # 失败告警只到 email
 alert_channels = [
-  { kind = "email", target = "ops@example.com" },
+  { channel_type = "email", recipient = "ops@example.com" },
 ]
 
 # Per-agent 覆盖 — research-bot 的 approval 改发研究负责人
 [[notification.agent_rules]]
-agent = "research-bot"
-targets = [{ kind = "telegram", target = "987654321" }]
+agent_pattern = "research-bot"
+events = ["approval_requested"]
+channels = [{ channel_type = "telegram", recipient = "987654321" }]
+
+# 同一种写法把 night-* 这些 agent 的失联告警发到 on-call 的会话串
+[[notification.agent_rules]]
+agent_pattern = "night-*"
+events = ["health_check_failed"]
+channels = [{ channel_type = "slack", recipient = "C0ONCALL", thread_id = "1699999999.000100" }]
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `approval_channels` | `Vec<NotificationTarget>` | `[]` | 待 approval 扇出到哪。每个 target 有 `kind`(`telegram`、`slack`、`discord`、`email`、`webhook`、`feishu`、`dingtalk` 等)和 `target` 字符串(chat ID、channel ID、邮箱、URL 等)。 |
-| `alert_channels` | `Vec<NotificationTarget>` | `[]` | 任务完成 / 失败告警发到哪。结构同 `approval_channels`。 |
-| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | per-agent 覆盖 —— 列 `{agent, targets}` 把单个 agent 的 approval 重定向到非全局 channel。 |
+| `approval_channels` | `Vec<NotificationTarget>` | `[]` | 待 approval 扇出到哪。每个 target 是 `{ channel_type, recipient }` —— `channel_type` 是 `telegram`、`slack`、`discord`、`email`、`webhook`、`feishu`、`dingtalk` 等，`recipient` 是 chat ID / channel ID / 邮箱 / URL，另有可选的 `thread_id`，在支持会话串或话题的适配器上指定发到哪一串。 |
+| `alert_channels` | `Vec<NotificationTarget>` | `[]` | 任务完成 / 失败告警发到哪。target 结构同 `approval_channels`。 |
+| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | per-agent 覆盖，对它列出的事件取代上面两个全局列表。三个字段都必填：`agent_pattern`(按 agent 名字匹配的 glob，`*` 匹配所有)、`events`(取自 `approval_requested`、`task_completed`、`task_failed`、`tool_failure`、`content_filtered`、`health_check_failed`、`model_migrated`)、`channels`(target 结构同上)。`content_filtered` 没有对应的全局列表，只能靠 rule 路由。 |
 
 按工具路由(如"shell_exec approval 给 oncall,file_write approval 给开发组")用 `[approval] routing`,不是 `[notification]`。
+
+Agent 失联告警也走这条路径，事件类型是 `health_check_failed` —— 这就是要写进 `agent_rules` 的 `events` 里的字符串。
+对这一个事件，上面两层之间还有第三层：Agent 自己 `agent.toml` 里的 `[autonomous] heartbeat_channel`。
+优先级从高到低：匹配的 `agent_rules` 条目、该 Agent 的 `heartbeat_channel`、`alert_channels`。
+清单里的这个简写形式接受 `"telegram"`（收件人取自 `owner` 用户在该通道上的 `channel_bindings`）或 `"telegram:123456"`（直接给出收件人）；两者都解析不出来的值会记一条日志并被忽略，告警仍按 `[notification]` 的路由投递。
 
 ---
 

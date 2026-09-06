@@ -1210,6 +1210,63 @@ struct KernelCronBridge {
 
 // `CronChannelSender` impl, `cron_fan_out_targets`, and `cron_deliver_response` live in `kernel::cron_bridge`. The `KernelCronBridge` struct definition stays here because it holds an `Arc<LibreFangKernel>` shared with the rest of the cron dispatcher.
 
+/// Does one `[[notification.agent_rules]]` entry's `agent_pattern` select this agent?
+///
+/// `AgentNotificationRule::agent_pattern` is documented as a glob over agent names (`"social-*"`), and a name is the only spelling an operator can write ahead of time — the id is a UUID minted at registration.
+/// Every notification path identifies the agent by that id, so matching the id alone would make the documented form silently never fire; both are tried.
+/// `agent_name` is `None` for an identifier with no live agent behind it, such as the `"system"` pseudo-agent that daemon-level events are attributed to.
+fn agent_rule_matches(pattern: &str, agent_id: &str, agent_name: Option<&str>) -> bool {
+    glob_matches(pattern, agent_id) || agent_name.is_some_and(|name| glob_matches(pattern, name))
+}
+
+/// Resolve which targets one notification is delivered to.
+///
+/// Precedence, most specific first:
+///
+/// 1. Every `[[notification.agent_rules]]` entry that `agent_rule_matches` selects for this agent and whose `events` list contains `event_type`.
+///    This is the full-fidelity form — several targets, thread ids, any event type — so it stays authoritative wherever an operator has written one.
+/// 2. `agent_target`, a per-agent shorthand the caller read off the agent's manifest.
+///    Today that is `autonomous.heartbeat_channel` on the `health_check_failed` path; it is more specific than a global channel list and less specific than a rule written against this event.
+/// 3. The global list for the event type: `[notification] approval_channels` for approval requests, `alert_channels` for the alert family.
+///
+/// Each layer falls through to the next only when it yields nothing, and an unrecognised `event_type` resolves to no targets at all rather than to the alert list.
+///
+/// Free-standing rather than a method so the precedence is one readable expression that can be reasoned about without a booted kernel.
+fn resolve_notification_targets(
+    notification: &librefang_types::approval::NotificationConfig,
+    agent_id: &str,
+    agent_name: Option<&str>,
+    event_type: &str,
+    agent_target: Option<&librefang_types::approval::NotificationTarget>,
+) -> Vec<librefang_types::approval::NotificationTarget> {
+    let rule_targets: Vec<librefang_types::approval::NotificationTarget> = notification
+        .agent_rules
+        .iter()
+        .filter(|rule| {
+            agent_rule_matches(&rule.agent_pattern, agent_id, agent_name)
+                && rule.events.iter().any(|e| e == event_type)
+        })
+        .flat_map(|rule| rule.channels.clone())
+        .collect();
+    if !rule_targets.is_empty() {
+        return rule_targets;
+    }
+
+    if let Some(target) = agent_target {
+        return vec![target.clone()];
+    }
+
+    match event_type {
+        "approval_requested" => notification.approval_channels.clone(),
+        "task_completed"
+        | "task_failed"
+        | "tool_failure"
+        | "health_check_failed"
+        | "model_migrated" => notification.alert_channels.clone(),
+        _ => Vec::new(),
+    }
+}
+
 impl LibreFangKernel {
     /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
     /// Called after a provider is first configured so Hands resume immediately.
@@ -1448,6 +1505,17 @@ impl LibreFangKernel {
         }
     }
 
+    /// The registered name behind a notification `agent_id`, when there is one.
+    ///
+    /// Notification callers pass the agent's UUID (or a pseudo-agent identifier such as `"system"` for daemon-level events), while `[[notification.agent_rules]]` patterns are written against names — see [`agent_rule_matches`].
+    fn notification_agent_name(&self, agent_id: &str) -> Option<String> {
+        agent_id
+            .parse::<AgentId>()
+            .ok()
+            .and_then(|uid| self.agents.registry.get_arc(uid))
+            .map(|entry| entry.name.clone())
+    }
+
     /// Push a notification to all configured targets, resolving routing rules.
     /// Resolution: per-agent rules (matching event) > global channels for that event type.
     ///
@@ -1464,35 +1532,31 @@ impl LibreFangKernel {
         message: &str,
         session_id: Option<&SessionId>,
     ) {
-        use librefang_types::capability::glob_matches;
+        self.push_notification_routed(agent_id, event_type, message, session_id, None)
+            .await
+    }
+
+    /// [`Self::push_notification`] with one extra target the caller read off the agent's own manifest.
+    ///
+    /// Only the heartbeat monitor supplies one today: `autonomous.heartbeat_channel` is the per-agent shorthand for "send this agent's unresponsive alert here", resolved by [`crate::heartbeat::resolve_heartbeat_channel`].
+    /// It sits *between* the two `config.toml` layers — see [`resolve_notification_targets`] for the full precedence — so an operator who already routes `health_check_failed` through `[[notification.agent_rules]]` keeps that routing, and one who wrote only the manifest field gets delivery instead of silence.
+    async fn push_notification_routed(
+        &self,
+        agent_id: &str,
+        event_type: &str,
+        message: &str,
+        session_id: Option<&SessionId>,
+        agent_target: Option<&librefang_types::approval::NotificationTarget>,
+    ) {
         let cfg = self.config.load_full();
-
-        // Check per-agent notification rules first
-        let agent_targets: Vec<librefang_types::approval::NotificationTarget> = cfg
-            .notification
-            .agent_rules
-            .iter()
-            .filter(|rule| {
-                glob_matches(&rule.agent_pattern, agent_id)
-                    && rule.events.iter().any(|e| e == event_type)
-            })
-            .flat_map(|rule| rule.channels.clone())
-            .collect();
-
-        let targets = if !agent_targets.is_empty() {
-            agent_targets
-        } else {
-            // Fallback to global channels based on event type
-            match event_type {
-                "approval_requested" => cfg.notification.approval_channels.clone(),
-                "task_completed"
-                | "task_failed"
-                | "tool_failure"
-                | "health_check_failed"
-                | "model_migrated" => cfg.notification.alert_channels.clone(),
-                _ => Vec::new(),
-            }
-        };
+        let agent_name = self.notification_agent_name(agent_id);
+        let targets = resolve_notification_targets(
+            &cfg.notification,
+            agent_id,
+            agent_name.as_deref(),
+            event_type,
+            agent_target,
+        );
 
         let delivered: std::borrow::Cow<'_, str> = match session_id {
             Some(sid) => std::borrow::Cow::Owned(format!("{message} [session={sid}]")),
@@ -1630,6 +1694,8 @@ impl LibreFangKernel {
 
         let policy = self.governance.approval_manager.policy();
         let cfg = self.config.load_full();
+        // A notification rule's `agent_pattern` is written against the agent's name; `req.agent_id` is its UUID.
+        let agent_name = self.notification_agent_name(&req.agent_id);
         let targets: Vec<librefang_types::approval::NotificationTarget> =
             if !req.route_to.is_empty() {
                 req.route_to.clone()
@@ -1643,21 +1709,13 @@ impl LibreFangKernel {
                 if !routed.is_empty() {
                     routed
                 } else {
-                    let agent_routed: Vec<_> = cfg
-                        .notification
-                        .agent_rules
-                        .iter()
-                        .filter(|rule| {
-                            glob_matches(&rule.agent_pattern, &req.agent_id)
-                                && rule.events.iter().any(|e| e == "approval_requested")
-                        })
-                        .flat_map(|rule| rule.channels.clone())
-                        .collect();
-                    if !agent_routed.is_empty() {
-                        agent_routed
-                    } else {
-                        cfg.notification.approval_channels.clone()
-                    }
+                    resolve_notification_targets(
+                        &cfg.notification,
+                        &req.agent_id,
+                        agent_name.as_deref(),
+                        "approval_requested",
+                        None,
+                    )
                 }
             };
 

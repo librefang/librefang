@@ -120,7 +120,14 @@ pub struct AutonomousConfig {
     /// when pruning NO_REPLY heartbeat messages from session context.
     #[serde(default)]
     pub heartbeat_keep_recent: Option<usize>,
-    /// Channel to send heartbeat status to (e.g., "telegram", "discord").
+    /// Where this agent's unresponsive alert is delivered — the per-agent shorthand for the `health_check_failed` notification.
+    ///
+    /// Written either as a bare channel (`"telegram"`), whose recipient is taken from the `owner` user's `channel_bindings` entry for that channel, or as `"<channel>:<recipient>"` (`"telegram:123456"`), which addresses a recipient directly.
+    /// It is consulted *after* a `[[notification.agent_rules]]` entry listing `health_check_failed` — that form carries several targets and thread ids, so it stays authoritative — and *before* the global `[notification] alert_channels` fallback.
+    /// A value that cannot be turned into a target is logged and ignored, leaving the `[notification]` routing to deliver the alert.
+    ///
+    /// This is the unresponsive-transition alert only; nothing pushes a periodic "still alive" status anywhere.
+    /// Resolution lives in `librefang_kernel::heartbeat::resolve_heartbeat_channel`.
     pub heartbeat_channel: Option<String>,
     /// After this many consecutive *block-only* iterations (every tool result
     /// a soft loop-guard block, no success, no hard error, no assistant prose)

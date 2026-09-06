@@ -1,0 +1,2 @@
+Correct the `[notification]` example and field tables in the configuration reference, which named `kind` / `target` on a notification target and `agent` / `targets` on an agent rule.
+None of those keys exist — the fields are `channel_type` / `recipient` / `thread_id` and `agent_pattern` / `channels` / `events`, with no serde aliases and no defaults on the three rule fields — so a `config.toml` copied out of that block failed to deserialize, and the required `events` list was not shown at all (#8208) (@houko)

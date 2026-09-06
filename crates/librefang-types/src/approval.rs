@@ -601,6 +601,8 @@ pub struct NotificationTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentNotificationRule {
     /// Glob pattern matching agent names (e.g. "social-*", "*").
+    ///
+    /// Matched against the agent's name and, for the benefit of a rule written against a specific registered agent, against its id as well — the notification path identifies agents by id, and a name is only available while the agent is registered.
     pub agent_pattern: String,
     /// Channels to notify for matching agents.
     pub channels: Vec<NotificationTarget>,

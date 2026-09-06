@@ -8,7 +8,10 @@ use librefang_runtime::kernel_handle;
 use librefang_types::agent::AgentId;
 use librefang_types::tool::ToolApprovalSubmission;
 
-use super::super::{spawn_logged, LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS, SYSTEM_CHANNEL_CRON};
+use super::super::{
+    resolve_notification_targets, spawn_logged, LibreFangKernel, SYSTEM_CHANNEL_AUTONOMOUS,
+    SYSTEM_CHANNEL_CRON,
+};
 
 #[async_trait::async_trait]
 impl kernel_handle::ApprovalGate for LibreFangKernel {
@@ -166,6 +169,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
 
             let cfg = self.config.load_full();
             let policy = self.governance.approval_manager.policy();
+            // A notification rule's `agent_pattern` is written against the agent's name; `agent_id` here is its UUID.
+            let agent_name = self.notification_agent_name(agent_id);
             let targets: Vec<librefang_types::approval::NotificationTarget> =
                 if !req.route_to.is_empty() {
                     // Highest priority: explicitly routed targets on the request itself
@@ -181,23 +186,14 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                     if !routed.is_empty() {
                         routed
                     } else {
-                        // Check per-agent notification rules
-                        let agent_routed: Vec<librefang_types::approval::NotificationTarget> = cfg
-                            .notification
-                            .agent_rules
-                            .iter()
-                            .filter(|rule| {
-                                glob_matches(&rule.agent_pattern, agent_id)
-                                    && rule.events.iter().any(|e| e == "approval_requested")
-                            })
-                            .flat_map(|rule| rule.channels.clone())
-                            .collect();
-                        if !agent_routed.is_empty() {
-                            agent_routed
-                        } else {
-                            // Fallback: global approval_channels
-                            cfg.notification.approval_channels.clone()
-                        }
+                        // Per-agent notification rules, then the global approval_channels.
+                        resolve_notification_targets(
+                            &cfg.notification,
+                            agent_id,
+                            agent_name.as_deref(),
+                            "approval_requested",
+                            None,
+                        )
                     }
                 };
 
@@ -375,6 +371,8 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         {
             use librefang_types::capability::glob_matches;
             let cfg = self.config.load_full();
+            // A notification rule's `agent_pattern` is written against the agent's name; `agent_id` here is its UUID.
+            let agent_name = self.notification_agent_name(agent_id);
             let targets: Vec<librefang_types::approval::NotificationTarget> = {
                 let routed: Vec<_> = policy
                     .routing
@@ -385,21 +383,13 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
                 if !routed.is_empty() {
                     routed
                 } else {
-                    let agent_routed: Vec<_> = cfg
-                        .notification
-                        .agent_rules
-                        .iter()
-                        .filter(|rule| {
-                            glob_matches(&rule.agent_pattern, agent_id)
-                                && rule.events.iter().any(|e| e == "approval_requested")
-                        })
-                        .flat_map(|rule| rule.channels.clone())
-                        .collect();
-                    if !agent_routed.is_empty() {
-                        agent_routed
-                    } else {
-                        cfg.notification.approval_channels.clone()
-                    }
+                    resolve_notification_targets(
+                        &cfg.notification,
+                        agent_id,
+                        agent_name.as_deref(),
+                        "approval_requested",
+                        None,
+                    )
                 }
             };
             let msg = format!(

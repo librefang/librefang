@@ -767,27 +767,39 @@ Where approval requests and task-state alerts are sent. Empty defaults mean appr
 [notification]
 # All approvals also fan out to Telegram and Slack
 approval_channels = [
-  { kind = "telegram", target = "123456789" },
-  { kind = "slack", target = "C0123456" },
+  { channel_type = "telegram", recipient = "123456789" },
+  { channel_type = "slack", recipient = "C0123456" },
 ]
 # Failure alerts only go to email
 alert_channels = [
-  { kind = "email", target = "ops@example.com" },
+  { channel_type = "email", recipient = "ops@example.com" },
 ]
 
 # Per-agent override — research-bot's approvals go to the research lead instead
 [[notification.agent_rules]]
-agent = "research-bot"
-targets = [{ kind = "telegram", target = "987654321" }]
+agent_pattern = "research-bot"
+events = ["approval_requested"]
+channels = [{ channel_type = "telegram", recipient = "987654321" }]
+
+# The same form routes the night-* agents' unresponsive alerts to an on-call thread
+[[notification.agent_rules]]
+agent_pattern = "night-*"
+events = ["health_check_failed"]
+channels = [{ channel_type = "slack", recipient = "C0ONCALL", thread_id = "1699999999.000100" }]
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `approval_channels` | `Vec<NotificationTarget>` | `[]` | Where pending approvals fan out. Each target has `kind` (`telegram`, `slack`, `discord`, `email`, `webhook`, `feishu`, `dingtalk`, …) and a `target` string (chat ID, channel ID, email address, URL, …). |
-| `alert_channels` | `Vec<NotificationTarget>` | `[]` | Where task completion / failure alerts go. Same shape as `approval_channels`. |
-| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | Per-agent overrides — list `{agent, targets}` to redirect a single agent's approvals away from the global channels. |
+| `approval_channels` | `Vec<NotificationTarget>` | `[]` | Where pending approvals fan out. Each target is `{ channel_type, recipient }` — `channel_type` is `telegram`, `slack`, `discord`, `email`, `webhook`, `feishu`, `dingtalk`, …, `recipient` is the chat ID / channel ID / email address / URL, and an optional `thread_id` picks a thread or topic on adapters that have them. |
+| `alert_channels` | `Vec<NotificationTarget>` | `[]` | Where task completion / failure alerts go. Same target shape as `approval_channels`. |
+| `agent_rules` | `Vec<AgentNotificationRule>` | `[]` | Per-agent overrides, replacing both global lists for the events they name. All three fields are required: `agent_pattern` (glob over agent names, `*` for every agent), `events` (any of `approval_requested`, `task_completed`, `task_failed`, `tool_failure`, `content_filtered`, `health_check_failed`, `model_migrated`), and `channels` (same target shape as above). `content_filtered` has no global list, so a rule is the only way to route it. |
 
 For per-tool routing (e.g. "shell_exec approvals go to oncall, file_write approvals go to the dev team"), use `[approval] routing` rather than `[notification]`.
+
+Unresponsive-agent alerts travel this path too, under the event type `health_check_failed` — that is the string to list in an `agent_rules` entry's `events`.
+For that one event there is a third layer between the two above: an agent's own `[autonomous] heartbeat_channel` in `agent.toml`.
+Precedence, most specific first: a matching `agent_rules` entry, then the agent's `heartbeat_channel`, then `alert_channels`.
+The manifest shorthand accepts `"telegram"` (recipient taken from the `owner` user's `channel_bindings` entry for that channel) or `"telegram:123456"` (recipient given directly); a value that resolves to neither is logged and ignored, so the alert still reaches whatever `[notification]` routes it to.
 
 ---
 

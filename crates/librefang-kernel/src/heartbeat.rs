@@ -8,6 +8,8 @@
 use crate::registry::AgentRegistry;
 use chrono::Utc;
 use librefang_types::agent::{AgentId, AgentState, ScheduleMode};
+use librefang_types::approval::NotificationTarget;
+use std::collections::HashMap;
 use tracing::debug;
 
 /// Default heartbeat check interval (seconds).
@@ -237,6 +239,76 @@ pub fn classify_transition(
     } else {
         HeartbeatTransition::NoChange
     }
+}
+
+/// What a per-agent `autonomous.heartbeat_channel` resolved to.
+///
+/// The manifest field is a one-line shorthand, so it carries at most one channel and one recipient.
+/// `[[notification.agent_rules]]` remains the full-fidelity form — several targets, thread ids, and event types other than `health_check_failed` — and still wins over the shorthand when both are configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatChannelResolution {
+    /// No heartbeat channel is configured for this agent, so the alert routes purely by `[notification]`.
+    Unset,
+    /// The value resolved to a delivery target.
+    Target(NotificationTarget),
+    /// The value has no channel part (e.g. `":ops"`), so there is nothing to route through.
+    MalformedSpec {
+        /// The manifest value, trimmed, as written.
+        spec: String,
+    },
+    /// A channel was named without a recipient, and the `owner` user has no `channel_bindings` entry for that channel to borrow one from.
+    NoRecipient {
+        /// The channel the manifest named.
+        channel: String,
+    },
+}
+
+/// Resolve `autonomous.heartbeat_channel` into the notification target this agent's unresponsive alert should be delivered to.
+///
+/// Two forms are accepted:
+///
+/// - `"telegram"` — a bare channel, whose recipient is the `owner` user's `channel_bindings` entry for that channel (the same binding `notify_owner_bg` delivers to), because a `NotificationTarget` cannot be addressed without one.
+/// - `"telegram:123456"` — channel and recipient. Everything after the *first* colon is the recipient, matching the `scheme:target` split the workflow operator-notify path already uses, so a recipient containing colons survives intact.
+///
+/// An absent or blank value resolves to [`HeartbeatChannelResolution::Unset`] rather than to a channel named `""`, because the dashboard manifest form writes an empty string for a field the operator left alone.
+/// The two failure variants are reported rather than swallowed so the caller can warn about a knob that will never deliver, and both leave `[notification]` routing to handle the alert.
+pub fn resolve_heartbeat_channel(
+    spec: Option<&str>,
+    owner_bindings: &HashMap<String, String>,
+) -> HeartbeatChannelResolution {
+    let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
+        return HeartbeatChannelResolution::Unset;
+    };
+
+    let (channel, recipient) = match spec.split_once(':') {
+        Some((channel, recipient)) => (channel.trim(), recipient.trim()),
+        None => (spec, ""),
+    };
+
+    if channel.is_empty() {
+        return HeartbeatChannelResolution::MalformedSpec {
+            spec: spec.to_string(),
+        };
+    }
+
+    let recipient = if recipient.is_empty() {
+        match owner_bindings.get(channel).map(|b| b.trim()) {
+            Some(bound) if !bound.is_empty() => bound.to_string(),
+            _ => {
+                return HeartbeatChannelResolution::NoRecipient {
+                    channel: channel.to_string(),
+                }
+            }
+        }
+    } else {
+        recipient.to_string()
+    };
+
+    HeartbeatChannelResolution::Target(NotificationTarget {
+        channel_type: channel.to_string(),
+        recipient,
+        thread_id: None,
+    })
 }
 
 /// Aggregate heartbeat summary.
@@ -779,5 +851,110 @@ mod tests {
             HeartbeatTransition::NoChange
         );
         assert_eq!(known.len(), 2);
+    }
+
+    /// A manifest that names no heartbeat channel — or one the dashboard form left blank — routes purely by `[notification]`.
+    ///
+    /// The blank case matters because the agent-manifest form writes an empty string for an untouched text field.
+    #[test]
+    fn heartbeat_channel_absent_or_blank_is_unset() {
+        let bindings = HashMap::new();
+        assert_eq!(
+            resolve_heartbeat_channel(None, &bindings),
+            HeartbeatChannelResolution::Unset
+        );
+        assert_eq!(
+            resolve_heartbeat_channel(Some(""), &bindings),
+            HeartbeatChannelResolution::Unset
+        );
+        assert_eq!(
+            resolve_heartbeat_channel(Some("   "), &bindings),
+            HeartbeatChannelResolution::Unset
+        );
+    }
+
+    /// `channel:recipient` addresses a target outright, without needing an owner binding.
+    #[test]
+    fn heartbeat_channel_with_explicit_recipient_resolves_verbatim() {
+        let bindings = HashMap::new();
+        assert_eq!(
+            resolve_heartbeat_channel(Some(" telegram : 123456 "), &bindings),
+            HeartbeatChannelResolution::Target(NotificationTarget {
+                channel_type: "telegram".to_string(),
+                recipient: "123456".to_string(),
+                thread_id: None,
+            })
+        );
+    }
+
+    /// Only the first colon separates channel from recipient, so a recipient that itself contains colons survives intact.
+    #[test]
+    fn heartbeat_channel_splits_on_the_first_colon_only() {
+        let bindings = HashMap::new();
+        assert_eq!(
+            resolve_heartbeat_channel(Some("slack:C0123:456"), &bindings),
+            HeartbeatChannelResolution::Target(NotificationTarget {
+                channel_type: "slack".to_string(),
+                recipient: "C0123:456".to_string(),
+                thread_id: None,
+            })
+        );
+    }
+
+    /// A bare channel borrows the recipient from the owner's `channel_bindings`, which is the only recipient the daemon knows for a channel type.
+    #[test]
+    fn heartbeat_channel_bare_borrows_owner_binding() {
+        let mut bindings = HashMap::new();
+        bindings.insert("telegram".to_string(), "123456".to_string());
+        assert_eq!(
+            resolve_heartbeat_channel(Some("telegram"), &bindings),
+            HeartbeatChannelResolution::Target(NotificationTarget {
+                channel_type: "telegram".to_string(),
+                recipient: "123456".to_string(),
+                thread_id: None,
+            })
+        );
+        // A trailing colon with nothing after it is the same "no recipient given" case.
+        assert_eq!(
+            resolve_heartbeat_channel(Some("telegram:"), &bindings),
+            HeartbeatChannelResolution::Target(NotificationTarget {
+                channel_type: "telegram".to_string(),
+                recipient: "123456".to_string(),
+                thread_id: None,
+            })
+        );
+    }
+
+    /// A bare channel with no owner binding is reported, not silently turned into a target with an empty recipient.
+    #[test]
+    fn heartbeat_channel_bare_without_owner_binding_reports_no_recipient() {
+        let mut bindings = HashMap::new();
+        bindings.insert("discord".to_string(), "987654".to_string());
+        assert_eq!(
+            resolve_heartbeat_channel(Some("telegram"), &bindings),
+            HeartbeatChannelResolution::NoRecipient {
+                channel: "telegram".to_string(),
+            }
+        );
+        // A binding present but empty is no binding at all.
+        bindings.insert("telegram".to_string(), "  ".to_string());
+        assert_eq!(
+            resolve_heartbeat_channel(Some("telegram"), &bindings),
+            HeartbeatChannelResolution::NoRecipient {
+                channel: "telegram".to_string(),
+            }
+        );
+    }
+
+    /// A value whose channel part is empty names nothing to send through.
+    #[test]
+    fn heartbeat_channel_without_channel_part_is_malformed() {
+        let bindings = HashMap::new();
+        assert_eq!(
+            resolve_heartbeat_channel(Some(":ops"), &bindings),
+            HeartbeatChannelResolution::MalformedSpec {
+                spec: ":ops".to_string(),
+            }
+        );
     }
 }

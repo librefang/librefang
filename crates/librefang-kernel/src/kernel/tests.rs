@@ -9095,6 +9095,300 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     kernel.shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// `autonomous.heartbeat_channel` — the per-agent shorthand for this same alert.
+//
+// The manifest field round-tripped through agent.toml and the dashboard form
+// for a long time with no Rust reader at all: an operator who filled in
+// "Heartbeat Channel" and nothing else got no alert, while the dashboard
+// echoed the setting back as if it were in effect. It now resolves into the
+// `health_check_failed` target list, one layer more specific than
+// `[notification] alert_channels` and one layer less specific than a
+// `[[notification.agent_rules]]` entry naming the event. These tests pin all
+// three layers against each other.
+// ---------------------------------------------------------------------------
+
+/// Register a running agent whose manifest carries `autonomous.heartbeat_channel`.
+fn register_agent_with_heartbeat_channel(
+    kernel: &LibreFangKernel,
+    name: &str,
+    heartbeat_channel: &str,
+) -> AgentId {
+    let mut manifest = test_manifest(name, "heartbeat routing test agent", vec![]);
+    manifest.autonomous = Some(librefang_types::agent::AutonomousConfig {
+        heartbeat_channel: Some(heartbeat_channel.to_string()),
+        ..Default::default()
+    });
+    let id = AgentId::new();
+    let entry = AgentEntry {
+        id,
+        name: name.to_string(),
+        manifest,
+        state: AgentState::Running,
+        ..Default::default()
+    };
+    kernel.agents.registry.register(entry).unwrap();
+    id
+}
+
+/// Boot a kernel for the heartbeat-alert routing tests, with an owner user carrying `channel_bindings`.
+fn boot_kernel_for_heartbeat_alerts(
+    notification: NotificationConfig,
+    owner_bindings: HashMap<String, String>,
+) -> LibreFangKernel {
+    use librefang_types::config::UserConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // The kernel keeps reading from this home for the rest of the test.
+    std::mem::forget(dir);
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        notification,
+        users: vec![UserConfig {
+            name: "Owner".to_string(),
+            role: "owner".to_string(),
+            channel_bindings: owner_bindings,
+            ..Default::default()
+        }],
+        ..KernelConfig::default()
+    };
+
+    LibreFangKernel::boot_with_config(config).expect("Kernel should boot")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_heartbeat_alert_prefers_per_agent_heartbeat_channel_over_alert_channels() {
+    // Without the manifest field being read, this alert lands on "global-ops":
+    // the per-agent value is the whole point of the knob, so it must win.
+    let notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+    let kernel = boot_kernel_for_heartbeat_alerts(notification, HashMap::new());
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_agent_with_heartbeat_channel(&kernel, "night-watch", "test:oncall-phone");
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![
+            "oncall-phone:Agent \"night-watch\" is unresponsive (inactive for 90s)".to_string()
+        ],
+        "autonomous.heartbeat_channel must route this agent's alert instead of the global alert_channels"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_heartbeat_alert_agent_rule_still_overrides_heartbeat_channel() {
+    // Precedence lock: the shorthand carries one target and no thread id, so a
+    // rule written against health_check_failed stays the authoritative form.
+    //
+    // The pattern is the agent's *name*, which is how `agent_pattern` is documented and the only spelling an operator can write by hand — the caller identifies the agent by a UUID minted at registration.
+    // A rule matched against the id alone would lose to the shorthand here, which is the opposite of what every doc surface for this field promises.
+    let notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: Vec::new(),
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: "night-watch".to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: "rule-topic".to_string(),
+                thread_id: None,
+            }],
+            events: vec!["health_check_failed".to_string()],
+        }],
+    };
+    let kernel = boot_kernel_for_heartbeat_alerts(notification, HashMap::new());
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_agent_with_heartbeat_channel(&kernel, "night-watch", "test:oncall-phone");
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["rule-topic:Agent \"night-watch\" is unresponsive (inactive for 90s)".to_string()],
+        "a matching [[notification.agent_rules]] entry must still win over the manifest shorthand"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_rule_pattern_matches_agent_name_and_uuid() {
+    // `agent_pattern` is documented as a glob over agent names, and a name glob is the only form an operator can write ahead of time — the UUID is minted at registration.
+    // Matching the id as well keeps the identifier callers actually pass usable, so both halves are pinned here.
+    let kernel = boot_kernel_for_heartbeat_alerts(NotificationConfig::default(), HashMap::new());
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_agent_with_heartbeat_channel(&kernel, "night-watch", "test:oncall-phone");
+
+    let rule_to = |pattern: &str, recipient: &str| NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: Vec::new(),
+        agent_rules: vec![AgentNotificationRule {
+            agent_pattern: pattern.to_string(),
+            channels: vec![NotificationTarget {
+                channel_type: "test".to_string(),
+                recipient: recipient.to_string(),
+                thread_id: None,
+            }],
+            events: vec!["health_check_failed".to_string()],
+        }],
+    };
+    let swap_notification = |notification: NotificationConfig| {
+        let mut cfg = (*kernel.config.load_full()).clone();
+        cfg.notification = notification;
+        kernel.config.store(Arc::new(cfg));
+    };
+
+    swap_notification(rule_to("night-*", "by-name"));
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    swap_notification(rule_to(&id.to_string(), "by-uuid"));
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    let msg = "Agent \"night-watch\" is unresponsive (inactive for 90s)";
+    assert_eq!(
+        recorded,
+        vec![format!("by-name:{msg}"), format!("by-uuid:{msg}")],
+        "agent_pattern must match the agent's name glob as documented, and its id as passed by callers"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_heartbeat_alert_bare_channel_uses_owner_channel_binding() {
+    // `heartbeat_channel = "test"` names a channel type and no recipient, so
+    // the recipient comes from the owner's channel_bindings — the same binding
+    // owner notifications are delivered to. Nothing is configured under
+    // [notification], so an unread manifest field means total silence here.
+    let mut owner_bindings = HashMap::new();
+    owner_bindings.insert("test".to_string(), "owner-chat".to_string());
+    let kernel = boot_kernel_for_heartbeat_alerts(NotificationConfig::default(), owner_bindings);
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_agent_with_heartbeat_channel(&kernel, "night-watch", "test");
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["owner-chat:Agent \"night-watch\" is unresponsive (inactive for 90s)".to_string()],
+        "a bare heartbeat_channel must borrow the owner's binding for that channel"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_heartbeat_alert_unresolvable_channel_falls_back_to_alert_channels() {
+    // A bare channel with no owner binding cannot be addressed. That is an
+    // operator mistake worth a WARN, not a reason to drop the alert: the
+    // configured [notification] routing must still fire.
+    let notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+    let kernel = boot_kernel_for_heartbeat_alerts(notification, HashMap::new());
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_agent_with_heartbeat_channel(&kernel, "night-watch", "test");
+    assert!(
+        kernel.heartbeat_alert_target(id, "night-watch").is_none(),
+        "an unaddressable heartbeat_channel must resolve to no per-agent target"
+    );
+    kernel.dispatch_heartbeat_alert(id, "night-watch", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["global-ops:Agent \"night-watch\" is unresponsive (inactive for 90s)".to_string()],
+        "an unaddressable heartbeat_channel must degrade to [notification] routing, not swallow the alert"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_heartbeat_alert_without_heartbeat_channel_uses_alert_channels() {
+    // The overwhelmingly common shape — no manifest shorthand at all — must
+    // route exactly as it did before the shorthand existed.
+    let notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "global-ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+    let kernel = boot_kernel_for_heartbeat_alerts(notification, HashMap::new());
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel
+        .mesh
+        .channel_adapters
+        .insert("test".to_string(), adapter);
+
+    let id = register_test_agent(&kernel, "plain-agent");
+    kernel.dispatch_heartbeat_alert(id, "plain-agent", 90).await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["global-ops:Agent \"plain-agent\" is unresponsive (inactive for 90s)".to_string()],
+        "an agent with no heartbeat_channel must keep routing through alert_channels"
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_push_notification_unknown_event_type_yields_no_targets() {
     // Regression: the global-fallback match arm has an explicit allowlist

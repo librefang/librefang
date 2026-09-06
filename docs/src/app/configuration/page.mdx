@@ -2761,7 +2761,7 @@ Configured in agent manifests via `AutonomousConfig`:
 | `max_iterations` | `50` | Maximum tool-use iterations per invocation. |
 | `max_restarts` | `10` | Maximum automatic restarts before permanent stop. |
 | `heartbeat_interval_secs` | `30` | Seconds between heartbeat health checks. |
-| `heartbeat_channel` | `null` | Channel to send heartbeat status to (e.g., `"telegram"`). |
+| `heartbeat_channel` | `null` | Where this agent's unresponsive alert goes. `"telegram"` uses the owner's `channel_bindings` recipient for that channel; `"telegram:123456"` addresses a recipient directly. Consulted after a matching `[[notification.agent_rules]]` entry and before `[notification] alert_channels`. |
 
 
 

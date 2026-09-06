@@ -2730,4 +2730,4 @@ max_retries = 3               # LLM 摘要的最大重试次数
 | `max_iterations` | `50` | 每次调用的最大工具使用迭代次数。 |
 | `max_restarts` | `10` | 永久停止前的最大自动重启次数。 |
 | `heartbeat_interval_secs` | `30` | 心跳健康检查的间隔（秒）。 |
-| `heartbeat_channel` | `null` | 发送心跳状态的通道（例如 `"telegram"`）。 |
+| `heartbeat_channel` | `null` | 该 Agent 失联告警的投递目标。`"telegram"` 使用 owner 用户在该通道上的 `channel_bindings` 收件人；`"telegram:123456"` 直接指定收件人。优先级低于匹配的 `[[notification.agent_rules]]`，高于 `[notification] alert_channels`。 |
