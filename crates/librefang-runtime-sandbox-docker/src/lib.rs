@@ -678,7 +678,7 @@ impl ContainerPool {
     /// leave a busy container immortal — exactly the container `max_age_secs` exists to retire.
     pub async fn cleanup(&self, idle_timeout_secs: u64, max_age_secs: u64) {
         let now = chrono::Utc::now();
-        let to_remove: Vec<(String, SandboxContainer)> = self
+        let stale_keys: Vec<String> = self
             .entries
             .iter()
             .filter(|e| {
@@ -687,13 +687,17 @@ impl ContainerPool {
                     .unwrap_or(Duration::ZERO);
                 entry_is_stale(e.last_used.elapsed(), age, idle_timeout_secs, max_age_secs)
             })
-            .map(|e| (e.key().clone(), e.container.clone()))
+            .map(|e| e.key().clone())
             .collect();
 
-        for (key, container) in to_remove {
-            debug!(container_id = %container.container_id, "Cleaning up stale pool container");
-            let _ = destroy_sandbox(&container).await;
-            self.entries.remove(&key);
+        // Remove before destroying: a concurrent `acquire()` racing this reaper tick must never
+        // be handed a container that is mid-destroy. If `remove` returns `None`, the entry was
+        // already checked out (or reaped) by someone else and is no longer ours to tear down.
+        for key in stale_keys {
+            if let Some((_, entry)) = self.entries.remove(&key) {
+                debug!(container_id = %entry.container.container_id, "Cleaning up stale pool container");
+                let _ = destroy_sandbox(&entry.container).await;
+            }
         }
     }
 
@@ -701,16 +705,15 @@ impl ContainerPool {
     ///
     /// A pooled container deliberately outlives the tool call that created it, so without a drain on daemon shutdown every restart would strand one container per live pool key.
     pub async fn drain(&self) {
-        let all: Vec<(String, SandboxContainer)> = self
-            .entries
-            .iter()
-            .map(|e| (e.key().clone(), e.container.clone()))
-            .collect();
+        let keys: Vec<String> = self.entries.iter().map(|e| e.key().clone()).collect();
 
-        for (key, container) in all {
-            debug!(container_id = %container.container_id, "Draining pool container on shutdown");
-            let _ = destroy_sandbox(&container).await;
-            self.entries.remove(&key);
+        // Same remove-then-destroy ordering as `cleanup`: never destroy an entry that a
+        // concurrent `acquire()`/`release()` has already taken out of the map.
+        for key in keys {
+            if let Some((_, entry)) = self.entries.remove(&key) {
+                debug!(container_id = %entry.container.container_id, "Draining pool container on shutdown");
+                let _ = destroy_sandbox(&entry.container).await;
+            }
         }
     }
 
