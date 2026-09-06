@@ -1357,7 +1357,7 @@ where
         }
     }
 
-    let new_user_records = build_api_user_records(&users);
+    let mut new_user_records = build_api_user_records(&users);
 
     let write_path = config_path.clone();
     let write_bytes = new_toml.into_bytes();
@@ -1368,7 +1368,15 @@ where
 
     // Authentication consults only this snapshot, not config.toml or the kernel config.
     // Keep the lock to the brief atomic replacement, and publish immediately after the durable write so reload failure or request cancellation while awaiting reload can never preserve a credential that the file has revoked.
-    *state.user_api_keys.write().await = new_user_records;
+    // This write owns the `[[users]]` half of that table and nothing else, so the paired-device half is re-derived and re-appended rather than dropped: the old whole-vector assignment de-authenticated every paired mobile device on any user or group edit, silently and until the next daemon restart, while `GET /api/pairing/devices` went on listing them as paired.
+    // The device rows come from the pairing store rather than from the entries already in the table, because `validate_name` does not reserve the `device:` prefix — an operator can create a config user by that name, and carrying such a row over would resurrect a credential this write just revoked.
+    // The snapshot is read while holding the guard because `pairing_complete` holds the same guard across the kernel-store mutation that publishes a new device; read before the lock, it could miss a device that has just been paired and then overwrite its row.
+    {
+        let mut live = state.user_api_keys.write().await;
+        let snap = librefang_kernel::kernel_handle::ApiAuth::auth_snapshot(state.kernel.as_ref());
+        new_user_records.extend(crate::server::paired_device_user_keys(&snap));
+        *live = new_user_records;
+    }
 
     let reload_error = state.kernel.reload_config().await.err();
     if let Some(e) = reload_error {

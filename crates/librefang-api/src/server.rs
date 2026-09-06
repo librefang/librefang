@@ -329,6 +329,9 @@ pub(crate) fn has_dashboard_credentials(snap: &ApiAuthSnapshot) -> bool {
 /// credential-change endpoint (which alters the derived session token that
 /// rides in the same list).
 ///
+/// All three reach it through [`refresh_auth_tables`], which republishes the per-user bearer table from the same snapshot, and new call sites should do the same: every one of them calls `reload_config` first, and a reload that refreshed the master key while leaving the bearer table alone is the exact shape of the revocation hole `refresh_auth_tables` exists to close.
+/// Call this one directly only where no config reload is involved at all, so the `[[users]]` half provably cannot have moved.
+///
 /// This is the *only* place the env / `vault:` indirection is re-run, which makes it the boundary for one operational fact worth stating plainly: rotating a `vault:NAME` master key with `librefang vault set` writes `vault.enc`, not `config.toml`, so nothing here notices until the operator calls `POST /api/config/reload`.
 /// That matches the posture the HTTP middleware has always had — `api_key_lock` was likewise resolved once and swapped on reload — and since #6613 the WS and terminal upgrade paths agree with it instead of re-resolving per connection.
 /// A reload suffices; a daemon restart is not needed.
@@ -385,17 +388,65 @@ pub(crate) fn paired_device_user_keys(snap: &ApiAuthSnapshot) -> Vec<middleware:
         .collect()
 }
 
+/// The whole per-user bearer table: every `[[users]]` entry that carries an `api_key_hash`, plus every paired device.
+///
+/// `middleware::auth` verifies an `Authorization: Bearer` against this one list and consults nothing else — not `config.toml`, not the kernel config, not the pairing store — so the list *is* the answer to "which per-user credentials does this daemon accept", and any writer that publishes less than the union silently revokes the half it left out.
+/// One function so boot, the reload paths, and the `/api/users` write path cannot each spell the union differently, which is exactly how the two halves drifted apart: `POST /api/config/reload` never rebuilt the table at all (a deleted `[[users]]` block kept authenticating until restart), while a `/api/users` write rebuilt it from config alone (de-authenticating every paired device until restart).
+pub(crate) fn user_api_key_table(snap: &ApiAuthSnapshot) -> Vec<middleware::ApiUserAuth> {
+    let mut keys = configured_user_api_keys(snap);
+    keys.extend(paired_device_user_keys(snap));
+    keys
+}
+
+/// Push a fresh auth snapshot into *every* live auth handle the HTTP middleware reads: the master credential pair (see [`refresh_master_credential`]) and the per-user bearer table.
+///
+/// Call this — not `refresh_master_credential` alone — after a config reload.
+/// `users` is classified as a hot-reload field (`build_reload_plan`), and the WS and terminal upgrade paths honour it because they re-derive their table from `auth_snapshot()` per connection; the REST surface reads the shared table instead, which no reload path wrote. An operator who deleted a `[[users]]` block and called `POST /api/config/reload` therefore saw the revocation take effect on one surface and silently fail on the other, with the revoked bearer keeping its role on every `/api/*` request until the daemon restarted.
+///
+/// `config_stored` is `ReloadPlan::config_stored` — the kernel's own record of whether that reload swapped the freshly-read config into the live `ArcSwap`, set at the line that performs the swap. Pass it straight through; do not re-derive it from `should_store_config`, which needs a `[reload] mode` read at the same instant the kernel read it and cannot be obtained after the fact.
+/// The bearer table may only be rebuilt from a config generation that matches the file on disk. Under `mode = "off"` / `"restart"` the kernel deliberately does not swap the freshly-read config in, so `auth_snapshot()` still answers with the pre-reload `[[users]]` — and `persist_identity_sections` publishes revocations straight to the table without waiting for a reload, so a rebuild from a config the kernel refused to apply would put a rotated-away `api_key_hash` back into service. The master credential is refreshed either way, exactly as this path has since #6613.
+///
+/// The snapshot is taken *after* the bearer-table write guard is acquired, not before: `pairing_complete` holds that same guard across the kernel-store mutation that publishes a new device, so a snapshot read ahead of the lock can observe the store without the device and then overwrite the row pairing had already pushed. Taking it under the guard also means the master credential and the bearer table come from one reload generation.
+///
+/// A rebuild can now empty the table, which no reload path could do before, so the transition that removes a daemon's *last* credential is logged.
+/// An operator who deletes every key-bearing `[[users]]` block from a daemon with no `api_key`, no paired device and no dashboard password arrives at the same no-auth posture `check_bind_auth_safety` refuses to boot a non-loopback bind into: remote callers get 401 on everything, and loopback callers are served as `Owner` without presenting anything (`middleware.rs`, the `TrustedNoAuthCaller` branch), which `LIBREFANG_ALLOW_NO_AUTH` widens to every origin.
+/// The boot check runs before `build_router` and cannot see a reload, so the warning is the only signal — and it is gated on the table having been non-empty first, so a deployment that never configured auth is not nagged on every reload.
+pub(crate) async fn refresh_auth_tables<K>(
+    kernel: &K,
+    api_key_lock: &tokio::sync::RwLock<String>,
+    master_key: &middleware::MasterKeyState,
+    user_api_keys: &tokio::sync::RwLock<Vec<middleware::ApiUserAuth>>,
+    config_stored: bool,
+) where
+    K: ApiAuth + ?Sized,
+{
+    let mut dropped_last_credential = false;
+    let snap = if config_stored {
+        let mut guard = user_api_keys.write().await;
+        let snap = kernel.auth_snapshot();
+        dropped_last_credential = !guard.is_empty() && !any_auth_configured(&snap);
+        *guard = user_api_key_table(&snap);
+        snap
+    } else {
+        kernel.auth_snapshot()
+    };
+    if dropped_last_credential {
+        tracing::warn!(
+            "Config reload removed this daemon's last credential — no api_key / api_key_hash, no [[users]] entry carrying an api_key_hash, no paired device, no dashboard password. Remote callers now get 401 on everything; loopback callers are served as Owner without presenting anything, and LIBREFANG_ALLOW_NO_AUTH widens that to every origin. Restore a credential in config.toml and reload again."
+        );
+    }
+    refresh_master_credential(&snap, api_key_lock, master_key).await;
+}
+
 /// Returns `true` when at least one form of authentication is configured for
 /// the daemon: a master credential (`api_key` literal / env / vault, or
 /// `api_key_hash`), any `[[users]]` entry with an `api_key_hash`, any paired
 /// device, or dashboard credentials. Used at boot (#3572) to decide whether a
-/// non-loopback bind is safe.
+/// non-loopback bind is safe, and by [`refresh_auth_tables`] to detect a reload that removed the last one.
 ///
-/// Reads the snapshot, unlike the per-request surfaces that read the live
-/// handles: this runs in `run_daemon` *before* `build_router`, so the handles do
-/// not exist yet, and resolving the vault once at boot is not a hot path.
-/// Keeping it on the snapshot is also what makes the boot refusal honest — it is
-/// answering "what did the operator configure", not "what is currently loaded".
+/// Reads the snapshot, unlike the per-request surfaces that read the live handles.
+/// The boot caller runs in `run_daemon` *before* `build_router`, so the handles do not exist yet, and resolving the vault once at boot is not a hot path; the reload caller has just rebuilt those handles from this very snapshot, so the snapshot and the live state agree by construction.
+/// Keeping it on the snapshot is also what makes both answers honest — it reports what the operator configured, not what some handle happens to hold.
 fn any_auth_configured(snap: &ApiAuthSnapshot) -> bool {
     let api_key_set = master_credential(snap).is_configured();
     let users_have_keys = snap.config_users.iter().any(|u| {
@@ -1295,17 +1346,29 @@ pub(crate) async fn change_password(
         Err(error) => return change_password_internal_error("join config write task", &error),
     }
 
-    // Trigger config reload so the kernel picks up the new credentials
-    if let Err(e) = state.kernel.reload_config().await {
-        tracing::warn!("Config reload after credential change failed: {e}");
-    }
+    // Trigger config reload so the kernel picks up the new credentials.
+    // The reload is best-effort — the credentials are already durable on disk, so a reload failure must not fail the request — but the plan it returns is not optional bookkeeping: it is the only record of whether the live config actually advanced, which decides whether the per-user bearer table may be rebuilt below.
+    let reload_plan = match state.kernel.reload_config().await {
+        Ok(plan) => Some(plan),
+        Err(e) => {
+            tracing::warn!("Config reload after credential change failed: {e}");
+            None
+        }
+    };
 
-    // Update the live auth handles so the derived static token reflects the
-    // new credentials immediately. The master key is untouched by a dashboard
-    // password change, but it rides in the same composite token list, so both
-    // handles are refreshed from one snapshot rather than only the list.
-    let snap = state.kernel.auth_snapshot();
-    refresh_master_credential(&snap, &state.api_key_lock, &state.master_key).await;
+    // Update the live auth handles so the derived static token reflects the new credentials immediately.
+    // The master key is untouched by a dashboard password change, but it rides in the same composite token list, so both handles are refreshed from one snapshot rather than only the list.
+    //
+    // The per-user bearer table goes with them even though this endpoint writes `[dashboard]` only, because the reload above is not scoped to what this endpoint wrote: in Hot / Hybrid mode it swaps in whatever `config.toml` currently says, including a `[[users]]` block an operator deleted by hand minutes ago.
+    // Leaving that to the 30 s config-file watcher does not work, and the gate is what breaks it — the watcher's own `reload_config` diffs the already-swapped live config against the same unchanged file, gets an empty plan, and skips the rebuild. A revoked bearer that a dashboard password change happened to load would then stay live until the daemon restarted.
+    refresh_auth_tables(
+        state.kernel.as_ref(),
+        &state.api_key_lock,
+        &state.master_key,
+        &state.user_api_keys,
+        reload_plan.is_some_and(|plan| plan.config_stored),
+    )
+    .await;
 
     // Invalidate all existing sessions to force re-login
     state.active_sessions.write().await.clear();
@@ -1606,11 +1669,7 @@ pub async fn build_router(
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
-        let mut keys = configured_user_api_keys(&auth_snap);
-        keys.extend(paired_device_user_keys(&auth_snap));
-        keys
-    }));
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(user_api_key_table(&auth_snap)));
 
     let auth_login_limiter = Arc::new(rate_limiter::AuthLoginLimiter::new());
 
@@ -2361,18 +2420,27 @@ pub async fn run_daemon(
                     tracing::info!("Config file changed, reloading...");
                     match k.reload_config().await {
                         Ok(plan) => {
-                            if plan.has_changes() {
+                            if !plan.has_changes() {
+                                tracing::debug!("Config hot-reload: no actionable changes");
+                            } else if plan.config_stored {
                                 tracing::info!("Config hot-reload applied: {:?}", plan.hot_actions);
                             } else {
-                                tracing::debug!("Config hot-reload: no actionable changes");
+                                // `[reload] mode` withheld the swap, so the plan is a preview of what a restart would do and nothing ran. Logging it as "applied" is the same misleading-success shape the HTTP response avoids.
+                                tracing::info!(
+                                    "Config change read but withheld by [reload] mode; restart to apply — hot actions {:?}, read-live changes {:?}",
+                                    plan.hot_actions,
+                                    plan.noop_changes
+                                );
                             }
-                            // Same live-handle refresh the `POST /api/config/reload`
-                            // handler performs (#6613) — an operator editing
-                            // config.toml directly must not need a restart before an
-                            // edited `api_key` / `api_key_hash` reaches the HTTP
-                            // middleware.
-                            let snap = k.auth_snapshot();
-                            refresh_master_credential(&snap, &st.api_key_lock, &st.master_key).await;
+                            // Same live-handle refresh the `POST /api/config/reload` handler performs (#6613) — an operator editing config.toml directly must not need a restart before an edited `api_key` / `api_key_hash` reaches the HTTP middleware, and the same holds for an edited `[[users]]` block reaching the per-user bearer table.
+                            refresh_auth_tables(
+                                k.as_ref(),
+                                &st.api_key_lock,
+                                &st.master_key,
+                                &st.user_api_keys,
+                                plan.config_stored,
+                            )
+                            .await;
                             // Restart channel bridge if channel config changed
                             if plan.hot_actions.contains(
                                 &HotAction::ReloadChannels,

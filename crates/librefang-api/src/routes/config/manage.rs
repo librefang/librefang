@@ -982,12 +982,13 @@ fn redacted_config_json(
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------
+/// `has_warnings` covers everything that makes a nominally successful reload less than complete — a channel bridge that failed to restart, or a plan the kernel declined to apply because `[reload] mode` withholds runtime changes.
 fn config_reload_status(
     restart_required: bool,
     has_changes: bool,
-    channel_reload_failed: bool,
+    has_warnings: bool,
 ) -> &'static str {
-    if restart_required || channel_reload_failed {
+    if restart_required || has_warnings {
         "partial"
     } else if has_changes {
         "applied"
@@ -1016,17 +1017,19 @@ pub async fn config_reload(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     match state.kernel.reload_config().await {
         Ok(plan) => {
-            // `api_key` / `api_key_hash` are classified as read-live in
-            // `build_reload_plan`, which is true for the WS and terminal
-            // upgrade paths (they call `valid_api_tokens(&auth_snapshot())`
-            // per connection) but was never true for the HTTP middleware:
-            // `api_key_lock` was written only at boot and on a dashboard
-            // credential change, so a reloaded master key kept authenticating
-            // with the old value until the daemon restarted. Push the fresh
-            // snapshot into both live handles here (#6613).
-            let snap = state.kernel.auth_snapshot();
-            crate::server::refresh_master_credential(&snap, &state.api_key_lock, &state.master_key)
-                .await;
+            // `api_key` / `api_key_hash` are classified as read-live in `build_reload_plan`, which is true for the WS and terminal upgrade paths (they call `valid_api_tokens(&auth_snapshot())` per connection) but was never true for the HTTP middleware: `api_key_lock` was written only at boot and on a dashboard credential change, so a reloaded master key kept authenticating with the old value until the daemon restarted.
+            // Push the fresh snapshot into every live handle here (#6613).
+            //
+            // `users` is hot-reloaded the same way and had the same hole one level down: the per-user bearer table was written at boot and by the `/api/users` endpoints only, so an operator who revoked a key by deleting the `[[users]]` block and calling this endpoint got a 200, saw the revocation honoured on WS and terminal, and kept authenticating every REST request with the deleted bearer until the daemon restarted.
+            // `refresh_auth_tables` republishes both, gated on the kernel's own `plan.config_stored` so a reload the kernel declined to apply cannot resurrect a credential the table has already revoked.
+            crate::server::refresh_auth_tables(
+                state.kernel.as_ref(),
+                &state.api_key_lock,
+                &state.master_key,
+                &state.user_api_keys,
+                plan.config_stored,
+            )
+            .await;
 
             // If channel config changed, the kernel already cleared the adapter
             // registry — but we also need to stop the old BridgeManager and
@@ -1050,6 +1053,15 @@ pub async fn config_reload(
                 }
             }
 
+            // A plan the kernel declined to apply is a preview of what a restart would do, not a record of what happened: under `[reload] mode = "off"` / `"restart"` the config is read and validated but never swapped in, and `apply_hot_actions_inner` runs inside that same branch.
+            // Reporting `hot_actions_applied: ["ReloadAuth"]` there is the identical misleading-success shape this endpoint's auth refresh exists to close, one mode over — the operator sees a 200 naming the action and believes the revocation landed.
+            if plan.has_changes() && !plan.config_stored {
+                warnings.push(
+                    "Nothing was applied: the configured `[reload] mode` withholds runtime changes, so the new config was read and validated but not swapped in. Restart the daemon to pick it up."
+                        .to_string(),
+                );
+            }
+
             let status = config_reload_status(
                 plan.restart_required,
                 plan.has_changes(),
@@ -1064,11 +1076,17 @@ pub async fn config_reload(
                 Some("api".to_string()),
             );
 
+            let hot_actions_applied: Vec<String> = if plan.config_stored {
+                plan.hot_actions.iter().map(|a| format!("{a:?}")).collect()
+            } else {
+                Vec::new()
+            };
             let mut body = serde_json::json!({
                 "status": status,
                 "restart_required": plan.restart_required,
                 "restart_reasons": plan.restart_reasons,
-                "hot_actions_applied": plan.hot_actions.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
+                "hot_actions_applied": hot_actions_applied,
+                "config_applied": plan.config_stored,
                 "noop_changes": plan.noop_changes,
             });
             if !warnings.is_empty() {

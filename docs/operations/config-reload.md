@@ -34,8 +34,9 @@ If the file is owned by your deployment rather than by LibreFang, see [managed-c
      `self.config.load()` on every message or request. The ArcSwap
      config swap makes the edit effective on the next use with no extra
      action; the planner records it as informational only.
-3. Hot actions are applied according to the configured `[reload] mode`
-   (`off` / `restart` / `hot` / `hybrid`) — see `should_apply_hot`.
+3. The configured `[reload] mode` (`off` / `restart` / `hot` / `hybrid`) decides whether any of that is applied — see `should_store_config`, which is the gate `reload_config` actually uses.
+   Under `hot` / `hybrid` a plan carrying any change swaps the new config in and runs its hot actions; under `off` / `restart` nothing is applied and the plan is only a preview of what a restart would do.
+   The response distinguishes the two: `config_applied` is `false` and `hot_actions_applied` is empty whenever the mode withheld the swap, with the reason in `warnings` and `status` reported as `partial`.
 
 When `restart_required` is set, the dashboard / API response says so
 explicitly. A field that is `Ignore`/`noop` is **not** a failure — it
@@ -105,7 +106,7 @@ classified differently — the row note spells out which is which.
 | `passkey_enabled` | R | Opt-in flag for passkey (WebAuthn/FIDO2) login — the route gating is fixed at boot. |
 | `passkey_rp_id` | R | WebAuthn Relying Party ID — the `Webauthn` instance is built once at boot. |
 | `passkey_rp_origin` | R | WebAuthn Relying Party origin — baked into the `Webauthn` instance at boot. |
-| `users` | H | RBAC user list — rebuilds the `AuthManager`. |
+| `users` | H | RBAC user list — rebuilds the `AuthManager` and republishes the HTTP per-user bearer table, so deleting a `[[users]]` block revokes that key on the REST surface too, not only on the WS / terminal upgrades. |
 | `groups` | N | User groups (#7745) — membership and conferred roles are resolved from the live config on every lookup, so the config swap is the whole of the reload. |
 | `default_owner` | N | Fleet-wide fallback owner for artifacts created by a turn with no authenticated caller (#7744) — parsed from the live config at each creation. Changing it does not rewrite owners already recorded. |
 | `require_auth_for_reads` | R | Whether the dashboard-reads allowlist requires auth. |

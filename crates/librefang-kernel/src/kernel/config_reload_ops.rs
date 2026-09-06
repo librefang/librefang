@@ -69,7 +69,8 @@ impl LibreFangKernel {
         let caps = crate::config_reload::ReloadCapabilities {
             log_reloader_installed: self.log_reloader.get().is_some(),
         };
-        let plan = crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
+        let mut plan =
+            crate::config_reload::build_reload_plan_with_caps(&old_cfg, &new_config, caps);
         plan.log_summary();
 
         // Apply hot actions + store new config atomically under the same
@@ -151,6 +152,9 @@ impl LibreFangKernel {
             }
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
+            // Record on the plan that the swap happened, at the one line that performs it.
+            // Callers outside the kernel publish state derived from the live config — the HTTP auth tables, the reload response's `hot_actions_applied` — and the alternative was for each of them to re-run `should_store_config` against a `reload.mode` it re-read at its own instant, which is both a second spelling of this decision and wrong under a concurrent reload.
+            plan.config_stored = true;
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits
             // take effect on the next side-task call. ArcSwap atomically
             // replaces the live snapshot — concurrent callers that already
