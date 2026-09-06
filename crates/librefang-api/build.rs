@@ -1,5 +1,7 @@
 use std::process::Command;
 
+mod build_paths;
+
 fn main() {
     // Ensure the dashboard embed directory exists so `include_dir!` never
     // fails on fresh clones/worktrees. The directory is gitignored because
@@ -7,9 +9,10 @@ fn main() {
     // dashboard subcrate (or downloaded from release assets at runtime).
     // When empty, `include_dir!` embeds nothing and the runtime directory
     // `~/.librefang/dashboard/` serves the actual assets.
-    let dashboard_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("static")
-        .join("react");
+    // Read CARGO_MANIFEST_DIR when this cached build-script binary runs.
+    // Compile-time `env!` would keep pointing at the worktree that originally
+    // compiled it when another worktree reuses the same target directory.
+    let dashboard_dir = build_paths::dashboard_dir();
     if !dashboard_dir.exists() {
         std::fs::create_dir_all(&dashboard_dir)
             .expect("failed to create static/react placeholder directory");
