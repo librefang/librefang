@@ -28,6 +28,7 @@
 //!   JSON `error` field — pinning that they emit JSON, not a panic / empty
 //!   body, which is exactly the regression class #3571 calls out.
 //! - `GET /api/memory/items/{memory_id}/history` against that same store: 400 for a malformed id, 404 for a well-formed id that matches no row, and 403 when the caller's namespace ACL excludes `proactive`.
+//! - PII redaction of the version chain a memory carries in its metadata, on both `GET /api/memory` and `GET /api/memory/items/{memory_id}/history`, seeded through the import route so no extraction / embedding provider is needed.
 //!
 //! Out of scope (skipped, with reason):
 //! - Endpoints whose behaviour only becomes observable once the store holds rows: search-by-content, consolidate, export/import, relations, duplicates, decay/cleanup side effects.
@@ -1435,5 +1436,196 @@ async fn memory_history_denies_a_caller_whose_acl_excludes_the_proactive_namespa
     assert!(
         err.contains("proactive"),
         "the denial must name the namespace that was refused, got: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Metadata redaction — the version chain, on both the listing and history reads
+// ---------------------------------------------------------------------------
+
+/// Bearer key for a user whose ACL grants `proactive` reads but denies PII.
+const PII_BLIND_KEY: &str = "pii-blind-memory-user-key";
+/// The e-mail address that lives only in the seeded memory's *prior* version.
+const PRIOR_VERSION_EMAIL: &str = "alice@example.com";
+/// Marker `MemoryNamespaceGuard` substitutes for redacted text.
+const PII_MARKER: &str = "[REDACTED:PII]";
+
+/// Boot a router whose store already holds one memory carrying a version chain, and hand back the seeded memory's id.
+///
+/// Seeding goes through `POST /api/memory/agents/{id}/import`, which writes the supplied metadata verbatim — the same shape `ProactiveMemoryStore` leaves behind after an in-place update, and the only way to get one into this harness without the extraction / embedding provider the test kernel has no credentials for.
+async fn boot_with_seeded_version_chain() -> (RouterHarness, String) {
+    let harness = boot_router_with_config(TEST_KEY, |config| {
+        let hash = librefang_api::password_hash::hash_password(PII_BLIND_KEY)
+            .expect("hash the PII-blind user's key");
+        config.users = vec![librefang_types::config::UserConfig {
+            name: "PiiBlind".to_string(),
+            role: "user".to_string(),
+            api_key_hash: Some(hash),
+            // Explicitly configured, so this ACL is used verbatim: proactive reads allowed, PII denied.
+            memory_access: Some(librefang_types::user_policy::UserMemoryAccess {
+                readable_namespaces: vec!["proactive".to_string()],
+                writable_namespaces: vec![],
+                pii_access: false,
+                export_allowed: false,
+                delete_allowed: false,
+            }),
+            ..Default::default()
+        }];
+    })
+    .await;
+
+    let agent_id = librefang_types::agent::AgentId::new().to_string();
+    let import = harness
+        .app
+        .clone()
+        .oneshot(authed_json(
+            Method::POST,
+            &format!("/api/memory/agents/{agent_id}/import"),
+            serde_json::json!([{
+                "content": "reach me at bob@example.com",
+                "level": "User",
+                "category": "contact",
+                "confidence": 0.9,
+                "created_at": "2026-01-02T00:00:00Z",
+                "updated_at": null,
+                "metadata": {
+                    "previous_content": format!("reach me at {PRIOR_VERSION_EMAIL}"),
+                    "version_history": [{
+                        "content": format!("reach me at {PRIOR_VERSION_EMAIL}"),
+                        "replaced_at": "2026-01-01T00:00:00Z",
+                    }],
+                },
+            }]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        import.status(),
+        StatusCode::OK,
+        "seeding the fixture over the import route must succeed"
+    );
+    let imported = read_json(import).await;
+    assert_eq!(
+        imported["imported"], 1,
+        "the fixture memory must actually land in the store: {imported}"
+    );
+
+    // Read the id back with the master key, which sees the store unredacted.
+    let listing = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory"))
+        .await
+        .unwrap();
+    let body = read_json(listing).await;
+    let memory_id = body["memories"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the seeded memory must be listed: {body}"))
+        .to_string();
+
+    (harness, memory_id)
+}
+
+/// `MemoryItem::metadata` is a plainly-serialized public field, and redaction used to rewrite `content` alone — so `GET /api/memory` scrubbed the e-mail out of the current version and handed the identical prior version straight back in `metadata.version_history` on the same response.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_listing_redacts_the_version_chain_for_a_caller_without_pii_access() {
+    let (harness, _memory_id) = boot_with_seeded_version_chain().await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(get_with_bearer("/api/memory", PII_BLIND_KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the ACL grants proactive reads; only PII is denied"
+    );
+    let body = read_json(resp).await;
+    let rendered = body.to_string();
+    assert!(
+        !rendered.contains(PRIOR_VERSION_EMAIL),
+        "the prior version must not ship anywhere in the response: {rendered}"
+    );
+    let chain_entry = &body["memories"][0]["metadata"]["version_history"][0]["content"];
+    assert!(
+        chain_entry
+            .as_str()
+            .is_some_and(|text| text.contains(PII_MARKER)),
+        "the version chain must survive as redacted text rather than vanish: {rendered}"
+    );
+    assert!(
+        body["memories"][0]["metadata"]["previous_content"]
+            .as_str()
+            .is_some_and(|text| text.contains(PII_MARKER)),
+        "previous_content must be redacted too: {rendered}"
+    );
+
+    // Control: the master key holds `pii_access`, so the same listing returns the chain verbatim — redaction is ACL-driven, not an unconditional strip of the metadata.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get("/api/memory"))
+        .await
+        .unwrap();
+    let body = read_json(resp).await;
+    assert!(
+        body.to_string().contains(PRIOR_VERSION_EMAIL),
+        "a caller with pii_access must still see the real prior version: {body}"
+    );
+}
+
+/// The history route returned `metadata["version_history"]` verbatim with no redaction of any kind, so a caller the listing route had just answered with scrubbed text could read the raw prior version one request later.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_history_redacts_prior_versions_for_a_caller_without_pii_access() {
+    let (harness, memory_id) = boot_with_seeded_version_chain().await;
+
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(get_with_bearer(
+            &format!("/api/memory/items/{memory_id}/history"),
+            PII_BLIND_KEY,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the ACL grants proactive reads; only PII is denied"
+    );
+    let body = read_json(resp).await;
+    assert_eq!(
+        body["version_count"], 1,
+        "the fixture holds exactly one prior version: {body}"
+    );
+    let text = body["versions"][0]["content"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a version entry must carry its superseded text: {body}"));
+    assert!(
+        !text.contains(PRIOR_VERSION_EMAIL),
+        "the prior version must not ship the raw e-mail: {text}"
+    );
+    assert!(
+        text.contains(PII_MARKER),
+        "the prior version must carry the redaction marker: {text}"
+    );
+
+    // Control: same route, master key, unredacted.
+    let resp = harness
+        .app
+        .clone()
+        .oneshot(authed_get(&format!(
+            "/api/memory/items/{memory_id}/history"
+        )))
+        .await
+        .unwrap();
+    let body = read_json(resp).await;
+    let verbatim = format!("reach me at {PRIOR_VERSION_EMAIL}");
+    assert_eq!(
+        body["versions"][0]["content"].as_str(),
+        Some(verbatim.as_str()),
+        "a caller with pii_access must still see the real prior version: {body}"
     );
 }

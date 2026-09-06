@@ -1634,25 +1634,39 @@ impl ProactiveMemoryStore {
     /// Both ways the caller can be wrong are reported as caller errors, because both used to be `LibreFangError::Internal` and reached the HTTP layer as a `500 Internal server error` plus an `ERROR` log line for what is a client-side mistake.
     /// An id that is not a UUID is `InvalidInput`, and an id that parses but matches no row is `Ok(None)` — the same "absent, not broken" signal [`Self::find_agent_id_for_memory`] gives the update / delete handlers.
     pub fn history(&self, memory_id: &str) -> LibreFangResult<Option<Vec<serde_json::Value>>> {
-        let uuid = uuid::Uuid::parse_str(memory_id)
-            .map_err(|e| LibreFangError::InvalidInput(format!("Invalid memory_id: {e}")))?;
-        let mid = MemoryId(uuid);
+        Ok(self
+            .fragment_for_history(memory_id)?
+            .map(|frag| version_history_desc(&frag.metadata)))
+    }
 
-        let Some(frag) = self.semantic.get_by_id(mid, false)? else {
+    /// Guarded counterpart to [`Self::history`], and the form every caller outside this crate should use.
+    ///
+    /// Prior versions of a memory are that memory's own text, so this read takes the same `proactive` namespace gate and the same PII redaction as every sibling read that returns fragment content.
+    /// Both live here rather than in the HTTP handler so they cannot drift away from the other `*_with_guard` wrappers (#7808) — the un-guarded [`Self::history`] stays for in-crate use and tests.
+    pub fn history_with_guard(
+        &self,
+        memory_id: &str,
+        guard: &crate::namespace_acl::MemoryNamespaceGuard,
+    ) -> LibreFangResult<Option<Vec<serde_json::Value>>> {
+        if let crate::namespace_acl::NamespaceGate::Deny(reason) = guard.check_read("proactive") {
+            return Err(LibreFangError::AuthDenied(reason));
+        }
+
+        let Some(frag) = self.fragment_for_history(memory_id)? else {
             return Ok(None);
         };
 
-        let history = frag
-            .metadata
-            .get("version_history")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        // Return in reverse chronological order (most recent first)
-        let mut history = history;
-        history.reverse();
+        let mut history = version_history_desc(&frag.metadata);
+        // The owning fragment carries the `taint_labels` signal; the entries themselves do not.
+        guard.redact_history_entries(&frag.metadata, &mut history);
         Ok(Some(history))
+    }
+
+    /// Resolve a memory id to its fragment for the history reads, mapping the two ways a caller can be wrong.
+    fn fragment_for_history(&self, memory_id: &str) -> LibreFangResult<Option<MemoryFragment>> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::InvalidInput(format!("Invalid memory_id: {e}")))?;
+        self.semantic.get_by_id(MemoryId(uuid), false)
     }
 
     /// Consolidate memories: merge near-duplicates and remove stale entries.
@@ -2506,6 +2520,19 @@ fn strip_private_stash_keys(metadata: &mut HashMap<String, serde_json::Value>) {
     for key in ADD_WITH_DECISION_PRIVATE_STASH_KEYS {
         metadata.remove(*key);
     }
+}
+
+/// Pull a fragment's `version_history` chain out of its metadata, most recent first.
+///
+/// Missing or non-array metadata reads as an empty chain: a memory that was never updated has no prior versions, which is absence of history rather than a malformed row.
+fn version_history_desc(metadata: &HashMap<String, serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut history = metadata
+        .get("version_history")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    history.reverse();
+    history
 }
 
 /// Extract entity-like candidates from a query for knowledge graph lookup.
@@ -5599,6 +5626,156 @@ mod tests {
         assert!(
             matches!(err, Err(LibreFangError::AuthDenied(_))),
             "find_duplicates_with_guard must deny a caller with no proactive read; got {err:?}"
+        );
+    }
+
+    /// Seed one memory whose metadata already carries a version chain, without going near the extractor or an embedding backend: `import_memories` writes the supplied metadata verbatim, which is exactly the shape an in-place update leaves behind.
+    /// Returns the stored memory's id.
+    async fn seed_memory_with_version_chain(
+        store: &ProactiveMemoryStore,
+        agent_id: &str,
+    ) -> String {
+        store
+            .import_memories(
+                agent_id,
+                vec![MemoryExportItem {
+                    content: "reach me at bob@example.com".to_string(),
+                    level: "User".to_string(),
+                    category: "contact".to_string(),
+                    confidence: 0.9,
+                    created_at: Utc::now().to_rfc3339(),
+                    updated_at: None,
+                    metadata: serde_json::json!({
+                        "previous_content": "reach me at alice@example.com",
+                        "version_history": [{
+                            "content": "reach me at alice@example.com",
+                            "replaced_at": "2026-01-01T00:00:00Z",
+                        }],
+                    }),
+                }],
+            )
+            .await
+            .expect("seeding the version-chain fixture must succeed");
+
+        let (items, _) = store
+            .list_page(Some(agent_id), None, None, 0, 10)
+            .expect("list the seeded memory");
+        items
+            .first()
+            .expect("the seeded memory must be listed")
+            .id
+            .clone()
+    }
+
+    fn readonly_proactive_acl(pii_access: bool) -> librefang_types::user_policy::UserMemoryAccess {
+        librefang_types::user_policy::UserMemoryAccess {
+            readable_namespaces: vec!["proactive".into()],
+            writable_namespaces: vec![],
+            pii_access,
+            export_allowed: false,
+            delete_allowed: false,
+        }
+    }
+
+    /// Prior versions of a memory are that memory's own text, so `/history` owes a caller without `pii_access` the same scrubbed text `GET /api/memory` gives them.
+    /// Pre-fix `history` handed back `metadata["version_history"]` verbatim and no redaction ran on the route at all, so the e-mail scrubbed out of the current version came straight back from the previous one.
+    #[tokio::test]
+    async fn history_with_guard_redacts_prior_versions_without_pii_access() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new().to_string();
+        let memory_id = seed_memory_with_version_chain(&store, &agent).await;
+
+        let redacting = MemoryNamespaceGuard::new(readonly_proactive_acl(false));
+        let versions = store
+            .history_with_guard(&memory_id, &redacting)
+            .expect("history read succeeds")
+            .expect("the seeded memory exists");
+        assert_eq!(
+            versions.len(),
+            1,
+            "the fixture holds exactly one prior version"
+        );
+        let text = versions[0]["content"]
+            .as_str()
+            .expect("a version entry carries its superseded text");
+        assert!(
+            !text.contains("alice@example.com"),
+            "the prior version must not ship the raw e-mail: {text}"
+        );
+        assert!(
+            text.contains("[REDACTED:PII]"),
+            "the prior version must carry the redaction marker: {text}"
+        );
+
+        // Control: the same read for a caller who may see PII returns the version verbatim, so the redaction is ACL-driven rather than an unconditional rewrite of the history route.
+        let unrestricted = MemoryNamespaceGuard::new(readonly_proactive_acl(true));
+        let versions = store
+            .history_with_guard(&memory_id, &unrestricted)
+            .expect("history read succeeds")
+            .expect("the seeded memory exists");
+        assert_eq!(
+            versions[0]["content"].as_str(),
+            Some("reach me at alice@example.com"),
+            "a caller with pii_access must still see the real prior version"
+        );
+    }
+
+    /// The namespace gate for the history read lives in the store next to the sibling `*_with_guard` wrappers, so it cannot drift out of the one HTTP handler that calls it.
+    #[tokio::test]
+    async fn history_with_guard_denies_a_caller_without_the_proactive_namespace() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+        use librefang_types::error::LibreFangError;
+        use librefang_types::user_policy::UserMemoryAccess;
+
+        let denied = MemoryNamespaceGuard::new(UserMemoryAccess {
+            readable_namespaces: vec!["kv:self".into()],
+            writable_namespaces: vec![],
+            pii_access: false,
+            export_allowed: false,
+            delete_allowed: false,
+        });
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+
+        let err = store.history_with_guard(&MemoryId::new().0.to_string(), &denied);
+        assert!(
+            matches!(err, Err(LibreFangError::AuthDenied(_))),
+            "history_with_guard must deny a caller with no proactive read; got {err:?}"
+        );
+    }
+
+    /// The listing path shipped the same prior-version text the history route did, because `MemoryItem::metadata` serializes plainly and `redact_item` rewrote `content` only.
+    /// A caller without `pii_access` got the e-mail scrubbed from `memories[].content` and handed back intact in `memories[].metadata.version_history` on the very same response.
+    #[tokio::test]
+    async fn list_page_with_guard_redacts_the_version_chain_in_metadata() {
+        use crate::namespace_acl::MemoryNamespaceGuard;
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.05).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate);
+        let agent = AgentId::new().to_string();
+        seed_memory_with_version_chain(&store, &agent).await;
+
+        let redacting = MemoryNamespaceGuard::new(readonly_proactive_acl(false));
+        let (items, _) = store
+            .list_page_with_guard(Some(&agent), None, None, 0, 10, &redacting)
+            .await
+            .expect("the listing is readable for a proactive-read ACL");
+        let item = items.first().expect("the seeded memory must be listed");
+
+        let serialized = serde_json::to_string(&item.metadata).expect("metadata serializes");
+        assert!(
+            !serialized.contains("alice@example.com"),
+            "no prior version may survive anywhere in the serialized metadata: {serialized}"
+        );
+        assert!(
+            item.metadata["previous_content"]
+                .as_str()
+                .is_some_and(|text| text.contains("[REDACTED:PII]")),
+            "previous_content must be redacted: {serialized}"
         );
     }
 }
