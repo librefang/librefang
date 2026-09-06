@@ -1575,13 +1575,13 @@ pub struct DockerSandboxConfig {
     /// Container lifecycle scope. Default: session.
     #[serde(default)]
     pub scope: DockerScope,
-    /// Cooldown before reusing a released container (seconds). Default: 300.
+    /// Settling time before a container released by one agent may be handed to a different agent; applies to scope = shared only, and never to an agent re-acquiring its own container. Default: 300.
     #[serde(default = "default_reuse_cool_secs")]
     pub reuse_cool_secs: u64,
-    /// Idle timeout — destroy containers after N seconds of inactivity. Default: 86400 (24h).
+    /// Idle timeout — destroy pooled containers after N seconds of inactivity; 0 disables. Default: 86400 (24h).
     #[serde(default = "default_docker_idle_timeout")]
     pub idle_timeout_secs: u64,
-    /// Maximum age before forced destruction (seconds). Default: 604800 (7 days).
+    /// Maximum age, measured from container creation rather than from the last release, before forced destruction (seconds); 0 disables. Default: 604800 (7 days).
     #[serde(default = "default_docker_max_age")]
     pub max_age_secs: u64,
     /// Paths blocked from bind mounting.
@@ -2344,12 +2344,12 @@ pub enum DockerSandboxMode {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DockerScope {
-    /// Container per session (destroyed when session ends).
+    /// Container per (agent, session), reused by every tool call in that session.
     #[default]
     Session,
-    /// Container per agent (reused across sessions).
+    /// Container per agent, reused across that agent's sessions.
     Agent,
-    /// Shared container pool.
+    /// Container per (config, workspace), reused by any agent that mounts the same workspace.
     Shared,
 }
 

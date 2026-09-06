@@ -3,7 +3,7 @@
 //! Provides secure command execution inside Docker containers with strict
 //! resource limits, network isolation, and capability dropping.
 
-use librefang_types::config::DockerSandboxConfig;
+use librefang_types::config::{DockerSandboxConfig, DockerScope};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
@@ -195,6 +195,26 @@ fn agent_id_container_suffix(agent_id: &str) -> String {
     hex[..8].to_string()
 }
 
+/// Derive a per-container suffix so two live containers never collide on a Docker name.
+///
+/// Names used to be `{prefix}-{agent_suffix}`, deterministic per agent, which held only
+/// because every container was destroyed by the end of the tool call that created it. Once
+/// containers are pooled an agent can legitimately have several alive at once — `scope =
+/// "shared"`, or two `docker_exec` calls overlapping — and `docker run --name` refuses the
+/// duplicate. Mixing a process-local counter with the wall clock keeps the suffix distinct
+/// across concurrent calls and across a daemon restart that left containers behind.
+fn container_instance_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let digest = Sha256::digest(format!("{n}:{nanos}").as_bytes());
+    let hex = format!("{digest:x}");
+    hex[..8].to_string()
+}
+
 /// SECURITY: Validate Docker image name — only allow safe characters.
 fn validate_image_name(image: &str) -> Result<(), String> {
     if image.is_empty() {
@@ -212,7 +232,10 @@ fn validate_image_name(image: &str) -> Result<(), String> {
 
 /// SECURITY: Sanitize command — reject dangerous shell metacharacters.
 /// Delegates to the comprehensive subprocess_sandbox check.
-fn validate_command(command: &str) -> Result<(), String> {
+///
+/// Public so a caller can fail an unsafe command before it acquires or creates a container.
+/// [`exec_in_sandbox`] still calls it, so the check is never skipped by a caller that forgets.
+pub fn validate_command(command: &str) -> Result<(), String> {
     if command.is_empty() {
         return Err("Command cannot be empty".into());
     }
@@ -252,9 +275,10 @@ pub async fn create_sandbox(
     // boundary rationale.
     validate_sandbox_config(config)?;
     let container_name = sanitize_container_name(&format!(
-        "{}-{}",
+        "{}-{}-{}",
         config.container_prefix,
-        agent_id_container_suffix(agent_id)
+        agent_id_container_suffix(agent_id),
+        container_instance_suffix()
     ))?;
 
     let mut cmd = tokio::process::Command::new("docker");
@@ -480,22 +504,110 @@ pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String>
 }
 
 // ---------------------------------------------------------------------------
-// Container Pool (Gap 5) — reuse containers across sessions
+// Container Pool (Gap 5) — reuse containers across tool calls
 // ---------------------------------------------------------------------------
 
 use dashmap::DashMap;
 use std::sync::Arc;
 
+/// The workload a pooled container belongs to, derived from [`DockerScope`].
+///
+/// This is the half of [`PoolKey`] that answers *who* may be handed a released container back.
+/// The other half — the config fingerprint and the workspace path — answers whether the container was built the way the caller needs at all.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PoolOwner {
+    /// `scope = "session"`: the container belongs to one session of one agent.
+    Session {
+        agent_id: String,
+        session_id: String,
+    },
+    /// `scope = "agent"`: the container belongs to one agent and is reused across its sessions.
+    Agent { agent_id: String },
+    /// `scope = "shared"`: any caller with the same config and workspace may reuse the container.
+    Shared,
+}
+
+impl PoolOwner {
+    /// Whether a released container can be handed to a *different* workload under this scope.
+    ///
+    /// Only `shared` can: the other two bake the agent (and, for `session`, the session) into the key, so the only caller that can ever acquire the container is the one that released it.
+    /// It is the precondition for `reuse_cool_secs` to apply at all; under `shared` the cooldown then narrows further to a reuse by an agent other than the one that released the container — see [`ContainerPool::acquire`].
+    pub fn crosses_workloads(&self) -> bool {
+        matches!(self, PoolOwner::Shared)
+    }
+}
+
+/// Identity a pooled container is reused under.
+///
+/// Two calls share a container only when every component matches:
+///
+/// - `owner` — the [`DockerScope`]-derived workload boundary.
+/// - `config_hash` — the container-shaping `[docker]` fields, fingerprinted by the `config_hash` function below; a container built from a different image or network is not a substitute.
+/// - `workspace` — the host path bind-mounted at `config.workdir`. It is a separate component rather than part of `config_hash` because it is per-call rather than per-config, and leaving it out would let `scope = "shared"` hand agent A's container, with A's workspace still mounted, to agent B.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolKey {
+    pub owner: PoolOwner,
+    pub config_hash: u64,
+    pub workspace: String,
+}
+
+impl PoolKey {
+    /// Derive the pool key for one sandbox call, or `None` when the call cannot be pooled.
+    ///
+    /// `None` means "create a container for this call and destroy it afterwards" — the pre-pool behaviour.
+    /// The only case that produces it is `scope = "session"` at a call site with no LibreFang session to pin the container to (the REST tool bridge, and any other out-of-band invocation): there is no session boundary to honour, and widening such a call to an agent-scoped container would give it a container the operator never asked to share.
+    pub fn derive(
+        config: &DockerSandboxConfig,
+        agent_id: &str,
+        session_id: Option<&str>,
+        workspace: &Path,
+    ) -> Option<Self> {
+        let owner = match config.scope {
+            DockerScope::Session => PoolOwner::Session {
+                agent_id: agent_id.to_string(),
+                session_id: session_id?.to_string(),
+            },
+            DockerScope::Agent => PoolOwner::Agent {
+                agent_id: agent_id.to_string(),
+            },
+            DockerScope::Shared => PoolOwner::Shared,
+        };
+        Some(Self {
+            owner,
+            config_hash: config_hash(config),
+            workspace: workspace.display().to_string(),
+        })
+    }
+}
+
 /// Pool entry for a reusable container.
 #[derive(Debug, Clone)]
 struct PoolEntry {
     container: SandboxContainer,
-    config_hash: u64,
+    pool_key: PoolKey,
+    /// The agent that put this container back, which is whose leftovers are inside it.
+    ///
+    /// Under `session` / `agent` scope the key already names that agent, so this is redundant there.
+    /// Under `shared` the key deliberately carries no agent, and this is the only record of who used the container last — which is what [`ContainerPool::acquire`] compares against to tell a handover from an agent picking its own container back up.
+    /// It is not `container.agent_id`: that field records who *created* the container and keeps saying so after the container has changed hands.
+    released_by: String,
     last_used: std::time::Instant,
-    created: std::time::Instant,
 }
 
-/// Container pool for reusing Docker containers.
+/// Whether a pooled container has aged out under the configured reaper policy.
+///
+/// `0` disables the axis it is written on rather than expiring everything immediately: an operator writing `idle_timeout_secs = 0` means "never reap on idleness", and the opposite reading would destroy every container the instant it was released, silently turning the pool back into per-call create/destroy.
+fn entry_is_stale(
+    idle: Duration,
+    age: Duration,
+    idle_timeout_secs: u64,
+    max_age_secs: u64,
+) -> bool {
+    (idle_timeout_secs > 0 && idle.as_secs() > idle_timeout_secs)
+        || (max_age_secs > 0 && age.as_secs() > max_age_secs)
+}
+
+/// Container pool for reusing Docker containers across tool calls.
 pub struct ContainerPool {
     entries: Arc<DashMap<String, PoolEntry>>,
 }
@@ -508,50 +620,95 @@ impl ContainerPool {
         }
     }
 
-    /// Acquire a container from the pool matching the config hash, or None.
-    pub fn acquire(&self, config_hash: u64, cool_secs: u64) -> Option<SandboxContainer> {
-        let mut found_key = None;
+    /// Take an idle container matching `key` out of the pool, or `None`.
+    ///
+    /// `reuse_cool_secs` is the operator's `[docker] reuse_cool_secs`: the settling time a released container must spend idle before it is handed to a *different* workload.
+    /// Two things narrow what counts as "different", and both are load-bearing.
+    ///
+    /// Under `session` / `agent` scope the key already pins the container to one workload, so there is nobody to protect from its leftovers; applying the cooldown there would mean the second tool call of a session never reuses the container the first one built, which is the whole point of the scope.
+    /// Under `shared` the key carries no agent, so `released_by` is what says whose leftovers are inside: an agent picking up the container it released a moment ago is not a handover and does not wait, while a genuinely different agent does.
+    /// That second distinction is what makes `shared` mean "one container per (config, workspace)" under a single caller.
+    /// Without it the default `reuse_cool_secs = 300` blocks every acquire — and because a blocked acquire is answered by *creating another container* rather than by waiting, one agent calling `docker_exec` on a short interval would inflate the shared pool instead of reusing anything.
+    pub fn acquire(
+        &self,
+        key: &PoolKey,
+        agent_id: &str,
+        reuse_cool_secs: u64,
+    ) -> Option<SandboxContainer> {
+        let mut found_id = None;
         for entry in self.entries.iter() {
-            if entry.config_hash == config_hash && entry.last_used.elapsed().as_secs() >= cool_secs
-            {
-                found_key = Some(entry.key().clone());
-                break;
+            if &entry.pool_key != key {
+                continue;
             }
+            let handover = key.owner.crosses_workloads() && entry.released_by != agent_id;
+            if handover && entry.last_used.elapsed().as_secs() < reuse_cool_secs {
+                continue;
+            }
+            found_id = Some(entry.key().clone());
+            break;
         }
-        if let Some(key) = found_key {
-            self.entries.remove(&key).map(|(_, e)| e.container)
+        if let Some(id) = found_id {
+            self.entries.remove(&id).map(|(_, e)| e.container)
         } else {
             None
         }
     }
 
-    /// Release a container back to the pool.
-    pub fn release(&self, container: SandboxContainer, config_hash: u64) {
+    /// Release a container back to the pool under the key it was acquired or created for.
+    ///
+    /// `released_by` is the agent that just finished with it — the caller's own id, not `container.agent_id`, which stays pinned to whoever created the container.
+    /// Only `shared` scope reads it back; see [`ContainerPool::acquire`].
+    pub fn release(&self, container: SandboxContainer, key: PoolKey, released_by: &str) {
         self.entries.insert(
             container.container_id.clone(),
             PoolEntry {
                 container,
-                config_hash,
+                pool_key: key,
+                released_by: released_by.to_string(),
                 last_used: std::time::Instant::now(),
-                created: std::time::Instant::now(),
             },
         );
     }
 
-    /// Cleanup containers older than max_age or idle longer than idle_timeout.
+    /// Destroy pooled containers idle past `idle_timeout_secs` or older than `max_age_secs`.
+    /// Either bound may be `0` to disable it.
+    ///
+    /// Age is measured from `SandboxContainer::created_at`, i.e. from `docker run`, not from the
+    /// last release. Timing it from the pool entry would restart the clock on every tool call and
+    /// leave a busy container immortal — exactly the container `max_age_secs` exists to retire.
     pub async fn cleanup(&self, idle_timeout_secs: u64, max_age_secs: u64) {
+        let now = chrono::Utc::now();
         let to_remove: Vec<(String, SandboxContainer)> = self
             .entries
             .iter()
             .filter(|e| {
-                e.last_used.elapsed().as_secs() > idle_timeout_secs
-                    || e.created.elapsed().as_secs() > max_age_secs
+                let age = (now - e.container.created_at)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                entry_is_stale(e.last_used.elapsed(), age, idle_timeout_secs, max_age_secs)
             })
             .map(|e| (e.key().clone(), e.container.clone()))
             .collect();
 
         for (key, container) in to_remove {
             debug!(container_id = %container.container_id, "Cleaning up stale pool container");
+            let _ = destroy_sandbox(&container).await;
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Destroy every pooled container and empty the pool.
+    ///
+    /// A pooled container deliberately outlives the tool call that created it, so without a drain on daemon shutdown every restart would strand one container per live pool key.
+    pub async fn drain(&self) {
+        let all: Vec<(String, SandboxContainer)> = self
+            .entries
+            .iter()
+            .map(|e| (e.key().clone(), e.container.clone()))
+            .collect();
+
+        for (key, container) in all {
+            debug!(container_id = %container.container_id, "Draining pool container on shutdown");
             let _ = destroy_sandbox(&container).await;
             self.entries.remove(&key);
         }
@@ -572,6 +729,18 @@ impl Default for ContainerPool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+static GLOBAL_POOL: std::sync::OnceLock<Arc<ContainerPool>> = std::sync::OnceLock::new();
+
+/// The process-wide container pool.
+///
+/// Host-scoped rather than kernel-scoped, because the resource being pooled is the host's Docker daemon: two kernels in one process would still be creating containers on the same daemon and must not each keep a private view of what is live.
+/// The `docker_exec` tool path and the kernel's reaper loop hold this same handle.
+pub fn global_pool() -> Arc<ContainerPool> {
+    GLOBAL_POOL
+        .get_or_init(|| Arc::new(ContainerPool::new()))
+        .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +1090,36 @@ mod tests {
 
     // ── Container Pool tests ──────────────────────────────────────────
 
+    fn test_container(id: &str, agent: &str) -> SandboxContainer {
+        SandboxContainer {
+            container_id: id.to_string(),
+            agent_id: agent.to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn scoped_config(scope: DockerScope) -> DockerSandboxConfig {
+        DockerSandboxConfig {
+            enabled: true,
+            scope,
+            ..Default::default()
+        }
+    }
+
+    fn key_for(
+        scope: DockerScope,
+        agent: &str,
+        session: Option<&str>,
+        workspace: &str,
+    ) -> Option<PoolKey> {
+        PoolKey::derive(
+            &scoped_config(scope),
+            agent,
+            session,
+            std::path::Path::new(workspace),
+        )
+    }
+
     #[test]
     fn test_container_pool_empty() {
         let pool = ContainerPool::new();
@@ -931,34 +1130,336 @@ mod tests {
     #[test]
     fn test_container_pool_release_acquire() {
         let pool = ContainerPool::new();
-        let container = SandboxContainer {
-            container_id: "test123".to_string(),
-            agent_id: "agent1".to_string(),
-            created_at: chrono::Utc::now(),
-        };
-        pool.release(container, 12345);
+        let key = key_for(DockerScope::Session, "agent1", Some("sess-a"), "/ws/agent1").unwrap();
+        pool.release(test_container("test123", "agent1"), key.clone(), "agent1");
         assert_eq!(pool.len(), 1);
 
-        // Acquire with same hash — should succeed (cool_secs=0 for test)
-        let acquired = pool.acquire(12345, 0);
+        let acquired = pool.acquire(&key, "agent1", 0);
         assert!(acquired.is_some());
         assert_eq!(acquired.unwrap().container_id, "test123");
         assert!(pool.is_empty());
     }
 
     #[test]
-    fn test_container_pool_hash_mismatch() {
+    fn test_container_pool_config_mismatch() {
         let pool = ContainerPool::new();
-        let container = SandboxContainer {
-            container_id: "test123".to_string(),
-            agent_id: "agent1".to_string(),
-            created_at: chrono::Utc::now(),
-        };
-        pool.release(container, 12345);
+        let key = key_for(DockerScope::Agent, "agent1", None, "/ws/agent1").unwrap();
+        pool.release(test_container("test123", "agent1"), key, "agent1");
 
-        // Acquire with different hash — should fail
-        let acquired = pool.acquire(99999, 0);
-        assert!(acquired.is_none());
+        // Same scope and agent, different image — the container on hand was not built the
+        // way this caller needs, so it must not be handed over.
+        let mut other_config = scoped_config(DockerScope::Agent);
+        other_config.image = "alpine:3.20".to_string();
+        let other_key = PoolKey::derive(
+            &other_config,
+            "agent1",
+            None,
+            std::path::Path::new("/ws/agent1"),
+        )
+        .unwrap();
+        assert!(pool.acquire(&other_key, "agent1", 0).is_none());
+    }
+
+    /// `scope = "session"` means one container per session. Before the pool key carried the
+    /// scope, `acquire` matched on a bare config hash, so a container released by one session
+    /// was handed to the next session of the same agent.
+    #[test]
+    fn test_session_scope_does_not_leak_across_sessions() {
+        let pool = ContainerPool::new();
+        let first = key_for(DockerScope::Session, "agent1", Some("sess-a"), "/ws/agent1").unwrap();
+        let second = key_for(DockerScope::Session, "agent1", Some("sess-b"), "/ws/agent1").unwrap();
+        assert_ne!(first, second);
+
+        pool.release(test_container("c-a", "agent1"), first.clone(), "agent1");
+        assert!(pool.acquire(&second, "agent1", 0).is_none());
+        assert_eq!(
+            pool.acquire(&first, "agent1", 0).map(|c| c.container_id),
+            Some("c-a".to_string())
+        );
+    }
+
+    /// `scope = "agent"` means one container per agent, reused across sessions — the same two
+    /// sessions that must NOT share under `session` scope MUST share under `agent` scope.
+    #[test]
+    fn test_agent_scope_reuses_across_sessions() {
+        let pool = ContainerPool::new();
+        let from_first =
+            key_for(DockerScope::Agent, "agent1", Some("sess-a"), "/ws/agent1").unwrap();
+        let from_second =
+            key_for(DockerScope::Agent, "agent1", Some("sess-b"), "/ws/agent1").unwrap();
+        assert_eq!(from_first, from_second);
+
+        pool.release(test_container("c-a", "agent1"), from_first, "agent1");
+        assert_eq!(
+            pool.acquire(&from_second, "agent1", 0)
+                .map(|c| c.container_id),
+            Some("c-a".to_string())
+        );
+    }
+
+    /// `scope = "agent"` still separates agents from each other.
+    #[test]
+    fn test_agent_scope_separates_agents() {
+        let pool = ContainerPool::new();
+        let a = key_for(DockerScope::Agent, "agent1", None, "/ws/agent1").unwrap();
+        let b = key_for(DockerScope::Agent, "agent2", None, "/ws/agent2").unwrap();
+        pool.release(test_container("c-a", "agent1"), a, "agent1");
+        assert!(pool.acquire(&b, "agent2", 0).is_none());
+    }
+
+    /// `scope = "shared"` pools across agents — but only agents that mount the same workspace.
+    #[test]
+    fn test_shared_scope_reuses_across_agents_with_same_workspace() {
+        let pool = ContainerPool::new();
+        let a = key_for(DockerScope::Shared, "agent1", None, "/ws/common").unwrap();
+        let b = key_for(DockerScope::Shared, "agent2", None, "/ws/common").unwrap();
+        assert_eq!(a, b);
+
+        pool.release(test_container("c-a", "agent1"), a, "agent1");
+        assert_eq!(
+            pool.acquire(&b, "agent2", 0).map(|c| c.container_id),
+            Some("c-a".to_string())
+        );
+    }
+
+    /// The workspace is bind-mounted into the container, so a shared container may only be
+    /// handed to a caller that mounts the same host path. Without the workspace in the key,
+    /// `scope = "shared"` would give agent B a container with agent A's workspace mounted.
+    #[test]
+    fn test_shared_scope_does_not_cross_workspaces() {
+        let pool = ContainerPool::new();
+        let a = key_for(DockerScope::Shared, "agent1", None, "/ws/agent1").unwrap();
+        let b = key_for(DockerScope::Shared, "agent2", None, "/ws/agent2").unwrap();
+        assert_ne!(a, b);
+
+        pool.release(test_container("c-a", "agent1"), a, "agent1");
+        assert!(pool.acquire(&b, "agent2", 0).is_none());
+    }
+
+    /// `scope = "session"` at a call site with no session (the REST tool bridge, cron) has no
+    /// session boundary to honour, so the call is unpoolable: create, exec, destroy.
+    #[test]
+    fn test_session_scope_without_session_id_is_unpoolable() {
+        assert!(key_for(DockerScope::Session, "agent1", None, "/ws/agent1").is_none());
+        // The scopes that do not name a session are unaffected.
+        assert!(key_for(DockerScope::Agent, "agent1", None, "/ws/agent1").is_some());
+        assert!(key_for(DockerScope::Shared, "agent1", None, "/ws/agent1").is_some());
+    }
+
+    /// `reuse_cool_secs` never gates `session` / `agent` scope: the key already pins the
+    /// container to one workload, and making the second tool call of a session skip the
+    /// container the first one built is exactly what the scope exists to prevent.
+    #[test]
+    fn test_reuse_cooldown_never_gates_session_or_agent_scope() {
+        let pool = ContainerPool::new();
+
+        let agent = key_for(DockerScope::Agent, "agent1", None, "/ws/agent1").unwrap();
+        pool.release(test_container("c-agent", "agent1"), agent.clone(), "agent1");
+        assert!(
+            pool.acquire(&agent, "agent1", 300).is_some(),
+            "an agent-scoped container is reusable by its own agent immediately"
+        );
+
+        let session =
+            key_for(DockerScope::Session, "agent1", Some("sess-a"), "/ws/agent1").unwrap();
+        pool.release(
+            test_container("c-session", "agent1"),
+            session.clone(),
+            "agent1",
+        );
+        assert!(
+            pool.acquire(&session, "agent1", 300).is_some(),
+            "a session-scoped container is reusable by its own session immediately"
+        );
+    }
+
+    /// Under `shared`, `reuse_cool_secs` is a *handover* delay, not a per-acquire delay.
+    ///
+    /// The distinction decides whether the documented "one container per (config, workspace)"
+    /// is true. A blocked acquire is answered by creating another container rather than by
+    /// waiting (see `tool_docker_exec` / `DockerBackend::run_command`), so if the cooldown
+    /// applied to the releasing agent's own next call, an agent calling `docker_exec` every
+    /// 10s would stack up `reuse_cool_secs / 10` containers before any reuse began — the pool
+    /// inflating instead of collapsing to one. This walks the whole sequence rather than a
+    /// single acquire, because a single acquire cannot tell the two readings apart.
+    #[test]
+    fn test_shared_cooldown_delays_handover_not_self_reuse() {
+        let pool = ContainerPool::new();
+        let shared = key_for(DockerScope::Shared, "agent1", None, "/ws/common").unwrap();
+
+        // agent1 releases, then calls again straight away: its own leftovers, no wait.
+        pool.release(test_container("c-1", "agent1"), shared.clone(), "agent1");
+        assert_eq!(
+            pool.acquire(&shared, "agent1", 300).map(|c| c.container_id),
+            Some("c-1".to_string()),
+            "an agent must reuse the shared container it just released, not create another"
+        );
+
+        // Repeat: the same agent stays on the same container call after call.
+        pool.release(test_container("c-1", "agent1"), shared.clone(), "agent1");
+        assert_eq!(
+            pool.acquire(&shared, "agent1", 300).map(|c| c.container_id),
+            Some("c-1".to_string())
+        );
+
+        // agent2 arriving inside the settling window is a real handover and is made to wait.
+        pool.release(test_container("c-1", "agent1"), shared.clone(), "agent1");
+        assert!(
+            pool.acquire(&shared, "agent2", 300).is_none(),
+            "a container another agent just used is still cooling down"
+        );
+        // Past the window (0 here stands in for elapsed >= reuse_cool_secs) it is handed over.
+        assert_eq!(
+            pool.acquire(&shared, "agent2", 0).map(|c| c.container_id),
+            Some("c-1".to_string())
+        );
+
+        // Having taken it over, agent2 is now the releaser and no longer waits on itself,
+        // while agent1 coming back is the one that has to settle.
+        pool.release(test_container("c-1", "agent2"), shared.clone(), "agent2");
+        assert!(
+            pool.acquire(&shared, "agent1", 300).is_none(),
+            "the cooldown follows the last user, not the container's creator"
+        );
+        assert_eq!(
+            pool.acquire(&shared, "agent2", 300).map(|c| c.container_id),
+            Some("c-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_pool_owner_crosses_workloads() {
+        assert!(PoolOwner::Shared.crosses_workloads());
+        assert!(!PoolOwner::Agent {
+            agent_id: "a".into()
+        }
+        .crosses_workloads());
+        assert!(!PoolOwner::Session {
+            agent_id: "a".into(),
+            session_id: "s".into()
+        }
+        .crosses_workloads());
+    }
+
+    /// Reaper policy, exercised without a Docker daemon: `cleanup` only decides *which*
+    /// entries to destroy, and that decision is this function.
+    #[test]
+    fn test_entry_is_stale_idle_and_age_bounds() {
+        let zero = Duration::from_secs(0);
+        // Idle past the idle timeout.
+        assert!(entry_is_stale(Duration::from_secs(400), zero, 300, 604800));
+        assert!(!entry_is_stale(Duration::from_secs(200), zero, 300, 604800));
+        // Older than the max age even though it was used a moment ago.
+        assert!(entry_is_stale(zero, Duration::from_secs(700), 300, 600));
+        assert!(!entry_is_stale(zero, Duration::from_secs(500), 300, 600));
+    }
+
+    /// `0` disables an axis. The opposite reading would reap every container the instant it
+    /// was released, quietly collapsing the pool back into per-call create/destroy.
+    #[test]
+    fn test_entry_is_stale_zero_disables_axis() {
+        let long = Duration::from_secs(10 * 365 * 24 * 3600);
+        assert!(!entry_is_stale(long, long, 0, 0));
+        assert!(entry_is_stale(long, Duration::from_secs(0), 1, 0));
+        assert!(entry_is_stale(Duration::from_secs(0), long, 0, 1));
+    }
+
+    /// Pooled containers coexist, so their Docker names must differ. Before the instance
+    /// suffix, every container for one agent was named `{prefix}-{sha(agent)[..8]}` and the
+    /// second concurrent `docker run` failed with a name conflict.
+    #[test]
+    fn test_container_instance_suffix_is_unique() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::with_capacity(1000);
+        for _ in 0..1000 {
+            let suffix = container_instance_suffix();
+            assert_eq!(suffix.len(), 8);
+            assert!(
+                suffix.chars().all(|c| c.is_ascii_hexdigit()),
+                "instance suffix must satisfy the Docker name grammar: {suffix}"
+            );
+            assert!(seen.insert(suffix), "duplicate container instance suffix");
+        }
+    }
+
+    /// The composed container name still passes the Docker name validator with the default
+    /// prefix, so the instance suffix cannot push a default deployment over the 63-char cap.
+    #[test]
+    fn test_composed_container_name_is_valid() {
+        let config = DockerSandboxConfig::default();
+        let name = format!(
+            "{}-{}-{}",
+            config.container_prefix,
+            agent_id_container_suffix("some-agent-id"),
+            container_instance_suffix()
+        );
+        assert!(sanitize_container_name(&name).is_ok(), "name: {name}");
+    }
+
+    /// `container_prefix` is an operator-settable key, and the instance suffix costs it nine
+    /// characters of headroom: the name is `{prefix}-{8 hex}-{8 hex}`, so the 63-char Docker cap
+    /// bites at a 45-char prefix where it used to bite at 54. Pinned here so a future change to
+    /// the name format cannot move the cap without someone noticing and updating the `[docker]`
+    /// tables in the configuration docs.
+    #[test]
+    fn test_container_prefix_length_boundary() {
+        fn composed(prefix: &str) -> Result<String, String> {
+            sanitize_container_name(&format!(
+                "{}-{}-{}",
+                prefix,
+                agent_id_container_suffix("some-agent-id"),
+                container_instance_suffix()
+            ))
+        }
+        assert!(
+            composed(&"p".repeat(45)).is_ok(),
+            "a 45-char container_prefix must still compose to a valid name"
+        );
+        let too_long = composed(&"p".repeat(46));
+        assert!(
+            too_long
+                .as_ref()
+                .is_err_and(|e| e.contains("Container name too long")),
+            "a 46-char container_prefix must be rejected, got: {too_long:?}"
+        );
+        // The shipped default has plenty of room.
+        assert!(composed(&DockerSandboxConfig::default().container_prefix).is_ok());
+    }
+
+    /// Requires a live Docker daemon: exercises the acquire → exec → release → re-acquire
+    /// round trip against real containers, including that a released container is the one
+    /// handed back. Run with `cargo test -p librefang-runtime-sandbox-docker -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires a running Docker daemon"]
+    async fn test_pool_round_trip_against_live_daemon() {
+        if !is_docker_available().await {
+            panic!("Docker daemon required; run without --ignored to skip this test");
+        }
+        let config = scoped_config(DockerScope::Agent);
+        let workspace = std::env::temp_dir();
+        let pool = ContainerPool::new();
+        let key = PoolKey::derive(&config, "pool-round-trip", None, &workspace)
+            .expect("agent scope always yields a key");
+
+        let container = create_sandbox(&config, "pool-round-trip", &workspace)
+            .await
+            .expect("create sandbox");
+        let id = container.container_id.clone();
+        pool.release(container, key.clone(), "pool-round-trip");
+
+        let reused = pool
+            .acquire(&key, "pool-round-trip", config.reuse_cool_secs)
+            .expect("reuse");
+        assert_eq!(reused.container_id, id);
+        let out = exec_in_sandbox(&reused, "echo pooled", Duration::from_secs(30))
+            .await
+            .expect("exec in reused container");
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("pooled"));
+
+        pool.release(reused, key, "pool-round-trip");
+        pool.drain().await;
+        assert!(pool.is_empty());
     }
 
     // ── Bind Mount Validation tests ──────────────────────────────────

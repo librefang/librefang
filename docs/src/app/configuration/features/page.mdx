@@ -568,7 +568,7 @@ blocked_mounts = []
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable Docker sandbox for code execution. |
 | `image` | string | `"python:3.12-slim"` | Docker image to use for the sandbox container. |
-| `container_prefix` | string | `"librefang-sandbox"` | Prefix for container names. |
+| `container_prefix` | string | `"librefang-sandbox"` | Prefix for container names. The full name is `{prefix}-{8 hex agent digest}-{8 hex instance digest}`, and Docker caps a container name at 63 characters, so a prefix longer than **45 characters** makes every sandbox creation fail with "Container name too long". |
 | `workdir` | string | `"/workspace"` | Working directory inside the container. |
 | `network` | string | `"none"` | Network mode: `"none"` (isolated), `"bridge"`, or a custom network name. |
 | `memory_limit` | string | `"512m"` | Memory limit (e.g., `"256m"`, `"1g"`). |
@@ -577,9 +577,9 @@ blocked_mounts = []
 | `read_only_root` | bool | `true` | Mount the root filesystem as read-only. |
 | `mode` | string | `"off"` | Activation mode. See below. |
 | `scope` | string | `"session"` | Container lifecycle scope. See below. |
-| `reuse_cool_secs` | u64 | `300` | Cooldown in seconds before a released container can be reused. |
-| `idle_timeout_secs` | u64 | `86400` | Destroy containers after this many seconds of inactivity (24 hours default). |
-| `max_age_secs` | u64 | `604800` | Maximum container age before forced destruction (7 days default). |
+| `reuse_cool_secs` | u64 | `300` | Settling time in seconds before a container released by one agent may be handed to a *different* agent. Applies to `scope = "shared"` only — `session` / `agent` scope pin the container to the one workload that released it, and even under `shared` an agent re-acquiring the container it just released does not wait. |
+| `idle_timeout_secs` | u64 | `86400` | Destroy pooled containers after this many seconds of inactivity (24 hours default). `0` disables idle reaping. Together with `max_age_secs` this is the only thing that shrinks the pool — see the note on accumulation below. |
+| `max_age_secs` | u64 | `604800` | Maximum pooled container age before forced destruction (7 days default), measured from `docker run` rather than from the last time the container was used. `0` disables age reaping. |
 | `blocked_mounts` | list of strings | `[]` | Host paths blocked from bind mounting into containers. |
 | `cap_add` | list of strings | `[]` | Linux capabilities to add to the container (e.g., `["NET_ADMIN"]`). Use with caution. |
 | `tmpfs` | list of strings | `["/tmp:size=64m"]` | tmpfs mounts inside the container. Each entry is `"path:options"` (e.g., `"/tmp:size=128m"`). |
@@ -597,9 +597,21 @@ blocked_mounts = []
 
 | Value | Description |
 |-------|-------------|
-| `session` | One container per session, destroyed when the session ends (default). |
-| `agent` | One container per agent, reused across sessions. |
-| `shared` | Shared container pool across all agents. |
+| `session` | One container per (agent, session), reused by every tool call in that session (default). |
+| `agent` | One container per agent, reused across that agent's sessions. |
+| `shared` | One container per (config, workspace), reusable by any agent that mounts the same workspace. |
+
+A container is reused only when the whole key matches: the scope owner above, the container-shaping `[docker]` fields (`image`, `network`, `memory_limit`, `cpu_limit`, `workdir`, `read_only_root`, `cap_add`, `tmpfs`, `pids_limit`, `blocked_mounts`), and the host workspace path bind-mounted into the container. The workspace is part of the key for every scope, including `shared`: a container carries the workspace it was created with, so sharing it with a caller that mounts a different path would expose one agent's workspace to another.
+
+Containers are destroyed by the reaper, which runs every 60 seconds while `enabled = true` and applies `idle_timeout_secs` and `max_age_secs`, and by daemon shutdown, which destroys every pooled container. There is no separate "session ended" signal in LibreFang, so a `session`-scoped container outlives its last tool call until one of those two reaps it — set `idle_timeout_secs` to the window you want that to be.
+
+A call site with no LibreFang session — the `POST /api/tools/{name}` bridge, and other out-of-band invocations — cannot honour `scope = "session"`, so it falls back to creating a container for the call and destroying it afterwards rather than widening the container to the whole agent.
+
+`shared` is a trust boundary, not only a pooling strategy. A container is handed over whole: everything a previous call wrote to a writable path or to the `/tmp` tmpfs is still there, as is any process that call left running. `reuse_cool_secs` delays a handover between two agents; it does not sanitize anything, and nothing else does either. Use `shared` only where every agent mounting that workspace already trusts the others, and reach for `agent` or `session` otherwise.
+
+`reuse_cool_secs` delays a handover rather than queueing one. A call that finds only a container still cooling down creates an additional container instead of waiting, and that container joins the pool when it is released. So a workspace several agents hit concurrently under `shared`, or any key hit by concurrent calls under any scope, holds more than one container.
+
+Nothing returns a container to the host except the reaper, so the idle containers a key holds settle at that key's peak concurrency and stay there for `idle_timeout_secs` — 24 hours by default. That is the number to size for when the sandbox is enabled: lower `idle_timeout_secs` rather than assuming load will drop off and take the containers with it.
 
 ---
 

@@ -137,8 +137,11 @@ was built without the relevant cargo feature.
 
 ### `BackendKind::Docker`
 
-- **What:** create container per call, exec, destroy. Adapter over the
-  existing `docker_sandbox.rs` create+exec+destroy flow.
+- **What:** acquire a container, exec, release or destroy it. Adapter over the
+  existing `docker_sandbox.rs` flow. Container lifetime follows `[docker] scope`
+  through the process-wide container pool; the adapter has no LibreFang session
+  on hand, so `scope = "session"` degenerates to create-per-call here while
+  `agent` / `shared` reuse containers across calls.
 - **Config:** uses the long-standing `[docker]` section in
   `config.toml`; no new knobs.
 - **Limits honoured:** the existing `DockerSandboxConfig.memory_limit`

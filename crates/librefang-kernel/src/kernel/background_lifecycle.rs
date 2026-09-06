@@ -866,6 +866,65 @@ impl LibreFangKernel {
             info!("In-memory GC sweep scheduled every 5 minutes");
         }
 
+        // Docker sandbox container reaper.
+        //
+        // `[docker] scope` lets a sandbox container outlive the tool call that created it, so
+        // something has to end that life: this loop applies `idle_timeout_secs` and
+        // `max_age_secs` to the pooled containers, and destroys all of them when the daemon
+        // shuts down. Without it, `scope = "agent"` / `"shared"` would accumulate containers
+        // for as long as the daemon runs. Only spawned when the sandbox is enabled — with
+        // `docker.enabled = false` no container is ever pooled and the loop has nothing to do.
+        if cfg.docker.enabled {
+            let kernel = Arc::clone(self);
+            let mut shutdown_rx = self.agents.supervisor.subscribe();
+            spawn_logged("docker_pool_reaper", async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                interval.tick().await; // Skip first immediate tick
+                let pool = librefang_runtime::docker_sandbox::global_pool();
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            // Re-read the bounds every tick rather than capturing them once, so
+                            // the loop uses whatever the live ArcSwap config holds. That is not
+                            // the same as hot-reloading them: `[docker]` is classified
+                            // restart-required (`config_reload.rs`, and the table in
+                            // `docs/operations/config-reload.md`), and `should_store_config`
+                            // declines the swap when a reload produced no hot action and no noop
+                            // change — so a `[docker]`-only `POST /api/config/reload` leaves the
+                            // boot-time table in place and still needs a daemon restart.
+                            //
+                            // `config_snapshot()` rather than `config_ref()`: the latter hands
+                            // back an `arc_swap::Guard`, which is `!Send`, and a guard alive
+                            // across the `cleanup` await would make this whole task future
+                            // `!Send` and reject it from `spawn_logged`.
+                            let cfg = kernel.config_snapshot();
+                            pool.cleanup(cfg.docker.idle_timeout_secs, cfg.docker.max_age_secs)
+                                .await;
+                        }
+                        _ = shutdown_rx.changed() => {
+                            // Copy the flag out before awaiting: the `watch::Ref` guard is not
+                            // `Send`, and holding it across `drain()` would make the whole task
+                            // future non-`Send`.
+                            let shutting_down = *shutdown_rx.borrow();
+                            if shutting_down {
+                                // Race the tick against the shutdown watch so the drain runs at
+                                // stop time instead of up to 60s later, by which point the
+                                // process is gone and the containers are stranded.
+                                pool.drain().await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            info!(
+                idle_timeout_secs = cfg.docker.idle_timeout_secs,
+                max_age_secs = cfg.docker.max_age_secs,
+                scope = ?cfg.docker.scope,
+                "Docker sandbox container reaper scheduled every 60 seconds"
+            );
+        }
+
         // Connect to configured + extension MCP servers
         let has_mcp = self
             .mcp

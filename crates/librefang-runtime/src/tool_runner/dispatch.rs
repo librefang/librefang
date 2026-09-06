@@ -1161,7 +1161,14 @@ pub async fn execute_tool_raw(
         // Docker sandbox tool (#3576: returns Result<String, ToolError>)
         #[cfg(feature = "docker-sandbox")]
         "docker_exec" => {
-            tool_docker_exec(input, *docker_config, *workspace_root, *caller_agent_id).await
+            tool_docker_exec(
+                input,
+                *docker_config,
+                *workspace_root,
+                *caller_agent_id,
+                *session_id,
+            )
+            .await
         }
 
         // Location tool.

@@ -18,8 +18,8 @@
 //!   per-agent `tool_exec_backend` manifest field — a follow-up PR will
 //!   migrate the call sites.
 //! - [`DockerBackend`] is an adapter over the existing
-//!   `docker_sandbox`, exposing `create + exec + destroy` as a single
-//!   `run_command` call.
+//!   `docker_sandbox`, exposing container acquisition, exec and release
+//!   as a single `run_command` call.
 //! - SSH and Daytona backends are gated behind `ssh-backend` and
 //!   `daytona-backend` cargo features.
 //!
@@ -527,9 +527,10 @@ pub(crate) fn truncate_to_cap(s: String, cap: usize) -> String {
 // Docker backend (adapter over docker_sandbox)
 // ---------------------------------------------------------------------------
 
-/// Adapter that exposes the existing `docker_sandbox` create+exec+destroy
-/// flow as a single `ToolExecBackend::run_command` call. Reuses the
-/// long-standing `DockerSandboxConfig`; no new config knobs.
+/// Adapter that exposes the existing `docker_sandbox` flow as a single
+/// `ToolExecBackend::run_command` call. Reuses the long-standing
+/// `DockerSandboxConfig`; no new config knobs. Container lifetime follows
+/// `[docker] scope` via `docker_sandbox::global_pool`.
 pub struct DockerBackend {
     config: librefang_types::config::DockerSandboxConfig,
     agent_id: String,
@@ -580,21 +581,77 @@ impl ToolExecBackend for DockerBackend {
             }
         }
 
-        let container =
-            crate::docker_sandbox::create_sandbox(&self.config, &self.agent_id, &self.workspace)
-                .await
-                .map_err(ExecError::Other)?;
+        // Reject an unsafe command before a container is involved. `exec_in_sandbox` checks
+        // it again, but the stale-container retry below would otherwise spend a freshly
+        // created container re-learning that the command was never going to run.
+        crate::docker_sandbox::validate_command(&spec.command).map_err(ExecError::Other)?;
+
+        // `[docker] scope` decides the container's lifetime. This adapter has no LibreFang
+        // session on hand — `ToolExecBackend::run_command` is a command-shaped contract, not a
+        // turn — so `scope = "session"` derives no key here and keeps the create-exec-destroy
+        // shape; `agent` / `shared` pool as configured.
+        let pool = crate::docker_sandbox::global_pool();
+        let key = crate::docker_sandbox::PoolKey::derive(
+            &self.config,
+            &self.agent_id,
+            None,
+            &self.workspace,
+        );
+
+        let reused = key
+            .as_ref()
+            .and_then(|k| pool.acquire(k, &self.agent_id, self.config.reuse_cool_secs));
+        let from_pool = reused.is_some();
+        let mut container = match reused {
+            Some(c) => c,
+            None => {
+                crate::docker_sandbox::create_sandbox(&self.config, &self.agent_id, &self.workspace)
+                    .await
+                    .map_err(ExecError::Other)?
+            }
+        };
 
         let timeout = spec
             .limits
             .timeout
             .unwrap_or(Duration::from_secs(self.config.timeout_secs));
-        let res = crate::docker_sandbox::exec_in_sandbox(&container, &spec.command, timeout).await;
+        let mut res =
+            crate::docker_sandbox::exec_in_sandbox(&container, &spec.command, timeout).await;
 
-        // Always destroy regardless of outcome — mirrors the existing
-        // tool_docker_exec semantics in tool_runner.rs.
-        if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
-            tracing::warn!("docker_sandbox cleanup failed: {e}");
+        // A pooled container can have been removed out from under us — a daemon restart, an
+        // operator's `docker rm`. Without this retry the dead container would go straight back
+        // to the pool and every later call for the same key would fail the same way.
+        if res.is_err() && from_pool {
+            tracing::warn!(
+                container = %container.container_id,
+                "tool_exec/docker: pooled container failed; discarding it and retrying on a fresh one"
+            );
+            if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
+                tracing::warn!("docker_sandbox cleanup failed: {e}");
+            }
+            container = crate::docker_sandbox::create_sandbox(
+                &self.config,
+                &self.agent_id,
+                &self.workspace,
+            )
+            .await
+            .map_err(ExecError::Other)?;
+            res = crate::docker_sandbox::exec_in_sandbox(&container, &spec.command, timeout).await;
+        }
+
+        let backend_id = container.container_id.clone();
+
+        match (key, res.is_ok()) {
+            // Hand a scope-keyed container back for the next call. A failed exec does not go
+            // back to the pool: on a timeout `exec_in_sandbox` kills only the host-side
+            // `docker exec` client, so the in-container workload is still running and
+            // destroying the container is the only thing that bounds it.
+            (Some(k), true) => pool.release(container, k, &self.agent_id),
+            _ => {
+                if let Err(e) = crate::docker_sandbox::destroy_sandbox(&container).await {
+                    tracing::warn!("docker_sandbox cleanup failed: {e}");
+                }
+            }
         }
 
         let exec = res.map_err(ExecError::Other)?;
@@ -602,7 +659,7 @@ impl ToolExecBackend for DockerBackend {
             stdout: exec.stdout,
             stderr: exec.stderr,
             exit_code: exec.exit_code,
-            backend_id: Some(container.container_id),
+            backend_id: Some(backend_id),
         })
     }
 }

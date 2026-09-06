@@ -1755,7 +1755,7 @@ blocked_mounts = []
 |------|------|--------|------|
 | `enabled` | bool | `false` | 启用 Docker 沙箱用于代码执行。 |
 | `image` | string | `"python:3.12-slim"` | 沙箱容器使用的 Docker 镜像。 |
-| `container_prefix` | string | `"librefang-sandbox"` | 容器名称前缀。 |
+| `container_prefix` | string | `"librefang-sandbox"` | 容器名称前缀。完整名称为 `{prefix}-{8 位 agent 摘要}-{8 位实例摘要}`，而 Docker 的容器名上限是 63 个字符，因此前缀超过 **45 个字符**会让每次沙箱创建都以 "Container name too long" 失败。 |
 | `workdir` | string | `"/workspace"` | 容器内的工作目录。 |
 | `network` | string | `"none"` | 网络模式：`"none"`（隔离）、`"bridge"` 或自定义网络名称。 |
 | `memory_limit` | string | `"512m"` | 内存限制（例如 `"256m"`、`"1g"`）。 |
@@ -1764,9 +1764,9 @@ blocked_mounts = []
 | `read_only_root` | bool | `true` | 将根文件系统挂载为只读。 |
 | `mode` | string | `"off"` | 激活模式。见下表。 |
 | `scope` | string | `"session"` | 容器生命周期范围。见下表。 |
-| `reuse_cool_secs` | u64 | `300` | 释放的容器在此秒数冷却后才可重用。 |
-| `idle_timeout_secs` | u64 | `86400` | 容器闲置超过此秒数后被销毁（默认 24 小时）。 |
-| `max_age_secs` | u64 | `604800` | 容器最大存活时间，超时后强制销毁（默认 7 天）。 |
+| `reuse_cool_secs` | u64 | `300` | 某个 Agent 释放的容器交给**其他 Agent** 之前需要静置的秒数。仅对 `scope = "shared"` 生效——`session` / `agent` 作用域把容器绑定在释放它的那个工作负载上；即便在 `shared` 下，Agent 重新取回自己刚释放的容器也不需要等待。 |
+| `idle_timeout_secs` | u64 | `86400` | 池中容器闲置超过此秒数后被销毁（默认 24 小时）。设为 `0` 关闭闲置回收。它和 `max_age_secs` 是唯一会让池收缩的机制——参见下文关于容器堆积的说明。 |
+| `max_age_secs` | u64 | `604800` | 池中容器最大存活时间，超时后强制销毁（默认 7 天）；从 `docker run` 起算，而不是从最后一次使用起算。设为 `0` 关闭寿命回收。 |
 | `blocked_mounts` | list of strings | `[]` | 禁止绑定挂载到容器的宿主机路径。 |
 | `cap_add` | list of strings | `[]` | 添加到容器的 Linux 能力（例如 `["NET_ADMIN"]`）。请谨慎使用。 |
 | `tmpfs` | list of strings | `["/tmp:size=64m"]` | 容器内的 tmpfs 挂载。每个条目格式为 `"path:options"`（例如 `"/tmp:size=128m"`）。 |
@@ -1784,9 +1784,21 @@ blocked_mounts = []
 
 | 值 | 说明 |
 |----|------|
-| `session` | 每个会话一个容器，会话结束时销毁（默认）。 |
-| `agent` | 每个 Agent 一个容器，跨会话重用。 |
-| `shared` | 所有 Agent 共享容器池。 |
+| `session` | 每个（Agent，会话）一个容器，该会话内的每次工具调用都重用它（默认）。 |
+| `agent` | 每个 Agent 一个容器，跨该 Agent 的各个会话重用。 |
+| `shared` | 每个（配置，工作区）一个容器，任何挂载相同工作区的 Agent 都可重用。 |
+
+只有整个键完全匹配时容器才会被重用：上表的作用域归属、决定容器形态的 `[docker]` 字段（`image`、`network`、`memory_limit`、`cpu_limit`、`workdir`、`read_only_root`、`cap_add`、`tmpfs`、`pids_limit`、`blocked_mounts`），以及挂载进容器的宿主机工作区路径。工作区对所有作用域（包括 `shared`）都是键的一部分：容器带着创建时挂载的工作区，把它交给挂载了其他路径的调用方就等于把一个 Agent 的工作区暴露给另一个 Agent。
+
+容器由两条路径销毁：`enabled = true` 时每 60 秒运行一次、按 `idle_timeout_secs` 与 `max_age_secs` 回收的清理循环，以及销毁全部池中容器的守护进程关闭流程。LibreFang 没有单独的“会话结束”信号，因此 `session` 作用域的容器会在最后一次工具调用之后继续存在，直到上述两者之一将其回收——把 `idle_timeout_secs` 设成你希望的存活窗口。
+
+没有 LibreFang 会话的调用方（`POST /api/tools/{name}` 桥接以及其他带外调用）无法遵循 `scope = "session"`，因此它会为该次调用创建容器并在调用后销毁，而不是把容器放宽到整个 Agent。
+
+`shared` 不只是一种池化策略，更是一条信任边界。容器是整体交接的：上一次调用往可写路径和 `/tmp` tmpfs 里写下的一切都还在，它遗留的进程也还在跑。`reuse_cool_secs` 只是推迟两个 Agent 之间的交接，它不做任何清理，其他机制也不做。只有当挂载该工作区的所有 Agent 之间本来就彼此信任时才用 `shared`，否则请用 `agent` 或 `session`。
+
+`reuse_cool_secs` 推迟交接，而不是把调用排队。如果一次调用只找到仍在静置的容器，它会再创建一个容器而不是等待，这个容器释放后同样进入池中。因此在 `shared` 下被多个 Agent 并发使用的工作区，以及任何作用域下被并发调用命中的键，都会持有不止一个容器。
+
+除了回收循环之外没有任何东西会把容器还给宿主机，所以一个键持有的闲置容器数量会稳定在该键的并发峰值，并保持 `idle_timeout_secs`（默认 24 小时）那么久。启用沙箱时要按这个数量来规划容量：把 `idle_timeout_secs` 调小，而不是指望负载回落时容器会自己消失。
 
 ---
 
