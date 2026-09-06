@@ -4,4 +4,4 @@ One stale key was enough to trigger it, a pre-sidecar `[channels.<vendor>]` bloc
 Boot and `POST /api/config/reload` now reject the same file for the same reason instead of disagreeing about whether it is loadable at all.
 A schema migration also stops rewriting a `config.toml` assembled from `include = [...]`: the write-back that stamps the new version serialises the *merged* configuration, so the first load of any config lacking a `config_version` key inlined every included file into the root and deleted the include directive along with them.
 That left the operator's file layout gone, later edits to the included files inert, and anything kept in a separately permissioned file copied verbatim into `config.toml` under its mode.
-The migration still applies in memory for these files and is simply not persisted, with a warning that names the includes and asks for the `config_version` stamp by hand. (@houko)
+The migration still applies in memory for these files and is simply not persisted, with a warning that names the includes and asks for the `config_version` stamp by hand. (#8214) (@houko)
