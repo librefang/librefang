@@ -894,7 +894,7 @@ ollama = ""    # explicit "no proxy" override
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `config_version` | u32 | `1` | Configuration schema version. Used by the auto-migrator to know whether your config needs upgrading on daemon boot. **Do not set manually** — `librefang upgrade` writes it. |
+| `config_version` | u32 | `1` | Configuration schema version. Used by the auto-migrator to know whether your config needs upgrading on daemon boot. **Do not set manually** — `librefang upgrade` writes it. The exception is a config assembled with `include = [...]`: the migration runs in memory but is never written back for those files, because the write-back serialises the *merged* configuration and would inline every included file into `config.toml` and delete the `include` directive. For those the daemon logs a warning naming the includes and asks you to apply the schema change and stamp this key by hand. |
 | `log_dir` | PathBuf \| null | `null` (= `~/.librefang/`) | Custom log directory. Useful when the home directory is on a slow disk and you want logs on local SSD. |
 | `qwen_code_path` | string \| null | `null` (look up `qwen` on `PATH`) | Absolute path to the Qwen Code CLI binary. Necessary when the daemon runs as a service that doesn't inherit the user's full PATH. Equivalent to setting `provider_urls.qwen-code`. |
 | `provider_proxy_urls` | `HashMap<string, string>` | `{}` | Per-provider proxy URL overrides. Empty string `""` for a provider explicitly bypasses the proxy (useful when a global `[proxy]` is set but you want one provider to connect direct, e.g. `ollama`). |

@@ -89,12 +89,14 @@ fn atomic_write_config(path: &Path, content: &str) -> std::io::Result<()> {
 /// substitute `KernelConfig::default()` on `Err`; doing so would hide the
 /// real problem and produce a misleading downstream error (see issue #5186).
 ///
+/// `strict_config = true` in the file extends that rule to unknown and typo'd fields: the load fails instead of returning defaults, because a flag whose entire purpose is to fail closed must not be the one thing that boots a daemon with an empty `api_key` and a default `exec_policy`.
+///
 /// Returns `Ok(KernelConfig::default())` when the config file is absent or
 /// unreadable due to an I/O error (file not found, permission denied), because
 /// that is a deployment-time condition where defaults are a safe starting point.
 ///
-/// If the config contains an `include` field, included files are loaded
-/// and deep-merged first, then the root config overrides them.
+/// If the config contains an `include` field, included files are loaded and deep-merged first, then the root config overrides them.
+/// A migrated config is written back to disk so later loads skip the migration, except when the file declares `include = [...]`: the write-back serializes the merged result, so persisting it would inline every included file into `config.toml` and delete the directive along with them.
 pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
     let config_path = path
         .map(|p| p.to_path_buf())
@@ -104,6 +106,19 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
         match std::fs::read_to_string(&config_path) {
             Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
                 Ok(mut root_value) => {
+                    // Read the `include = [...]` directive off the file before include resolution consumes it.
+                    // `resolve_config_includes` replaces the root value with the deep-merged result and drops the directive on the way, so by the time the migration write-back below serializes a `KernelConfig` there is nothing left in it to say that this file was one layer of a multi-file layout.
+                    let declared_includes: Vec<String> = root_value
+                        .as_table()
+                        .and_then(|t| t.get("include"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
                     // Process includes before deserializing
                     let config_dir = config_path
                         .parent()
@@ -191,15 +206,16 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 
                     if !all_unknown.is_empty() {
                         if is_strict {
-                            tracing::error!(
-                                path = %config_path.display(),
-                                fields = %all_unknown.join(", "),
-                                "strict_config is enabled and config contains unknown fields, using defaults"
+                            // Returning defaults here handed the operator who asked for the strictest configuration the loosest runtime: `api_key` and `users` empty (so the API's no-auth branch grants a loopback caller Owner), `exec_policy` back to its compiled default, and `home_dir` / `data_dir` back under `~/.librefang`.
+                            // It was also invisible to `cmd_start`, whose `load_config(...).is_err()` guard is the only thing standing between a bad config and a booted daemon.
+                            // Same message and same shape as `try_load_config`, so boot and hot-reload agree on one file.
+                            let msg = format!(
+                                "strict_config is enabled and config contains unknown fields (path={}): {}",
+                                config_path.display(),
+                                all_unknown.join(", ")
                             );
-                            return Ok(KernelConfig {
-                                strict_config: true,
-                                ..KernelConfig::default()
-                            });
+                            eprintln!("error: {msg}");
+                            return Err(msg);
                         }
                         for field in &all_unknown {
                             tracing::warn!(field, "Unknown config field (ignored)");
@@ -289,6 +305,21 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
                                     "Config was migrated in memory but NOT written back: the file is deployment-managed (LIBREFANG_CONFIG_MODE=managed). \
                                      This migration re-runs on every boot until the managed source is updated to the new schema."
                                 );
+                            } else if migrated
+                                && file_version < CONFIG_VERSION
+                                && !declared_includes.is_empty()
+                            {
+                                // The write-back serializes the merged `KernelConfig`, not the root file, so persisting it would copy every included file's content into `config.toml` verbatim and drop the `include` directive with it.
+                                // The operator's layering would be gone for good: the include files become dead, later edits to them inert, and whatever they held for the sake of stricter file permissions lands under `config.toml`'s mode instead of their own.
+                                // Skipping the write is the conservative half of the trade — the in-memory config is migrated either way, and what it costs is that this migration re-runs on every load until the operator stamps the version themselves.
+                                tracing::warn!(
+                                    path = %config_path.display(),
+                                    includes = %declared_includes.join(", "),
+                                    from_version = file_version,
+                                    to_version = CONFIG_VERSION,
+                                    "Config was migrated in memory but NOT written back: the file declares `include = [...]`, and writing the merged result would inline every included file into config.toml and delete the include directive. \
+                                     Apply the schema change by hand and add `config_version = {CONFIG_VERSION}` to config.toml to stop this migration re-running on every load."
+                                );
                             } else if migrated && file_version < CONFIG_VERSION {
                                 let toml_str = toml::to_string_pretty(&config);
                                 match toml_str {
@@ -365,15 +396,14 @@ pub fn load_config(path: Option<&Path>) -> Result<KernelConfig, String> {
 /// so the live config stays intact and the operator gets an actionable
 /// error.
 ///
-/// Differences from `load_config`:
+/// Behaviour relative to `load_config`:
 ///
 /// - No write-back of the migrated TOML to disk. The reload path doesn't
 ///   own the file, and a partial migration that fails downstream would
 ///   leave the disk file in a half-migrated state. The next initial-boot
 ///   `load_config` call still does the write-back.
-/// - Unknown fields under `strict_config = true` produce `Err` instead of
-///   "return defaults with `strict_config: true`" — same intent, but
-///   surfaced as an error so the reload path can refuse to apply it.
+/// - Unknown fields under `strict_config = true` produce the same kind of `Err` as `load_config`, so the reload path refuses to apply the config and the boot path refuses to start.
+///   The two messages differ only in the `(path=...)` segment `load_config` adds, because it is the one that resolved the path.
 /// - Unknown fields under `strict_config = false` (or unset) still warn
 ///   and proceed, matching `load_config`'s tolerant behaviour.
 pub fn try_load_config(path: &Path) -> Result<KernelConfig, String> {
@@ -865,9 +895,17 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// A config file that sets nothing leaves every compiled default in place.
+    ///
+    /// The path is explicit and inside a tempdir on purpose.
+    /// `load_config(None)` resolves `default_config_path()`, which on a developer machine is the real `~/.librefang/config.toml`: the assertion would then depend on whatever that machine happens to have configured, and against a real config predating `CONFIG_VERSION` the migration write-back would rewrite the developer's own file from struct serialization — comments and all — as a side effect of running the test suite.
     #[test]
     fn test_load_config_defaults() {
-        let config = load_config(None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, format!("config_version = {CONFIG_VERSION}\n")).unwrap();
+
+        let config = load_config(Some(&path)).unwrap();
         assert_eq!(config.log_level, "info");
     }
 
@@ -1316,11 +1354,120 @@ mod tests {
         writeln!(f, "bogus_field = \"oops\"").unwrap();
         drop(f);
 
-        // Strict mode: should reject and return defaults (with strict_config=true)
-        let config = load_config(Some(&root)).unwrap();
-        // Falls back to defaults because strict mode rejected unknown fields
-        assert_eq!(config.log_level, "info"); // default, not "debug"
-        assert!(config.strict_config);
+        // Strict mode: the load fails outright.
+        // It must not hand back a config at all, least of all a default one — see `strict_config_refuses_to_load_rather_than_booting_on_defaults`.
+        let error = load_config(Some(&root)).expect_err("strict mode must refuse to load");
+        assert!(
+            error.contains("bogus_field"),
+            "error must name the offending field; got: {error}"
+        );
+    }
+
+    /// `strict_config = true` must refuse to load, never fall back to `KernelConfig::default()`.
+    ///
+    /// The old behaviour returned `Ok(KernelConfig { strict_config: true, ..default() })`, which is the worst possible answer to "be stricter than usual": every security control the operator wrote — the API key, the user list, a `deny` exec policy — was replaced by a compiled default, and because it was an `Ok`, `cmd_start`'s `load_config(...).is_err()` guard never fired and the daemon booted on it.
+    #[test]
+    fn strict_config_refuses_to_load_rather_than_booting_on_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        std::fs::write(
+            &root,
+            "strict_config = true\n\
+             api_key = \"operator-secret\"\n\
+             log_level = \"debug\"\n\
+             bogus_field = \"oops\"\n\
+             \n\
+             [exec_policy]\n\
+             mode = \"deny\"\n",
+        )
+        .unwrap();
+
+        let error = load_config(Some(&root))
+            .expect_err("strict_config = true plus an unknown field must fail the load");
+        assert!(
+            error.contains("strict_config"),
+            "error must say strict mode is what rejected the file; got: {error}"
+        );
+        assert!(
+            error.contains("bogus_field"),
+            "error must name the offending field so the operator can fix it; got: {error}"
+        );
+
+        // The tolerant path is what the operator opted out of: with the flag off the same file loads and keeps every setting.
+        // This is the control that proves the failure above comes from strict mode and not from the config being unloadable.
+        let tolerant = root.with_file_name("tolerant.toml");
+        let contents = std::fs::read_to_string(&root).unwrap();
+        std::fs::write(
+            &tolerant,
+            contents.replace("strict_config = true", "strict_config = false"),
+        )
+        .unwrap();
+        let config = load_config(Some(&tolerant)).expect("tolerant mode still loads");
+        assert_eq!(config.api_key, "operator-secret");
+        assert_eq!(
+            config.exec_policy.mode,
+            librefang_types::config::ExecSecurityMode::Deny
+        );
+    }
+
+    /// A schema migration must not rewrite a config that is assembled from `include = [...]`.
+    ///
+    /// The write-back serializes the *merged* `KernelConfig`, so persisting it inlined every included file into `config.toml` and — because `include` is `skip_serializing_if` empty by then — deleted the directive, leaving the include files dead and any later edit to them inert.
+    ///
+    /// The second half is a positive control, and it is what keeps the first half from passing vacuously.
+    /// The write-back is reached only when `config_mode() != ConfigMode::Managed`, and `config_mode()` reads `LIBREFANG_CONFIG_MODE` from the process environment, so an ambient `managed` would short-circuit it one branch earlier and the include assertions would hold against the unfixed code too.
+    /// An otherwise identical v1 config with no `include` must therefore still be rewritten.
+    #[test]
+    fn migrating_a_config_with_includes_leaves_the_layout_on_disk_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_path = dir.path().join("base.toml");
+        let root_path = dir.path().join("config.toml");
+
+        let base_contents = "api_listen = \"0.0.0.0:9999\"\napi_key = \"from-the-include\"\n";
+        std::fs::write(&base_path, base_contents).unwrap();
+
+        // No `config_version` key, so the file is v1 and the migration write-back is live.
+        let root_contents = "# operator comment\ninclude = [\"base.toml\"]\nlog_level = \"warn\"\n";
+        std::fs::write(&root_path, root_contents).unwrap();
+
+        let config = load_config(Some(&root_path)).expect("include chain must still load");
+        assert_eq!(config.log_level, "warn", "root still overrides the include");
+        assert_eq!(config.api_listen, "0.0.0.0:9999", "include still merges in");
+        assert_eq!(
+            config.config_version, CONFIG_VERSION,
+            "migration still runs in memory"
+        );
+
+        let root_after = std::fs::read_to_string(&root_path).unwrap();
+        assert_eq!(
+            root_after, root_contents,
+            "the root config must be left exactly as the operator wrote it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&base_path).unwrap(),
+            base_contents,
+            "the included file must be left untouched"
+        );
+
+        // Positive control: the same v1 shape with no `include`, whose file the write-back must still rewrite.
+        // If this half fails, the assertions above are not evidence of a deliberate skip — they are evidence that nothing was going to write in this environment anyway.
+        let plain_path = dir.path().join("plain.toml");
+        let plain_contents = "# operator comment\nlog_level = \"warn\"\n";
+        std::fs::write(&plain_path, plain_contents).unwrap();
+
+        let plain = load_config(Some(&plain_path)).expect("plain v1 config must load");
+        assert_eq!(plain.log_level, "warn");
+        let plain_after = std::fs::read_to_string(&plain_path).unwrap();
+        assert_ne!(
+            plain_after, plain_contents,
+            "the migration write-back must be live here, or the include assertions above prove nothing \
+             (LIBREFANG_CONFIG_MODE=managed skips it one branch earlier)"
+        );
+        assert!(
+            plain_after.contains("config_version"),
+            "the write-back stamps the migrated config_version; got: {plain_after}"
+        );
     }
 
     #[test]
@@ -1573,10 +1720,11 @@ mod tests {
         writeln!(f, "max_hourly_usdd = 5.0").unwrap(); // typo
         drop(f);
 
-        let config = load_config(Some(&root)).unwrap();
-        // Falls back to defaults because strict mode rejected the typo.
-        assert_eq!(config.log_level, "info");
-        assert!(config.strict_config);
+        let error = load_config(Some(&root)).expect_err("strict mode must refuse the nested typo");
+        assert!(
+            error.contains("budget.max_hourly_usdd"),
+            "error must name the offending nested field by its dotted path; got: {error}"
+        );
     }
 
     #[test]

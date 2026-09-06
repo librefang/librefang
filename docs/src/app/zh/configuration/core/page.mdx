@@ -892,7 +892,7 @@ ollama = ""    # 显式"不走代理"覆盖
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `config_version` | u32 | `1` | 配置 schema 版本。给 auto-migrator 用,知道 daemon 启动时是否要升级你的配置。**不要手动设** —— `librefang upgrade` 写。 |
+| `config_version` | u32 | `1` | 配置 schema 版本。给 auto-migrator 用,知道 daemon 启动时是否要升级你的配置。**不要手动设** —— `librefang upgrade` 写。例外是用 `include = [...]` 拼出来的配置:迁移只在内存里跑,不会回写到盘上,因为回写的是合并后的配置,会把每个被 include 的文件内联进 `config.toml` 并删掉 `include` 指令。这种情况下 daemon 会打一条 warning 列出这些 include,请你手动改 schema 并自己写这个 key。 |
 | `log_dir` | PathBuf \| null | `null`(= `~/.librefang/`) | 自定义日志目录。home 目录在慢盘上、想把日志放本地 SSD 时用。 |
 | `qwen_code_path` | string \| null | `null`(到 `PATH` 找 `qwen`) | Qwen Code CLI 的绝对路径。daemon 作为 service 跑、没继承用户完整 PATH 时必填。等同于设 `provider_urls.qwen-code`。 |
 | `provider_proxy_urls` | `HashMap<string, string>` | `{}` | per-provider 代理 URL 覆盖。空字符串 `""` 显式让某 provider 绕过代理(全局 `[proxy]` 设了但希望某 provider 直连时用,如 `ollama`)。 |
