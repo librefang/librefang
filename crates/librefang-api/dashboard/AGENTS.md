@@ -157,3 +157,10 @@ flipping it to `error` only after the existing violations are zero.
   ```
 - Mutation invalidation lives in the hook — callers should never need to know which keys a mutation touches. Call sites MAY attach per-call `onSuccess` / `onError` handlers for UI feedback (toasts, modal dismissal, local state updates); that is orthogonal to invalidation and stays at the call site. See `MemoryPage` delete/cleanup and `ChannelsPage` configure/test for the pattern.
 - Commit convention matches the root repo: `feat(dashboard/<area>): ...`, `refactor(dashboard/queries): ...`, `fix(dashboard/<area>): ...`. Never include a `Co-Authored-By` footer.
+
+## Locale parity
+
+`pnpm test:i18n-parity` and `src/lib/__tests__/locale-parity.test.ts` use the shared `compareKeys` function in `scripts/i18n-parity.mjs`.
+Ordinary keys must match English; each English plural family must supply the cardinal categories selected by `Intl.PluralRules` for the target locale.
+Unused plural suffixes remain tolerated, matching the existing CI policy.
+Keep the CLI and CI on this shared comparison; regression fixtures in `i18n-parity-script.test.ts` cover missing categories, ordinary drift, and CLI failure status.

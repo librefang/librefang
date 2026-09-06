@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Standalone CLI mirror of src/lib/__tests__/locale-parity.test.ts.
+// Standalone CLI and shared comparison used by locale-parity.test.ts.
 // Use this when you want a quick pre-commit check without spinning up
-// vitest. The vitest version is what gates CI (runs as part of
+// vitest. Both entry points use compareKeys; the vitest suite gates CI (part of
 // `pnpm test` in dashboard-build.yml).
 //
 // Usage:
@@ -48,17 +48,42 @@ export function loadFlat(file, localesDir = LOCALES_DIR) {
   }
 }
 
-export function runParity() {
-  const reference = loadFlat(REFERENCE);
-  const others = readdirSync(LOCALES_DIR).filter(
+// i18next chooses cardinal suffixes from the locale's CLDR categories rather
+// than requiring the English one/other pair in every language.
+const PLURAL_SUFFIX_RE = /_(zero|one|two|few|many|other)$/;
+
+export function compareKeys(reference, locale, tag) {
+  const pluralBase = (key) => key.replace(PLURAL_SUFFIX_RE, "");
+  const nonPlural = (keys) => new Set([...keys].filter((key) => !PLURAL_SUFFIX_RE.test(key)));
+  const refNonPlural = nonPlural(reference);
+  const localeNonPlural = nonPlural(locale);
+  const missing = [...refNonPlural].filter((key) => !localeNonPlural.has(key)).sort();
+  const extra = [...localeNonPlural].filter((key) => !refNonPlural.has(key)).sort();
+  const bases = new Set([...reference].filter((key) => PLURAL_SUFFIX_RE.test(key)).map(pluralBase));
+  const categories = new Intl.PluralRules(tag, { type: "cardinal" }).resolvedOptions().pluralCategories;
+  const missingPlural = [];
+  for (const base of bases) {
+    for (const category of categories) {
+      const key = `${base}_${category}`;
+      if (!locale.has(key)) missingPlural.push(key);
+    }
+  }
+  // Preserve the CI policy: unused plural suffixes are tolerated.
+  return { missing, extra, missingPlural: missingPlural.sort() };
+}
+
+export function runParity(localesDir = LOCALES_DIR) {
+  const reference = loadFlat(REFERENCE, localesDir);
+  const others = readdirSync(localesDir).filter(
     (f) => f.endsWith(".json") && f !== REFERENCE,
   );
 
   let drift = false;
   for (const file of others) {
-    const locale = loadFlat(file);
-    const missing = [...reference].filter((k) => !locale.has(k)).sort();
-    const extra = [...locale].filter((k) => !reference.has(k)).sort();
+    const locale = loadFlat(file, localesDir);
+    const result = compareKeys(reference, locale, file.slice(0, -".json".length));
+    const missing = [...result.missing, ...result.missingPlural].sort();
+    const extra = result.extra;
     if (missing.length === 0 && extra.length === 0) {
       console.log(`OK   ${file} (${locale.size} keys, parity with ${REFERENCE})`);
       continue;
