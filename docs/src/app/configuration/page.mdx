@@ -1652,7 +1652,7 @@ reasoning_mode = "high"        # optional: none | low | high | max
 |-------|------|---------|-------------|
 | `budget_tokens` | u32 | `10000` | Maximum tokens allocated for the thinking/reasoning phase. |
 | `stream_thinking` | bool | `false` | Whether to stream thinking tokens to the client (visible in the API response stream). |
-| `reasoning_mode` | string | unset | Explicit reasoning effort: `"none"`, `"low"`, `"high"`, or `"max"`. When unset, the effort is derived from `budget_tokens`. |
+| `reasoning_mode` | string | unset | Explicit reasoning effort: `"none"`, `"low"`, `"high"`, or `"max"`. When unset, the effort is derived from `budget_tokens` on the drivers whose wire still takes a budget — see the per-provider mapping below. |
 
 #### `reasoning_mode` (#7946)
 
@@ -1677,7 +1677,8 @@ Per-provider wire mapping:
 
 A payload never carries both `reasoning_effort` and `reasoning.effort` — OpenRouter rejects that combination with HTTP 400.
 Kimi/Moonshot models always send `thinking: disabled` (a multi-turn tool-call requirement, not a preference), and DeepSeek R1 has no wire toggle.
-The Anthropic and Ollama drivers keep reading `budget_tokens` for the graded rungs — their wire control is a token budget, not an effort enum — but they do honour `none`, because the mode has to travel on a materialised thinking config and reading that config as a bare budget would enable reasoning on a turn that asked for the opposite.
+The Ollama driver keeps reading `budget_tokens` for the graded rungs — its wire control is a token budget, not an effort enum — but it does honour `none`, because the mode has to travel on a materialised thinking config and reading that config as a bare budget would enable reasoning on a turn that asked for the opposite.
+The Anthropic driver splits on the model: Haiku 4.5 and older Claude models behave the same way, while Opus 4.6 and newer have no token budget left to send and take the mode as their only rung — `low` / `high` / `max` map straight onto `output_config.effort`, and with no mode set the field is omitted so the API's own default applies rather than a rung derived from a budget the operator may never have chosen.
 Gemini does not read the thinking config at all.
 Full detail, including why `medium` is not a settable mode: `docs/architecture/reasoning-mode-resolution.md`.
 

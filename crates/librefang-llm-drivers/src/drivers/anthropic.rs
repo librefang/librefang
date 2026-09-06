@@ -3,6 +3,7 @@
 //! Full implementation of the Anthropic Messages API with tool use support,
 //! system prompt extraction, and retry on 429/529 errors.
 
+use super::anthropic_models;
 use crate::backoff::standard_retry_delay;
 use crate::llm_driver::{
     CompletionRequest, CompletionResponse, LlmDriver, LlmError, LlmFamily, StreamEvent,
@@ -10,7 +11,7 @@ use crate::llm_driver::{
 use crate::rate_limit_tracker::RateLimitSnapshot;
 use async_trait::async_trait;
 use futures::StreamExt;
-use librefang_types::config::{PromptCacheStrategy, ReasoningMode, ResponseFormat};
+use librefang_types::config::{PromptCacheStrategy, ReasoningMode, ResponseFormat, ThinkingConfig};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -117,10 +118,16 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
-    /// Extended thinking configuration.
-    /// Anthropic API expects: `{"type": "enabled", "budget_tokens": N}`
+    /// Extended thinking configuration, in whichever spelling this model's schema still accepts.
+    /// `{"type": "adaptive"}` on Opus 4.6 and newer, `{"type": "enabled", "budget_tokens": N}` on Haiku 4.5 and older and on the non-Claude ids this driver also serves, and `{"type": "disabled"}` only on the models that both reason unasked and accept that spelling.
+    /// Which one applies is decided by [`anthropic_models`], never here.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    /// `{"effort": …}` — the depth control that replaced `thinking.budget_tokens`.
+    /// The API's rungs are `low` / `medium` / `high` / `xhigh` / `max`, but `xhigh` only from Opus 4.7 onwards; this driver emits `low` / `high` / `max` alone, because those are the graded `ReasoningMode` spells and every adaptive-generation model accepts all three.
+    /// Only ever populated alongside the adaptive thinking form, and only when a mode was actually named; the models that take the budgeted form have no such field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,6 +179,12 @@ enum ApiContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<serde_json::Value>,
     },
+    /// An assistant thinking block replayed from history.
+    ///
+    /// When extended thinking is on, Anthropic requires the assistant turn that precedes a set of tool results to start with the thinking blocks it originally produced, echoed back byte-for-byte with the `signature` that authenticates them.
+    /// Unlike every other block this one therefore carries no `cache_control` field: the signature covers the block exactly as the model emitted it, so nothing may be added to it.
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -217,7 +230,13 @@ enum ResponseContentBlock {
         input: serde_json::Value,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// The signature Anthropic stamps on each thinking block, which has to be echoed back verbatim on the next request or the turn is rejected.
+        /// Optional because `redacted_thinking` and any future unsigned variant would otherwise fail the whole response parse.
+        #[serde(default)]
+        signature: Option<String>,
+    },
     /// Catch-all for block types this driver does not explicitly model
     /// (e.g. `redacted_thinking`, `server_tool_use`,
     /// `web_search_tool_result`). Anthropic returns these in normal
@@ -297,7 +316,11 @@ fn anthropic_error_code(
 /// Accumulator for content blocks during streaming.
 enum ContentBlockAccum {
     Text(String),
-    Thinking(String),
+    /// The signature arrives in its own `signature_delta` events, separately from the reasoning text, and is empty until they land.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -375,7 +398,7 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         .messages
         .iter()
         .filter(|m| m.role != Role::System)
-        .map(convert_message)
+        .map(|m| convert_message(m, &request.model))
         .collect();
 
     // Build tools. Only `SystemAndN` stamps the last tool — `SystemOnly`
@@ -414,35 +437,47 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         apply_cache_markers(&mut api_messages, strategy, stamp_tools_last, ttl);
     }
 
-    // Anthropic requires budget_tokens >= 1024 for extended thinking.
-    // Skip thinking if budget is too low.
+    // Whether this turn asked to reason at all, before any question of how the request should spell that.
+    // A budget under 1024 reads as an opt-out on every wire generation.
+    // On the budgeted form that is the API's own floor for `budget_tokens`.
+    // The adaptive form has no budget field at all, and the sub-1024 reading is kept there as this driver's convention — the same one `openai.rs::reasoning_effort_for_budget` applies to every other wire — so that an operator who used a token floor as an off-switch is not silently switched back on and billed for it.
     //
-    // `reasoning_mode = "none"` (#7946) is an explicit request NOT to reason, so
-    // it suppresses extended thinking here even though this driver otherwise
-    // ignores the mode and steers on `budget_tokens` alone. Without this the
-    // kernel's `ThinkingOverride::Mode(ReasoningMode::None)` — which has to
-    // materialise a `ThinkingConfig` so the OpenAI-compatible drivers can send
-    // their explicit non-think toggle — would arrive here as a default 10_000
-    // token budget and turn extended thinking *on* for an agent that asked for
-    // the opposite, also inflating `max_tokens` below.
-    let thinking_value = request
+    // `reasoning_mode = "none"` (#7946) is an explicit request NOT to reason, so it suppresses extended thinking here.
+    // Without this the kernel's `ThinkingOverride::Mode(ReasoningMode::None)` — which has to materialise a `ThinkingConfig` so the OpenAI-compatible drivers can send their explicit non-think toggle — would arrive here as a default 10_000 token budget and turn extended thinking *on* for an agent that asked for the opposite, also inflating `max_tokens` below.
+    let requested_thinking = request
         .thinking
         .as_ref()
         .filter(|tc| tc.reasoning_mode != Some(ReasoningMode::None))
-        .filter(|tc| tc.budget_tokens >= 1024)
-        .map(|tc| {
-            serde_json::json!({
+        .filter(|tc| tc.budget_tokens >= 1024);
+
+    let generation = anthropic_models::wire_generation(&request.model);
+    let (thinking_value, output_config) = match requested_thinking {
+        Some(tc) if generation.uses_budgeted_thinking() => (
+            Some(serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": tc.budget_tokens
-            })
-        });
+            })),
+            None,
+        ),
+        Some(tc) => (
+            Some(serde_json::json!({"type": "adaptive"})),
+            adaptive_effort(tc).map(|effort| serde_json::json!({"effort": effort})),
+        ),
+        // Nothing was asked for.
+        // Omitting the field is the portable way to say so — `{"type": "disabled"}` is itself a 400 on Fable 5 / 5.1 — and it is only the wrong answer on the models that both reason unasked and accept that spelling, which get it instead.
+        None if anthropic_models::reasons_without_being_asked(&request.model) => {
+            (Some(serde_json::json!({"type": "disabled"})), None)
+        }
+        None => (None, None),
+    };
 
-    // When thinking is enabled, max_tokens must be > budget_tokens.
-    let effective_max_tokens = if let Some(ref tv) = thinking_value {
-        let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
-        request.max_tokens.max(budget + 1024)
-    } else {
-        request.max_tokens
+    // The budgeted form requires max_tokens > budget_tokens.
+    // The adaptive form carries no budget to clear, so it leaves the caller's ceiling exactly as asked rather than inflating it on the strength of a figure the model never sees.
+    let effective_max_tokens = match requested_thinking {
+        Some(tc) if generation.uses_budgeted_thinking() => {
+            request.max_tokens.max(tc.budget_tokens + 1024)
+        }
+        _ => request.max_tokens,
     };
 
     // Anthropic rejects max_tokens=0 with HTTP 400; fall back to a safe
@@ -463,13 +498,33 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
         system,
         messages: api_messages,
         tools: api_tools,
-        temperature: if thinking_value.is_some() {
-            None
-        } else {
+        // Sampling parameters were removed on Opus 4.7 and newer and answer 400 there; on the models that still take one, extended thinking is incompatible with a caller-chosen temperature.
+        temperature: if generation.accepts_sampling_params() && requested_thinking.is_none() {
             Some(request.temperature)
+        } else {
+            None
         },
         stream: false,
         thinking: thinking_value,
+        output_config,
+    }
+}
+
+/// The `output_config.effort` rung an adaptive-thinking request should carry, or `None` to leave the field off entirely.
+///
+/// Only an explicit `reasoning_mode` names a rung.
+/// `budget_tokens` deliberately does not: the adaptive wire has no budget field, `effort` defaults to `high` when the field is absent, and the bucket `openai.rs::reasoning_effort_for_budget` applies would map the compiled-in default budget of 10_000 to `medium` — quietly making every agent that configured nothing reason *less* than an unconfigured request does, which is the outcome `docs/architecture/reasoning-mode-resolution.md` set out to avoid when it declined to remap Claude budgets into rungs.
+/// So an operator who wants a depth other than the API default names it with `reasoning_mode`, and a budget keeps the one job it can still do on this wire: saying, below 1024, not to reason at all.
+///
+/// The rungs are the three graded `ReasoningMode` spells and no more.
+/// `xhigh` exists on the API from Opus 4.7 onwards but not on the 4.6 pair, and no mode asks for it, so nothing here can emit a rung one half of the adaptive generation would reject.
+fn adaptive_effort(thinking: &ThinkingConfig) -> Option<&'static str> {
+    match thinking.reasoning_mode {
+        Some(ReasoningMode::Low) => Some("low"),
+        Some(ReasoningMode::High) => Some("high"),
+        Some(ReasoningMode::Max) => Some("max"),
+        // `ReasoningMode::None` is filtered out as an opt-out before the form is chosen, so it can only arrive here if that filter is removed; it names no rung either way.
+        Some(ReasoningMode::None) | None => None,
     }
 }
 
@@ -631,7 +686,7 @@ impl LlmDriver for AnthropicDriver {
             let api_response: ApiResponse =
                 serde_json::from_str(&body).map_err(|e| LlmError::Parse(e.to_string()))?;
 
-            return Ok(convert_response(api_response));
+            return Ok(convert_response(api_response, &request.model));
         }
 
         Err(LlmError::Api {
@@ -882,7 +937,14 @@ impl LlmDriver for AnthropicDriver {
                                     });
                                 }
                                 "thinking" => {
-                                    blocks.push(ContentBlockAccum::Thinking(String::new()));
+                                    // The signature is normally empty here and arrives in `signature_delta` events, but read it anyway so a block delivered whole in one frame is not silently unsigned.
+                                    blocks.push(ContentBlockAccum::Thinking {
+                                        thinking: String::new(),
+                                        signature: block["signature"]
+                                            .as_str()
+                                            .unwrap_or_default()
+                                            .to_string(),
+                                    });
                                 }
                                 other => {
                                     // Keep index alignment for unknown block
@@ -934,19 +996,34 @@ impl LlmDriver for AnthropicDriver {
                                     }
                                 }
                                 "thinking_delta" => {
-                                    if let Some(thinking) = delta["thinking"].as_str() {
-                                        if let Some(ContentBlockAccum::Thinking(ref mut t)) =
-                                            blocks.get_mut(block_idx)
+                                    if let Some(text) = delta["thinking"].as_str() {
+                                        if let Some(ContentBlockAccum::Thinking {
+                                            ref mut thinking,
+                                            ..
+                                        }) = blocks.get_mut(block_idx)
                                         {
-                                            t.push_str(thinking);
+                                            thinking.push_str(text);
                                         }
                                         crate::send_or_mark_dropped!(
                                             receiver_dropped,
                                             tx,
                                             StreamEvent::ThinkingDelta {
-                                                text: thinking.to_string(),
+                                                text: text.to_string(),
                                             }
                                         );
+                                    }
+                                }
+                                // The signature authenticates the reasoning text and has to be echoed back verbatim on the next request, so it is accumulated with the block rather than dropped.
+                                // It carries no reader-facing content, hence no StreamEvent.
+                                "signature_delta" => {
+                                    if let Some(chunk) = delta["signature"].as_str() {
+                                        if let Some(ContentBlockAccum::Thinking {
+                                            ref mut signature,
+                                            ..
+                                        }) = blocks.get_mut(block_idx)
+                                        {
+                                            signature.push_str(chunk);
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -1048,10 +1125,16 @@ impl LlmDriver for AnthropicDriver {
                             provider_metadata: None,
                         });
                     }
-                    ContentBlockAccum::Thinking(thinking) => {
+                    ContentBlockAccum::Thinking {
+                        thinking,
+                        signature,
+                    } => {
                         content.push(ContentBlock::Thinking {
                             thinking,
-                            provider_metadata: None,
+                            provider_metadata: thinking_provider_metadata(
+                                Some(signature),
+                                &request.model,
+                            ),
                         });
                     }
                     ContentBlockAccum::ToolUse {
@@ -1267,12 +1350,8 @@ fn apply_cache_markers(
     }
     let marker = ttl.to_marker();
     let mut stamped = 0usize;
-    // Walk tail → head and only count messages where a marker actually
-    // landed. Empty `Blocks` (e.g. messages whose only content was a
-    // Thinking block, filtered by `convert_message`) are skipped without
-    // consuming the budget — otherwise the rolling window silently
-    // shrinks below its target and the promised cache reuse is not
-    // realised.
+    // Walk tail → head and only count messages where a marker actually landed.
+    // Messages whose last block cannot carry one — an empty `Blocks` payload, or a turn ending in a replayed thinking block — are skipped without consuming the budget; otherwise the rolling window silently shrinks below its target and the promised cache reuse is not realised.
     for msg in api_messages.iter_mut().rev() {
         if stamped >= budget {
             break;
@@ -1284,17 +1363,12 @@ fn apply_cache_markers(
 }
 
 /// Attempt to stamp `marker` on the last content block of this message.
-/// Returns `true` iff a marker actually landed (i.e. either the
-/// plain-string `Text` form was upgraded into a single-element block
-/// list, or the existing `Blocks` payload had a last block that could
-/// carry `cache_control`). Returns `false` for empty `Blocks` payloads
-/// — in that case the caller should not consume a breakpoint slot, so
-/// the rolling window can keep walking backwards.
 ///
-/// If the message uses the plain-string `ApiContent::Text` form it is
-/// upgraded to a single-element `Blocks` payload first — Anthropic only
-/// accepts `cache_control` on structured content blocks, not on
-/// shorthand strings. This upgrade is a lossless wire-format change.
+/// Returns `true` iff a marker actually landed — either the plain-string `Text` form was upgraded into a single-element block list, or the existing `Blocks` payload had a last block that could carry `cache_control`.
+/// Returns `false` for empty `Blocks` payloads and for a payload ending in a thinking block; in those cases the caller should not consume a breakpoint slot, so the rolling window can keep walking backwards.
+///
+/// If the message uses the plain-string `ApiContent::Text` form it is upgraded to a single-element `Blocks` payload first — Anthropic only accepts `cache_control` on structured content blocks, not on shorthand strings.
+/// This upgrade is a lossless wire-format change.
 fn try_stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value) -> bool {
     if let ApiContent::Text(text) = &msg.content {
         let text = text.clone();
@@ -1305,8 +1379,6 @@ fn try_stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value)
         return true;
     }
     if let ApiContent::Blocks(blocks) = &mut msg.content {
-        // Thinking blocks were already filtered out by `convert_message`,
-        // so any block reachable here can safely carry `cache_control`.
         if let Some(last) = blocks.last_mut() {
             match last {
                 ApiContentBlock::Text { cache_control, .. }
@@ -1316,6 +1388,9 @@ fn try_stamp_block_with_marker(msg: &mut ApiMessage, marker: &serde_json::Value)
                     *cache_control = Some(marker.clone());
                     return true;
                 }
+                // A thinking block is authenticated by its signature exactly as the model produced it, so nothing may be added to it — including a cache breakpoint.
+                // Leave the budget unspent and let the window keep walking backwards, as for an empty payload.
+                ApiContentBlock::Thinking { .. } => return false,
             }
         }
     }
@@ -1341,8 +1416,40 @@ fn build_system_value(text: &str, ttl: Option<CacheTtl>) -> serde_json::Value {
     }
 }
 
+/// Wrap a thinking block's signature, and the model that minted it, for storage on the assistant message.
+///
+/// The key is `signature` rather than Gemini's `thought_signature` because the two are different provider contracts that happen to share a purpose, and a history written by one driver must never be replayed as if it came from the other.
+/// An absent or empty signature stores nothing, which is what keeps [`convert_message`] from replaying a block the API would reject.
+///
+/// `model` is recorded next to it because a thinking block is bound to the model that produced it: another model ignores or drops the block, and what a third-party Messages-API endpoint does with a signature it did not mint is unspecified.
+/// `FallbackChain::try_entry` swaps `request.model` while reusing the same `Arc<Vec<Message>>` history, so cross-model replay is not hypothetical — it is what a failover leg does by construction.
+fn thinking_provider_metadata(signature: Option<String>, model: &str) -> Option<serde_json::Value> {
+    signature
+        .filter(|s| !s.is_empty())
+        .map(|s| serde_json::json!({ "signature": s, "model": model }))
+}
+
+/// Read back what [`thinking_provider_metadata`] stored, but only for the model that minted it.
+///
+/// A block stamped with a different model, or with no model at all, returns `None` and is dropped rather than replayed — the same thing the receiving model would do with it, done one hop earlier and without spending the tokens.
+fn thinking_signature<'a>(
+    provider_metadata: Option<&'a serde_json::Value>,
+    model: &str,
+) -> Option<&'a str> {
+    let metadata = provider_metadata?;
+    if metadata.get("model")?.as_str()? != model {
+        return None;
+    }
+    metadata
+        .get("signature")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+}
+
 /// Convert an LibreFang Message to an Anthropic API message.
-fn convert_message(msg: &Message) -> ApiMessage {
+///
+/// `model` is the id this request is going out under, needed so a thinking block minted by a different model is not replayed as if it belonged to this one.
+fn convert_message(msg: &Message, model: &str) -> ApiMessage {
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -1386,7 +1493,21 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         is_error: *is_error,
                         cache_control: None,
                     }),
-                    ContentBlock::Thinking { .. } => None,
+                    // Replayed verbatim, because Anthropic validates the signature against the reasoning text and rejects an assistant turn that dropped a thinking block it produced (`a final assistant message must start with a thinking block`).
+                    // A block with no signature, or one minted by a different model, cannot be replayed — it either predates signature capture, came from another provider, or belongs to the model a failover leg moved away from — so it is dropped as before rather than sent in a form the receiving model cannot use.
+                    //
+                    // Every surviving block is replayed, not just the last turn's, and that is a deliberate choice rather than an oversight.
+                    // Only the assistant turn immediately preceding a set of tool results has to carry them, so the earlier ones are surplus, but this driver sees one flattened history and has no reliable notion of which turn the API will treat as final — and the two mistakes are not symmetric, since pruning the wrong turn costs a rejected request while keeping a surplus one costs input tokens.
+                    // Trimming them is the history layer's job, and it already has the knob: `[compaction] strip_reasoning_after_turns`, which defaults to 0 (off).
+                    ContentBlock::Thinking {
+                        thinking,
+                        provider_metadata,
+                    } => thinking_signature(provider_metadata.as_ref(), model).map(|signature| {
+                        ApiContentBlock::Thinking {
+                            thinking: thinking.clone(),
+                            signature: signature.to_string(),
+                        }
+                    }),
                     ContentBlock::ImageFile { media_type, path } => {
                         match tokio::task::block_in_place(|| std::fs::read(path)) {
                             Ok(bytes) => {
@@ -1421,7 +1542,10 @@ fn convert_message(msg: &Message) -> ApiMessage {
 }
 
 /// Convert an Anthropic API response to our CompletionResponse.
-fn convert_response(api: ApiResponse) -> CompletionResponse {
+///
+/// `model` is the id the request went out under, stamped onto any thinking-block signature so the block is only ever replayed to the model that minted it.
+/// It is taken from the request rather than from `ApiResponse` because the response echoes a resolved snapshot id, which would never compare equal to the alias the next request is built from.
+fn convert_response(api: ApiResponse, model: &str) -> CompletionResponse {
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
 
@@ -1443,15 +1567,18 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
                 });
                 tool_calls.push(ToolCall { id, name, input });
             }
-            ResponseContentBlock::Thinking { thinking } => {
+            ResponseContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 content.push(ContentBlock::Thinking {
                     thinking,
-                    provider_metadata: None,
+                    provider_metadata: thinking_provider_metadata(signature, model),
                 });
             }
-            // Unrecognized block types (e.g. redacted_thinking) carry no
-            // payload we can surface; skip them rather than aborting the
-            // whole response parse.
+            // Unrecognized block types carry no payload this driver models, so they are skipped rather than aborting the whole response parse.
+            // `redacted_thinking` is the one that costs something: on the budgeted generation a safety-flagged reasoning trace comes back under that tag, and an assistant turn that dropped it is as incomplete as one that dropped a `thinking` block.
+            // Carrying it would need a `ContentBlock` variant of its own in `librefang-types` and a new arm at every match on that enum across the kernel, runtime and API crates, so it is out of this driver's reach; the models this change is about never produce one, because from Opus 4.6 onwards the raw trace is not returned at all and reasoning comes back as ordinary `thinking` blocks.
             ResponseContentBlock::Unknown => {}
         }
     }
@@ -1498,7 +1625,7 @@ mod tests {
     #[test]
     fn test_convert_message_text() {
         let msg = Message::user("Hello");
-        let api_msg = convert_message(&msg);
+        let api_msg = convert_message(&msg, "claude-sonnet-4-5");
         assert_eq!(api_msg.role, "user");
     }
 
@@ -1521,7 +1648,7 @@ mod tests {
             status: Default::default(),
             approval_request_id: None,
         }]);
-        let api_msg = convert_message(&msg);
+        let api_msg = convert_message(&msg, "claude-sonnet-4-5");
         let blocks = match api_msg.content {
             ApiContent::Blocks(b) => b,
             ApiContent::Text(_) => panic!("expected Blocks content"),
@@ -1557,7 +1684,7 @@ mod tests {
         }"#;
         let api: ApiResponse = serde_json::from_str(body)
             .expect("unknown content block must not fail the response parse");
-        let resp = convert_response(api);
+        let resp = convert_response(api, "claude-sonnet-4-5");
         let texts: Vec<&str> = resp
             .content
             .iter()
@@ -1600,7 +1727,7 @@ mod tests {
             pinned: false,
             timestamp: None,
         };
-        let api_msg = convert_message(&msg);
+        let api_msg = convert_message(&msg, "claude-sonnet-4-5");
         let blocks = match api_msg.content {
             ApiContent::Blocks(b) => b,
             ApiContent::Text(_) => panic!("expected Blocks content"),
@@ -1649,7 +1776,7 @@ mod tests {
             },
         };
 
-        let response = convert_response(api_response);
+        let response = convert_response(api_response, "claude-sonnet-4-5");
         assert_eq!(response.stop_reason, StopReason::ToolUse);
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "web_search");
@@ -1749,7 +1876,7 @@ mod tests {
             pinned: false,
             timestamp: None,
         };
-        let api_msg = convert_message(&msg);
+        let api_msg = convert_message(&msg, "claude-sonnet-4-5");
         match api_msg.content {
             ApiContent::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 1);
@@ -1777,7 +1904,7 @@ mod tests {
             },
         };
 
-        let response = convert_response(api_response);
+        let response = convert_response(api_response, "claude-sonnet-4-5");
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].input, serde_json::json!({}));
         match &response.content[0] {
@@ -1929,6 +2056,422 @@ mod tests {
         }
     }
 
+    /// Helper: a minimal request for `model`, optionally asking to reason.
+    fn wire_request(model: &str, thinking: Option<ThinkingConfig>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
+            max_tokens: 4096,
+            temperature: 0.7,
+            thinking,
+            ..Default::default()
+        }
+    }
+
+    /// `temperature` was removed on Opus 4.7 and every model released after it, and the API answers `400 invalid_request_error` rather than ignoring it.
+    /// The driver's source field is a bare `f32`, so before the wire-generation gate every non-thinking turn to a current model carried one and died.
+    #[test]
+    fn modern_models_get_no_temperature() {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "claude-mythos-5",
+        ] {
+            let api_request = build_anthropic_request(&wire_request(model, None));
+            assert!(
+                api_request.temperature.is_none(),
+                "{model} rejects temperature, got {:?}",
+                api_request.temperature,
+            );
+        }
+    }
+
+    /// Positive control: the models that still accept sampling parameters must keep getting the operator's temperature.
+    /// Omitting it everywhere would silently discard a configured value on the whole legacy fleet.
+    #[test]
+    fn models_that_still_accept_sampling_keep_their_temperature() {
+        for model in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+            "claude-3-5-sonnet-20241022",
+        ] {
+            let api_request = build_anthropic_request(&wire_request(model, None));
+            assert_eq!(
+                api_request.temperature,
+                Some(0.7),
+                "{model} still accepts temperature",
+            );
+        }
+    }
+
+    /// On Opus 4.6 and newer, `thinking: {"type": "enabled", "budget_tokens": N}` is either deprecated or removed; the current form is `{"type": "adaptive"}`.
+    /// The budget must not leak into `max_tokens` either — there is no budget for the ceiling to clear — and with no `reasoning_mode` set there is no rung to pin, so `output_config` stays off and the API's own default effort applies.
+    #[test]
+    fn modern_models_get_adaptive_thinking_and_no_invented_depth() {
+        for model in [
+            "claude-opus-5",
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-opus-4-6",
+            "claude-fable-5",
+        ] {
+            let api_request = build_anthropic_request(&wire_request(
+                model,
+                Some(ThinkingConfig {
+                    budget_tokens: 8192,
+                    ..Default::default()
+                }),
+            ));
+            let thinking = api_request
+                .thinking
+                .as_ref()
+                .unwrap_or_else(|| panic!("{model} must still be asked to reason"));
+            assert_eq!(thinking["type"], "adaptive", "{model}");
+            assert!(
+                thinking.get("budget_tokens").is_none(),
+                "{model} rejects budget_tokens, got {thinking:?}",
+            );
+            assert!(
+                api_request.output_config.is_none(),
+                "{model} was given no reasoning_mode, so its depth must be left at the API default, got {:?}",
+                api_request.output_config,
+            );
+            assert_eq!(
+                api_request.max_tokens, 4096,
+                "{model} has no budget for max_tokens to clear",
+            );
+        }
+    }
+
+    /// `ApiFormat::Anthropic` also serves `kimi_coding` and `byteplus_coding`, whose models are not Claude models and lost neither the sampling parameters nor the budgeted thinking form.
+    /// Degrading an unrecognised id towards the newest Claude contract is right for a `claude-*` id and wrong for these, so they keep the exact request shape they were served before the wire-generation table existed.
+    #[test]
+    fn non_claude_models_on_this_driver_keep_temperature_and_the_budgeted_form() {
+        for model in ["kimi-for-coding", "kimi-k2.5", "ark-code-latest"] {
+            let plain = build_anthropic_request(&wire_request(model, None));
+            assert_eq!(
+                plain.temperature,
+                Some(0.7),
+                "{model} honours temperature and must keep receiving it",
+            );
+
+            let reasoning = build_anthropic_request(&wire_request(
+                model,
+                Some(ThinkingConfig {
+                    budget_tokens: 8192,
+                    ..Default::default()
+                }),
+            ));
+            let thinking = reasoning
+                .thinking
+                .as_ref()
+                .unwrap_or_else(|| panic!("{model} must still be asked to reason"));
+            assert_eq!(
+                thinking["type"], "enabled",
+                "{model} implements the classic Messages API, not Anthropic's adaptive form",
+            );
+            assert_eq!(thinking["budget_tokens"], 8192, "{model}");
+            assert!(
+                reasoning.output_config.is_none(),
+                "{model} has no output_config field, got {:?}",
+                reasoning.output_config,
+            );
+        }
+    }
+
+    /// Haiku 4.5 and older have no adaptive form at all, so the budgeted request — and the `max_tokens > budget_tokens` inflation it requires — has to survive for them.
+    #[test]
+    fn haiku_4_5_and_older_keep_the_budgeted_thinking_request() {
+        for model in ["claude-haiku-4-5-20251001", "claude-3-7-sonnet-20250219"] {
+            let api_request = build_anthropic_request(&wire_request(
+                model,
+                Some(ThinkingConfig {
+                    budget_tokens: 8192,
+                    ..Default::default()
+                }),
+            ));
+            let thinking = api_request
+                .thinking
+                .as_ref()
+                .unwrap_or_else(|| panic!("{model} must still be asked to reason"));
+            assert_eq!(thinking["type"], "enabled", "{model}");
+            assert_eq!(thinking["budget_tokens"], 8192, "{model}");
+            assert!(
+                api_request.output_config.is_none(),
+                "{model} has no output_config field, got {:?}",
+                api_request.output_config,
+            );
+            assert_eq!(
+                api_request.max_tokens,
+                8192 + 1024,
+                "{model} needs max_tokens above the budget",
+            );
+        }
+    }
+
+    /// `reasoning_mode` is the only thing that names an effort rung.
+    /// A budget must not be bucketed into one: `output_config` defaults to `high` when absent, so deriving `medium` from the compiled-in default budget of 10_000 would make every agent that configured nothing reason less than an unconfigured request does.
+    #[test]
+    fn only_an_explicit_mode_pins_an_effort_rung() {
+        for (reasoning_mode, expected) in [
+            (Some(ReasoningMode::Low), Some("low")),
+            (Some(ReasoningMode::High), Some("high")),
+            (Some(ReasoningMode::Max), Some("max")),
+            (None, None),
+        ] {
+            // The budgets straddle every bucket boundary the OpenAI-compatible driver uses, so a reintroduced budget bucket shows up as a rung appearing where `None` is expected or moving where a mode was named.
+            for budget_tokens in [2_000u32, 8_000, 10_000, 32_000] {
+                let api_request = build_anthropic_request(&wire_request(
+                    "claude-opus-5",
+                    Some(ThinkingConfig {
+                        budget_tokens,
+                        reasoning_mode,
+                        ..Default::default()
+                    }),
+                ));
+                let effort = api_request.output_config.as_ref().map(|c| {
+                    c["effort"]
+                        .as_str()
+                        .expect("effort is a string")
+                        .to_string()
+                });
+                assert_eq!(
+                    effort.as_deref(),
+                    expected,
+                    "mode {reasoning_mode:?} with budget {budget_tokens}",
+                );
+            }
+        }
+    }
+
+    /// Opus 5 and Sonnet 5 reason when the request carries no `thinking` field, so an agent that asked not to reason has to be told explicitly.
+    /// Every other model is left alone: Fable / Mythos answer 400 to `{"type": "disabled"}`, and Opus 4.7 / 4.8 and everything older already stay quiet when the field is absent.
+    #[test]
+    fn thinking_is_turned_off_explicitly_only_where_that_is_both_needed_and_accepted() {
+        let off = ThinkingConfig {
+            reasoning_mode: Some(ReasoningMode::None),
+            ..Default::default()
+        };
+
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            let api_request = build_anthropic_request(&wire_request(model, Some(off.clone())));
+            assert_eq!(
+                api_request
+                    .thinking
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{model} needs the explicit off-switch"))["type"],
+                "disabled",
+                "{model}",
+            );
+            assert!(
+                api_request.output_config.is_none(),
+                "{model}: disabling thinking must not pin an effort rung, which is what keeps the field inside the range Opus 5 accepts it in",
+            );
+        }
+
+        for model in [
+            "claude-fable-5-1",
+            "claude-mythos-5",
+            "claude-opus-4-8",
+            "claude-haiku-4-5",
+            "kimi-for-coding",
+        ] {
+            for thinking in [Some(off.clone()), None] {
+                let api_request = build_anthropic_request(&wire_request(model, thinking));
+                assert!(
+                    api_request.thinking.is_none(),
+                    "{model} must be left to its own default, got {:?}",
+                    api_request.thinking,
+                );
+            }
+        }
+    }
+
+    /// A signed thinking block must survive a full round trip: parsed off the response with its signature, stored on the assistant message, and replayed byte-for-byte at the head of that turn.
+    /// Anthropic validates the signature against the reasoning text and rejects an assistant turn that dropped a thinking block it produced, so an agent with thinking on could not complete a single tool round trip while the block was being filtered.
+    #[test]
+    fn a_signed_thinking_block_survives_history_replay() {
+        let body = r#"{
+            "content": [
+                {"type": "thinking", "thinking": "step one", "signature": "SigAbc123"},
+                {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "rust"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }"#;
+        let api: ApiResponse = serde_json::from_str(body).expect("response parses");
+        let response = convert_response(api, "claude-opus-4-6");
+
+        match &response.content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                provider_metadata,
+            } => {
+                assert_eq!(thinking, "step one");
+                let metadata = provider_metadata
+                    .as_ref()
+                    .expect("the signature must be captured, not dropped");
+                assert_eq!(metadata["signature"], "SigAbc123");
+                assert_eq!(
+                    metadata["model"], "claude-opus-4-6",
+                    "the minting model must be recorded so a failover leg does not replay the block to a different one",
+                );
+            }
+            other => panic!("expected a thinking block first, got {other:?}"),
+        }
+
+        // Second turn: the stored assistant turn goes back out verbatim.
+        let request = CompletionRequest {
+            model: "claude-opus-4-6".to_string(),
+            messages: std::sync::Arc::new(vec![
+                Message::user("find something"),
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(response.content.clone()),
+                    pinned: false,
+                    timestamp: None,
+                },
+            ]),
+            max_tokens: 4096,
+            thinking: Some(ThinkingConfig::default()),
+            ..Default::default()
+        };
+        let api_request = build_anthropic_request(&request);
+        let blocks = match &api_request.messages[1].content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => panic!("expected Blocks for the assistant turn"),
+        };
+        match &blocks[0] {
+            ApiContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "step one");
+                assert_eq!(signature, "SigAbc123");
+            }
+            other => panic!("assistant turn must start with its thinking block, got {other:?}"),
+        }
+        assert!(
+            matches!(blocks[1], ApiContentBlock::ToolUse { .. }),
+            "the tool_use block must still follow it",
+        );
+    }
+
+    /// The mirror image: a thinking block with no signature — a pre-migration session, or one written by another provider's driver — cannot be replayed, because Anthropic will not accept an unsigned one.
+    /// It is dropped exactly as every thinking block used to be.
+    #[test]
+    fn an_unsigned_thinking_block_is_not_replayed() {
+        let api_request = build_anthropic_request(&assistant_turn_request(
+            "claude-opus-4-6",
+            ContentBlock::Thinking {
+                thinking: "unsigned reasoning".to_string(),
+                provider_metadata: None,
+            },
+        ));
+        let blocks = match &api_request.messages[0].content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => panic!("expected Blocks"),
+        };
+        assert_eq!(
+            blocks.len(),
+            1,
+            "the unsigned thinking block must be dropped"
+        );
+        assert!(matches!(blocks[0], ApiContentBlock::Text { .. }));
+    }
+
+    /// A signature is minted by one model and means nothing to another, so the block must not survive a change of model.
+    ///
+    /// This is not hypothetical: `FallbackChain::try_entry` clones the request and overwrites `model` from the chain entry while reusing the same `Arc<Vec<Message>>` history, so every failover leg replays turn N's blocks against a model that did not produce them.
+    /// Dropping the block here is what the receiving model would do with it anyway, minus the tokens — and minus whatever a third-party Messages-API endpoint would make of a signature it never issued.
+    #[test]
+    fn a_thinking_block_minted_by_another_model_is_not_replayed() {
+        let signed_by_opus = ContentBlock::Thinking {
+            thinking: "step one".to_string(),
+            provider_metadata: Some(
+                serde_json::json!({"signature": "SigAbc123", "model": "claude-opus-4-6"}),
+            ),
+        };
+
+        let same_model = build_anthropic_request(&assistant_turn_request(
+            "claude-opus-4-6",
+            signed_by_opus.clone(),
+        ));
+        let blocks = match &same_model.messages[0].content {
+            ApiContent::Blocks(b) => b,
+            ApiContent::Text(_) => panic!("expected Blocks"),
+        };
+        assert_eq!(
+            blocks.len(),
+            2,
+            "the model that minted the signature must still get its block back, got {blocks:?}",
+        );
+        assert!(matches!(blocks[0], ApiContentBlock::Thinking { .. }));
+
+        for other_model in ["claude-sonnet-4-6", "claude-opus-5", "kimi-for-coding"] {
+            let api_request = build_anthropic_request(&assistant_turn_request(
+                other_model,
+                signed_by_opus.clone(),
+            ));
+            let blocks = match &api_request.messages[0].content {
+                ApiContent::Blocks(b) => b,
+                ApiContent::Text(_) => panic!("expected Blocks"),
+            };
+            assert_eq!(
+                blocks.len(),
+                1,
+                "{other_model} did not mint this signature and must not be sent it, got {blocks:?}",
+            );
+            assert!(matches!(blocks[0], ApiContentBlock::Text { .. }));
+        }
+    }
+
+    /// Helper: one assistant turn carrying `block` followed by a plain text block, addressed to `model`.
+    ///
+    /// The trailing text block is what makes a dropped `block` visible: without it the message would convert to an empty payload and every assertion would read the same either way.
+    fn assistant_turn_request(model: &str, block: ContentBlock) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    block,
+                    ContentBlock::Text {
+                        text: "the answer".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            }]),
+            max_tokens: 4096,
+            ..Default::default()
+        }
+    }
+
+    /// A replayed thinking block cannot carry a `cache_control` marker — the signature covers the block as the model emitted it.
+    /// When it is the last block of a message the rolling window must skip that message without spending a breakpoint, the same as for an empty payload.
+    #[test]
+    fn a_trailing_thinking_block_does_not_consume_a_breakpoint() {
+        let mut msg = ApiMessage {
+            role: "assistant".to_string(),
+            content: ApiContent::Blocks(vec![ApiContentBlock::Thinking {
+                thinking: "step one".to_string(),
+                signature: "SigAbc123".to_string(),
+            }]),
+        };
+        assert!(
+            !try_stamp_block_with_marker(&mut msg, &CacheTtl::Short.to_marker()),
+            "a thinking block must not be marked, and must not burn the slot",
+        );
+        assert!(last_block_cache_control(&msg).is_none());
+    }
+
     /// Helper: extract the cache_control marker from a message's last block,
     /// or `None` if the message is in plain-string form (no marker possible).
     fn last_block_cache_control(msg: &ApiMessage) -> Option<&serde_json::Value> {
@@ -1941,6 +2484,7 @@ mod tests {
             | ApiContentBlock::Image { cache_control, .. }
             | ApiContentBlock::ToolUse { cache_control, .. }
             | ApiContentBlock::ToolResult { cache_control, .. } => cache_control.as_ref(),
+            ApiContentBlock::Thinking { .. } => None,
         }
     }
 
@@ -2405,13 +2949,17 @@ mod tests {
         for msg in &api_request.messages {
             if let ApiContent::Blocks(blocks) = &msg.content {
                 for block in blocks {
-                    let cc = match block {
+                    let marked = match block {
                         ApiContentBlock::Text { cache_control, .. }
                         | ApiContentBlock::Image { cache_control, .. }
                         | ApiContentBlock::ToolUse { cache_control, .. }
-                        | ApiContentBlock::ToolResult { cache_control, .. } => cache_control,
+                        | ApiContentBlock::ToolResult { cache_control, .. } => {
+                            cache_control.is_some()
+                        }
+                        // A thinking block has no field to mark.
+                        ApiContentBlock::Thinking { .. } => false,
                     };
-                    if cc.is_some() {
+                    if marked {
                         total += 1;
                     }
                 }

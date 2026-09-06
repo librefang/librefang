@@ -5,6 +5,7 @@
 //! Together, Mistral, Fireworks, Ollama, vLLM, Alibaba Coding Plan, and any
 //! OpenAI-compatible endpoint.
 pub mod anthropic;
+pub(crate) mod anthropic_models;
 pub mod bedrock;
 pub mod chatgpt;
 pub mod claude_code;

@@ -110,7 +110,20 @@ Top-level form only:
 |---|---|
 | Kimi / Moonshot (`ReasoningEchoPolicy::EmptyString`) | `"thinking": {"type": "disabled"}` regardless of mode. Thinking is disabled wire-side so multi-turn `tool_calls` work without round-tripping `reasoning_content` — a correctness requirement, not a preference. |
 | DeepSeek R1 (`ReasoningEchoPolicy::Strip`) | Nothing sent, in **either** dialect — the `Strip` check short-circuits ahead of the OpenRouter branch, so an R1 route through OpenRouter is not handed a budget-derived `reasoning.effort` it never received before #7946. R1 reasons unconditionally and exposes no wire toggle, so the field would change the payload without changing the model. Pinned by `deepseek_r1_gets_no_reasoning_control_in_either_dialect`. |
-| Anthropic, Gemini, Ollama drivers | Continue to read `budget_tokens` for the graded rungs. Their wire control *is* a token budget rather than an effort enum, and remapping an existing Claude user's configured budget into a four-rung bucket would silently change what they are already paying for. `none` is the one rung they *do* honour, because it has to be: `apply_thinking_override` has to materialise a `ThinkingConfig` to carry the mode, and a bare `budget_tokens` read of that config would enable extended thinking (Anthropic) or `think: true` (Ollama) for a turn that asked for the opposite — and bill it. Both drivers therefore treat `reasoning_mode = "none"` as off, pinned by `reasoning_mode_none_does_not_enable_extended_thinking` and `build_request_think_field_false_for_reasoning_mode_none`. Gemini does not read `request.thinking` at all. |
+| Gemini, Ollama drivers | Continue to read `budget_tokens` for the graded rungs. Their wire control *is* a token budget rather than an effort enum, and remapping a configured budget into a four-rung bucket would silently change what the operator is already paying for. `none` is the one rung they *do* honour, because it has to be: `apply_thinking_override` has to materialise a `ThinkingConfig` to carry the mode, and a bare `budget_tokens` read of that config would enable `think: true` (Ollama) for a turn that asked for the opposite — and bill it. Pinned by `build_request_think_field_false_for_reasoning_mode_none`. Gemini does not read `request.thinking` at all. |
+| Anthropic driver, budgeted generation (Haiku 4.5 and older Claude models, and the non-Claude ids on Anthropic-compatible endpoints) | Same as the row above: `budget_tokens` goes on the wire as-is, no rung is derived from it, and `none` is honoured as off. Pinned by `reasoning_mode_none_does_not_enable_extended_thinking`. |
+
+### The Anthropic driver's adaptive generation
+
+Opus 4.6 and newer no longer have a token budget to send: `thinking.budget_tokens` was deprecated on the 4.6 pair and answers 400 from Opus 4.7 onwards, and the depth control that replaced it is `output_config.effort`.
+So on that generation the mode is the *only* thing that names a rung — `low` → `low`, `high` → `high`, `max` → `max` — and `none` is still off, spelled `thinking: {"type": "disabled"}` on the ids that both reason unasked and accept that spelling and by omission everywhere else.
+
+With no mode set, the driver sends **no** `output_config` at all rather than bucketing `budget_tokens` into one.
+That keeps this table's original promise on the only wire where it can still be kept: `effort` defaults to `high` when the field is absent, and `reasoning_effort_for_budget` would map the compiled-in default budget of 10_000 to `medium`, so bucketing would make every agent that configured nothing reason *less* than an unconfigured request does — the same silent change of what the operator is paying for that the budget-bucket exemption existed to prevent.
+A budget keeps the one job it can still do on this wire: below 1024 it means do not reason at all, the same convention `reasoning_effort_for_budget` applies everywhere else.
+Pinned by `only_an_explicit_mode_pins_an_effort_rung` and `thinking_is_turned_off_explicitly_only_where_that_is_both_needed_and_accepted` in `crates/librefang-llm-drivers/src/drivers/anthropic.rs`.
+
+Which generation a model id belongs to is decided in one place, `crates/librefang-llm-drivers/src/drivers/anthropic_models.rs`.
 
 ## Interaction with the #7769 negative cache
 
