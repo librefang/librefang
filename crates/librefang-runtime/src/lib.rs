@@ -73,6 +73,7 @@ pub use librefang_runtime_media::media_understanding;
 pub mod media_understanding;
 pub mod model_catalog;
 pub mod model_metadata;
+pub(crate) mod network_meter;
 pub mod parallel_dispatch;
 pub mod pdf_text;
 pub mod pii_filter;

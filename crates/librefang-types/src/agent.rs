@@ -723,7 +723,11 @@ pub struct ResourceQuota {
     /// Clamped to `0.01..=1.0` at enforcement time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burst_ratio: Option<f32>,
-    /// Maximum network bytes per hour.
+    /// Maximum bytes the agent may pull in over the network per rolling hour. `0` = unlimited, matching `max_tool_calls_per_minute`.
+    ///
+    /// Charged against the response bodies the agent's own outbound tools read: `web_fetch`, `web_fetch_to_file`, the WASM `net_fetch` host call, and MCP tool results.
+    /// Once the rolling hour sits at or above the cap the agent's next `web_fetch` / `web_fetch_to_file` / `web_search` / MCP call is refused; a transfer already in flight finishes and is counted.
+    /// Headless-browser navigation and search-provider JSON responses are outside the meter — `docs/architecture/network-byte-quota.md` enumerates exactly what is counted and what is not.
     pub max_network_bytes_per_hour: u64,
     /// Maximum cost in USD per hour.
     pub max_cost_per_hour_usd: f64,

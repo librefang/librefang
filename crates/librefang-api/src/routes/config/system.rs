@@ -754,6 +754,8 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str("# TYPE librefang_tool_calls gauge\n");
     out.push_str("# HELP librefang_llm_calls LLM API calls made (rolling 1h window).\n");
     out.push_str("# TYPE librefang_llm_calls gauge\n");
+    out.push_str("# HELP librefang_network_bytes Bytes read from the network by the agent's metered tools (rolling 1h window), the spend `[resources] max_network_bytes_per_hour` is charged against.\n");
+    out.push_str("# TYPE librefang_network_bytes gauge\n");
     for agent in &agents {
         if let Some(snap) = state.kernel.scheduler_ref().get_usage(agent.id) {
             let name = escape_prometheus_label_value(&agent.name);
@@ -779,6 +781,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
             out.push_str(&format!(
                 "librefang_llm_calls{{{labels}}} {}\n",
                 snap.llm_calls
+            ));
+            out.push_str(&format!(
+                "librefang_network_bytes{{{labels}}} {}\n",
+                snap.network_bytes
             ));
         }
     }

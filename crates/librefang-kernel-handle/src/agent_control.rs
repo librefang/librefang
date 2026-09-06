@@ -300,4 +300,21 @@ pub trait AgentControl: Send + Sync {
     fn max_agent_call_depth(&self) -> u32 {
         5
     }
+
+    /// Whether the agent may start another metered network transfer, per `agent.toml: [resources] max_network_bytes_per_hour`.
+    ///
+    /// Asked by the runtime's tool dispatcher before it runs an egress tool (`web_fetch`, `web_fetch_to_file`, `web_search`, any MCP tool), so a cap that has already been spent refuses the call instead of being discovered a gigabyte later.
+    /// `Err(QuotaExceeded)` is the refusal; the dispatcher renders it back to the model as a denied tool result.
+    ///
+    /// Default: `Ok(())`. A stub with no scheduler has no byte accounting to answer from, and inventing a refusal would be worse than admitting there is no cap.
+    fn check_network_quota(&self, _agent_id: &str) -> Result<(), KernelOpError> {
+        Ok(())
+    }
+
+    /// Report bytes an agent's outbound tools pulled off the wire during one tool call.
+    ///
+    /// Post-charge, mirroring [`Self::check_network_quota`]'s pre-check: the transfer has already completed, and what the report buys is the refusal of the next one once the rolling hour crosses the cap.
+    ///
+    /// Default: no-op, so stubs and mocks that keep no usage state need no impl.
+    fn record_network_bytes(&self, _agent_id: &str, _bytes: u64) {}
 }

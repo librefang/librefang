@@ -133,18 +133,6 @@ pub struct ToolExecContext<'a> {
     pub acting_principal: Option<librefang_types::principal::Principal>,
 }
 
-/// Execute a tool without running the approval / capability / taint gate.
-///
-/// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls
-/// the right implementation.  All pre-flight checks (capability enforcement,
-/// approval gate, taint checks, truncated-args detection) live in the outer
-/// [`execute_tool`] wrapper; this function only handles the match.
-//
-// The `#[allow(unused_variables)]` is for `--no-default-features` builds
-// where the media / browser / docker-sandbox tool arms are cfg-gated out
-// and the destructured `media_engine`, `media_drivers`, `browser_ctx`,
-// `tts_engine`, `docker_config` bindings have no consumer. Re-flagging
-// them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
 /// Build a [`ToolResult`] from a `ToolError`-native tool's result, mapping the
 /// error through [`ToolError::execution_status`] so an ACL `PermissionDenied`
 /// carries `ToolExecutionStatus::Denied` (a *soft* error — reported to the
@@ -168,8 +156,70 @@ fn tool_result_from_typed(tool_use_id: &str, result: TypedToolResult) -> ToolRes
     }
 }
 
-#[allow(unused_variables)]
+/// Whether a tool's whole purpose is to pull bytes in from outside the host.
+///
+/// This is the set the `agent.toml: [resources] max_network_bytes_per_hour` cap *refuses* once it is spent, and it is deliberately narrower than the set of tools that *report* bytes into the meter.
+/// A WASM skill whose guest calls `net_fetch` has an arbitrary tool name and no way to be recognised here, so its transfers count toward the cap and push the agent over it, but the refusal lands on the next egress tool rather than on the skill.
+/// Headless-browser tools are in neither set: the browser fetches subresources on its own and the runtime never sees a byte count it could honestly report.
+fn is_network_egress_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "web_fetch" | "web_fetch_to_file" | "web_search")
+        || mcp::is_mcp_tool(tool_name)
+}
+
+/// Execute a tool, enforcing and metering the agent's rolling-hour network byte quota around the dispatch.
+///
+/// This wrapper is the single chokepoint for `max_network_bytes_per_hour`, and it sits on `execute_tool_raw` rather than on the outer [`execute_tool`] gate on purpose: the deferred-approval resume path (`Kernel::build_deferred_tool_exec_context`) re-enters dispatch here, so a `web_fetch` that a human approved an hour later would otherwise be neither counted nor capped.
+///
+/// The pre-check refuses an egress tool whose agent has already spent the cap; the `crate::network_meter` scope collects what the dispatched tool actually read off the wire and reports it to the kernel afterwards, so the cap is charged even when the tool ultimately failed.
+/// Both halves need a kernel handle *and* an attributed caller: without either there is no quota to consult and no agent to charge, which is the case for the MCP HTTP bridge and for most tests.
 pub async fn execute_tool_raw(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    ctx: &ToolExecContext<'_>,
+) -> ToolResult {
+    // `dispatch_tool_call` is an enormous future — the whole builtin dispatch table — so it is awaited from exactly one place here.
+    // Branching to a second `dispatch_tool_call(...).await` for the unattributed case would stamp a second copy of that state machine into this function's future.
+    let charge_to = match (ctx.kernel, ctx.caller_agent_id) {
+        (Some(kernel), Some(agent_id)) => Some((kernel, agent_id)),
+        _ => None,
+    };
+
+    if let Some((kernel, agent_id)) = charge_to {
+        if is_network_egress_tool(normalize_tool_name(tool_name)) {
+            if let Err(e) = kernel.check_network_quota(agent_id) {
+                warn!(tool_name, agent_id, error = %e, "Network byte quota spent — refusing egress tool");
+                // The soft `Denied` status, not the default hard `Error`: a spent byte cap is a policy refusal the agent can work around, so it must not count toward the consecutive-hard-failure abort that would tear the turn down.
+                return ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: format!("Execution denied: {e}"),
+                    status: librefang_types::tool::ToolExecutionStatus::Denied,
+                    is_error: true,
+                    ..Default::default()
+                };
+            }
+        }
+    }
+
+    let (result, bytes) =
+        crate::network_meter::measure(dispatch_tool_call(tool_use_id, tool_name, input, ctx)).await;
+    if let Some((kernel, agent_id)) = charge_to {
+        if bytes > 0 {
+            kernel.record_network_bytes(agent_id, bytes);
+        }
+    }
+    result
+}
+
+/// Dispatch a tool without running the approval / capability / taint gate or the network byte quota.
+///
+/// This is the pure dispatch layer: it pattern-matches on `tool_name` and calls the right implementation.
+/// All pre-flight checks (capability enforcement, approval gate, taint checks, truncated-args detection) live in the outer [`execute_tool`] wrapper, and the network byte quota lives in [`execute_tool_raw`]; this function only handles the match.
+//
+// The `#[allow(unused_variables)]` is for `--no-default-features` builds where the media / browser / docker-sandbox tool arms are cfg-gated out and the destructured `media_engine`, `media_drivers`, `browser_ctx`, `tts_engine`, `docker_config` bindings have no consumer.
+// Re-flagging them per-feature would be 5 nested `cfg_attr` blocks; this is cleaner.
+#[allow(unused_variables)]
+async fn dispatch_tool_call(
     tool_use_id: &str,
     tool_name: &str,
     input: &serde_json::Value,
@@ -1458,7 +1508,11 @@ pub async fn execute_tool_raw(
                                 .await;
                             conn.report_call_outcome(result.as_ref().map(|_| ()));
                             match result {
-                                Ok(content) => Ok(content),
+                                Ok(content) => {
+                                    // An MCP server answers over stdio or HTTP and the transport does not expose a wire byte count, so the response payload the agent receives is the honest measure of what this call pulled in.
+                                    crate::network_meter::record(content.len() as u64);
+                                    Ok(content)
+                                }
                                 Err(e) => Err(ToolError::upstream_msg(format!(
                                     "MCP tool call failed: {e}"
                                 ))),

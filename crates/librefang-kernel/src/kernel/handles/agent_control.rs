@@ -527,6 +527,20 @@ impl kernel_handle::AgentControl for LibreFangKernel {
             }),
         );
     }
+
+    fn check_network_quota(&self, agent_id: &str) -> Result<(), kernel_handle::KernelOpError> {
+        // An id the kernel cannot parse belongs to no registered agent, so there is no quota to answer from and no transfer to attribute — the same silent fallthrough `touch_heartbeat` uses.
+        let Ok(id) = agent_id.parse::<AgentId>() else {
+            return Ok(());
+        };
+        self.agents.scheduler.check_network_quota(id)
+    }
+
+    fn record_network_bytes(&self, agent_id: &str, bytes: u64) {
+        if let Ok(id) = agent_id.parse::<AgentId>() {
+            self.agents.scheduler.record_network_bytes(id, bytes);
+        }
+    }
 }
 
 #[cfg(test)]

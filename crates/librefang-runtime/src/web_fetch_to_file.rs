@@ -125,6 +125,8 @@ pub async fn tool_web_fetch_to_file(
     loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
+                // Reported before the cap test for the same reason as `web_fetch`: the bytes are already spent when we decide to throw them away.
+                crate::network_meter::record(chunk.len() as u64);
                 if buf.len() as u64 + chunk.len() as u64 > cap {
                     return Err(format!(
                         "Response exceeded cap of {cap} bytes (server omitted or misreported Content-Length)"

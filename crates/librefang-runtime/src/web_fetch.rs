@@ -240,6 +240,8 @@ impl WebFetchEngine {
         loop {
             match resp.chunk().await {
                 Ok(Some(chunk)) => {
+                    // Report before the cap test: the chunk crossed the wire whether or not we keep it, and an agent that repeatedly starts oversized downloads is exactly the traffic `max_network_bytes_per_hour` exists to bound.
+                    crate::network_meter::record(chunk.len() as u64);
                     if body_bytes.len() as u64 + chunk.len() as u64 > cap {
                         return Err(format!(
                             "Response too large: exceeds max {} bytes (server omitted or misreported Content-Length)",

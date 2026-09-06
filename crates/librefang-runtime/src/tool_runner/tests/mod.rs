@@ -879,6 +879,10 @@ struct DispatchCapture {
     /// When set, `run_workflow` answers with the nesting-depth refusal the kernel raises past `max_agent_call_depth` (refs #6659) instead of the trait's default "workflow engine unavailable".
     /// Lets a test drive `tool_workflow_run`'s error mapping without a real kernel.
     deny_workflow_run: bool,
+    /// When set, `check_network_quota` answers with the scheduler's spent-cap refusal so a test can drive the dispatcher's egress gate without a real kernel.
+    network_quota_spent: bool,
+    /// Byte totals the dispatcher reported through `record_network_bytes`, in call order.
+    network_bytes: std::sync::Mutex<Vec<u64>>,
 }
 
 #[async_trait::async_trait]
@@ -976,6 +980,23 @@ impl AgentControl for DispatchCapture {
 
     fn max_agent_call_depth(&self) -> u32 {
         10
+    }
+
+    fn check_network_quota(
+        &self,
+        _agent_id: &str,
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+        if self.network_quota_spent {
+            // Verbatim shape of `AgentScheduler::network_quota_gate`'s refusal.
+            return Err(librefang_kernel_handle::KernelOpError::QuotaExceeded(
+                "Network byte limit exceeded: 2048 / 1024 bytes per hour".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_network_bytes(&self, _agent_id: &str, bytes: u64) {
+        self.network_bytes.lock().unwrap().push(bytes);
     }
 }
 
@@ -2474,6 +2495,262 @@ impl AcpFsBridge for ForceHumanCapturingKernel {}
 impl AcpTerminalBridge for ForceHumanCapturingKernel {}
 
 // ---- END role-trait impls (#3746) ----
+
+// ── Network byte quota (`agent.toml: [resources] max_network_bytes_per_hour`) ──
+//
+// The cap is enforced in `execute_tool_raw`, which asks the kernel handle before running an egress tool and reports what the tool read afterwards.
+// Both halves are exercised here through the real dispatcher, with `DispatchCapture` standing in for the kernel's scheduler.
+
+/// A spent hourly byte cap must refuse the egress tool before it dials, and the refusal must be soft (`Denied`) so a capped agent is not torn down by the consecutive-hard-failure abort.
+/// Before the quota was enforced the dispatcher never consulted the kernel at all, so this call reached `tool_web_fetch_legacy` and came back with the SSRF rejection of a loopback URL instead.
+#[tokio::test]
+async fn spent_network_byte_quota_refuses_web_fetch_before_it_dials() {
+    let cap = Arc::new(DispatchCapture {
+        network_quota_spent: true,
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+
+    let result = execute_tool(
+        "t1",
+        "web_fetch",
+        &serde_json::json!({ "url": "http://127.0.0.1:9/never-dialled" }),
+        Some(&kernel),
+        None,            // allowed_tools
+        Some("agent-1"), // caller_agent_id
+        None,            // skill_registry
+        None,            // allowed_skills
+        None,            // mcp_connections
+        None,            // web_ctx
+        None,            // browser_ctx
+        None,            // allowed_env_vars
+        None,            // workspace_root
+        None,            // media_engine
+        None,            // media_drivers
+        None,            // exec_policy
+        None,            // tts_engine
+        None,            // docker_config
+        None,            // process_manager
+        None,            // process_registry
+        None,            // sender_id
+        None,            // channel
+        None,            // chat_id
+        None,            // checkpoint_manager
+        None,            // interrupt
+        None,            // session_id
+        None,            // dangerous_command_checker
+        None,            // available_tools
+        0,               // spill_threshold_bytes
+        0,               // max_artifact_bytes
+    )
+    .await;
+
+    assert!(
+        result.is_error,
+        "a spent cap must refuse the call: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Network byte limit exceeded"),
+        "the model must be told which quota refused it: {}",
+        result.content
+    );
+    assert_eq!(
+        result.status,
+        librefang_types::tool::ToolExecutionStatus::Denied,
+        "a quota refusal is a soft denial, not a hard tool failure"
+    );
+    assert!(
+        cap.network_bytes.lock().unwrap().is_empty(),
+        "a call that never ran must not be charged any bytes"
+    );
+}
+
+/// A non-egress tool is unaffected by a spent cap: the quota bounds bandwidth, not the agent.
+/// This is the assertion that keeps the gate from degenerating into "stop the agent once it has downloaded too much".
+#[tokio::test]
+async fn spent_network_byte_quota_leaves_non_egress_tools_alone() {
+    let cap = Arc::new(DispatchCapture {
+        network_quota_spent: true,
+        ..Default::default()
+    });
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+
+    let result = execute_tool(
+        "t1",
+        "system_time",
+        &serde_json::json!({}),
+        Some(&kernel),
+        None,            // allowed_tools
+        Some("agent-1"), // caller_agent_id
+        None,            // skill_registry
+        None,            // allowed_skills
+        None,            // mcp_connections
+        None,            // web_ctx
+        None,            // browser_ctx
+        None,            // allowed_env_vars
+        None,            // workspace_root
+        None,            // media_engine
+        None,            // media_drivers
+        None,            // exec_policy
+        None,            // tts_engine
+        None,            // docker_config
+        None,            // process_manager
+        None,            // process_registry
+        None,            // sender_id
+        None,            // channel
+        None,            // chat_id
+        None,            // checkpoint_manager
+        None,            // interrupt
+        None,            // session_id
+        None,            // dangerous_command_checker
+        None,            // available_tools
+        0,               // spill_threshold_bytes
+        0,               // max_artifact_bytes
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "a spent network cap must not block a local tool: {}",
+        result.content
+    );
+}
+
+/// The dispatcher must charge the agent what the fetch actually read off the wire.
+/// `web_fetch` wraps its body in external-content markers and an `HTTP {status}` line before returning it, so the rendered tool result is a different size than the response — measuring the result string would report the wrong number, and before the meter existed nothing was reported at all.
+#[tokio::test]
+async fn web_fetch_charges_the_agent_for_the_bytes_it_actually_read() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let body = vec![b'x'; 4096];
+    Mock::given(method("GET"))
+        .and(path("/payload.txt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/plain")
+                .set_body_bytes(body),
+        )
+        .mount(&server)
+        .await;
+
+    let cache = Arc::new(crate::web_cache::WebCache::new(
+        std::time::Duration::from_secs(60),
+    ));
+    let web_ctx = crate::web_search::WebToolsContext {
+        search: crate::web_search::WebSearchEngine::new(
+            librefang_types::config::WebConfig::default(),
+            cache.clone(),
+            vec![],
+        ),
+        fetch: crate::web_fetch::WebFetchEngine::new(
+            librefang_types::config::WebFetchConfig {
+                // wiremock binds loopback, which the SSRF guard blocks by default.
+                ssrf_allowed_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            cache,
+        ),
+    };
+
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+    let url = format!("{}/payload.txt", server.uri());
+
+    let result = execute_tool(
+        "t1",
+        "web_fetch",
+        &serde_json::json!({ "url": url }),
+        Some(&kernel),
+        None,            // allowed_tools
+        Some("agent-1"), // caller_agent_id
+        None,            // skill_registry
+        None,            // allowed_skills
+        None,            // mcp_connections
+        Some(&web_ctx),  // web_ctx
+        None,            // browser_ctx
+        None,            // allowed_env_vars
+        None,            // workspace_root
+        None,            // media_engine
+        None,            // media_drivers
+        None,            // exec_policy
+        None,            // tts_engine
+        None,            // docker_config
+        None,            // process_manager
+        None,            // process_registry
+        None,            // sender_id
+        None,            // channel
+        None,            // chat_id
+        None,            // checkpoint_manager
+        None,            // interrupt
+        None,            // session_id
+        None,            // dangerous_command_checker
+        None,            // available_tools
+        0,               // spill_threshold_bytes
+        0,               // max_artifact_bytes
+    )
+    .await;
+
+    assert!(
+        !result.is_error,
+        "the fetch should succeed: {}",
+        result.content
+    );
+    let reported: u64 = cap.network_bytes.lock().unwrap().iter().sum();
+    assert_eq!(
+        reported, 4096,
+        "the meter must charge the response body the fetch read, not the rendered tool result"
+    );
+}
+
+/// A tool call that moves no bytes must not reach the kernel at all — the reporting path is on every dispatch, so a spurious zero-byte report per tool call would be pure noise on an operator's usage counters.
+#[tokio::test]
+async fn a_tool_that_moves_no_bytes_reports_nothing() {
+    let cap = Arc::new(DispatchCapture::default());
+    let kernel: Arc<dyn KernelHandle> = cap.clone();
+
+    let result = execute_tool(
+        "t1",
+        "system_time",
+        &serde_json::json!({}),
+        Some(&kernel),
+        None,            // allowed_tools
+        Some("agent-1"), // caller_agent_id
+        None,            // skill_registry
+        None,            // allowed_skills
+        None,            // mcp_connections
+        None,            // web_ctx
+        None,            // browser_ctx
+        None,            // allowed_env_vars
+        None,            // workspace_root
+        None,            // media_engine
+        None,            // media_drivers
+        None,            // exec_policy
+        None,            // tts_engine
+        None,            // docker_config
+        None,            // process_manager
+        None,            // process_registry
+        None,            // sender_id
+        None,            // channel
+        None,            // chat_id
+        None,            // checkpoint_manager
+        None,            // interrupt
+        None,            // session_id
+        None,            // dangerous_command_checker
+        None,            // available_tools
+        0,               // spill_threshold_bytes
+        0,               // max_artifact_bytes
+    )
+    .await;
+
+    assert!(!result.is_error, "{}", result.content);
+    assert!(
+        cap.network_bytes.lock().unwrap().is_empty(),
+        "no bytes moved, so nothing should have been reported"
+    );
+}
 
 mod policy;
 mod shell;

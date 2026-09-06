@@ -1995,6 +1995,59 @@ async fn metrics_escapes_untrusted_label_values() {
     }
 }
 
+/// The byte spend `[resources] max_network_bytes_per_hour` is charged against has to be visible on `/api/metrics`, or an operator whose agent is suddenly refused a `web_fetch` has no way to see why.
+/// Before the quota was enforced the scheduler kept no network byte counter at all, so there was nothing for this gauge to report and the line did not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_exposes_the_network_byte_spend_behind_the_hourly_cap() {
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    let id = AgentId::new();
+    let mut manifest = AgentManifest {
+        name: "net-metered".to_string(),
+        source_template: None,
+        description: "network byte gauge".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    manifest.model.provider = "groq".to_string();
+    manifest.model.model = "llama-3.3-70b-versatile".to_string();
+    let resources = manifest.resources.clone();
+    let entry = AgentEntry {
+        id,
+        name: "net-metered".to_string(),
+        manifest,
+        state: AgentState::Running,
+        mode: AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        session_id: SessionId::new(),
+        ..Default::default()
+    };
+    h.state.kernel.agent_registry().register(entry).unwrap();
+    h.state.kernel.scheduler_ref().register(id, resources);
+    h.state
+        .kernel
+        .scheduler_ref()
+        .record_network_bytes(id, 4096);
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = String::from_utf8(body).expect("metrics response is UTF-8");
+
+    assert!(
+        body.contains("# TYPE librefang_network_bytes gauge"),
+        "the gauge must be declared: {body}"
+    );
+    assert!(
+        body.lines().any(|line| {
+            line.starts_with("librefang_network_bytes{agent=\"net-metered\"")
+                && line.ends_with(" 4096")
+        }),
+        "the agent's reported network spend must reach /api/metrics: {body}"
+    );
+}
+
 /// #8085: the SCRUB list governed only the path being assigned, so a wholesale
 /// table write smuggled a credential-shaped field past it.
 ///

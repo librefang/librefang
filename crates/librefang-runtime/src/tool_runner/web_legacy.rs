@@ -65,6 +65,8 @@ async fn read_body_limited(resp: reqwest::Response) -> ToolResult {
     use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| fetch_err("Failed to read response chunk", e))?;
+        // Charge the agent's rolling-hour network quota with what actually arrived, including the chunk that trips the 10 MB cap below.
+        crate::network_meter::record(chunk.len() as u64);
         total += chunk.len();
         if total > MAX_BODY_BYTES {
             return Err(ToolError::upstream_msg(format!(

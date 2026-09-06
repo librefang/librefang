@@ -486,7 +486,11 @@ async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> Resu
     let mut buf: Vec<u8> = Vec::new();
     loop {
         match resp.chunk().await {
-            Ok(Some(chunk)) => append_capped(&mut buf, &chunk, max_bytes)?,
+            Ok(Some(chunk)) => {
+                // A WASM guest's fetch is still the host agent's egress, so it lands on the same rolling-hour meter as `web_fetch` (`crate::network_meter`).
+                crate::network_meter::record(chunk.len() as u64);
+                append_capped(&mut buf, &chunk, max_bytes)?
+            }
             Ok(None) => break,
             Err(e) => return Err(format!("Failed to read response: {e}")),
         }
@@ -526,8 +530,11 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
     // block_on inside spawn_blocking creates a nested runtime and bypasses the
     // epoch watchdog, allowing a WASM guest to stall the host indefinitely.
     let handle = state.tokio_handle.clone();
+    // The guest is running on a blocking-pool thread, so the byte meter `tool_runner::dispatch` installed as a tokio task-local is invisible here and `read_body_capped`'s reports below would be dropped.
+    // `WasmSandbox::execute` carried a handle to that counter into `GuestState`; it goes back into the task-local around the fetch so a guest's egress is charged to the tool call that started it.
+    let network_meter = state.network_meter.clone();
     tokio::task::block_in_place(|| {
-        handle.block_on(async {
+        let fetch = async {
             // SECURITY: follow redirects MANUALLY, re-running the SSRF check,
             // the capability gate, and the DNS pin on EVERY hop. Auto-redirects
             // (reqwest's default 10) would re-resolve a 3xx `Location` host
@@ -619,7 +626,11 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
                 current_url = next.to_string();
             }
             json!({"error": format!("SSRF blocked: too many redirects (cap: {MAX_REDIRECTS})")})
-        })
+        };
+        match network_meter {
+            Some(counter) => handle.block_on(crate::network_meter::scoped(counter, fetch)),
+            None => handle.block_on(fetch),
+        }
     })
 }
 
@@ -1093,6 +1104,36 @@ mod tests {
         let mut fresh: Vec<u8> = Vec::new();
         assert!(append_capped(&mut fresh, &vec![0u8; max + 1], max).is_err());
         assert!(fresh.is_empty());
+    }
+
+    /// Every chunk `read_body_capped` pulls off the wire is the host agent's egress and must land on the tool call's byte meter, so a WASM skill cannot transfer outside `[resources] max_network_bytes_per_hour`.
+    /// The reader is exercised directly rather than through `host_net_fetch`, because the SSRF gate that sits above it (`is_ssrf_target`) refuses loopback by design and no mock server can be reached through it.
+    #[tokio::test]
+    async fn read_body_capped_reports_every_chunk_to_the_network_meter() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(4096)))
+            .mount(&server)
+            .await;
+
+        let (text, bytes) = crate::network_meter::measure(async {
+            let resp = reqwest::get(server.uri())
+                .await
+                .expect("mock server answers");
+            read_body_capped(resp, 1024 * 1024)
+                .await
+                .expect("4096 bytes is under the cap")
+        })
+        .await;
+
+        assert_eq!(text.len(), 4096, "the whole body must still be returned");
+        assert_eq!(
+            bytes, 4096,
+            "the meter must be charged exactly what came off the wire"
+        );
     }
 
     #[test]
