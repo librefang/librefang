@@ -2905,35 +2905,15 @@ impl LibreFangKernel {
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
-        // Acquire the same session/agent lock as the non-streaming path so concurrent
-        // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
-        // `agent_scoped` tracks whether we are taking the per-agent lock (vs. a
-        // per-session lock for session_id_override callers): only the agent-scoped
-        // branch needs the task-local `held_agent_locks` registration so the
-        // re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126) tool
-        // paths can observe this streaming turn's holding of agent_msg_locks
-        // and skip / reject as appropriate. Mirrors the non-streaming site at
-        // `send_message_full_inner` (~L871-906).
-        // Collapse an override that targets the agent's canonical session onto
-        // the per-agent lock, exactly as the non-streaming
-        // `send_message_full_inner` site does: an override equal to
-        // `entry.session_id` writes the SAME session the no-override persistent
-        // path writes, so taking the per-session lock here while that path
-        // takes the per-agent lock would let the two write one session under
-        // two mutexes concurrently (lost update). `effective_session_id`
-        // already resolves to the canonical id in that case, so only the lock
-        // namespace changes; a no-override channel dispatch keeps the per-agent
-        // lock (narrow fix — the channel-derived variant is unchanged here).
+        // Acquire the same session/agent lock as the non-streaming path so concurrent turns are serialized.
+        // Clone the Arc here (sync fn); lock inside the spawn.
+        // `agent_scoped` tracks whether we are taking the per-agent lock (vs. a per-session lock for session_id_override callers); whichever branch is taken, the lock is registered in the matching task-local `held_agent_locks` set inside the spawn so the re-entrant `agent_send` (#5125) / `channel_send` mirror (#5126) tool paths and the in-turn auto-compaction can observe this streaming turn's holding of it and skip / reject as appropriate.
+        // Mirrors the non-streaming site at `send_message_full_inner` (~L871-906).
+        // Collapse an override that targets the agent's canonical session onto the per-agent lock, exactly as the non-streaming `send_message_full_inner` site does: an override equal to `entry.session_id` writes the SAME session the no-override persistent path writes, so taking the per-session lock here while that path takes the per-agent lock would let the two write one session under two mutexes concurrently (lost update).
+        // `effective_session_id` already resolves to the canonical id in that case, so only the lock namespace changes; a no-override channel dispatch keeps the per-agent lock (narrow fix — the channel-derived variant is unchanged here).
         //
-        // Re-read the canonical id FRESH here rather than reusing the `entry`
-        // snapshot captured ~760 lines above (line ~2065): `entry.session_id`
-        // is mutable via `switch_agent_session` (#4291), and this non-async fn
-        // does substantial preemptible synchronous work (catalog/budget/quota,
-        // session-mode resolution) between that fetch and this decision, so a
-        // concurrent rotation could leave the snapshot stale and mis-select the
-        // lock namespace — reintroducing the very race this fix closes. Mirrors
-        // the non-streaming `send_message_full_inner` site, and the fork branch
-        // above which reads the parent session id from `loop_opts`, not `entry`.
+        // Re-read the canonical id FRESH here rather than reusing the `entry` snapshot captured ~760 lines above (line ~2065): `entry.session_id` is mutable via `switch_agent_session` (#4291), and this non-async fn does substantial preemptible synchronous work (catalog/budget/quota, session-mode resolution) between that fetch and this decision, so a concurrent rotation could leave the snapshot stale and mis-select the lock namespace — reintroducing the very race this fix closes.
+        // Mirrors the non-streaming `send_message_full_inner` site, and the fork branch above which reads the parent session id from `loop_opts`, not `entry`.
         let canonical_session_id = self.agents.registry.get(agent_id).map(|e| e.session_id);
         let session_scoped_lock =
             matches!(session_id_override, Some(sid) if Some(sid) != canonical_session_id);
@@ -2979,18 +2959,24 @@ impl LibreFangKernel {
             // prevents concurrent streaming + non-streaming writes from
             // producing last-write-wins data loss on session history.
             let _session_guard = session_lock.lock().await;
-            // Record that this task now holds `agent_msg_locks[agent_id]` so the
-            // re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126)
-            // tool paths — which run inside `run_agent_loop_streaming` below on
-            // this same task — can detect the self-re-entry instead of
-            // deadlocking on the non-reentrant `tokio::sync::Mutex`. Only the
-            // agent-scoped lock is tracked: the session-scoped
-            // (`session_id_override`) lock is a different key space those two
-            // paths never re-acquire. Mirrors the non-streaming site at
-            // `send_message_full_inner` (~L890-906); declared *after*
-            // `_session_guard` so drop order is registry-then-mutex.
+            // Record that this task now holds `agent_msg_locks[agent_id]` so the re-entrant `agent_send` (#5125) and `channel_send`-mirror (#5126) tool paths — which run inside `run_agent_loop_streaming` below on this same task — can detect the self-re-entry instead of deadlocking on the non-reentrant `tokio::sync::Mutex`.
+            // The session-scoped lock gets its own registration below rather than being tracked under `agent_id`, which would risk a false-positive rejection.
+            // Mirrors the non-streaming site at `send_message_full_inner` (~L890-906); declared *after* `_session_guard` so drop order is registry-then-mutex.
             let _held_guard = if agent_scoped {
                 Some(librefang_runtime::held_agent_locks::HeldLockGuard::register(agent_id))
+            } else {
+                None
+            };
+            // Session-scoped sibling of `_held_guard`, mirroring the second registration at `send_message_full_inner`.
+            // This is not optional bookkeeping on the streaming path: the pre-loop auto-compaction a few lines below calls `compact_agent_session_in_lock_scope(.., agent_scoped = false)`, which re-acquires `session_msg_locks[effective_session_id]` on THIS task unless the registry reports it held — the very mutex `_session_guard` is holding, so an unregistered session-scoped turn parks forever the moment its session crosses the compaction threshold.
+            // It also arms the keyed-`agent_send` cycle rejection for tool calls issued during the turn, which is dead code without a registration to observe.
+            // Gated on `session_scoped_lock`, the same bit that selected the `session_msg_locks` entry above and the exact negation of `agent_scoped`, so the two registrations are mutually exclusive and exhaustive: every turn registers precisely the one lock it holds.
+            let _held_session_guard = if session_scoped_lock {
+                Some(
+                    librefang_runtime::held_agent_locks::HeldSessionLockGuard::register(
+                        effective_session_id,
+                    ),
+                )
             } else {
                 None
             };

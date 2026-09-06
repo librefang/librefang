@@ -14454,6 +14454,171 @@ async fn compact_session_serializes_with_message_writers_without_self_deadlock()
     kernel.shutdown();
 }
 
+/// A streaming turn that serializes on the per-SESSION lock must register that session in the task-local held-lock registry, or its own pre-loop auto-compaction re-acquires the same non-reentrant `tokio::sync::Mutex` on the very task that holds it and parks forever.
+///
+/// The asymmetry this pins down: `send_message_full_inner` registers both the agent-scoped and the session-scoped lock, while the streaming spawn body used to register only the agent-scoped one.
+/// A `session_id_override` that is not the agent's canonical session selects `session_msg_locks[sid]` with `agent_scoped = false`, and the pre-loop hook then calls `compact_agent_session_in_lock_scope(.., agent_scoped = false)`, whose session arm consults `is_session_held(sid)` — `false`, because nothing had registered it — and falls through to `lock_owned().await` on the mutex this same task is already holding.
+/// The turn's `JoinHandle` then never resolves: the session stays wedged until the daemon restarts, and every later operation on it blocks behind the leaked guard, including `reset_one_session`, which takes the agent lock first and so wedges the whole agent.
+///
+/// Reaching it takes no crafted request: the ACP adapter derives each editor session's LibreFang session id with `Uuid::new_v5` from the ACP id (`librefang-acp/src/session.rs: SessionState::for_acp_id`) and passes it as `session_id_override`, and the dashboard appends `?session_id=` for any pinned session — neither is ever the agent's canonical session, so on default config the trigger is just that session crossing `threshold_messages`.
+///
+/// Unlike the `issue_5125_streaming_spawn_body_*` tests above, which reconstruct the spawn body's lock state by hand and therefore pass whether or not the production site registers anything, this one drives the real streaming entry — which is why it is the one that fails without the fix.
+/// The kernel is explicitly driverless (#7743), so the turn dies at the LLM call and touches no network; what is asserted is that it finishes at all, and that the compaction it was blocked on actually ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_turn_on_non_canonical_session_survives_in_turn_auto_compaction() {
+    use librefang_memory::session::Session as MemSession;
+    use librefang_types::message::Message;
+
+    // Comfortably past the default `threshold_messages` (30) so the pre-loop hook decides a compaction is due, and past `keep_recent` (10) so the compactor actually trims rather than short-circuiting.
+    const SEEDED_MESSAGES: usize = 40;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // Same discipline as `reentrant_test_kernel`: keep the tempdir alive until process exit so a background write that outlives `shutdown()` cannot race its teardown.
+    std::mem::forget(dir);
+    let kernel = Arc::new(
+        LibreFangKernel::boot_with_config(KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig::driverless(),
+            ..KernelConfig::default()
+        })
+        .expect("kernel should boot"),
+    );
+    // The streaming entry builds its kernel-handle argument via `kernel_handle()`, which panics if the self-handle weak ref was never installed.
+    kernel.set_self_handle();
+
+    let agent_id = kernel
+        .spawn_agent(test_manifest(
+            "streaming-session-lock",
+            "streaming session-lock regression",
+            vec![],
+        ))
+        .expect("spawn should succeed");
+    let canonical_session_id = kernel
+        .agents
+        .registry
+        .get(agent_id)
+        .expect("agent entry")
+        .session_id;
+
+    // A second session owned by the same agent — the shape a dashboard `?session_id=` pin or an ACP editor session produces. Being non-canonical is exactly what selects the per-session lock namespace.
+    let pinned_session_id = SessionId::new();
+    assert_ne!(
+        pinned_session_id, canonical_session_id,
+        "test invariant: the override must not collapse onto the canonical session, or the turn takes the per-agent lock instead"
+    );
+
+    kernel
+        .memory
+        .substrate
+        .save_session(&MemSession {
+            id: pinned_session_id,
+            agent_id,
+            messages: (0..SEEDED_MESSAGES)
+                .map(|i| Message::user(format!("seeded message {i}")))
+                .collect(),
+            context_window_tokens: 0,
+            label: None,
+            model_override: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+            peer_id: None,
+        })
+        .expect("seeding the over-threshold session should succeed");
+
+    let (rx, handle) = kernel
+        .send_message_streaming_with_routing_and_session_override(
+            agent_id,
+            "ping",
+            None,
+            Some(pinned_session_id),
+        )
+        .await
+        .expect("the streaming turn must dispatch");
+
+    // Drain the event stream. The turn's producer awaits on a bounded channel, so an undrained receiver could stall it for a reason unrelated to the lock and mask the signal this test is after.
+    let drain = tokio::spawn(async move {
+        let mut rx = rx;
+        while rx.recv().await.is_some() {}
+    });
+
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(60), handle).await;
+    drain.abort();
+    // The turn's own result is deliberately not asserted — a driverless kernel fails it at the LLM call. Resolving at all is the contract under test.
+    let _turn_result = joined
+        .expect(
+            "the streaming turn must finish — without the session registration its task \
+             self-deadlocks re-acquiring session_msg_locks[pinned_session_id] from inside the \
+             pre-loop auto-compaction, and this timeout fires",
+        )
+        .expect("the streaming turn task must not panic");
+
+    // Positive evidence that the turn got *through* the compactor rather than bailing out somewhere ahead of it: the pre-loop hook trimmed the pinned session down to `keep_recent`.
+    let compacted = kernel
+        .memory
+        .substrate
+        .get_session(pinned_session_id)
+        .expect("get_session must not error")
+        .expect("the pinned session must still exist");
+    assert!(
+        compacted.messages.len() < SEEDED_MESSAGES,
+        "the in-turn auto-compaction must have run on the pinned session, but it still holds {} of the {SEEDED_MESSAGES} seeded messages",
+        compacted.messages.len()
+    );
+
+    kernel.shutdown();
+}
+
+/// `compact_agent_session_with_id` with no explicit session id must not take the per-agent lock twice.
+/// It acquires `agent_msg_locks[agent]` on the caller's behalf and then delegates with `agent_scoped = false`; when `session_id_override` is `None` the helper falls past its session arm into a fallback that reaches for that same mutex.
+/// The `is_held` check guarding that fallback is what lets it through rather than what stops it: a caller arriving through `KernelApi` has no `held_agent_locks::scope`, registration outside one is inert, so `is_held` answers `false` at both acquisitions and the second parks the task on a lock only that task could release.
+///
+/// The sibling of the streaming-path registration above: same defect class (a lock the registry does not know about, consulted again downstream on the same task), different remedy, because here there is no scope to register into and the right answer is to take the lock once.
+/// No in-tree caller passes `None` today — channel dispatch always names a session — which is exactly why it is worth pinning before one does.
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_with_id_and_no_session_override_does_not_double_take_the_agent_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+    // Same discipline as `reentrant_test_kernel`: keep the tempdir alive until process exit so a background write that outlives `shutdown()` cannot race its teardown.
+    std::mem::forget(dir);
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        default_model: DefaultModelConfig::driverless(),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    let agent_id = kernel
+        .spawn_agent(test_manifest(
+            "compact-no-session-override",
+            "agent-lock double-take regression",
+            vec![],
+        ))
+        .expect("spawn should succeed");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        kernel.compact_agent_session_with_id(agent_id, None, false),
+    )
+    .await
+    .expect(
+        "compaction with no session override must not hang — with the outer guard taken \
+         unconditionally it self-deadlocks re-acquiring agent_msg_locks[agent] and this timeout \
+         fires",
+    )
+    .expect("empty-session compaction should succeed");
+    assert!(
+        result.starts_with("No compaction needed"),
+        "the agent's canonical session is empty, so the gate should short-circuit; got: {result}"
+    );
+
+    kernel.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_compact_gate_passes_when_tokens_above_threshold_but_messages_below() {
     use librefang_memory::session::Session as MemSession;

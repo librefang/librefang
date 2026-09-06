@@ -349,9 +349,12 @@ impl LibreFangKernel {
     ) -> KernelResult<String> {
         // Public callers do not carry the dispatch lock-domain bit.
         // Serialize with the agent-scoped writers used by channel dispatch first, then let the scoped helper also cover an explicit-session writer.
-        let _agent_guard = if librefang_runtime::held_agent_locks::is_held(agent_id) {
-            None
-        } else {
+        // Only when a session id is actually named, though: that is the case where the helper below goes after a *different* mutex (`session_msg_locks[sid]`), so the two acquisitions cover two lock domains.
+        // With no session id the helper's fallback arm reaches for this very `agent_msg_locks[agent_id]`, and holding it here as well would re-acquire a non-reentrant mutex on the same task.
+        // The `is_held` check does not save that case; it is what lets it through: registration is inert outside a `held_agent_locks::scope`, and a caller arriving through `KernelApi` has none, so `is_held` answers `false` here and again in the fallback and the same mutex is taken twice.
+        let _agent_guard = if session_id_override.is_some()
+            && !librefang_runtime::held_agent_locks::is_held(agent_id)
+        {
             let lock = self
                 .agents
                 .agent_msg_locks
@@ -359,6 +362,8 @@ impl LibreFangKernel {
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone();
             Some(lock.lock_owned().await)
+        } else {
+            None
         };
         self.compact_agent_session_in_lock_scope(agent_id, session_id_override, force, false)
             .await
@@ -410,6 +415,7 @@ impl LibreFangKernel {
             }
         } else {
             // The public default-session entry point always sets `agent_scoped = true`; keep this defensive fallback aligned.
+            // It is also the live arm for `compact_agent_session_with_id(agent, None, ..)`, which is why that caller must not pre-take `agent_msg_locks[agent_id]`: this acquisition is the only serialization that shape gets.
             if librefang_runtime::held_agent_locks::is_held(agent_id) {
                 None
             } else {
