@@ -6,8 +6,9 @@ This document states what that layer is for and what removes rows from it, becau
 ## What writes it
 
 `crates/librefang-runtime/src/agent_loop/end_turn.rs` composes `[Past exchange]\nThem: …\nYou: …` from the finished turn and hands it to `remember_interaction_best_effort` (`agent_loop/prompt.rs`), which writes straight to `MemorySubstrate`.
-The only gate is `!is_fork && !incognito`.
+Two gates: `!is_fork && !incognito`, and `capabilities.memory_write` — an agent whose manifest declares a `memory_write` list covering nothing stops accumulating these rows, the same way it already stopped accumulating extracted facts (#7605).
 There is no relevance test, no extraction threshold and no category — the row is the raw exchange.
+The row does carry the `chat_scope` and `session_scope` stamps the recall filters read, spelled exactly as `auto_memorize` spells them, so an exchange written in one chat or session no longer surfaces in a recall running under a different one (#5227, #7605).
 
 This is a *parallel* writer to the proactive-memory extractor, not an input to it.
 `ProactiveMemoryStore::auto_memorize` reads the live turn out of `ctx.session.messages`, never the stored episodic rows, so the arrow from episodic to semantic that this architecture is usually described as having does not exist in code.

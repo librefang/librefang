@@ -1762,17 +1762,15 @@ pub trait ProactiveMemory: Send + Sync {
     ) -> crate::error::LibreFangResult<bool>;
 }
 
-/// Metadata key under which `auto_memorize` tags memories with their
-/// originating `(channel, chat)` scope. Format mirrors the kernel's
-/// `sender_channel`: either a bare channel type (`"telegram"`) or a
-/// chat-qualified form (`"whatsapp:<chatJid>"`). When present, recall
-/// filters this against the active request's `chat_scope` so a memory
-/// extracted from a group chat cannot bleed into a DM with the same
-/// peer — and vice versa (#5227).
+/// Metadata key under which the automatic writers tag memories with their originating `(channel, chat)` scope.
 ///
-/// Memories without this key are treated as chat-agnostic (legacy /
-/// manually-stored / `MemoryLevel::User`) and remain recallable across
-/// all chats for the same `(agent, peer)` pair.
+/// Both of them stamp it: `auto_memorize` on the facts it extracts, and `agent_loop::prompt::remember_interaction_best_effort` on the verbatim exchange it files every turn.
+/// Format mirrors the kernel's `sender_channel`: either a bare channel type (`"telegram"`) or a chat-qualified form (`"whatsapp:<chatJid>"`).
+/// When present, recall filters this against the active request's `chat_scope` so a memory extracted from a group chat cannot bleed into a DM with the same peer — and vice versa (#5227).
+///
+/// The stamp is stored verbatim, and the comparand is the request's `chat_scope` verbatim, so a producer must not normalise one side alone.
+///
+/// Memories without this key are treated as chat-agnostic (legacy / manually-stored / `MemoryLevel::User`) and remain recallable across all chats for the same `(agent, peer)` pair.
 pub const CHAT_SCOPE_METADATA_KEY: &str = "chat_scope";
 
 /// Decide whether a memory (identified by its stored `scope` string and
@@ -1812,7 +1810,9 @@ pub fn memory_scope_allows_recall(
     }
 }
 
-/// Metadata key under which `auto_memorize` records the session a memory was extracted from (#7605).
+/// Metadata key under which the automatic writers record the session a memory came from (#7605).
+///
+/// `auto_memorize` stamps the facts it extracts and `agent_loop::prompt::remember_interaction_best_effort` stamps the verbatim exchange it files every turn, so the filter covers both classes rather than only the distilled one.
 ///
 /// The value is the turn's `SessionId` rendered as a UUID string — the same identity `POST /api/agents/{id}/message` accepts as `session_id` and `librefang message --session-id` passes, resolved by the ladder in `docs/architecture/session-mode-resolution.md`.
 /// There is no second notion of a session here: whatever session the turn's history was read from and written back to is what gets stamped.
@@ -1820,9 +1820,10 @@ pub fn memory_scope_allows_recall(
 /// Distinct from [`CHAT_SCOPE_METADATA_KEY`], which answers "which chat on which channel" and is `None` for every non-channel caller (dashboard, REST, CLI) — precisely the callers a multi-user deployment uses.
 pub const SESSION_SCOPE_METADATA_KEY: &str = "session_scope";
 
-/// Scope string under which the unconditional per-turn writer files a whole exchange verbatim.
+/// Scope string under which the per-turn writer files a whole exchange verbatim.
 ///
-/// `agent_loop::prompt::remember_interaction_best_effort` writes one such row per turn; nothing distils them and they carry no TTL, which is why they dominate a mature store (794 of 999 live rows on the installation measured in #7920).
+/// `agent_loop::prompt::remember_interaction_best_effort` writes one such row per turn, on any turn that is neither a fork nor incognito and whose agent `capabilities.memory_write` still permits to write (#7605).
+/// Nothing distils them and they carry no TTL, which is why they dominate a mature store (794 of 999 live rows on the installation measured in #7920).
 pub const EPISODIC_SCOPE: &str = "episodic";
 
 /// Metadata key an extractor stamps on a fact it distilled, and the marker that separates an extracted fact from raw dialogue.

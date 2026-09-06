@@ -9,7 +9,12 @@ They are independent, they are checked in different places, and none of them sub
 
 ## 1. Does the agent have the capability at all
 
-`capabilities.memory_read` and `capabilities.memory_write` in `agent.toml` gate the automatic paths, resolved by `ManifestCapabilities::allows_own_memory_read` / `allows_own_memory_write` and applied in `gated_proactive_memory_for_retrieve` / `gated_proactive_memory_for_memorize` (`crates/librefang-runtime/src/agent_loop/end_turn.rs`).
+`capabilities.memory_read` and `capabilities.memory_write` in `agent.toml` gate the automatic paths, resolved by `ManifestCapabilities::allows_own_memory_read` / `allows_own_memory_write`.
+
+There are **two** automatic paths on each side and the gate is applied to both.
+On the read side `gated_proactive_memory_for_retrieve` (`crates/librefang-runtime/src/agent_loop/end_turn.rs`) closes `auto_retrieve`, and `RecallSetupContext::memory_read_allowed` closes the substrate recall and the context engine — `setup_recalled_memories` checks it before issuing any query, so a denied agent runs none at all.
+On the write side `gated_proactive_memory_for_memorize` closes `auto_memorize`, and the same `allows_own_memory_write` check at the `remember_interaction_best_effort` call site closes the per-turn episodic writer.
+Gating only the two proactive halves is what the first version of this shipped, and it left the larger half of the store open in both directions: the verbatim exchange written on every turn, and the recall that reads it back.
 
 The two lists are tri-state, which is unusual in a manifest and deliberate:
 
@@ -24,6 +29,11 @@ Everywhere else in a manifest an empty list reads as "undeclared, therefore unre
 Keeping the distinction here is what lets `memory_read = []` mean what an operator typing it means, without failing closed on the many manifests that have no `[capabilities]` block at all.
 The accepted scope strings come from `librefang_types::capability::scope_covers_own_memory`, shared with the `memory_semantic_*` tool gate (#7808) so the two cannot drift.
 
+Sharing the scope vocabulary is not sharing the tri-state, and the difference is worth stating because it bounds what `memory_read = []` buys you.
+`manifest_to_capabilities` (`crates/librefang-kernel/src/kernel/manifest_helpers.rs`) flattens both `None` and `Some([])` into zero `Capability::MemoryRead` entries, and the tool gate in `Kernel::available_tools` keeps a semantic-memory tool whenever the scope list it sees is empty — deliberately, so that the many manifests declaring nothing can still reach the feature.
+So a denied agent runs no automatic recall at all, and still has `memory_semantic_search` on its tool list: if the model chooses to call it, it reads the store directly, filtered by neither chat nor session.
+Automatic memory is what this document governs; closing the explicit tool path is a change to the #7808 gate's own tri-state, which is a separate decision about a separate surface.
+
 `ManifestCapabilities` serializes an undeclared list by omitting the key, so a manifest that round-trips through the session store or the REST layer comes back undeclared rather than declared-empty.
 
 One upgrade note follows from that.
@@ -37,11 +47,13 @@ That direction is deliberate: the failure is loss of a convenience, logged at `d
 The #5227 filter, keyed on the `chat_scope` metadata stamp: a memory extracted in a WhatsApp group does not surface in a DM with the same peer.
 `MemoryLevel::User` rows are exempt — the chats it separates belong to the same person, so stable facts about them are meant to cross.
 Composed by `compose_sender_scope(channel, chat_id)` at the kernel inject site, and `None` for every non-channel caller (dashboard, REST, CLI).
+Both writers stamp it: `auto_memorize` on the facts it extracts, and `remember_interaction_best_effort` on the verbatim exchange it files every turn.
 
 ## 3. Which session did it come from
 
 The #7605 filter, keyed on the `session_scope` metadata stamp.
-`auto_memorize` records the session that produced a memory; `auto_retrieve` and the substrate recall in `setup_recalled_memories` drop any memory stamped for a different one.
+`auto_memorize` and `remember_interaction_best_effort` both record the session that produced a memory; `auto_retrieve` and the substrate recall in `setup_recalled_memories` drop any memory stamped for a different one.
+Stamping the per-turn writer matters more than stamping the extractor: raw dialogue is the dominant class in a mature store — 794 of 999 live rows on the installation measured in #7920 — and each row inlines a whole user turn plus the reply, so for as long as it went out unstamped the filter was separating the smaller and less revealing half of the store.
 The dedup candidate set inside `add_with_decision` is filtered the same way, or a later turn in another session could NOOP against a stranger's row — losing the fact — or UPDATE it in place, overwriting one visitor's memory with another's content.
 
 There is no `MemoryLevel::User` exemption here, unlike the chat filter.

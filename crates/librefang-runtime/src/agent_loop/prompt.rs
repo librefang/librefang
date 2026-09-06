@@ -63,6 +63,40 @@ pub(super) fn push_filtered_user_message(
     }
 }
 
+/// Build the scope stamps an episodic row carries, byte for byte as `ProactiveMemoryStore::auto_memorize` stamps the facts it extracts (`librefang-memory`, `proactive.rs`).
+///
+/// Both writers file into the same `memories` table and are read back by the same two predicates, so a map that differs here is a row those predicates cannot place.
+/// A `None` or empty scope deliberately leaves its key absent rather than stamping a placeholder: [`librefang_types::memory::memory_scope_allows_recall`] and [`librefang_types::memory::memory_session_scope_allows_recall`] compare by string equality, so a sentinel value would match no recall at all and hard-block the row instead of leaving it agnostic — which is what a non-channel caller and an operator who set `session_scoped_recall = false` are asking for.
+///
+/// The asymmetry below is deliberate rather than an oversight to tidy up: the chat scope is stored verbatim because `auto_memorize` stores it verbatim and because the recall comparand is the untrimmed `RecallSetupContext::sender_chat_scope`, so trimming here would file this turn's exchange under a key that the same turn's extracted fact — and every recall — spells differently.
+/// The session scope is trimmed for the mirror-image reason: `auto_memorize` trims it.
+/// Normalising a chat scope is a change to [`librefang_types::agent::compose_sender_scope`] and to both readers, not to one of two writers.
+fn episodic_scope_metadata(
+    chat_scope: Option<&str>,
+    session_scope: Option<&str>,
+) -> HashMap<String, serde_json::Value> {
+    let mut metadata = HashMap::new();
+    if let Some(scope) = chat_scope.filter(|s| !s.is_empty()) {
+        metadata.insert(
+            librefang_types::memory::CHAT_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String(scope.to_string()),
+        );
+    }
+    if let Some(scope) = session_scope.map(str::trim).filter(|s| !s.is_empty()) {
+        metadata.insert(
+            librefang_types::memory::SESSION_SCOPE_METADATA_KEY.to_string(),
+            serde_json::Value::String(scope.to_string()),
+        );
+    }
+    metadata
+}
+
+/// Persist this turn's exchange as one episodic row, stamped with the chat and session it came from.
+///
+/// The stamps are not optional decoration (#5227, #7605).
+/// This row is the whole exchange verbatim and is the most sensitive content in the store, yet an unstamped row is exactly what both recall filters read as "visible from every chat and every session" — so for as long as this writer passed an empty metadata map, raw dialogue kept crossing both boundaries that `auto_memorize`'s output had already stopped crossing.
+/// Rows written before this shipped stay agnostic, which is the documented upgrade posture; the stamps apply to new writes only.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn remember_interaction_best_effort(
     memory: &MemorySubstrate,
     embedding_driver: Option<&(dyn EmbeddingDriver + Send + Sync)>,
@@ -70,7 +104,10 @@ pub(super) async fn remember_interaction_best_effort(
     interaction_text: &str,
     streaming: bool,
     peer_id: Option<&str>,
+    chat_scope: Option<&str>,
+    session_scope: Option<&str>,
 ) {
+    let metadata = episodic_scope_metadata(chat_scope, session_scope);
     if let Some(emb) = embedding_driver {
         match emb.embed_one(interaction_text).await {
             Ok(vec) => {
@@ -80,7 +117,7 @@ pub(super) async fn remember_interaction_best_effort(
                         interaction_text,
                         MemorySource::Conversation,
                         librefang_types::memory::EPISODIC_SCOPE,
-                        HashMap::new(),
+                        metadata,
                         Some(&vec),
                         peer_id,
                     )
@@ -105,7 +142,7 @@ pub(super) async fn remember_interaction_best_effort(
                         interaction_text,
                         MemorySource::Conversation,
                         librefang_types::memory::EPISODIC_SCOPE,
-                        HashMap::new(),
+                        metadata,
                         peer_id,
                     )
                     .await
@@ -124,7 +161,7 @@ pub(super) async fn remember_interaction_best_effort(
             interaction_text,
             MemorySource::Conversation,
             librefang_types::memory::EPISODIC_SCOPE,
-            HashMap::new(),
+            metadata,
             peer_id,
         )
         .await
@@ -213,6 +250,15 @@ pub(super) struct RecallSetup {
 pub(super) struct RecallSetupContext<'a> {
     pub(super) session: &'a Session,
     pub(super) user_message: &'a str,
+    /// Manifest name of the agent this turn belongs to, used only to label the capability-gate log line.
+    ///
+    /// Carried explicitly because this struct has no manifest, and every sibling memory gate in `end_turn.rs` logs `agent = %manifest.name`: a structured filter on `agent` has to catch this gate too, or the one denial an operator cannot query for is the one that closed the largest path.
+    pub(super) agent_name: &'a str,
+    /// Whether `capabilities.memory_read` lets this agent's own store reach its prompt at all (#7605).
+    ///
+    /// Resolved at the call site by [`librefang_types::agent::ManifestCapabilities::allows_own_memory_read`] — the same predicate `gated_proactive_memory_for_retrieve` applies to the proactive half — so the substrate recall, the context engine and `auto_retrieve` cannot disagree about whether an agent may read itself.
+    /// `false` only when the manifest declared a `memory_read` list covering nothing; an absent key stays permissive, as every other capability list does.
+    pub(super) memory_read_allowed: bool,
     pub(super) memory: &'a MemorySubstrate,
     pub(super) embedding_driver: Option<&'a (dyn EmbeddingDriver + Send + Sync)>,
     pub(super) proactive_memory: Option<&'a Arc<librefang_memory::ProactiveMemoryStore>>,
@@ -379,6 +425,23 @@ fn select_recall_candidates(
 }
 
 pub(super) async fn setup_recalled_memories(ctx: RecallSetupContext<'_>) -> RecallSetup {
+    // #7605: an agent whose `capabilities.memory_read` covers nothing reads nothing, and that has to be decided here rather than only around `auto_retrieve` further down.
+    // The substrate recall and the context engine are the other two ways a stored memory reaches the prompt, and `DefaultContextEngine::ingest` runs its own recall over the same table, so gating the proactive store alone left every row — other visitors' included — rendered into the system prompt of an agent that had declared no read capability, with `memories_used` populated to match.
+    // Returning before the engine call rather than filtering afterwards also means no recall query is issued at all, which is what an operator who locked the store expects to see in the logs.
+    // The cost of returning this early is that a custom engine's `ingest` hook stops firing for a denied agent — `ScriptableContextEngine` (`context_engine/scriptable/engine.rs`) and `SidecarContextEngine` (`context_engine/sidecar.rs`) run an operator-supplied subprocess there, not just `DefaultContextEngine`'s in-process recall.
+    // That is the intended reading rather than collateral damage: the only thing the loop takes from `ingest` is `recalled_memories`, and a hook whose whole product is recalled memories has nothing to contribute to a turn that is not allowed any.
+    // What LibreFang cannot see is whatever else an operator's script or sidecar does while it is in there, so this is a behaviour change for those two engines and is called out in the changelog rather than left to be discovered.
+    if !ctx.memory_read_allowed {
+        debug!(
+            agent = %ctx.agent_name,
+            agent_id = %ctx.session.agent_id,
+            "capabilities.memory_read grants no scope over this agent's own memory; skipping memory recall"
+        );
+        return RecallSetup {
+            memories: Vec::new(),
+            memories_used: Vec::new(),
+        };
+    }
     // #5227: ask the substrate for a wider candidate window than the section will use, so the
     // per-scope post-filters below have enough headroom to keep a full set of legitimate results.
     // Without the inflation a substrate query that returns ~5 memories all stamped for the *other*
@@ -946,6 +1009,333 @@ mod tests {
         }
     }
 
+    /// A manifest carrying nothing but the given `[capabilities]` block, so the capability tests below drive the real tri-state resolution instead of asserting against a hand-set bool.
+    fn manifest_with(capabilities_toml: &str) -> AgentManifest {
+        let toml_str = format!(
+            r#"
+name = "recall-gate-test"
+version = "0.1.0"
+description = "d"
+author = "t"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "s"
+
+{capabilities_toml}
+"#
+        );
+        toml::from_str(&toml_str).expect("manifest parses")
+    }
+
+    /// Run the recall the way the agent loop runs it, with the capability flag resolved from `manifest` exactly as both call sites resolve it.
+    async fn recall_for(
+        manifest: &AgentManifest,
+        substrate: &MemorySubstrate,
+        context_engine: Option<&dyn ContextEngine>,
+        session: &Session,
+        opts: &LoopOptions,
+        user_message: &str,
+    ) -> RecallSetup {
+        setup_recalled_memories(RecallSetupContext {
+            session,
+            user_message,
+            agent_name: &manifest.name,
+            memory_read_allowed: manifest.capabilities.allows_own_memory_read(),
+            memory: substrate,
+            embedding_driver: None,
+            proactive_memory: None,
+            context_engine,
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_scope: None,
+            session_scope: None,
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts,
+        })
+        .await
+    }
+
+    /// Run the recall as a turn belonging to one specific chat and session would run it.
+    async fn recall_scoped(
+        substrate: &MemorySubstrate,
+        session: &Session,
+        opts: &LoopOptions,
+        chat_scope: &str,
+        session_scope: &str,
+    ) -> RecallSetup {
+        setup_recalled_memories(RecallSetupContext {
+            session,
+            user_message: "customer code",
+            agent_name: "test-agent",
+            memory_read_allowed: true,
+            memory: substrate,
+            embedding_driver: None,
+            proactive_memory: None,
+            context_engine: None,
+            sender_user_id: None,
+            sender_channel: None,
+            sender_chat_scope: Some(chat_scope),
+            session_scope: Some(session_scope),
+            kernel: None,
+            stable_prefix_mode: false,
+            streaming: false,
+            opts,
+        })
+        .await
+    }
+
+    /// #7605 — `memory_read = []` is a declared-empty list that denies, and the denial has to reach every path a stored memory can take into the prompt.
+    ///
+    /// `gated_proactive_memory_for_retrieve` only ever covered `auto_retrieve`.
+    /// The substrate recall and the context engine are the other two ways in, the kernel binds an engine unconditionally, and `DefaultContextEngine::ingest` runs its own recall over the same table — so an agent locked out of its own store still had every row rendered into its system prompt, `memories_used` populated to match.
+    #[tokio::test]
+    async fn declared_empty_memory_read_keeps_memories_out_of_the_prompt_7605() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        for i in 0..3 {
+            substrate
+                .remember_with_embedding(
+                    agent_id,
+                    &format!(
+                        "[Past exchange]\nThem: my customer code is PINE-{i}\nYou: noted the customer code."
+                    ),
+                    MemorySource::Conversation,
+                    librefang_types::memory::EPISODIC_SCOPE,
+                    std::collections::HashMap::new(),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // The live shape: the kernel always builds an engine, so the engine branch is the one production takes.
+        let engine =
+            DefaultContextEngine::new(ContextEngineConfig::default(), Arc::clone(&substrate), None);
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+
+        let denied_manifest = manifest_with("[capabilities]\nmemory_read = []");
+        let denied = recall_for(
+            &denied_manifest,
+            substrate.as_ref(),
+            Some(&engine),
+            &session,
+            &opts,
+            "customer code",
+        )
+        .await;
+        assert!(
+            denied.memories.is_empty(),
+            "memory_read = [] must stop the substrate/context-engine recall too: {:?}",
+            denied
+                .memories
+                .iter()
+                .map(|f| &f.content)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            denied.memories_used.is_empty(),
+            "memories_used is built from the same union, so it must be empty as well"
+        );
+
+        // And nothing reaches the assembled prompt, which is the property the capability actually promises.
+        let prompt = build_prompt_setup(PromptSetupContext {
+            manifest: &denied_manifest,
+            session: &session,
+            kernel: None,
+            experiment_context: None,
+            running_experiment: None,
+            memories: &denied.memories,
+            memory_fact_budget_percent: None,
+            stable_prefix_mode: false,
+            streaming: false,
+        });
+        assert!(
+            !prompt.system_prompt.contains("PINE-"),
+            "a stored memory reached the system prompt of an agent that declared no read capability: {}",
+            prompt.system_prompt
+        );
+        assert!(
+            prompt.memory_context_msg.is_none(),
+            "no memory context message may be produced when the store is closed"
+        );
+
+        // An absent key is not a declared-empty one: most manifests in the wild have no `[capabilities]` block at all and must keep recalling.
+        let open_manifest = manifest_with("");
+        let open = recall_for(
+            &open_manifest,
+            substrate.as_ref(),
+            Some(&engine),
+            &session,
+            &opts,
+            "customer code",
+        )
+        .await;
+        assert!(
+            !open.memories.is_empty(),
+            "an undeclared memory_read must stay permissive, or upgrading switches memory off for everyone"
+        );
+
+        // The mirror of the two assertions above, so the pair pins a difference rather than one absence: the same three rows, the same engine, and with the key absent they do reach the prompt.
+        let open_prompt = build_prompt_setup(PromptSetupContext {
+            manifest: &open_manifest,
+            session: &session,
+            kernel: None,
+            experiment_context: None,
+            running_experiment: None,
+            memories: &open.memories,
+            memory_fact_budget_percent: None,
+            stable_prefix_mode: false,
+            streaming: false,
+        });
+        assert!(
+            open_prompt.system_prompt.contains("PINE-"),
+            "an undeclared memory_read must still render its store into the prompt: {}",
+            open_prompt.system_prompt
+        );
+    }
+
+    /// An absent or empty scope must leave its key off the row entirely, and a present one must be stamped in the spelling the recall comparand uses.
+    ///
+    /// Both recall predicates compare a stamped value by string equality, so either mistake is fatal in the same way: a placeholder on an unscoped row, or a normalised value on a scoped one, matches no recall at all and hides the row from everywhere instead of leaving it agnostic.
+    /// The chat scope in particular is stamped verbatim because `setup_recalled_memories` compares against the untrimmed `sender_chat_scope`, and because `auto_memorize` stamps it verbatim — an episodic row and the fact extracted from the same turn have to be recallable from the same places.
+    #[test]
+    fn episodic_scope_metadata_matches_the_recall_comparand() {
+        use librefang_types::memory::{
+            memory_scope_allows_recall, memory_session_scope_allows_recall,
+            SESSION_SCOPE_METADATA_KEY,
+        };
+
+        assert!(episodic_scope_metadata(None, None).is_empty());
+        assert!(episodic_scope_metadata(Some(""), Some("   ")).is_empty());
+
+        // A chat scope carrying whitespace is unusual but reachable: `compose_sender_scope` does not normalise the `chat_id` a channel adapter hands it, and neither does the recall comparand.
+        let padded_chat = " telegram:g1 ";
+        let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let stamped = episodic_scope_metadata(Some(padded_chat), Some(session));
+        assert_eq!(
+            stamped.get(CHAT_SCOPE_METADATA_KEY),
+            Some(&serde_json::json!(" telegram:g1 ")),
+            "the chat stamp must be byte-identical to the scope the turn ran under, not a tidied version of it"
+        );
+
+        // The property that spelling exists for: the row this metadata describes survives a recall running under the very scopes that produced it.
+        assert!(
+            memory_scope_allows_recall(
+                librefang_types::memory::EPISODIC_SCOPE,
+                &stamped,
+                padded_chat
+            ),
+            "the row must be recallable from the chat that wrote it"
+        );
+        assert!(
+            memory_session_scope_allows_recall(&stamped, session),
+            "the row must be recallable from the session that wrote it"
+        );
+
+        // The session scope is trimmed, mirroring `auto_memorize`; in production it is a `SessionId` rendered as a UUID, so the trim never has anything to do.
+        let trimmed = episodic_scope_metadata(None, Some(" sess-1 "));
+        assert_eq!(
+            trimmed.get(SESSION_SCOPE_METADATA_KEY),
+            Some(&serde_json::json!("sess-1"))
+        );
+    }
+
+    /// #7605 / #5227 — the per-turn episodic writer files the whole exchange verbatim, and until it stamped the two scopes those rows were the one class of memory that still crossed every session and every chat.
+    ///
+    /// Driven through the production writer rather than a hand-built fixture: the defect was that the writer never emitted the keys, which a synthesised row cannot catch.
+    #[tokio::test]
+    async fn episodic_write_stays_in_its_own_session_and_chat_7605() {
+        use librefang_types::memory::SESSION_SCOPE_METADATA_KEY;
+
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        let session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        let group_scope = "telegram:group--42";
+        let dm_scope = "telegram:dm-42";
+
+        remember_interaction_best_effort(
+            substrate.as_ref(),
+            None,
+            agent_id,
+            "[Past exchange]\nThem: my customer code is PINE-77\nYou: noted.",
+            false,
+            None,
+            Some(group_scope),
+            Some(session_a),
+        )
+        .await;
+
+        let stored = substrate
+            .recall(
+                "customer code",
+                10,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1, "the writer must persist exactly one row");
+        assert_eq!(
+            stored[0].metadata.get(CHAT_SCOPE_METADATA_KEY),
+            Some(&serde_json::Value::String(group_scope.to_string())),
+            "the exchange must carry the chat it came from, spelled as auto_memorize spells it"
+        );
+        assert_eq!(
+            stored[0].metadata.get(SESSION_SCOPE_METADATA_KEY),
+            Some(&serde_json::Value::String(session_a.to_string())),
+            "the exchange must carry the session it came from"
+        );
+
+        let session = empty_session(agent_id);
+        let opts = LoopOptions::default();
+
+        let other_session =
+            recall_scoped(substrate.as_ref(), &session, &opts, group_scope, session_b).await;
+        assert!(
+            other_session.memories.is_empty(),
+            "regression #7605: raw dialogue written in session A reached session B: {:?}",
+            other_session
+                .memories
+                .iter()
+                .map(|f| &f.content)
+                .collect::<Vec<_>>()
+        );
+
+        let other_chat =
+            recall_scoped(substrate.as_ref(), &session, &opts, dm_scope, session_a).await;
+        assert!(
+            other_chat.memories.is_empty(),
+            "regression #5227: raw dialogue written in a group chat reached a DM with the same peer: {:?}",
+            other_chat
+                .memories
+                .iter()
+                .map(|f| &f.content)
+                .collect::<Vec<_>>()
+        );
+
+        let own_turn =
+            recall_scoped(substrate.as_ref(), &session, &opts, group_scope, session_a).await;
+        assert_eq!(
+            own_turn.memories.len(),
+            1,
+            "the agent must still recall its own exchange in the chat and session that produced it"
+        );
+        assert!(
+            own_turn.memories[0].content.contains("PINE-77"),
+            "the surviving row must be the exchange that was written, not some other candidate: {}",
+            own_turn.memories[0].content
+        );
+    }
+
     /// #5227 P2 (second-pass review) — when a `ContextEngine` is wired
     /// in, `engine.ingest` uses its OWN small recall budget (default 5)
     /// and is unaware of `chat_scope`. If the substrate has many memories
@@ -1020,6 +1410,8 @@ mod tests {
         let setup = setup_recalled_memories(RecallSetupContext {
             session: &session,
             user_message: "project Atlas",
+            agent_name: "test-agent",
+            memory_read_allowed: true,
             memory: substrate.as_ref(),
             embedding_driver: None,
             proactive_memory: None,
@@ -1110,6 +1502,8 @@ mod tests {
         let setup = setup_recalled_memories(RecallSetupContext {
             session: &session,
             user_message: "project Atlas",
+            agent_name: "test-agent",
+            memory_read_allowed: true,
             memory: substrate.as_ref(),
             embedding_driver: None,
             proactive_memory: None,
@@ -1163,6 +1557,8 @@ mod tests {
             "[Past exchange]\nThem: hello\nYou: hi",
             false, // non-streaming
             Some("user-42"),
+            None, // no chat scope
+            None, // no session scope
         )
         .await;
 
@@ -1209,6 +1605,8 @@ mod tests {
             agent_id,
             "[Past exchange]\nThem: world\nYou: done",
             false,
+            None,
+            None,
             None,
         )
         .await;
@@ -1315,6 +1713,8 @@ mod tests {
         let setup = setup_recalled_memories(RecallSetupContext {
             session: &session,
             user_message: "atlas",
+            agent_name: "test-agent",
+            memory_read_allowed: true,
             memory: substrate.as_ref(),
             embedding_driver: Some(&embedding),
             proactive_memory: None,
@@ -1379,6 +1779,8 @@ mod tests {
         let setup = setup_recalled_memories(RecallSetupContext {
             session: &session,
             user_message: "atlas",
+            agent_name: "test-agent",
+            memory_read_allowed: true,
             memory: substrate.as_ref(),
             embedding_driver: Some(&embedding),
             proactive_memory: None,

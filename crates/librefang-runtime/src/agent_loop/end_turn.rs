@@ -261,7 +261,15 @@ pub(super) async fn finalize_successful_end_turn(
         // is_cascade_leak doc-comments). Skip persistence entirely when
         // either side is empty after sanitise — a half-empty memory row
         // would itself trip the leak guard on recall.
-        if let (Some(user_clean), Some(resp_clean)) = (
+        //
+        // `capabilities.memory_write` gates this row the way it gates `auto_memorize` further down (#7605): it is an automatic write into the agent's own store, and an operator who declared a list covering nothing is asking for the store to stop growing.
+        // Gating only the extraction half left the larger half — one verbatim exchange per turn — writing regardless.
+        if !ctx.manifest.capabilities.allows_own_memory_write() {
+            debug!(
+                agent = %ctx.manifest.name,
+                "capabilities.memory_write grants no scope over this agent's own memory; skipping the per-turn episodic write"
+            );
+        } else if let (Some(user_clean), Some(resp_clean)) = (
             sanitize_for_memory(ctx.user_message),
             sanitize_for_memory(&end_turn.final_response),
         ) {
@@ -285,6 +293,9 @@ pub(super) async fn finalize_successful_end_turn(
             // separate concern and uses chat_id.  If both were collapsed to
             // the same value a group-chat user's memory recall would be
             // scoped to the chat rather than to the individual.
+            //
+            // The same two scopes `auto_memorize` is handed below (#5227, #7605).
+            // They are what stops this row — the whole exchange, verbatim — from surfacing in another chat or another visitor's session, and both recall filters read an unstamped row as visible from everywhere.
             remember_interaction_best_effort(
                 ctx.memory,
                 ctx.embedding_driver,
@@ -292,6 +303,8 @@ pub(super) async fn finalize_successful_end_turn(
                 &interaction_text,
                 ctx.streaming,
                 ctx.sender_user_id,
+                ctx.sender_chat_scope,
+                ctx.session_scope,
             )
             .await;
         }
@@ -636,6 +649,133 @@ system_prompt = "s"
             last_repaired_generation: None,
             peer_id: None,
         }
+    }
+
+    /// Run one successful end-turn against a fresh in-memory substrate and hand back the store it wrote into.
+    ///
+    /// Everything optional is left off — no LLM ran, no proactive store, no context engine — so the only thing that can touch the substrate is the per-turn episodic writer this exercises.
+    async fn finalize_turn(
+        manifest: &AgentManifest,
+        chat_scope: Option<&str>,
+        session_scope: Option<&str>,
+    ) -> (Arc<MemorySubstrate>, AgentId) {
+        let memory = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let agent_id = AgentId::new();
+        let mut session = session_for(agent_id);
+        let agent_id_str = agent_id.0.to_string();
+        let opts = LoopOptions::default();
+        let messages: Vec<Message> = Vec::new();
+
+        finalize_successful_end_turn(
+            FinalizeEndTurnContext {
+                manifest,
+                session: &mut session,
+                memory: memory.as_ref(),
+                embedding_driver: None,
+                context_engine: None,
+                on_phase: None,
+                proactive_memory: None,
+                hooks: None,
+                agent_id_str: &agent_id_str,
+                user_message: "my customer code is PINE-77",
+                messages: &messages,
+                sender_user_id: None,
+                sender_chat_scope: chat_scope,
+                session_scope,
+                streaming: false,
+                opts: &opts,
+            },
+            FinalizeEndTurnResultData {
+                final_response: "Noted your customer code.".to_string(),
+                iteration: 0,
+                total_usage: TokenUsage::default(),
+                decision_traces: Vec::new(),
+                memories_saved: Vec::new(),
+                memories_used: Vec::new(),
+                memory_conflicts: Vec::new(),
+                experiment_context: None,
+                directives: librefang_types::message::ReplyDirectives::default(),
+                new_messages_start: 0,
+                owner_notice: None,
+                actual_provider: None,
+                actual_model: None,
+            },
+        )
+        .await
+        .expect("end turn finalizes");
+
+        (memory, agent_id)
+    }
+
+    async fn episodic_rows(memory: &MemorySubstrate, agent_id: AgentId) -> Vec<MemoryFragment> {
+        memory
+            .recall(
+                "customer code",
+                10,
+                Some(MemoryFilter {
+                    agent_id: Some(agent_id),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("recall succeeds")
+    }
+
+    /// #5227 / #7605 — the per-turn episodic row is written from this call site, and it must obey the same two things `auto_memorize` obeys: the write capability, and the chat / session stamps.
+    ///
+    /// Exercised through `finalize_successful_end_turn` rather than through the writer directly, because the defect was in the wiring: a writer that accepts the scopes is no use while the call site holding them declines to forward them.
+    #[tokio::test]
+    async fn end_turn_episodic_write_is_capability_gated_and_scope_stamped_7605() {
+        use librefang_types::memory::{CHAT_SCOPE_METADATA_KEY, SESSION_SCOPE_METADATA_KEY};
+
+        let chat_scope = "telegram:group--42";
+        let session_scope = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+        let (memory, agent_id) =
+            finalize_turn(&manifest_from(""), Some(chat_scope), Some(session_scope)).await;
+        let stored = episodic_rows(memory.as_ref(), agent_id).await;
+        assert_eq!(
+            stored.len(),
+            1,
+            "an agent that declared no capabilities must still get its per-turn episodic row"
+        );
+        assert_eq!(
+            stored[0].metadata.get(CHAT_SCOPE_METADATA_KEY),
+            Some(&serde_json::Value::String(chat_scope.to_string())),
+            "without the chat stamp the exchange resurfaces in a DM with the same peer (#5227)"
+        );
+        assert_eq!(
+            stored[0].metadata.get(SESSION_SCOPE_METADATA_KEY),
+            Some(&serde_json::Value::String(session_scope.to_string())),
+            "without the session stamp the exchange resurfaces in another visitor's turn (#7605)"
+        );
+
+        // A caller with no channel context and session scoping turned off writes an agnostic row, as it did before — the stamps follow the scopes, they are never invented.
+        let (agnostic_store, agnostic_agent) = finalize_turn(&manifest_from(""), None, None).await;
+        let agnostic = episodic_rows(agnostic_store.as_ref(), agnostic_agent).await;
+        assert_eq!(agnostic.len(), 1);
+        assert!(
+            !agnostic[0].metadata.contains_key(CHAT_SCOPE_METADATA_KEY)
+                && !agnostic[0]
+                    .metadata
+                    .contains_key(SESSION_SCOPE_METADATA_KEY),
+            "an unscoped turn must leave both keys absent rather than stamping a placeholder: {:?}",
+            agnostic[0].metadata
+        );
+
+        // `memory_write = []` denies here exactly as it denies `auto_memorize`.
+        let (denied_store, denied_agent) = finalize_turn(
+            &manifest_from("[capabilities]\nmemory_write = []"),
+            Some(chat_scope),
+            Some(session_scope),
+        )
+        .await;
+        let denied = episodic_rows(denied_store.as_ref(), denied_agent).await;
+        assert!(
+            denied.is_empty(),
+            "memory_write = [] must stop the store growing one verbatim exchange per turn: {:?}",
+            denied.iter().map(|f| &f.content).collect::<Vec<_>>()
+        );
     }
 
     /// #7605 — the reporter set `memory_read = []` / `memory_write = []`,

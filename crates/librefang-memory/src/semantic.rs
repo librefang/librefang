@@ -1331,20 +1331,13 @@ impl SemanticStore {
     /// ahead of extracted facts even when the fact scores lower, and only within a
     /// class does the old `confidence ASC, created_at ASC` ordering apply.
     ///
-    /// The rationale is that the two classes have different exit paths. An extracted
-    /// fact is the distilled, categorised artefact of many turns and is produced at a
-    /// few rows a day; raw dialogue is written unconditionally, one row per turn, is
-    /// never distilled into anything, and has no TTL — so the cap is the only exit it
-    /// has. Ordering by confidence alone made the cap evict whichever class happened
-    /// to score lower, which is not a decision anybody made.
+    /// The rationale is that the two classes have different exit paths.
+    /// An extracted fact is the distilled, categorised artefact of many turns and is produced at a few rows a day; raw dialogue is written once per turn on every turn that is neither a fork nor incognito and whose agent `capabilities.memory_write` still permits to write (#7605), is never distilled into anything, and has no TTL — so the cap is the only exit it has.
+    /// Ordering by confidence alone made the cap evict whichever class happened to score lower, which is not a decision anybody made.
     ///
-    /// The raw-dialogue predicate is the exact write signature of
-    /// `remember_interaction_best_effort` (`librefang-runtime`, `agent_loop::prompt`):
-    /// `MemorySource::Conversation`, scope `episodic`, empty metadata. Extracted facts
-    /// always carry a `category` (see `ProactiveMemoryStore::add_with_decision`) and
-    /// always land in a `*_memory` scope, so they can never match; imported and
-    /// system-sourced rows differ in `source`. A row that matches all three is one this
-    /// writer produced.
+    /// The raw-dialogue predicate is the write signature of `remember_interaction_best_effort` (`librefang-runtime`, `agent_loop::prompt`): `MemorySource::Conversation`, scope `episodic`, and **no `category` key** — not empty metadata, which those rows stopped having when the writer started stamping `chat_scope` / `session_scope` (#5227, #7605).
+    /// Extracted facts always carry a `category` (see `ProactiveMemoryStore::add_with_decision`) and always land in a `*_memory` scope, so they can never match; imported and system-sourced rows differ in `source`.
+    /// A row that matches all three is one this writer produced.
     pub fn eviction_candidates(
         &self,
         agent_id: AgentId,
@@ -2123,15 +2116,27 @@ mod tests {
             .unwrap();
     }
 
-    /// The exact write signature of `remember_interaction_best_effort`.
+    /// The exact write signature of `remember_interaction_best_effort`, scope stamps included (#5227, #7605).
+    ///
+    /// The stamps are what makes this fixture worth keeping faithful: the class predicate keys on the absence of a `category`, not on empty metadata, so a row carrying `chat_scope` and `session_scope` must still be classed as raw dialogue and evicted ahead of a fact.
+    /// A helper that kept writing `HashMap::new()` would have gone on passing while the predicate it stands for drifted.
     fn remember_raw_dialogue(store: &SemanticStore, agent_id: AgentId, body: &str) -> MemoryId {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            librefang_types::memory::CHAT_SCOPE_METADATA_KEY.to_string(),
+            serde_json::json!("telegram:group--42"),
+        );
+        metadata.insert(
+            librefang_types::memory::SESSION_SCOPE_METADATA_KEY.to_string(),
+            serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        );
         store
             .remember(
                 agent_id,
                 &format!("[Past exchange]\nThem: {body}\nYou: sure"),
                 MemorySource::Conversation,
                 "episodic",
-                HashMap::new(),
+                metadata,
             )
             .unwrap()
     }

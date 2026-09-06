@@ -256,6 +256,8 @@ async fn run_agent_loop_streaming_inner(
     } = setup_recalled_memories(RecallSetupContext {
         session,
         user_message,
+        agent_name: &manifest.name,
+        memory_read_allowed: manifest.capabilities.allows_own_memory_read(),
         memory,
         embedding_driver,
         proactive_memory: gated_proactive_memory_for_retrieve(manifest, proactive_memory.as_ref()),
