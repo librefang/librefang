@@ -12,7 +12,7 @@ homepage = "https://librefang.ai"
 keywords = ["librefang", "sidecar", "telegram", "channel", "bot"]
 categories = ["command-line-utilities"]
 readme = "README.md"
-rust-version = "1.80"
+rust-version = "1.88"
 
 [[bin]]
 name = "librefang-sidecar-telegram"
@@ -29,5 +29,9 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 # regex needed for the markdown parser (inline link / bold / italic patterns) and the HTML sanitiser (tag-allowlist scanner).
 regex = "1"
+# CommonMark parser for building `InputRichMessage.blocks` (#8015). Declares MSRV 1.71.1,
+# well under this crate's floor — the floor is set by `reqwest -> url -> idna -> icu_*`,
+# which is where the 1.88 above comes from.
+pulldown-cmark = { version = "0.13", default-features = false }
 # `once_cell` for the static reaction map and the cached regex set — avoids re-compiling on every send.
 once_cell = "1"

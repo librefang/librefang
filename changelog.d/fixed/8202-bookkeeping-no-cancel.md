@@ -1,0 +1,4 @@
+Stop the `Stale PR` and `Issue-PR Link Labels` workflows from cancelling their own runs, so a bookkeeping label job can no longer stamp a red check on a pull request whose required check is green.
+A cancelled run reports its check as failed, and runs on unrelated pull requests were cancelling one another in bursts — one sweep produced 33 runs across 33 distinct branches and cancelled 31 — which left nearly every open PR at `mergeStateStatus = UNSTABLE` over label bookkeeping and made a genuine failure indistinguishable from the noise at a glance.
+#8190 attributed this to the concurrency group key and changed it; the cancellations continued with the new key live, so that explanation is not established and the comments no longer assert it.
+Both workflows recompute their desired state from the pull request on every run, so serialising them is free apart from a few seconds of runner time, and it removes the mechanism rather than trying to aim it (#8202) (@houko)

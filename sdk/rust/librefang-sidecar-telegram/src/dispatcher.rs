@@ -146,16 +146,15 @@ fn truncate_raw_caption(raw: Option<&str>) -> Option<String> {
 
 /// Send a text message.
 ///
-/// Prefers `sendRichMessage` (Bot API 10.1+), which hands the text to Telegram's own
-/// GFM-compatible parser. That gets us tables, `_italic_`, `~~strikethrough~~` and
-/// nested emphasis — none of which `format::markdown` can express — and raises the
-/// size limit from 4096 to 32768, so ordinary replies stop being split mid-sentence.
-/// The text is passed through [`crate::format::prepare_rich_markdown`] first so quoted
-/// untrusted content cannot inject interactive elements.
+/// Prefers `sendRichMessage` (Bot API 10.1+) carrying structured blocks, built by
+/// [`crate::format::prepare_rich_blocks`]. Telegram runs no Markdown or HTML parser over a
+/// block's text, so quoted content arrives as a string value rather than as markup — the
+/// converter, not Telegram, does the parsing, and a bug in it costs formatting rather than
+/// letting quoted text turn itself into a button or a link.
 ///
-/// A definitive refusal by Telegram (see [`is_api_rejection`] for exactly which
-/// responses count) falls back to [`send_text_legacy_counting`], keeping pre-10.1 (typically
-/// self-hosted) Bot API servers working exactly as before.
+/// Falls back to a sanitised Markdown string only when conversion yields nothing for
+/// non-empty text, which would mean a converter bug, and then to the legacy `sendMessage` +
+/// HTML pipeline when Telegram itself refuses the rich call.
 pub async fn send_text(
     client: &BotClient,
     chat_id: i64,
@@ -182,11 +181,8 @@ pub async fn send_text_counting(
     text: &str,
     thread_id: Option<i64>,
 ) -> (usize, Option<Error>) {
-    if let Some(markdown) = crate::format::prepare_rich_markdown(text) {
-        match client
-            .send_rich_message(chat_id, &markdown, thread_id)
-            .await
-        {
+    if let Some(rich) = rich_message_body(text) {
+        match client.send_rich_message(chat_id, rich, thread_id).await {
             Ok(_) => return (1, None),
             // Only a rejection *by Telegram* means the rich path is unavailable for this
             // text. A transport failure (timeout, connection reset) leaves the outcome
@@ -199,6 +195,23 @@ pub async fn send_text_counting(
         }
     }
     send_text_legacy_counting(client, chat_id, text, thread_id).await
+}
+
+/// Build the `rich_message` body for the preferred path.
+///
+/// Blocks first: Telegram runs no parser over a block's text, so quoted content cannot turn
+/// itself into markup and code samples keep their angle brackets. The sanitised Markdown
+/// string is kept only as a guard — if the converter ever returned nothing for text that was
+/// not empty, sending it would deliver an empty message, and a lower-fidelity message beats a
+/// blank one. `None` means the text does not fit the rich limit at all and the caller should
+/// chunk it through the legacy pipeline.
+pub(crate) fn rich_message_body(text: &str) -> Option<serde_json::Value> {
+    if let Some(blocks) = crate::format::prepare_rich_blocks(text) {
+        return Some(serde_json::json!({ "blocks": blocks }));
+    }
+    let markdown = crate::format::prepare_rich_markdown(text)?;
+    eprintln!("[telegram] rich blocks unavailable for this text, sending Markdown instead");
+    Some(serde_json::json!({ "markdown": markdown }))
 }
 
 /// True when Telegram itself answered with a definitive refusal — the message does not
@@ -919,9 +932,11 @@ mod tests {
         let seen = server.join().expect("mock thread");
         assert_eq!(seen.len(), 1, "legacy pipeline must not be touched");
         assert!(seen[0].0.contains("/sendRichMessage"), "{}", seen[0].0);
-        // The table reaches Telegram as Markdown, not as pre-rendered HTML.
+        // The table reaches Telegram as a structured block, not as pre-rendered HTML and
+        // not as a Markdown string Telegram would have to parse.
         assert!(seen[0].1.contains("rich_message"));
-        assert!(seen[0].1.contains("| a | b |"));
+        assert!(seen[0].1.contains(r#""type":"table""#), "{}", seen[0].1);
+        assert!(!seen[0].1.contains("| a | b |"), "{}", seen[0].1);
     }
 
     /// 429 is excluded from the fallback on purpose: it says the request was throttled,
@@ -989,8 +1004,12 @@ mod tests {
         assert!(seen[1].1.contains("<b>bold</b>"));
     }
 
+    /// Under the `markdown` field this needed a sanitiser and a proof that every `<` ends
+    /// up escaped. Under `blocks` the button text is the *value* of a paragraph's `text`
+    /// field, which Telegram never parses, and a button can only exist as a `RichTextButton`
+    /// object we never construct. The property is structural rather than argued.
     #[test]
-    fn send_text_sanitizes_injected_buttons_before_they_reach_telegram() {
+    fn a_quoted_button_reaches_telegram_as_text_not_markup() {
         let (root, server) = mock_bot_api(vec![(200, OK_MESSAGE)]);
         let client = BotClient::with_roots("t", &root, &root).expect("client");
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
@@ -1002,15 +1021,20 @@ mod tests {
 
         let seen = server.join().expect("mock thread");
         assert!(seen[0].0.contains("/sendRichMessage"));
-        assert!(
-            !seen[0].1.contains(r#"said: <tg-button"#),
-            "an injected button reached Telegram: {}",
-            seen[0].1
+        let sent: serde_json::Value = serde_json::from_str(&seen[0].1).expect("body is JSON");
+        assert_eq!(
+            sent["rich_message"]["blocks"][0]["text"], quoted,
+            "the quoted markup must arrive verbatim as a string: {sent}"
         );
-        // `&lt;`, not `\<`: verified against the live Bot API that Telegram parses
-        // `\<tg-button …>` into a real button and `&lt;tg-button …>` into text.
-        assert!(seen[0].1.contains("&lt;tg-button"), "{}", seen[0].1);
+        // Nothing is escaped here at all — neither `&lt;` nor `\<` — because nothing on
+        // this path parses the text. #8127 was about which escape Telegram honours in
+        // `rich_message.markdown`; the guard path still needs `&lt;` and keeps its own
+        // test. On the blocks path the question does not arise, and asserting the absence
+        // of both forms is what says so.
+        assert!(!seen[0].1.contains("&lt;tg-button"), "{}", seen[0].1);
         assert!(!seen[0].1.contains(r#"\\<tg-button"#), "{}", seen[0].1);
+        // The only shape a button can take, and the converter never builds it.
+        assert!(!seen[0].1.contains(r#""type":"button""#), "{}", seen[0].1);
     }
 
     #[test]

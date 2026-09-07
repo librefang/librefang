@@ -19,11 +19,22 @@ permissions:
   contents: read
 
 # Two paths with different safety properties share this workflow.
-# The `pull_request_target` path only removes `stale-pr` from the single PR that was pushed to, so it is idempotent and safe to cancel — the newer push repeats the same removal.
-# The `schedule` / `workflow_dispatch` path sweeps up to 100 open PRs and adds or removes a label one PR at a time, so cancelling it mid-flight would leave a partially swept repository; every sweep shares the constant `sweep` group key and is never cancelled, which makes two overlapping cron fires serialise instead of racing.
+# The `pull_request_target` path only removes `stale-pr` from the single PR that was pushed to, so it is idempotent: repeating it is free and skipping a superseded one saves nothing worth having.
+# The `schedule` / `workflow_dispatch` path sweeps up to 100 open PRs and adds or removes a label one PR at a time, so cancelling it mid-flight would leave a partially swept repository; every sweep shares the constant `sweep` group key.
+#
+# Nothing here is ever cancelled, and that is the point.
+# A cancelled run reports its check as failed, so a workflow that cancels its own runs stamps a red check on pull requests whose required `CI Gate` is green — which is how nearly every open PR came to sit at `mergeStateStatus = UNSTABLE` over label bookkeeping, making a real failure indistinguishable from this noise at a glance.
+# Runs on unrelated pull requests were observed cancelling one another in bursts: on 2026-09-04 a single `auto-update-branches` sweep produced 33 runs across 33 distinct branches between 15:53:25 and 15:55:47 and cancelled 31 of them.
+#
+# #8190 attributed that to the group key — `github.event.pull_request.number` failing to vary per PR — and switched to `github.head_ref`.
+# It did not stop: bursts on 2026-09-05 after 18:13 still cancelled runs on distinct branches with the new key live on `main`, and `Issue-PR Link Labels` showed identical behaviour under a third spelling.
+# Two different key expressions producing the same result is evidence against the key being the cause, so that explanation is unconfirmed and should not be repeated as fact.
+# `head_ref` is kept because it is the more likely-correct spelling for a per-PR key regardless, and because it is empty outside pull-request events so the sweep still falls through to `sweep`.
+#
+# Turning cancellation off removes the mechanism instead of trying to aim it. The cost is that two pushes to one PR run this twice, roughly fifteen seconds each; the benefit is that no run of this workflow can ever report a red check again.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || 'sweep' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.pull_request.number || 'sweep' }}
+  cancel-in-progress: false
 
 jobs:
   test:
