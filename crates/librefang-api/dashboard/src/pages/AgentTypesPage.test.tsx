@@ -12,8 +12,8 @@ import {
   usePromoteAgentType,
   useRestoreTemplateVersion,
   useSpawnEphemeral,
-  useUpdateAgentType,
 } from "../lib/mutations/agentTypes";
+import * as agentTypeMutations from "../lib/mutations/agentTypes";
 import { ApiError } from "../lib/http/errors";
 import { useUIStore } from "../lib/store";
 import { createTestQueryClient } from "../lib/test/query-client";
@@ -37,6 +37,12 @@ vi.mock("../lib/queries/agents", () => ({
 
 vi.mock("../lib/queries/skills", () => ({ useSkills: vi.fn() }));
 
+// Both names for the manifest-write hook: `main` exports it as
+// `useUpdateAgentType` and #8028 renames it to `useUpdateAgentTypeToml`.
+// This test only needs it stubbed — it never asserts on it — so the factory
+// provides both and the page gets whichever one it imports. Pinning a single
+// name would break this file on whichever of the two PRs merges second, for a
+// hook that has nothing to do with what is being tested.
 vi.mock("../lib/mutations/agentTypes", () => ({
   useCreateAgentType: vi.fn(),
   useDeleteAgentType: vi.fn(),
@@ -44,6 +50,7 @@ vi.mock("../lib/mutations/agentTypes", () => ({
   useRestoreTemplateVersion: vi.fn(),
   useSpawnEphemeral: vi.fn(),
   useUpdateAgentType: vi.fn(),
+  useUpdateAgentTypeToml: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -159,13 +166,19 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
   vi.mocked(useAgents).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useAgents>);
   vi.mocked(useTools).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useTools>);
   vi.mocked(useSkills).mockReturnValue(mockQuery([]) as unknown as ReturnType<typeof useSkills>);
+  // Stub both spellings of the manifest-write hook rather than picking one:
+  // the page calls whichever it imports, and an unstubbed `vi.fn()` returns
+  // `undefined`, which the page then destructures and crashes on.
+  const mutations = agentTypeMutations as unknown as Record<string, unknown>;
   for (const hook of [
     useCreateAgentType,
     useDeleteAgentType,
     useRestoreTemplateVersion,
     useSpawnEphemeral,
-    useUpdateAgentType,
+    mutations.useUpdateAgentType,
+    mutations.useUpdateAgentTypeToml,
   ]) {
+    if (!hook) continue;
     (hook as unknown as ReturnType<typeof vi.fn>).mockReturnValue(idle);
   }
   vi.mocked(usePromoteAgentType).mockReturnValue(
