@@ -185,9 +185,9 @@ impl TelegramAdapter {
         if raw.trim().is_empty() {
             return;
         }
-        if let Some(markdown) = crate::format::prepare_rich_markdown(raw) {
+        if let Some(rich) = crate::dispatcher::rich_message_body(raw) {
             match client
-                .edit_rich_message_text(chat_id, message_id, &markdown)
+                .edit_rich_message_text(chat_id, message_id, rich)
                 .await
             {
                 Ok(_) => return,

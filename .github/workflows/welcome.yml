@@ -6,6 +6,8 @@ on:
   issues:
     types: [opened]
 
+# Deliberately minimal, and pinned by `scripts/tests/test_release_tag_workflow_safety.py`: this runs on `pull_request_target`, where the token carries base-repository access on an event a fork controls, so `pull-requests` stays read-only.
+# The pull-request greeting posts through the REST issue-comments endpoint, which a pull request shares with issues and which `issues: write` already covers — see the note above the call below.
 permissions:
   issues: write
   pull-requests: read
@@ -72,7 +74,10 @@ jobs:
 
           We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
           MSG
-              gh pr comment "$NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+              # Not `gh pr comment`: that issues the GraphQL `addComment` mutation, which on a pull request is gated on `pull-requests: write`, and this workflow deliberately keeps that scope read-only because it runs on `pull_request_target`.
+              # A pull request is an issue as far as the REST comment endpoint is concerned, so posting there needs only the `issues: write` this workflow already holds.
+              # The failure this replaces was invisible for the life of the workflow: the greeting is guarded on `PRIOR_COUNT -eq 0`, so every run by a returning contributor exits before reaching this line and reports success — 27 of 28 `pull_request_target` runs were green while the branch had never once posted anything, and the first genuine first-time pull request (#8203) died on `Resource not accessible by integration (addComment)`.
+              gh api --method POST "repos/$REPO/issues/$NUMBER/comments" -F "body=@$BODY_FILE" --silent
               rm -f "$BODY_FILE"
               trap - EXIT
             fi

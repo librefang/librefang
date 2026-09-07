@@ -233,12 +233,12 @@ impl BotClient {
     pub async fn send_rich_message(
         &self,
         chat_id: i64,
-        markdown: &str,
+        rich_message: Value,
         thread_id: Option<i64>,
     ) -> Result<SendMessageResult> {
         let mut payload = json!({
             "chat_id": chat_id,
-            "rich_message": { "markdown": markdown },
+            "rich_message": rich_message,
         });
         if let Some(t) = thread_id {
             payload["message_thread_id"] = json!(t);
@@ -254,12 +254,12 @@ impl BotClient {
         &self,
         chat_id: i64,
         message_id: i64,
-        markdown: &str,
+        rich_message: Value,
     ) -> Result<Value> {
         let payload = json!({
             "chat_id": chat_id,
             "message_id": message_id,
-            "rich_message": { "markdown": markdown },
+            "rich_message": rich_message,
         });
         self.call_json("editMessageText", &payload).await
     }
