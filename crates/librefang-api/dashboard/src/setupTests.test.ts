@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockResizeObserver } from "./setupTests";
 
-describe.sequential("dashboard browser mocks", () => {
+describe("dashboard browser mocks", () => {
   it("allows a test to populate storage", () => {
     localStorage.setItem("leaked", "value");
     sessionStorage.setItem("leaked", "value");
