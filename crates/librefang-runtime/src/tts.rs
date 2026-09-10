@@ -2,7 +2,7 @@
 //!
 //! Auto-cascades through available providers based on configured API keys.
 
-use librefang_types::config::{TtsConfig, TtsElevenLabsConfig};
+use librefang_types::config::{TtsConfig, TtsElevenLabsConfig, DEFAULT_TTS_OUTPUT_FORMAT};
 
 /// Maximum audio response size (10MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
@@ -16,6 +16,30 @@ fn resolve_elevenlabs_format<'a>(
     cfg: &'a TtsElevenLabsConfig,
 ) -> &'a str {
     format_override.unwrap_or(cfg.output_format.as_str())
+}
+
+/// Resolve the final container the `text_to_speech` tool writes to `output/`:
+/// the per-call `output_format` argument wins over the operator-wide
+/// `[tts] output_format`, which itself falls back to
+/// [`DEFAULT_TTS_OUTPUT_FORMAT`]. Free function so the precedence is
+/// unit-testable without a synthesis call (#8272), mirroring
+/// [`resolve_elevenlabs_format`].
+///
+/// `tts_config` is `None` only where the caller has no TTS config to consult,
+/// in which case the built-in default applies — the behaviour that code had
+/// before this tier existed.
+///
+/// Unlike [`resolve_elevenlabs_format`] this value is never sent to a provider:
+/// it selects the post-synthesis ffmpeg step that every provider's audio goes
+/// through, which is why it lives on `[tts]` rather than on one provider's
+/// block.
+pub(crate) fn resolve_tts_output_format<'a>(
+    request_override: Option<&'a str>,
+    tts_config: Option<&'a TtsConfig>,
+) -> &'a str {
+    request_override
+        .or_else(|| tts_config.and_then(|cfg| cfg.output_format.as_deref()))
+        .unwrap_or(DEFAULT_TTS_OUTPUT_FORMAT)
 }
 
 /// Derive the codec/container label from an ElevenLabs compound output-format
@@ -605,6 +629,60 @@ mod tests {
                 "prefix of {input}"
             );
         }
+    }
+
+    /// Pins the 3-tier precedence for the tool-level output format
+    /// (tool-arg override > `[tts] output_format` > built-in default), the
+    /// analogue of `test_three_tier_resolution_elevenlabs_format` for the
+    /// setting that applies to every provider (#8272).
+    #[test]
+    fn test_three_tier_resolution_tts_output_format() {
+        let config = TtsConfig {
+            output_format: Some("ogg_opus".to_string()),
+            ..Default::default()
+        };
+
+        // Tier 1: tool-arg override wins over the operator default.
+        assert_eq!(resolve_tts_output_format(Some("mp3"), Some(&config)), "mp3");
+        // Tier 2: the operator default applies when the tool call omits one —
+        // the tier that did not exist before #8272, and the whole point of it.
+        assert_eq!(resolve_tts_output_format(None, Some(&config)), "ogg_opus");
+        // Tier 3: built-in default when nothing is configured. An existing
+        // deployment that sets no key must keep the behaviour it had.
+        assert_eq!(
+            resolve_tts_output_format(None, Some(&TtsConfig::default())),
+            DEFAULT_TTS_OUTPUT_FORMAT
+        );
+        assert_eq!(resolve_tts_output_format(None, None), "mp3");
+    }
+
+    /// A tool argument must still win when it names the *same* value the
+    /// operator configured, and when it names one the operator did not — the
+    /// override path must not consult the config at all.
+    #[test]
+    fn test_tts_output_format_override_wins_without_config() {
+        assert_eq!(
+            resolve_tts_output_format(Some("ogg_opus"), None),
+            "ogg_opus"
+        );
+
+        let config = TtsConfig {
+            output_format: Some("mp3".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tts_output_format(Some("ogg_opus"), Some(&config)),
+            "ogg_opus"
+        );
+    }
+
+    /// The built-in default is the pre-#8272 literal. Changing it is a
+    /// behaviour change for every deployment that configures nothing, so it
+    /// should not happen as a side effect of an unrelated edit.
+    #[test]
+    fn test_default_tts_output_format_is_unset_and_mp3() {
+        assert_eq!(DEFAULT_TTS_OUTPUT_FORMAT, "mp3");
+        assert_eq!(TtsConfig::default().output_format, None);
     }
 
     // ── Custom TTS config tests ──────────────────────────────────────────

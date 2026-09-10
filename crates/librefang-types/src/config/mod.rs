@@ -1610,6 +1610,42 @@ admin_role = "admin"
         );
     }
 
+    /// A misspelt `[tts] output_format` is silently equivalent to the default
+    /// at the point of use, so `validate()` has to name it at config load
+    /// (#8272).
+    #[test]
+    fn test_validate_unknown_tts_output_format_warns() {
+        let mut config = KernelConfig::default();
+        config.tts.output_format = Some("ogg-opus".to_string());
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("output_format") && w.contains("ogg-opus")),
+            "expected tts output_format warning, got: {warnings:?}"
+        );
+    }
+
+    /// Every accepted value, and the unset default, must pass without a word —
+    /// a warning on a supported configuration is what teaches operators to
+    /// ignore the channel.
+    #[test]
+    fn test_validate_accepted_tts_output_formats_are_silent() {
+        for value in TTS_OUTPUT_FORMATS
+            .iter()
+            .map(|f| Some(f.to_string()))
+            .chain(std::iter::once(None))
+        {
+            let mut config = KernelConfig::default();
+            config.tts.output_format = value.clone();
+            let warnings = config.validate();
+            assert!(
+                !warnings.iter().any(|w| w.contains("[tts] output_format")),
+                "output_format {value:?} should be accepted, got: {warnings:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_validate_default_config_no_structural_errors() {
         // Default config should only have path warnings (home_dir may not exist

@@ -1014,7 +1014,14 @@ pub(super) async fn tool_text_to_speech(
     let voice = input["voice"].as_str();
     let format = input["format"].as_str();
     let provider = input["provider"].as_str();
-    let output_format = input["output_format"].as_str().unwrap_or("mp3");
+    // Tool argument first, then the operator's `[tts] output_format`, then the
+    // built-in `"mp3"`. Reading the config here is what lets a deployment whose
+    // channel only accepts Ogg/Opus voice notes get a deliverable file without
+    // the model having to remember an optional argument (#8272).
+    let output_format = crate::tts::resolve_tts_output_format(
+        input["output_format"].as_str(),
+        tts_engine.map(|e| e.tts_config()),
+    );
 
     if let Some(cache) = media_drivers {
         let resolved_provider =

@@ -671,6 +671,15 @@ debounce_ms = 500
 # [tts]
 # enabled = false
 # provider = "openai"          # or "elevenlabs" or "google_tts"
+# output_format = "mp3"        # or "ogg_opus". Default for the text_to_speech
+#                              # tool's `output_format` argument, for every
+#                              # provider. Set "ogg_opus" when the audio goes to
+#                              # a messaging channel: a voice note must be
+#                              # Ogg/Opus, and most providers return MP3, which
+#                              # the channel rejects after a synthesis that
+#                              # reported success. Converted via ffmpeg; falls
+#                              # back to the provider format if ffmpeg is
+#                              # missing. A value passed in the tool call wins.
 #
 # [tts.elevenlabs]
 # voice_id = "21m00Tcm4TlvDq8ikWAM"   # Rachel (default)

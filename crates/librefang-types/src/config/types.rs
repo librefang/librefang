@@ -1411,12 +1411,41 @@ impl Default for CustomTtsConfig {
     }
 }
 
+/// Accepted values of the `text_to_speech` tool's `output_format` argument,
+/// and therefore of the `[tts] output_format` operator default that supplies
+/// it. Single source for the tool's JSON-schema `enum` and for the config
+/// validation warning, so the two cannot drift apart (#8272).
+pub const TTS_OUTPUT_FORMATS: [&str; 2] = ["mp3", "ogg_opus"];
+
+/// Fallback for the `text_to_speech` tool's `output_format` when neither the
+/// tool call nor `[tts] output_format` names one. Kept at `"mp3"` so an
+/// existing deployment that sets nothing keeps its current behaviour.
+pub const DEFAULT_TTS_OUTPUT_FORMAT: &str = "mp3";
+
 /// Text-to-speech configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TtsConfig {
     /// Enable TTS. Default: false.
     pub enabled: bool,
+    /// Operator default for the `text_to_speech` tool's `output_format`
+    /// argument — the container the tool finally writes to `output/`, applied
+    /// to every provider. One of [`TTS_OUTPUT_FORMATS`]. Unset (`None`) keeps
+    /// the built-in [`DEFAULT_TTS_OUTPUT_FORMAT`]; an `output_format` passed in
+    /// the tool call always wins over this.
+    ///
+    /// Set it to `"ogg_opus"` when the audio is destined for a messaging
+    /// channel: a voice note has to be Ogg/Opus, and most providers return MP3,
+    /// which such a channel rejects. Synthesis still reports success in that
+    /// case — the file exists, it simply cannot be delivered — so without this
+    /// key the mismatch surfaces only as a reply that never arrives (#8272).
+    /// The conversion runs through ffmpeg and falls back to the provider format
+    /// when ffmpeg is missing.
+    ///
+    /// Distinct from `[tts.elevenlabs] output_format`: that one is a provider
+    /// query parameter with its own vocabulary (`opus_48000_32`, …) and already
+    /// defaults to Opus (#6116), so ElevenLabs needs no conversion step here.
+    pub output_format: Option<String>,
     /// Default provider: "openai", "elevenlabs", "google_tts", or any custom
     /// name. When set to a name other than the three built-in ones, the
     /// `[tts.custom]` block must supply the endpoint URL.
@@ -1444,6 +1473,7 @@ impl Default for TtsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            output_format: None,
             provider: None,
             openai: TtsOpenAiConfig::default(),
             elevenlabs: TtsElevenLabsConfig::default(),
