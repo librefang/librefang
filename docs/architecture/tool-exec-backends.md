@@ -74,6 +74,13 @@ failure, network timeout, etc.
 [tool_exec]
 kind = "local"   # default
 
+# Default per-command timeout for the local backend, in seconds, applied when
+# an `ExecSpec` carries no timeout of its own.
+# Omit the key to inherit the global `tool_timeout_secs` (default 120), so
+# raising that one knob moves both tool-timeout paths.
+# `0` is rejected at boot: it would fail every local command instantly.
+# default_timeout_secs = 300
+
 # [tool_exec.ssh]
 # host = "build.example.com"
 # port = 22
@@ -124,6 +131,9 @@ was built without the relevant cargo feature.
   `subprocess_sandbox::sandbox_command`.
 - **When:** default. Always available; no feature flag.
 - **Limits honoured:** `timeout`, `max_output_bytes`.
+- **Default timeout:** `tool_exec.default_timeout_secs`, falling back to the global `tool_timeout_secs` (120s) when unset.
+  It applies only to an `ExecSpec` that carries no `limits.timeout` of its own, so the per-tool `tool_timeouts` map — which is resolved per call by `ToolPolicy::tool_timeout_secs_for` — has to arrive on the spec; a backend is built once per agent and cannot know which tool it is about to run.
+  Because the fallback equals the tool-dispatch timeout that already wraps the call in `agent_loop/tool_call.rs`, that outer timeout expires first in a default configuration, and the backend's own `ExecError::Timeout` fires only when a spec or an explicit `default_timeout_secs` is shorter.
 
 ### `BackendKind::Docker`
 

@@ -738,6 +738,18 @@ fn redacted_config_json(
         config.workflow_stale_timeout_minutes
     );
     set!("tool_timeout_secs", config.tool_timeout_secs);
+    // `tool_exec`: the backend selector and the local backend's per-command
+    // default. Neither is a secret — the SSH / Daytona sub-tables carry the
+    // credentials and are deliberately left out, which is also why
+    // `WRITABLE_EXACT_PATHS` lists this section leaf-by-leaf.
+    // `default_timeout_secs` is `Option` with a `None` default, so it is
+    // reported as `null` rather than omitted: the dashboard reads it with
+    // `getNestedValue`, and an absent key renders as "not configured" no
+    // matter what the operator just saved.
+    set!("tool_exec", {
+        "kind": config.tool_exec.kind,
+        "default_timeout_secs": config.tool_exec.default_timeout_secs,
+    });
     set!(
         "local_probe_interval_secs",
         config.local_probe_interval_secs
@@ -1238,6 +1250,13 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         obj.insert(
             "x-ui-options".into(),
             ui_options_overlay(provider_options, model_options),
+        );
+        obj.insert(
+            "x-aux-tasks".into(),
+            serde_json::json!(librefang_types::config::AuxTask::ALL
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()),
         );
         obj.insert("x-non-writable".into(), serde_json::json!(non_writable));
     }
@@ -1882,6 +1901,35 @@ mod config_read_write_parity_tests {
                 "`{path}` was reported missing from GET /api/config in #6596"
             );
         }
+    }
+
+    /// `tool_exec.default_timeout_secs` (#8171), pinned by hand because the bulk guard is structurally blind to it.
+    ///
+    /// `every_writable_config_leaf_is_readable` derives its candidates from `serde_json::to_value(&config)`, and this field is `Option<u64>` with `#[serde(skip_serializing_if = "Option::is_none")]` and a `None` default — so it is absent from the serialized value and filtered out before `is_writable_config_path` is ever consulted, exactly the blind spot that test's own doc-comment names.
+    /// A writable-but-unreadable field is the #6596 class: the dashboard reads it with `getNestedValue`, an absent key renders as "not configured", and the operator's save appears to have been discarded even though it returned `200 OK`.
+    #[test]
+    fn tool_exec_default_timeout_is_readable_both_unset_and_configured() {
+        let config = KernelConfig::default();
+        assert_eq!(
+            config.tool_exec.default_timeout_secs, None,
+            "this test is only meaningful while the field defaults to None"
+        );
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        assert_eq!(
+            lookup(&payload, "tool_exec.default_timeout_secs"),
+            Some(&serde_json::Value::Null),
+            "an unset writable field must still be reported, as null — omitting it is \
+             indistinguishable from the section not existing"
+        );
+
+        let mut config = KernelConfig::default();
+        config.tool_exec.default_timeout_secs = Some(300);
+        let payload = super::redacted_config_json(&config, &BudgetConfig::default());
+        assert_eq!(
+            lookup(&payload, "tool_exec.default_timeout_secs").and_then(serde_json::Value::as_u64),
+            Some(300),
+            "a saved value must read back"
+        );
     }
 
     /// #6605: fields that are intentionally NOT writable but must still be readable.

@@ -174,6 +174,13 @@ pub enum AppEvent {
     /// Memory agents loaded (for agent selector).
     MemoryAgentsLoaded(Vec<AgentEntry>),
     MemoryConfigLoaded(crate::tui::screens::memory::MemoryConfigView),
+    /// The result of a `PATCH /api/memory/config`.
+    ///
+    /// Carries the failure reason rather than a bare `false`: a connection
+    /// error, a 400 and a 500 need different operator responses, and "Save
+    /// failed" with no detail is the report that arrives as a bug with nothing
+    /// to act on.
+    MemoryConfigSaved(Result<(), FetchFailure>),
     /// The memory config could not be read — see [`FetchFailure`].
     ///
     /// Sent instead of staying silent: without it the Memory screen keeps
@@ -236,6 +243,8 @@ pub enum AppEvent {
     SettingsModelsLoaded(Vec<ModelInfo>),
     /// Settings tools loaded.
     SettingsToolsLoaded(Vec<ToolInfo>),
+    /// Settings auxiliary LLM chains loaded.
+    SettingsAuxiliaryLoaded(std::collections::BTreeMap<String, Vec<String>>),
     /// Provider key saved.
     ProviderKeySaved(String),
     /// Provider key deleted.
@@ -2507,10 +2516,120 @@ pub fn spawn_fetch_memory_config(backend: BackendRef, tx: mpsc::Sender<AppEvent>
                 .as_str()
                 .unwrap_or("")
                 .to_string(),
+            // The raw setting travels alongside it, because it is the only one
+            // of the two a save may write back: the resolved name has already
+            // lost its provider prefix, and is `[default_model]`'s when nothing
+            // was configured at all.
+            configured_extraction_model: pm["extraction_model"].as_str().map(str::to_string),
             extraction_model_inherited: pm["extraction_model_source"].as_str()
                 == Some("inherited_default"),
         };
         let _ = tx.send(AppEvent::MemoryConfigLoaded(view));
+    });
+}
+
+/// Read the outcome of a memory-config PATCH out of its response body.
+///
+/// `memory_config_patch` returns `(StatusCode::OK, Json(body))` on every path
+/// that got as far as writing the file, and its contract says clients MUST
+/// inspect `body.status`: `"applied"` is a clean save, `"partial"` means the
+/// TOML reached disk but `reload_config()` rejected it, leaving the running
+/// kernel on the boot snapshot with the validator output in `reload_error`.
+/// Reading the HTTP status alone reports that as a clean "Saved" while nothing
+/// the operator changed is in effect.
+///
+/// Split out of the request thread so the discrimination is testable without
+/// standing up an HTTP server.
+fn interpret_memory_config_patch_body(json: &serde_json::Value) -> Result<(), FetchFailure> {
+    if json["status"].as_str() == Some("applied") {
+        return Ok(());
+    }
+    let mut reason = crate::i18n::t("tui-memory-config-save-partial");
+    if let Some(err) = json["reload_error"].as_str() {
+        reason.push_str(": ");
+        reason.push_str(err);
+    }
+    Err(FetchFailure::Error(reason))
+}
+
+/// Write the memory configuration back.
+///
+/// `extraction_model` is `None` when the operator did not edit it, and the
+/// field is then left out of the PATCH entirely: the endpoint only writes the
+/// keys a request carries, so omitting it is what keeps a boolean-only save
+/// from rewriting the model. Sending the panel's displayed name instead would
+/// strip a `provider/` prefix, pin a model that was inheriting, or overwrite a
+/// change that is still waiting for a restart to take effect.
+pub fn spawn_save_memory_config(
+    backend: BackendRef,
+    auto_memorize: bool,
+    auto_retrieve: bool,
+    extraction_model: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let BackendRef::Daemon { base_url, api_key } = backend else {
+            // Without this the panel sits on "Saving..." forever: nothing is
+            // spawned, no event arrives, and the operator has no way to tell
+            // the save is never going to happen.
+            let _ = tx.send(AppEvent::MemoryConfigSaved(Err(
+                FetchFailure::RequiresDaemon,
+            )));
+            return;
+        };
+        // This write reads config.toml, rewrites it, and runs a full
+        // `reload_config()` that can rebuild the embedding/extraction
+        // drivers and rescan skills — the 5 s default is a read timeout
+        // sized for a GET, not for this.
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
+        let mut proactive_memory = serde_json::json!({
+            "auto_memorize": auto_memorize,
+            "auto_retrieve": auto_retrieve,
+        });
+        if let Some(model) = extraction_model.as_deref().map(str::trim) {
+            // An emptied field is not a request to configure the empty string,
+            // and the endpoint has no "unset" for this key — leave it alone.
+            if !model.is_empty() {
+                proactive_memory["extraction_model"] = serde_json::Value::String(model.to_string());
+            }
+        }
+        let body = serde_json::json!({ "proactive_memory": proactive_memory });
+        let result = match client
+            .patch(format!("{base_url}/api/memory/config"))
+            .json(&body)
+            .send()
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    // The endpoint's contract: PATCH returns 200 on every
+                    // path that reached disk, and `body.status` — not the
+                    // HTTP status — discriminates a clean save ("applied")
+                    // from one where the write succeeded but the live
+                    // reload failed ("partial", `restart_required: true`).
+                    // Treating 200 alone as success reports that case as a
+                    // clean "Saved" with the daemon still on the boot
+                    // snapshot.
+                    match resp.json::<serde_json::Value>() {
+                        Ok(json) => interpret_memory_config_patch_body(&json),
+                        Err(e) => Err(FetchFailure::Error(e.to_string())),
+                    }
+                } else {
+                    // The body is where the API explains a 400; a status line
+                    // reading "400 Bad Request" alone does not say which field.
+                    let body = resp.text().unwrap_or_default();
+                    let detail = body.trim();
+                    let mut reason = status.to_string();
+                    if !detail.is_empty() {
+                        reason.push_str(": ");
+                        reason.push_str(detail);
+                    }
+                    Err(FetchFailure::Error(reason))
+                }
+            }
+            Err(e) => Err(FetchFailure::Error(e.to_string())),
+        };
+        let _ = tx.send(AppEvent::MemoryConfigSaved(result));
     });
 }
 
@@ -3685,6 +3804,173 @@ pub fn spawn_fetch_backups(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
         BackendRef::InProcess(_) => {
             let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
                 "tui-event-backups-need-daemon",
+            )));
+        }
+    });
+}
+
+/// Fetch auxiliary LLM chains from `GET /api/config`.
+pub fn spawn_fetch_auxiliary(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
+            // `send()` returning `Ok` says nothing about status: a 401 or 500 body
+            // deserialises into `serde_json::Value` perfectly well, `llm.auxiliary`
+            // is then absent, and the pane renders every task as "(not configured)"
+            // — telling an operator with a rejected request that their chains are
+            // empty. And a transport error used to send no event at all, stranding
+            // the spinner `refresh_settings_auxiliary` had already armed. Both go
+            // through `daemon_response` like every sibling helper (#8059 review).
+            let outcome =
+                daemon_response(client.get(format!("{base_url}/api/config")).send(), || {
+                    crate::i18n::t("tui-event-aux-fetch-failed")
+                });
+            let resp = match outcome {
+                Ok(resp) => resp,
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                    return;
+                }
+            };
+            match resp.json::<serde_json::Value>() {
+                Err(e) => {
+                    let _ = tx.send(AppEvent::FetchError(with_detail(
+                        crate::i18n::t("tui-event-aux-fetch-failed"),
+                        transport_detail(&e),
+                    )));
+                }
+                Ok(body) => {
+                    // Enumerate the task list from the kernel (#8059 review): the
+                    // config document only carries configured tasks, so a list
+                    // hand-maintained in event.rs would go stale when a new
+                    // `AuxTask` variant lands. The schema's `x-aux-tasks` is
+                    // compile-guarded by the `AuxTask::ALL` completeness test.
+                    // A failed or malformed schema fetch used to fall through to an
+                    // empty list in silence, leaving the operator looking at only the
+                    // tasks they had already configured with nothing to say a task is
+                    // missing rather than absent (same class of bug as #8144). Report
+                    // it and still render what the config document does carry.
+                    let known_tasks: Vec<String> = match client
+                        .get(format!("{base_url}/api/config/schema"))
+                        .send()
+                        .and_then(|r| r.json::<serde_json::Value>())
+                    {
+                        Ok(schema) => match schema.get("x-aux-tasks").and_then(|v| v.as_array()) {
+                            Some(a) => a
+                                .iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect(),
+                            None => {
+                                let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                                    "tui-event-aux-tasks-schema-missing",
+                                )));
+                                Vec::new()
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::FetchError(crate::i18n::t_args(
+                                "tui-event-aux-tasks-fetch-failed",
+                                &[("error", &e.to_string())],
+                            )));
+                            Vec::new()
+                        }
+                    };
+                    let mut aux = std::collections::BTreeMap::new();
+                    if let Some(obj) = body
+                        .get("llm")
+                        .and_then(|l| l.get("auxiliary"))
+                        .and_then(|a| a.as_object())
+                    {
+                        for (task, chain) in obj {
+                            if let Some(arr) = chain.as_array() {
+                                let entries: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect();
+                                aux.insert(task.clone(), entries);
+                            }
+                        }
+                    }
+                    // Serve the kernel's task list: fill in every task the
+                    // schema enumerates but the operator has not configured,
+                    // so a new AuxTask variant appears without a code change
+                    // here (#8059 review).
+                    for task in known_tasks {
+                        aux.entry(task).or_default();
+                    }
+                    let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+                }
+            }
+        }
+        BackendRef::InProcess(kernel) => {
+            let mut aux = std::collections::BTreeMap::new();
+            let config = kernel.config_ref();
+            for (task, chain) in &config.llm.auxiliary.tasks {
+                aux.insert(task.as_str().to_string(), chain.clone());
+            }
+            // Same enumeration source as the daemon path
+            // (schema `x-aux-tasks`): compile-guarded `AuxTask::ALL`.
+            for task in librefang_types::config::AuxTask::ALL {
+                aux.entry(task.as_str().to_string()).or_default();
+            }
+            let _ = tx.send(AppEvent::SettingsAuxiliaryLoaded(aux));
+        }
+    });
+}
+
+/// Save an auxiliary LLM chain via `POST /api/config/set`.
+pub fn spawn_save_aux_chain(
+    backend: BackendRef,
+    task: String,
+    chain: Vec<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || match backend {
+        BackendRef::Daemon {
+            ref base_url,
+            ref api_key,
+        } => {
+            let client = make_daemon_client(api_key.as_deref());
+            let body = serde_json::json!({
+                "path": format!("llm.auxiliary.{task}"),
+                "value": chain,
+            });
+            // `llm.auxiliary.<task>` has several legitimate rejections — 403 from
+            // `is_writable_config_path`, 400 when the chain does not deserialise,
+            // 409 on a corrupt config.toml, 423 under a managed config. Discarding
+            // the result and refetching re-rendered the old chain, so a refused
+            // save was indistinguishable from an edit that did not take
+            // (#8059 review).
+            let outcome = daemon_response(
+                client
+                    .post(format!("{base_url}/api/config/set"))
+                    .json(&body)
+                    .send(),
+                || crate::i18n::t_args("tui-event-aux-save-failed", &[("task", &task)]),
+            );
+            match outcome {
+                Ok(_) => {
+                    spawn_fetch_auxiliary(
+                        BackendRef::Daemon {
+                            base_url: base_url.clone(),
+                            api_key: api_key.clone(),
+                        },
+                        tx,
+                    );
+                }
+                Err(message) => {
+                    let _ = tx.send(AppEvent::FetchError(message));
+                }
+            }
+        }
+        BackendRef::InProcess(_) => {
+            // Reporting, not blanking: sending an empty map here made
+            // `SettingsAuxiliaryLoaded` rebuild `aux_tasks` from zero keys, so the
+            // pane replaced nine populated rows with "No auxiliary tasks
+            // configured." — a false statement about the operator's config, on top
+            // of silently dropping the edit (#8059 review).
+            let _ = tx.send(AppEvent::FetchError(crate::i18n::t(
+                "tui-event-aux-save-not-available-in-process",
             )));
         }
     });
@@ -5076,6 +5362,37 @@ pub fn spawn_fetch_agents_for_chat(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    // ── the memory-config PATCH reports its outcome in the body ───────────
+
+    /// The clean case, and the only one that may clear the unsaved marker.
+    #[test]
+    fn an_applied_memory_config_patch_is_a_success() {
+        let body = serde_json::json!({ "status": "applied", "restart_required": false });
+
+        assert!(interpret_memory_config_patch_body(&body).is_ok());
+    }
+
+    /// The endpoint answers 200 here too: the file was written but the live
+    /// reload failed, so the kernel is still running the boot snapshot.
+    /// Reporting it as "Saved" tells the operator their change is in effect
+    /// when none of it is.
+    #[test]
+    fn a_partial_memory_config_patch_is_not_a_success() {
+        let body = serde_json::json!({
+            "status": "partial",
+            "restart_required": true,
+            "reload_error": "invalid type: string, expected u64 for key `queue.depth`",
+        });
+
+        match interpret_memory_config_patch_body(&body) {
+            Err(FetchFailure::Error(reason)) => assert!(
+                reason.contains("invalid type: string"),
+                "the validator output is the only thing that says what to fix, got {reason:?}"
+            ),
+            other => panic!("a partial save must not read as success, got {other:?}"),
+        }
+    }
 
     // ── fetch helpers must never exit silently (#8141) ─────────────────────
 

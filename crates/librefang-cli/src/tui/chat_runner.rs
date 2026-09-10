@@ -464,6 +464,61 @@ impl StandaloneChat {
                     }
                 }
             }
+            "goal" => {
+                let args = parts.get(1).map(|s| s.trim()).unwrap_or("");
+                let Some((description, loop_engineering)) =
+                    librefang_types::goal::parse_goal_args(args)
+                else {
+                    self.chat.push_message(
+                        Role::System,
+                        commands::lookup("goal")
+                            .map(|def| def.usage())
+                            .unwrap_or_default(),
+                    );
+                    return;
+                };
+                match &self.backend {
+                    Backend::Daemon { .. } => {
+                        // No HTTP endpoint wraps `create_and_start_goal` for
+                        // the daemon-attached chat path yet — say so rather
+                        // than crash or silently no-op.
+                        self.chat.push_message(
+                            Role::System,
+                            crate::i18n::t("chat-runner-goal-daemon-unsupported"),
+                        );
+                    }
+                    Backend::InProcess { kernel } => match self.agent_id_inprocess {
+                        Some(id) => {
+                            match librefang_kernel::goal_runner::create_and_start_goal(
+                                kernel.as_ref(),
+                                id,
+                                &description,
+                                loop_engineering,
+                            ) {
+                                Ok(launch) => {
+                                    self.chat
+                                        .push_message(Role::System, launch.message(&description));
+                                }
+                                Err(e) => {
+                                    self.chat.push_message(Role::System, e);
+                                }
+                            }
+                        }
+                        None => {
+                            self.chat.push_message(
+                                Role::System,
+                                crate::i18n::t("chat-runner-no-active-connection"),
+                            );
+                        }
+                    },
+                    Backend::None => {
+                        self.chat.push_message(
+                            Role::System,
+                            crate::i18n::t("chat-runner-no-backend-connected"),
+                        );
+                    }
+                }
+            }
             // The pre-flight `commands::lookup` guarantees `canonical` is one
             // of the names matched above.
             other => unreachable!("unhandled CLI command `{other}`"),
@@ -983,6 +1038,23 @@ mod tests {
         ];
         let preferred = preferred_daemon_agent(&agents).unwrap();
         assert_eq!(preferred["name"].as_str(), Some("assistant"));
+    }
+
+    /// `/goal` carries `Scope::CLI`, so the pre-flight `commands::lookup`
+    /// check in `handle_slash_command` accepts it — before #7996 there was no
+    /// match arm for it, so it fell to `unreachable!()` and panicked the TUI
+    /// with the terminal left in raw mode. `Backend::None` (the state
+    /// `StandaloneChat::new` starts in) must reach the graceful
+    /// no-backend-connected message instead of panicking.
+    #[test]
+    fn goal_command_does_not_panic_without_a_backend() {
+        let (tx, _rx) = mpsc::channel();
+        let mut chat = StandaloneChat::new(tx);
+        chat.handle_slash_command("/goal ship the release");
+        assert!(
+            !chat.chat.messages.is_empty(),
+            "expected a system message, got none"
+        );
     }
 
     #[test]

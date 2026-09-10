@@ -35,6 +35,13 @@ vi.mock("../lib/mutations/config", () => ({
   useReloadConfig: vi.fn(),
 }));
 
+// The chain panel has its own suite (AuxiliaryLlmSection.test.tsx). Here it is
+// only a marker, so the assertion is about which editors the `llm` section
+// mounts, not about what either of them renders.
+vi.mock("../components/AuxiliaryLlmSection", () => ({
+  AuxiliaryLlmSection: () => <div data-testid="aux-chain-panel" />,
+}));
+
 // The page only uses the router for the category tab strip and the
 // unsaved-changes blocker; neither is under test here.
 vi.mock("@tanstack/react-router", () => ({
@@ -232,6 +239,56 @@ describe("ConfigPage managed mode (#6695)", () => {
 
     expect(inertWrapperFor(screen.getByLabelText("Log Level"))).toBeNull();
     expect(screen.queryByTestId("managed-config-banner")).toBeNull();
+  });
+});
+
+describe("ConfigPage — llm.auxiliary has one editor, not two (#8059 review)", () => {
+  /** `llm` with the real shape of `auxiliary`: an object map of string arrays,
+   *  which the generic field grid infers as `{type:"object"}` and renders as a
+   *  staged `JsonEditor`. */
+  const LLM_SCHEMA: ConfigSchemaRoot = {
+    type: "object",
+    properties: {
+      llm: {
+        type: "object",
+        properties: {
+          auxiliary: {
+            type: "object",
+            additionalProperties: { type: "array", items: { type: "string" } },
+          },
+          cheap_tier_enabled: { type: "boolean", title: "Cheap Tier Enabled" },
+        },
+      },
+    },
+    "x-sections": [
+      { key: "llm", title: "LLM", struct_field: "llm", fields: ["auxiliary", "cheap_tier_enabled"] },
+    ],
+    "x-non-writable": [],
+  } as unknown as ConfigSchemaRoot;
+
+  beforeEach(() => {
+    useConfigSchemaMock.mockReturnValue(
+      makeQuery(LLM_SCHEMA) as ReturnType<typeof useConfigSchema>,
+    );
+    useFullConfigMock.mockReturnValue(
+      makeQuery({ llm: { auxiliary: { compression: ["groq:big"] }, cheap_tier_enabled: true } }) as ReturnType<
+        typeof useFullConfig
+      >,
+    );
+    setStatus({ mode: "mutable", source: "/root/.librefang/config.toml", writable: true });
+  });
+
+  it("does not also render auxiliary as a generic staged field", () => {
+    // The grid's JsonEditor stages into `pendingChanges`; the chain panel writes
+    // immediately. Side by side, editing the blob and then the panel makes "Save
+    // changes" post the pre-edit object and revert the chain already on disk.
+    render(<ConfigPage category="general" />);
+
+    expect(screen.getByTestId("aux-chain-panel")).toBeInTheDocument();
+    expect(document.querySelector('[id^="cfg-llm-auxiliary"]')).toBeNull();
+    // The rest of the section must keep rendering — this excludes one field, not
+    // the grid.
+    expect(document.querySelector('[id^="cfg-llm-cheap_tier_enabled"]')).not.toBeNull();
   });
 });
 

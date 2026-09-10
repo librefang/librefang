@@ -1,0 +1,3 @@
+Offer the full slash menu in the dashboard chat, which previously drew on a hand-written list that nobody kept in sync with the command registry — the reason `/goal` worked in Telegram and nowhere else.
+The catalog is now derived from `COMMAND_REGISTRY`, so the menu gains `/goal`, `/agents`, `/budget`, `/peers`, `/a2a`, `/context`, `/queue`, `/verbose` and `/info`, and a command registered with dashboard scope appears there without a second edit.
+Registry entries carry how the dashboard runs each command, which is what lets the menu distinguish the ones the SPA answers locally from the ones it dispatches over the chat WebSocket (#7996) (@DaBlitzStein)

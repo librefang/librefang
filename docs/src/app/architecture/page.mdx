@@ -87,7 +87,7 @@ librefang/
 │   ├── librefang-desktop/     #   Tauri desktop app
 │   ├── librefang-telemetry/   #   OpenTelemetry metrics & traces
 │   └── librefang-testing/     #   Test utilities
-├── agents/                    # Pipeline runner agent templates
+├── agents/                    # Pipeline runner agent types
 ├── sdk/                       # Client SDKs
 │   ├── javascript/            #   @librefang/sdk (npm)
 │   ├── python/                #   librefang-sdk (PyPI)
@@ -140,7 +140,7 @@ After running `librefang init`, the user data directory is created at `~/.libref
 │   ├── librefang.db           #   SQLite database (memory, sessions, knowledge graph)
 │   └── state.db               #   Daemon state persistence
 ├── registry/                  # Synced from librefang-registry
-│   ├── agents/                #   32 agent templates (agent.toml each)
+│   ├── agents/                #   32 agent types (agent.toml each)
 │   ├── hands/                 #   15 hand definitions (HAND.toml + SKILL.md)
 │   ├── providers/             #   49 provider configs (*.toml)
 │   ├── skills/                #   Skill definitions

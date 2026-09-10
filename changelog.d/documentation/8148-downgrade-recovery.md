@@ -1,0 +1,3 @@
+Document the supported recovery for a binary downgrade over a migrated database: the older daemon's refusal to boot is the fail-loud guard working as designed, not corruption, and the way back is an offline restore of a backup taken before the upgrade.
+Deliberately not `POST /api/restore`, which runs inside a live daemon still holding the database open and can checkpoint its own stale write-ahead log over what was just restored.
+The page also names the two things that quietly break the procedure: a `data_dir` or `[memory] sqlite_path` that puts the databases outside the tree the archive carries, and a leftover `-wal` whose frames replay the newer schema version back over the restored file (#8148) (@DaBlitzStein)

@@ -1,5 +1,6 @@
 //! Session management — load/save conversation history.
 
+use crate::agent_tables::{execute_agent_deletes, AgentTableGroup};
 use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -2049,7 +2050,10 @@ impl SessionStore {
 /// transaction. Both `sessions` and `sessions_fts` MUST be cleared
 /// together — `search_sessions` reads from `sessions_fts` without
 /// joining `sessions`, so an orphan FTS row leaves the deleted agent's
-/// content searchable (a privacy regression, see #3501).
+/// content searchable (a privacy regression, see #3501). Both are listed
+/// under [`AgentTableGroup::Session`] in
+/// [`AGENT_SCOPED_TABLES`](crate::agent_tables::AGENT_SCOPED_TABLES), which
+/// is where the pair is kept together.
 ///
 /// Shared by [`SessionStore::delete_agent_sessions`] and
 /// [`crate::substrate::MemorySubstrate::remove_agent`] so the cascade
@@ -2058,17 +2062,7 @@ pub(crate) fn execute_session_agent_deletes(
     tx: &rusqlite::Transaction<'_>,
     agent_id: &str,
 ) -> LibreFangResult<()> {
-    tx.execute(
-        "DELETE FROM sessions WHERE agent_id = ?1",
-        rusqlite::params![agent_id],
-    )
-    .map_err(LibreFangError::memory)?;
-    tx.execute(
-        "DELETE FROM sessions_fts WHERE agent_id = ?1",
-        rusqlite::params![agent_id],
-    )
-    .map_err(LibreFangError::memory)?;
-    Ok(())
+    execute_agent_deletes(tx, agent_id, AgentTableGroup::Session)
 }
 
 #[cfg(test)]

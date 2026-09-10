@@ -1254,6 +1254,27 @@ impl AuxTask {
             AuxTask::SessionSummary => "session_summary",
         }
     }
+
+    /// Every task, in declaration order.
+    ///
+    /// Served as `x-aux-tasks` on `GET /api/config/schema` so the dashboard
+    /// and TUI editors enumerate the task list from the kernel instead of
+    /// keeping a hand-copied list that drifts when a variant is added
+    /// (#8059 review). `as_str` above is an exhaustive match, so a new
+    /// variant cannot compile until it has a slug; the
+    /// `all_slugs_covered_by_all_const` test below then fails until `ALL`
+    /// picks it up.
+    pub const ALL: [AuxTask; 9] = [
+        AuxTask::Compression,
+        AuxTask::Title,
+        AuxTask::Search,
+        AuxTask::Vision,
+        AuxTask::BrowserVision,
+        AuxTask::Fold,
+        AuxTask::SkillReview,
+        AuxTask::SkillWorkshopReview,
+        AuxTask::SessionSummary,
+    ];
 }
 
 impl std::fmt::Display for AuxTask {
@@ -8232,6 +8253,52 @@ impl Default for ToolResultsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8059 review: `AuxTask::ALL` is the single Rust-side enumeration the
+    /// config-schema endpoint serves as `x-aux-tasks`, so a variant added to
+    /// the enum but not to `ALL` would silently vanish from both UI editors.
+    /// `schemars::schema_for!` enumerates the variants from the derive
+    /// itself, so this test fails until `ALL` picks the new variant up.
+    #[test]
+    fn all_slugs_covered_by_all_const() {
+        let schema = serde_json::to_value(schemars::schema_for!(AuxTask))
+            .expect("AuxTask schema serialises");
+        // schemars 0.8 renders a unit-only enum whose variants carry
+        // doc-comments as `oneOf` of `{enum: [slug], type: "string"}` — one
+        // object per variant — rather than a single flat `enum` array.
+        let mut expected: Vec<String> = schema
+            .get("oneOf")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.get("enum"))
+                    .filter_map(|e| e.as_array())
+                    .filter_map(|e| e.first())
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| {
+                schema
+                    .get("enum")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+        assert!(!expected.is_empty(), "schema enumerated no variants");
+        expected.sort();
+
+        let mut have: Vec<String> = AuxTask::ALL
+            .iter()
+            .map(|t| t.as_str().to_string())
+            .collect();
+        have.sort();
+        assert_eq!(have, expected, "AuxTask::ALL must cover every variant");
+    }
 
     /// #6459 — an empty `[providers] allowed` list means "no restriction":
     /// every provider is permitted, preserving pre-allowlist behaviour.

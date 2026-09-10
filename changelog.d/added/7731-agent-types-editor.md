@@ -1,0 +1,2 @@
+The agent-types editor now mirrors the agent editor: catalog-backed pickers for skills and tools (fuzzy search over installed skills / the tool catalog, free-text allowed), provider/model defaults with hints, and workspace-agent source entries are read-only ("managed via Agents").
+The TUI templates screen lists operator-created types and spawns them from their real TOML rather than a hardcoded starter set (#7731) (@DaBlitzStein)

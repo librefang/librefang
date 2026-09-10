@@ -556,11 +556,19 @@ function DetailsModal({ channel, onClose, t }: {
 // (everything else) — see `useSaveSidecarConfig` for the wire shape.
 function SidecarForm({
   channel,
+  create,
   existingInstanceCount,
   onClose,
   t,
 }: {
   channel: Channel;
+  /** Explicit create-vs-edit mode, passed by the only two entry points that
+   *  open this drawer: the Add picker (always create, even for a type that
+   *  already has instances) and a card's configure gear (always edit).
+   *  Inferring it from `channel.configured` breaks as soon as the picker
+   *  lists an already-configured type, whose representative row may be a
+   *  configured instance (#8091). */
+  create: boolean;
   /** How many configured instances of this channel's type already exist.
    *  Drives the instance-name default below — see the field's own comment. */
   existingInstanceCount: number;
@@ -569,13 +577,9 @@ function SidecarForm({
 }) {
   const addToast = useUIStore((s) => s.addToast);
   const saveMut = useSaveSidecarConfig();
-  // A discovery (catalog) row is never `configured`, so this is exactly
-  // "the user picked a channel type from the Add picker" — including
-  // picking a type that already has other instances (multi-instance
-  // support). `channelType` is the `SIDECAR_CATALOG` key either way:
-  // discovery rows use their own `name` for it (no `channel_type` field),
-  // configured rows carry it explicitly.
-  const isCreate = !channel.configured;
+  // Create-vs-edit is a property of the entry point (picker → create, card
+  // gear → edit), not of the row — see the `create` prop doc above.
+  const isCreate = create;
   const channelType = channel.channel_type ?? channel.name;
   const { data: agents } = useAgents();
   // Instance-name default: safe to prefill with the catalog type only when
@@ -852,7 +856,13 @@ export function ChannelsPage() {
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
   // Every channel is sidecar now (the in-process registry was removed),
   // so configure always lands on the schema-driven SidecarForm drawer.
-  const [sidecarFormChannel, setSidecarFormChannel] = useState<Channel | null>(null);
+  // Whether the drawer opens in create mode belongs to the entry point, not
+  // the row: the Add picker always creates (even for a type that already has
+  // instances), while a card's configure gear always edits. Passed explicitly
+  // rather than inferred from `channel.configured`, because a picker row may
+  // be represented by a configured instance (#8091).
+  const [sidecarForm, setSidecarForm] =
+    useState<{ channel: Channel; create: boolean } | null>(null);
   // The picker drawer holds the catalog of unconfigured channel types
   // (slack / discord / email / …). Default view shows only configured
   // channels so the page stays focused on what's actually wired up.
@@ -874,7 +884,7 @@ export function ChannelsPage() {
     });
   };
   const handleCardConfigure = useCallback((ch: Channel) => {
-    setSidecarFormChannel(ch);
+    setSidecarForm({ channel: ch, create: false });
   }, []);
   const handleCardRemove = useCallback((ch: Channel) => {
     setRemoveChannel(ch);
@@ -893,7 +903,6 @@ export function ChannelsPage() {
 
   const channels = useMemo(() => channelsQuery.data ?? [], [channelsQuery.data]);
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
-  const unconfiguredCount = channels.length - configuredCount;
 
   // Configured channels are the main page content. Filter/sort applies
   // to those only; the unconfigured catalog lives behind the Add picker.
@@ -913,20 +922,33 @@ export function ChannelsPage() {
     [channels, search, sortField, sortOrder],
   );
 
-  // Catalog of channel types, surfaced in the Add picker. Every catalog
-  // type is always listed (not just ones with zero configured instances —
-  // #8xxx multi-instance support) so picking an already-configured type
-  // starts a second (third, …) named instance instead of having nowhere
-  // left to click.
-  const pickerChannels = useMemo(
-    () => [...channels]
-      .filter(c => !c.configured)
+  // Catalog of channel types, surfaced in the Add picker. One row per type,
+  // taken from the unconfigured discovery row: its `name` IS the type and it
+  // carries the cached schema, and `list_channels` emits one for every
+  // `SIDECAR_CATALOG` entry whether or not instances of it exist — so an
+  // already-configured type is still listed here, which is what gives a
+  // second instance somewhere to be added from (#8091).
+  //
+  // Seeding from the discovery rows only is also what keeps the picker to
+  // types this page can actually create. A `[[sidecar_channels]]` entry whose
+  // `channel_type` is not a catalog name (a third-party adapter) has no
+  // discovery row, no cached schema, and no `configure_sidecar_channel`
+  // catalog entry to save against — electing its configured instance as the
+  // type's representative would add a row that opens the "setup form
+  // unavailable" panel and could never be saved. `instanceCountByType` below
+  // already accounts for configured rows.
+  const pickerChannels = useMemo(() => {
+    const byType = new Map<string, Channel>();
+    for (const c of channels) {
+      const type = c.channel_type ?? c.name;
+      if (!c.configured) byType.set(type, c);
+    }
+    return [...byType.values()]
       .filter(c => !pickerSearch
         || (c.display_name || c.name).toLowerCase().includes(pickerSearch.toLowerCase())
         || c.category?.toLowerCase().includes(pickerSearch.toLowerCase()))
-      .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name)),
-    [channels, pickerSearch],
-  );
+      .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name));
+  }, [channels, pickerSearch]);
 
   // How many configured instances each catalog type already has — feeds
   // the picker's "N configured" hint and, more importantly, tells
@@ -965,13 +987,12 @@ export function ChannelsPage() {
   };
   const handlePick = (ch: Channel) => {
     setPickerOpen(false);
-    // Schema-driven save endpoint
-    // (`POST /api/channels/sidecar/{name}/configure`) is the only
-    // configure path now — every channel runs as a sidecar. `ch` here is
-    // always a discovery (catalog) row, so `SidecarForm` opens in "create a
-    // new instance" mode regardless of how many instances of this type
-    // already exist.
-    setSidecarFormChannel(ch);
+    // `POST /api/channels/sidecar/{name}/configure` is the only configure
+    // path now — every channel runs as a sidecar. The picker always opens
+    // create mode, even when the picked type already has instances
+    // (#8091): the row is a catalog entry, not an existing instance to
+    // edit — an instance is edited from its card's gear instead.
+    setSidecarForm({ channel: ch, create: true });
   };
 
   const handleSort = (field: SortField) => {
@@ -1029,15 +1050,23 @@ export function ChannelsPage() {
             <Button variant="secondary" size="sm" onClick={handleReload} disabled={reloadMut.isPending}>
               {t("channels.reload", { defaultValue: "Reload" })}
             </Button>
+            {/* `PageHeader` renders above the loading / error / empty
+                branches below, so this button is on screen before the query
+                resolves and with the daemon unreachable. Gate it on the
+                catalog having actually arrived: opening the picker on an
+                empty `channels` would show its "nothing to add" panel, which
+                would be a statement about the catalog rather than about the
+                fetch that has not happened. Not gated on
+                `unconfiguredCount === 0` any more — a configured type still
+                belongs in the picker so a second instance can be added
+                (#8091). */}
             <Button
               variant="primary"
               size="sm"
               onClick={openPicker}
+              disabled={!channelsQuery.data}
               leftIcon={<Plus className="h-3.5 w-3.5" />}
-              disabled={unconfiguredCount === 0}
-              title={unconfiguredCount === 0
-                ? t("channels.all_configured", { defaultValue: "All channels configured" })
-                : t("channels.add_channel", { defaultValue: "Add channel" })}
+              title={t("channels.add_channel", { defaultValue: "Add channel" })}
             >
               {t("channels.add", { defaultValue: "Add" })}
             </Button>
@@ -1227,15 +1256,16 @@ export function ChannelsPage() {
 
       {/* Sidecar configure form — schema-driven, hits
           `POST /api/channels/sidecar/{name}/configure`. */}
-      {sidecarFormChannel && (
+      {sidecarForm && (
         <SidecarForm
-          channel={sidecarFormChannel}
+          channel={sidecarForm.channel}
+          create={sidecarForm.create}
           existingInstanceCount={
             instanceCountByType.get(
-              sidecarFormChannel.channel_type ?? sidecarFormChannel.name,
+              sidecarForm.channel.channel_type ?? sidecarForm.channel.name,
             ) ?? 0
           }
-          onClose={() => setSidecarFormChannel(null)}
+          onClose={() => setSidecarForm(null)}
           t={t}
         />
       )}
@@ -1266,33 +1296,51 @@ export function ChannelsPage() {
           />
           {pickerChannels.length === 0 ? (
             <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+              {/* "Everything is already configured" is no longer a state the
+                  picker can be in: every catalog type is listed whether or not
+                  it has instances. With the Add button gated on loaded data,
+                  the one remaining way to get here without a search term is a
+                  daemon that reported no catalog at all. */}
               {pickerSearch
                 ? t("channels.no_results")
-                : t("channels.all_configured_desc", { defaultValue: "All available channel types are already configured." })}
+                : t("channels.picker_empty_catalog", { defaultValue: "No channel types are available to add." })}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {pickerChannels.map((c) => (
-                <button
-                  key={c.name}
-                  type="button"
-                  onClick={() => handlePick(c)}
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left"
-                >
-                  <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/20 grid place-items-center text-brand shrink-0">
-                    {getChannelIcon(c.name)}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="font-mono text-[13px] font-medium text-text-main truncate">
-                      {c.display_name || c.name}
+              {pickerChannels.map((c) => {
+                const instanceCount = instanceCountByType.get(c.channel_type ?? c.name) ?? 0;
+                return (
+                  <button
+                    key={c.channel_type ?? c.name}
+                    type="button"
+                    onClick={() => handlePick(c)}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left"
+                  >
+                    <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/20 grid place-items-center text-brand shrink-0">
+                      {getChannelIcon(c.name)}
                     </div>
-                    <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
-                      {c.category || c.name}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[13px] font-medium text-text-main truncate">
+                        {c.display_name || c.name}
+                      </div>
+                      <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
+                        {c.category || c.name}
+                      </div>
                     </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
-                </button>
-              ))}
+                    {instanceCount > 0 && (
+                      <span
+                        className="shrink-0 font-mono text-[10px] text-text-dim"
+                        title={t("channels.picker_instances_configured_hint", {
+                          defaultValue: "Instances of this channel type that are already configured",
+                        })}
+                      >
+                        {t("channels.picker_instances_configured", { instances: instanceCount })}
+                      </span>
+                    )}
+                    <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
+                  </button>
+                  );
+                })}
             </div>
           )}
         </div>

@@ -1,0 +1,4 @@
+The dashboard agent editor gains a Shared Folders section (#8013), bringing it to parity with the TUI editor from #7835: an operator can name, map and mode a `[workspaces]` declaration without editing raw TOML.
+  The form emits the `[workspaces]` table header only after every top-level scalar — a header inside the scalar block would scope the remaining bare keys into the table, so the first save with a folder would have silently deleted the agent's tags, skills, MCP servers and schedule.
+  Only `path`-based declarations become rows; a `mount` entry (absolute host directory) is preserved verbatim on save instead of being rewritten as an empty `path` and dropped.
+  Duplicate folder names and paths that escape `workspaces_dir` (absolute or containing `..`) are refused at save time with a per-row message, so the operator finds out before the daemon's parser does. (#8013) (@DaBlitzStein)

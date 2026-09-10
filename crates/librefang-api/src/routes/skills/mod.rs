@@ -913,19 +913,16 @@ fn validate_static_file_path(
 /// operators), then fall back to the vault. Returns `None` when neither
 /// holds a non-empty token.
 ///
+/// The order lives in `routes::vault::resolve_key`, which
+/// `GET /api/vault/keys` also reports from. Keeping one definition is
+/// what stops the listing from describing the vault while the daemon
+/// reads the environment.
+///
 /// `pub(crate)` so the agent-type promotion handler in
 /// `routes::agent_templates` reuses it rather than duplicating the
 /// env-then-vault order.
 pub(crate) fn resolve_github_token(state: &Arc<AppState>) -> Option<String> {
-    if let Ok(tok) = std::env::var("GITHUB_TOKEN") {
-        if !tok.trim().is_empty() {
-            return Some(tok);
-        }
-    }
-    state
-        .kernel
-        .vault_get("GITHUB_TOKEN")
-        .filter(|t| !t.trim().is_empty())
+    crate::routes::vault::resolve_key(state, "GITHUB_TOKEN").map(|(token, _)| token)
 }
 
 // ── Skill evolution handlers ───────────────────────────────────────────

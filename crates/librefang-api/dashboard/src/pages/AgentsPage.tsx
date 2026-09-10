@@ -58,6 +58,7 @@ import {
   emptyManifestExtras,
   emptyManifestForm,
   parseManifestToml,
+  preservedWorkspaceNamesFromExtras,
   serializeManifestForm,
   validateManifestForm,
   type ManifestExtras,
@@ -3532,7 +3533,15 @@ export function AgentsPage() {
                   );
                 };
                 if (createMode === "form") {
-                  const errors = validateManifestForm(formState);
+                  // Names already preserved from `[workspaces]` entries the
+                  // form can't render (mount-based declarations) — without
+                  // this a form row can collide with one of them and the
+                  // duplicate key only surfaces as an opaque server-side
+                  // TOML parse error instead of the inline message below.
+                  const errors = validateManifestForm(
+                    formState,
+                    preservedWorkspaceNamesFromExtras(formExtras),
+                  );
                   setFormErrors(new Set(errors));
                   if (errors.length > 0) return;
                   spawnMutation.mutate(

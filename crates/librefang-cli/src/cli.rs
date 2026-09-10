@@ -314,6 +314,32 @@ pub(crate) enum Commands {
         #[arg(long)]
         watch: bool,
     },
+    /// Purge every trace of an agent: roster entry, sessions, memories,
+    /// workspace directory, cron jobs, event triggers, channel/conversation
+    /// routing bindings and any agent-type with the same name. For agents
+    /// the operator already deleted but whose data lingers. Refuses to run
+    /// while a daemon holds this installation (pass `--force` to override).
+    /// Prompts for confirmation; pass `--yes` to skip (required when stdin
+    /// is not a TTY), or `--dry-run` to preview. Note that even `--dry-run`
+    /// opens the database, which may apply pending schema migrations and
+    /// reindex the search index — nothing is deleted either way.
+    Purge {
+        /// Agent name to purge.
+        #[arg(long)]
+        agent: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would be purged. Still opens the database (may apply
+        /// pending migrations and reindex search), but deletes nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Run the destructive path even while a daemon is detected for
+        /// this installation. Only reach for this once you know the daemon
+        /// is not actually holding the data (e.g. a stale daemon.json).
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage execution approvals (list, approve, reject) [*].
     #[command(
         subcommand,

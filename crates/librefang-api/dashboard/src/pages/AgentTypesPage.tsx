@@ -611,12 +611,18 @@ function AgentTypeRow({
           <Play className="h-3.5 w-3.5" />
         </button>
 
+        {/* Read-only sanitized-manifest modal. Its own key, not
+            `agentTypes.promote`: the Share2 button below opens the registry
+            pull request, and while the two shared a key these adjacent
+            icon-only controls had the same accessible name, so a screen-reader
+            user could not tell preview from publish (#8166). Wording tracks
+            the modal it opens, `agentTypes.promote_title`. */}
         <button
           type="button"
           onClick={onPreviewPromote}
           className="rounded-lg p-1.5 text-text-dim hover:bg-main/50 hover:text-brand"
-          aria-label={t("agentTypes.promote")}
-          title={t("agentTypes.promote")}
+          aria-label={t("agentTypes.promote_preview")}
+          title={t("agentTypes.promote_preview")}
         >
           <ShieldCheck className="h-3.5 w-3.5" />
         </button>

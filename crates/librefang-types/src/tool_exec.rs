@@ -83,6 +83,10 @@ impl FromStr for BackendKind {
 /// [tool_exec]
 /// kind = "local"   # default
 ///
+/// # Default per-command timeout for the local backend, in seconds.
+/// # Omit to inherit the global `tool_timeout_secs`; `0` is rejected at boot.
+/// # default_timeout_secs = 300
+///
 /// # NOTE: setting kind != "local" here selects the resolved backend at
 /// # boot, but actual tool dispatch through the new ToolExecBackend
 /// # trait is wired up in a follow-up PR. Until then, tool calls fall
@@ -113,6 +117,24 @@ pub struct ToolExecConfig {
     /// Daytona-backend knobs. Required when `kind = "daytona"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daytona: Option<DaytonaBackendConfig>,
+    /// Default per-command timeout for the local backend, in seconds, applied
+    /// when an `ExecSpec` carries no timeout of its own.
+    ///
+    /// Unset inherits the global `tool_timeout_secs` (120s), so raising that one
+    /// knob moves both tool-timeout paths instead of only the `ToolPolicy` one
+    /// (#8171).
+    /// Note that this is a change of default in one direction: the constant it
+    /// replaces was 30s, so an unconfigured local backend now lets a hung
+    /// command run four times longer before its own guard would fire.
+    /// Set it to pin the local backend independently of the tool-dispatch
+    /// timeout — which is the only way to make the backend's timeout the one
+    /// that fires, since an equal value always loses the race to the dispatch
+    /// timeout wrapping the call.
+    /// The per-tool `tool_timeouts` map is not folded in here: it is resolved
+    /// per call and has to arrive on the `ExecSpec`.
+    /// `0` is rejected by [`ToolExecConfig::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_timeout_secs: Option<u64>,
 }
 
 impl ToolExecConfig {
@@ -125,6 +147,22 @@ impl ToolExecConfig {
     /// per-field checks (host non-empty, api_url scheme, etc.) live in
     /// the per-backend constructor where the error context is richest.
     pub fn validate(&self) -> Result<(), String> {
+        // `0` builds a `Duration::from_secs(0)`, which makes every local exec
+        // return `ExecError::Timeout("after 0s")` — a daemon that boots clean
+        // and then fails every tool call with nothing naming the cause.
+        // Rejected rather than clamped: unlike `max_history_messages`, where a
+        // too-small value still describes a working configuration, there is no
+        // sensible timeout an operator meant by zero.
+        // The field is writable over `POST /api/config/set` and the section is
+        // restart-classified, so without this the effect surfaces at the next
+        // boot, decoupled from the save that caused it.
+        if self.default_timeout_secs == Some(0) {
+            return Err(
+                "tool_exec.default_timeout_secs is 0, which would fail every local command \
+                 immediately; omit the key to inherit tool_timeout_secs"
+                    .into(),
+            );
+        }
         match self.kind {
             BackendKind::Local | BackendKind::Docker => Ok(()),
             BackendKind::Ssh => {
@@ -476,12 +514,56 @@ mod tests {
         ToolExecConfig::default().validate().expect("default ok");
     }
 
+    /// `0` is the one value that turns a working daemon into one where every
+    /// local command fails instantly, and it boots clean without this check:
+    /// `build_backend` makes a `Duration::from_secs(0)` and `run_command`
+    /// returns `ExecError::Timeout("after 0s")` before anything runs.
+    #[test]
+    fn validate_rejects_a_zero_default_timeout() {
+        let cfg = ToolExecConfig {
+            default_timeout_secs: Some(0),
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("tool_exec.default_timeout_secs"),
+            "the error must name the key an operator has to change, got: {err}"
+        );
+
+        // The check is on the section, not on the local backend: a daemon
+        // running SSH or Daytona still has the field in its config file and
+        // still boots into it the day it switches back to local.
+        let cfg = ToolExecConfig {
+            kind: BackendKind::Ssh,
+            ssh: Some(SshBackendConfig {
+                host: "h".into(),
+                user: "u".into(),
+                ..Default::default()
+            }),
+            default_timeout_secs: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_err(),
+            "zero must be rejected for any kind"
+        );
+
+        // One second is a bad idea and an operator's business; only zero is
+        // rejected, because only zero cannot mean anything.
+        let cfg = ToolExecConfig {
+            default_timeout_secs: Some(1),
+            ..Default::default()
+        };
+        cfg.validate().expect("a small but real timeout is allowed");
+    }
+
     #[test]
     fn validate_ssh_without_subtable_errors() {
         let cfg = ToolExecConfig {
             kind: BackendKind::Ssh,
             ssh: None,
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("tool_exec.ssh"), "got: {err}");
@@ -496,6 +578,7 @@ mod tests {
                 ..Default::default()
             }),
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("host"), "got: {err}");
@@ -507,6 +590,7 @@ mod tests {
             kind: BackendKind::Daytona,
             ssh: None,
             daytona: None,
+            default_timeout_secs: None,
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("tool_exec.daytona"), "got: {err}");

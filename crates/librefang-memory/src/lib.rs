@@ -14,6 +14,7 @@
 //! - `ProactiveMemoryHooks`: Auto-memorize and auto-retrieve hooks
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
+pub mod agent_tables;
 pub mod channel_binding_store;
 pub mod chunker;
 pub mod consolidation;

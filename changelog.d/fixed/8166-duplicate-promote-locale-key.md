@@ -1,0 +1,6 @@
+Separate the labels of the two promotion controls on the Agent Types page, and add a guard that fails the locale suite on any repeated key.
+Every dashboard locale declared `agentTypes.promote` twice inside the same object, once for the shield button that opens the read-only sanitized-manifest preview and once for the share button that opens a public registry pull request.
+`JSON.parse` is last-wins, so the collision did not leave dead text; it silently relabelled the preview, and the page rendered two adjacent icon-only buttons whose accessible name and tooltip both read "Promote to registry" while only one of them published anything.
+A screen-reader user heard the same name twice with no way to tell them apart, and a sighted user hovering the shield was told it promotes to the registry.
+The preview button now has its own `agentTypes.promote_preview`, worded to match the modal it opens.
+The duplicate got in without a merge conflict, because two branches added the key at different positions in the same object and git merged both cleanly — every existing check ran on the parsed tree, where the duplicate had already collapsed — which is why the guard reads the raw text. (#8166) (@DaBlitzStein)

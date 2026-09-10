@@ -110,6 +110,7 @@ vi.mock("react-i18next", async () => {
 });
 
 const PROMOTE_LABEL = "Promote to registry";
+const PREVIEW_LABEL = "Promotion preview";
 
 const TYPE: AgentTemplate = {
   name: "researcher",
@@ -195,14 +196,18 @@ function renderPage(promote: { mutateAsync: ReturnType<typeof vi.fn>; isPending:
   );
 }
 
-// Both promotion controls carry the same label by design — the first opens the
-// read-only preview, the second starts the real promotion. DOM order is the
-// only thing that separates them, so name the indices once.
-const PREVIEW = 0;
-const PROMOTE = 1;
+// The two promotion controls are adjacent icon-only buttons with very
+// different consequences — the first opens a read-only sanitized-manifest
+// modal, the second opens a public registry pull request — so each is found by
+// its own accessible name rather than by DOM position. They shared one until
+// #8166: `agentTypes.promote` was defined twice in every locale, once per
+// button, and last-wins silently relabelled the preview.
+function previewButton() {
+  return screen.getByRole("button", { name: PREVIEW_LABEL });
+}
 
-function promoteButtons() {
-  return screen.getAllByRole("button", { name: PROMOTE_LABEL });
+function promoteButton() {
+  return screen.getByRole("button", { name: PROMOTE_LABEL });
 }
 
 describe("AgentTypesPage promotion", () => {
@@ -211,14 +216,24 @@ describe("AgentTypesPage promotion", () => {
     useUIStore.setState({ toasts: [] });
   });
 
-  it("labels both promotion controls from agentTypes.promote", () => {
+  // Icon-only controls, so the accessible name is the only thing telling a
+  // screen-reader user which one publishes. `getByRole` throws on more than one
+  // match, so each of these also asserts the other button did not borrow the
+  // name (#8166).
+  it("gives the preview and publish controls distinct accessible names", () => {
     renderPage({ mutateAsync: vi.fn(), isPending: false });
-    expect(promoteButtons()).toHaveLength(2);
+
+    expect(previewButton()).toBeInTheDocument();
+    expect(promoteButton()).toBeInTheDocument();
+    expect(previewButton()).not.toBe(promoteButton());
+    // Both surfaces of the name, since the sighted user reads the tooltip.
+    expect(previewButton()).toHaveAttribute("title", PREVIEW_LABEL);
+    expect(promoteButton()).toHaveAttribute("title", PROMOTE_LABEL);
   });
 
   it("opens the sanitized manifest and its retained findings from the preview button", () => {
     renderPage({ mutateAsync: vi.fn(), isPending: false });
-    fireEvent.click(promoteButtons()[PREVIEW]);
+    fireEvent.click(previewButton());
 
     expect(screen.getByText(/Sanitized manifest/)).toBeInTheDocument();
     expect(screen.getByText(/description = "Reads papers"/)).toBeInTheDocument();
@@ -235,7 +250,7 @@ describe("AgentTypesPage promotion", () => {
     const mutateAsync = vi.fn().mockResolvedValue({ pr_url: "https://example.test/pr/7" });
     renderPage({ mutateAsync, isPending: false });
 
-    fireEvent.click(promoteButtons()[PROMOTE]);
+    fireEvent.click(promoteButton());
     expect(screen.getByText(/Promote the agent type 'researcher'/)).toBeInTheDocument();
     expect(mutateAsync).not.toHaveBeenCalled();
 
@@ -254,7 +269,7 @@ describe("AgentTypesPage promotion", () => {
       .mockRejectedValue(new ApiError(409, "review_required", reason));
     renderPage({ mutateAsync, isPending: false });
 
-    fireEvent.click(promoteButtons()[PROMOTE]);
+    fireEvent.click(promoteButton());
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => expect(useUIStore.getState().toasts).toHaveLength(1));

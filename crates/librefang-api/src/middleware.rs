@@ -361,6 +361,18 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
     if path == "/api/groups" || path.starts_with("/api/groups/") {
         return true;
     }
+    // #8164: `PUT` / `DELETE /api/vault/keys/{key}` store the daemon-wide credentials the
+    // daemon presents as itself. `GITHUB_TOKEN` is what `routes::skills::resolve_github_token`
+    // hands to `POST /api/skills/{name}/propose` and `POST /api/templates/{name}/promote`, so an
+    // Admin who replaces it makes both push branches and open PRs under a token they chose, and
+    // an Admin who deletes it breaks promotion for everyone. That is the same class of action as
+    // the `/api/config/set` write and the `/api/users/{name}/provider-keys` write already listed
+    // here, and Admin is "config write" by design rather than "credential custody". Prefix-matched
+    // because of the `{key}` segment; the GET listing is gated to Owner in
+    // `min_role_for_privileged_get` for the enumeration it discloses.
+    if path.starts_with("/api/vault/keys") {
+        return true;
+    }
     // Adding / updating / deleting an MCP server persists a config entry that
     // `connect_mcp_servers()` immediately spawns — a stdio transport is a raw
     // `command` + `args` executed under the daemon UID. That is process spawn,
@@ -498,6 +510,14 @@ fn min_role_for_privileged_get(path: &str) -> Option<UserRole> {
     // `/api/users*` management surface. Matched by prefix + suffix because
     // the `{name}` segment is concrete on the request URI.
     if path.starts_with("/api/users/") && path.ends_with("/provider-keys") {
+        return Some(UserRole::Owner);
+    }
+    // `GET /api/vault/keys` returns no secret value, but it enumerates which daemon-wide
+    // credentials the operator has configured and where each one resolves from (#8164). That is
+    // the same disclosure the `provider-keys` listing above is gated on, and it is the read side
+    // of writes `is_owner_only_write` keeps at Owner — leaving it at the blanket "GET is
+    // read-only" rule would hand every authenticated Viewer the daemon's credential layout.
+    if path == "/api/vault/keys" {
         return Some(UserRole::Owner);
     }
     None

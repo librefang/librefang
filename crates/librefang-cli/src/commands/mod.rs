@@ -23,6 +23,7 @@ pub(crate) mod mcp_cmds;
 pub(crate) mod models;
 pub(crate) mod monitoring;
 pub(crate) mod prelude;
+pub mod purge;
 pub(crate) mod skill;
 pub(crate) mod status;
 pub(crate) mod system;

@@ -1104,7 +1104,7 @@ impl DeliveryTracker {
     }
 }
 
-mod workspace_setup;
+pub(crate) mod workspace_setup;
 use workspace_setup::*;
 
 /// Spawn a fire-and-forget tokio task that logs panics instead of silently

@@ -7421,7 +7421,7 @@
       ]
     },
     "ToolExecConfig": {
-      "description": "Top-level tool-execution backend configuration in `config.toml`.\n\n```toml [tool_exec] kind = \"local\"   # default\n\n# NOTE: setting kind != \"local\" here selects the resolved backend at # boot, but actual tool dispatch through the new ToolExecBackend # trait is wired up in a follow-up PR. Until then, tool calls fall # back to the legacy local/docker path. See # docs/architecture/tool-exec-backends.md \"Status\" section.\n\n# [tool_exec.ssh] # host = \"build.example.com\" # user = \"agent\" # key_path = \"/home/me/.ssh/id_ed25519\"\n\n# [tool_exec.daytona] # api_url = \"https://app.daytona.io\" # api_key_env = \"DAYTONA_API_KEY\" ```\n\n`kind` selects the active backend; the matching sub-table carries the connection knobs. Inactive sub-tables are ignored — keeping stale config around is fine.",
+      "description": "Top-level tool-execution backend configuration in `config.toml`.\n\n```toml [tool_exec] kind = \"local\"   # default\n\n# Default per-command timeout for the local backend, in seconds. # Omit to inherit the global `tool_timeout_secs`; `0` is rejected at boot. # default_timeout_secs = 300\n\n# NOTE: setting kind != \"local\" here selects the resolved backend at # boot, but actual tool dispatch through the new ToolExecBackend # trait is wired up in a follow-up PR. Until then, tool calls fall # back to the legacy local/docker path. See # docs/architecture/tool-exec-backends.md \"Status\" section.\n\n# [tool_exec.ssh] # host = \"build.example.com\" # user = \"agent\" # key_path = \"/home/me/.ssh/id_ed25519\"\n\n# [tool_exec.daytona] # api_url = \"https://app.daytona.io\" # api_key_env = \"DAYTONA_API_KEY\" ```\n\n`kind` selects the active backend; the matching sub-table carries the connection knobs. Inactive sub-tables are ignored — keeping stale config around is fine.",
       "type": "object",
       "properties": {
         "daytona": {
@@ -7434,6 +7434,15 @@
               "type": "null"
             }
           ]
+        },
+        "default_timeout_secs": {
+          "description": "Default per-command timeout for the local backend, in seconds, applied when an `ExecSpec` carries no timeout of its own.\n\nUnset inherits the global `tool_timeout_secs` (120s), so raising that one knob moves both tool-timeout paths instead of only the `ToolPolicy` one (#8171). Note that this is a change of default in one direction: the constant it replaces was 30s, so an unconfigured local backend now lets a hung command run four times longer before its own guard would fire. Set it to pin the local backend independently of the tool-dispatch timeout — which is the only way to make the backend's timeout the one that fires, since an equal value always loses the race to the dispatch timeout wrapping the call. The per-tool `tool_timeouts` map is not folded in here: it is resolved per call and has to arrive on the `ExecSpec`. `0` is rejected by [`ToolExecConfig::validate`].",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
         },
         "kind": {
           "description": "Active backend kind. Default: `local`.",

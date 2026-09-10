@@ -963,13 +963,45 @@ impl LibreFangKernel {
             Ok(h) => h,
             Err(_) => return None,
         };
-        let guard = read_accessor_state(&handle, "credential_vault");
+        {
+            let guard = read_accessor_state(&handle, "credential_vault");
+            if guard.is_unlocked() {
+                return guard.get(key).map(|s| s.to_string());
+            }
+        }
+        // The cached handle is locked exactly when `vault.enc` was absent at cache-population time, and `vault_handle` never re-checks.
+        // The file can appear afterwards — `librefang vault set` from another process, or an MCP OAuth flow writing through `KernelOAuthProvider`'s own instance — and a handle left locked would answer "no such key" for the rest of the daemon's lifetime, which reads as a missing credential rather than as a stale cache.
+        // Upgrading to the write guard costs one Argon2id KDF once; every later call takes the read fast path above.
+        let mut guard = write_accessor_state(&handle, "credential_vault");
         if !guard.is_unlocked() {
-            // Vault file did not exist when the cache was populated and no
-            // `set()` has initialised it yet — nothing to read.
-            return None;
+            if !guard.exists() {
+                return None;
+            }
+            if let Err(e) = guard.unlock() {
+                warn!(error = %e, "vault_get: cached handle could not be unlocked after vault.enc appeared");
+                return None;
+            }
         }
         guard.get(key).map(|s| s.to_string())
+    }
+
+    /// Reconcile the cached in-memory vault with `vault.enc` before mutating it.
+    ///
+    /// `CredentialVault::save` re-encrypts the whole file from the instance's own map, so mutating a map that predates an out-of-band write erases that write.
+    /// The daemon has more than one writer: `KernelOAuthProvider` opens a fresh `CredentialVault` per call for the `mcp-oauth:*` entries, and `librefang vault set` runs in a separate process.
+    /// Without this, an operator storing a `GITHUB_TOKEN` over HTTP would silently drop every OAuth client secret and token stored since the kernel first unlocked, dropping the affected MCP servers back to `NeedsAuth`.
+    ///
+    /// A missing file is not an error — the caller decides whether that means "create it" (`vault_set`) or "nothing to remove" (`vault_remove`).
+    /// The re-read costs one Argon2id KDF, which the `save` on the very next line pays again regardless; the hot read path in `vault_get` is untouched.
+    fn reconcile_cached_vault(
+        guard: &mut librefang_extensions::vault::CredentialVault,
+    ) -> Result<(), String> {
+        if !guard.exists() {
+            return Ok(());
+        }
+        guard
+            .reload()
+            .map_err(|e| format!("Vault unlock failed: {e}"))
     }
 
     /// Write a secret to the encrypted vault.
@@ -979,18 +1011,42 @@ impl LibreFangKernel {
     /// instead of once per call. The save-time KDF inside
     /// `CredentialVault::set` still runs on every write — at-rest
     /// security is unchanged. Creates the vault if it does not exist.
+    ///
+    /// Re-reads the file first, so a write never clobbers entries another writer added since this kernel unlocked — see `reconcile_cached_vault`.
+    /// Creating a missing vault is left to `CredentialVault::set`, whose own `!unlocked && !path.exists()` guard is the one that gets the file-appeared-since-boot case right; calling `init()` here instead failed permanently with "Vault already exists. Delete it first to re-initialize." once anything else had created the file.
     pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
         let handle = self.vault_handle()?;
         let mut guard = write_accessor_state(&handle, "credential_vault");
-        if !guard.is_unlocked() {
-            // Vault did not exist at cache-population time; create it now.
-            guard
-                .init()
-                .map_err(|e| format!("Vault init failed: {e}"))?;
-        }
+        Self::reconcile_cached_vault(&mut guard)?;
         guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
+    /// Remove a secret from the encrypted vault, returning whether the key
+    /// was present.
+    ///
+    /// Goes through the same cached handle as `vault_get` / `vault_set`
+    /// (#3598), so the deletion is visible to subsequent reads in this
+    /// process without a restart.
+    ///
+    /// A vault that does not exist holds no secrets, so removing from one
+    /// is `Ok(false)` rather than an error — the caller asked for the key
+    /// to be absent and it is.
+    ///
+    /// "Does not exist" is a check against the file, not against `is_unlocked()`.
+    /// The two differ whenever `vault.enc` appeared after the cache was populated, and answering `Ok(false)` there told the caller a credential had been removed while it was still in the file and still resolved after the next restart.
+    pub fn vault_remove(&self, key: &str) -> Result<bool, String> {
+        let handle = self.vault_handle()?;
+        let mut guard = write_accessor_state(&handle, "credential_vault");
+        Self::reconcile_cached_vault(&mut guard)?;
+        if !guard.is_unlocked() {
+            // `reconcile_cached_vault` unlocks whenever the file is there, so this is the genuinely-no-vault case.
+            return Ok(false);
+        }
+        guard
+            .remove(key)
+            .map_err(|e| format!("Vault remove failed: {e}"))
     }
 
     /// Install an MCP catalog template into the configured server set,

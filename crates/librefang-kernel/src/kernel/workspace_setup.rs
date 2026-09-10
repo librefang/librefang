@@ -535,7 +535,7 @@ pub(super) fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
     Ok(())
 }
 
-pub(super) fn safe_path_component(input: &str, fallback: &str) -> String {
+pub(crate) fn safe_path_component(input: &str, fallback: &str) -> String {
     let sanitized: String = input
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -581,6 +581,18 @@ pub(super) fn resolve_workspace_dir(
             workspaces_root.display()
         )))
     })?;
+    resolved_workspace_dir(workspaces_root, requested, agent_name, agent_id)
+}
+
+/// Where a workspace directory *would* be, without touching the filesystem.
+///
+/// Split out of [`resolve_workspace_dir`] so a read-only caller can ask the question: `agent_purge` has to know where an agent's workspace lives before it deletes it, and a planning pass that created the workspaces root as a side effect of previewing a purge would be a bug.
+pub(crate) fn resolved_workspace_dir(
+    workspaces_root: &Path,
+    requested: Option<PathBuf>,
+    agent_name: &str,
+    agent_id: AgentId,
+) -> KernelResult<PathBuf> {
     let root = workspaces_root.to_path_buf();
 
     if let Some(path) = requested {

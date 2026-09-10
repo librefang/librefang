@@ -411,10 +411,23 @@ impl CredentialVault {
     }
 
     /// Unlock the vault by loading and decrypting entries.
+    ///
+    /// A no-op once the vault is open — callers that need the in-memory map to match what is currently on disk want [`Self::reload`] instead.
     pub fn unlock(&mut self) -> ExtensionResult<()> {
         if self.unlocked {
             return Ok(());
         }
+        self.reload()
+    }
+
+    /// Re-read the vault file, replacing the in-memory map with what is on disk right now.
+    ///
+    /// `save` rewrites the whole file from `self.entries`, so an instance that mutates a map older than the file erases every entry written since it last read.
+    /// More than one writer touches `vault.enc` in a normal deployment: `KernelOAuthProvider` opens its own [`CredentialVault`] per call for the `mcp-oauth:*` entries, and `librefang vault set` runs in a separate process entirely.
+    /// A long-lived cached instance therefore has to reconcile before it mutates, which is what the kernel's `vault_set` / `vault_remove` accessors use this for.
+    ///
+    /// A failure leaves the previous entries in place: `load` clears the map only after the ciphertext has decrypted and parsed.
+    pub fn reload(&mut self) -> ExtensionResult<()> {
         if !self.path.exists() {
             return Err(ExtensionError::Vault(
                 "Vault not initialized. Run `librefang vault init`.".to_string(),

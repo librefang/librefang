@@ -1,0 +1,3 @@
+The Goals page shows each goal's autonomous run phase as a badge on the run's info row, for the active run and for runs that already ended (finished, max-iterations, rate-limited, stopped), so the outcome of a run is visible without starting another one to find out.
+The phase is drawn from the page's single phase-to-appearance map, so the same phase cannot come out one colour beside the play button and a different colour on the line below it, and its label comes from the existing translated `goals.run_phase_*` keys.
+A phase this build does not know renders under the neutral variant asking for its own key, so it picks up a translation as soon as one is added rather than borrowing another phase's label and reporting a run as something it is not (#8067) (@DaBlitzStein)

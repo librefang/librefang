@@ -27,6 +27,65 @@ use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
+/// Why one adapter did not deliver an approval notification.
+///
+/// Recorded per adapter so the once-per-approval warning can name the
+/// configuration the operator actually has to change. The pre-#8228 warning
+/// asserted a missing `channel_default` / `AgentBinding` unconditionally,
+/// which is wrong on the `NoRecipients` path: routing is present and correct
+/// there, and the operator sent to `channel_default` config finds nothing to
+/// fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalSkipReason {
+    /// Neither a `channel_default` nor an `AgentBinding` peer on this adapter
+    /// resolves to the requesting agent. This is the #5002 case: the operator
+    /// configured nothing that reaches this agent.
+    NoRouting,
+    /// Routing resolves to the requesting agent, but the adapter exposes no
+    /// `notification_recipients()`. That empty default is documented as
+    /// correct for group-only and public-broadcast integrations
+    /// (`types.rs:975-981`), so the remedy is the adapter's admin /
+    /// allowed-users list, not the routing config.
+    NoRecipients,
+    /// Routing and recipients both resolved, and every send failed. Each
+    /// failure already logged its own error; the aggregate must not blame
+    /// this on missing configuration.
+    DeliveryFailed,
+}
+
+impl ApprovalSkipReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoRouting => "no routing to this agent",
+            Self::NoRecipients => "routed but no notification_recipients",
+            Self::DeliveryFailed => "delivery failed",
+        }
+    }
+}
+
+/// One adapter's contribution to the aggregate approval warning.
+///
+/// Carries the `adapter` / `account_id` / `channel` triple the pre-#8228
+/// per-adapter warning named and the aggregate dropped — those are the fields
+/// an operator acts on, and `adapters=N` alone gives no way to tell which
+/// channels were even considered.
+struct SkippedApprovalAdapter {
+    adapter: String,
+    account_id: String,
+    channel: String,
+    reason: ApprovalSkipReason,
+}
+
+impl std::fmt::Display for SkippedApprovalAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.adapter)?;
+        if !self.account_id.is_empty() {
+            write!(f, "/{}", self.account_id)?;
+        }
+        write!(f, " ({}, {})", self.channel, self.reason.as_str())
+    }
+}
+
 /// Two-channel reply envelope returned by the bridge. The `public` field is
 /// what should reach the source chat (DM or group). The `owner_notice` field
 /// is a structured private message intended for the operator's DM only —
@@ -1813,37 +1872,54 @@ impl BridgeManager {
                                         &approval.description,
                                     );
 
-                                    for adapter in &adapters {
-                                        // #4985 / PR #4994 follow-up: scope
-                                        // delivery to adapters bound to the
-                                        // requesting agent. We build the same
-                                        // channel key the bridge boot stores
-                                        // in `channel_defaults` — bare
-                                        // `<channel_type>` for single-bot
-                                        // adapters (`account_id().is_none()`),
-                                        // account-qualified
-                                        // `<channel_type>:<account_id>` for
-                                        // multi-bot adapters
-                                        // (`account_id().is_some()`).
-                                        //
-                                        // Crucially, when the adapter exposes
-                                        // an `account_id`, ONLY the qualified
-                                        // key counts. A bare-key fallback in
-                                        // mixed configs (one single-bot
-                                        // adapter + one multi-bot adapter
-                                        // both on the same channel type)
-                                        // would point the multi-bot
-                                        // adapter's qualified miss at the
-                                        // single-bot adapter's default,
-                                        // leaking the approval into the
-                                        // multi-bot adapter's chat. The
-                                        // resolver's "qualified > bare"
-                                        // precedence is for inbound routing
-                                        // where the same physical message
-                                        // can fall through; the approval
-                                        // listener has no such fallback
-                                        // semantics — each adapter must
-                                        // match on its own configured key.
+                                    // #8227: "this approval reached nobody" is
+                                    // a verdict on the whole fan-out, not on
+                                    // one adapter's turn in it. A host running
+                                    // one sidecar per agent is a supported
+                                    // configuration, and there every approval
+                                    // has N-1 adapters that legitimately do not
+                                    // cover the requesting agent. The signal is
+                                    // "some adapter produced a delivery
+                                    // target", not "some adapter's send
+                                    // succeeded": a transport failure already
+                                    // logs its own WARN naming the error, and
+                                    // blaming it on missing routing config
+                                    // would point the operator at the wrong
+                                    // thing.
+                                    let mut covered_by_any_adapter = false;
+                                    let mut skipped: Vec<SkippedApprovalAdapter> = Vec::new();
+
+                                    // #4985 / PR #4994 follow-up: scope
+                                    // delivery to adapters bound to the
+                                    // requesting agent. We build the same
+                                    // channel key the bridge boot stores
+                                    // in `channel_defaults` — bare
+                                    // `<channel_type>` for single-bot
+                                    // adapters (`account_id().is_none()`),
+                                    // account-qualified
+                                    // `<channel_type>:<account_id>` for
+                                    // multi-bot adapters
+                                    // (`account_id().is_some()`).
+                                    //
+                                    // Crucially, when the adapter exposes
+                                    // an `account_id`, ONLY the qualified
+                                    // key counts. A bare-key fallback in
+                                    // mixed configs (one single-bot
+                                    // adapter + one multi-bot adapter
+                                    // both on the same channel type)
+                                    // would point the multi-bot
+                                    // adapter's qualified miss at the
+                                    // single-bot adapter's default,
+                                    // leaking the approval into the
+                                    // multi-bot adapter's chat. The
+                                    // resolver's "qualified > bare"
+                                    // precedence is for inbound routing
+                                    // where the same physical message
+                                    // can fall through; the approval
+                                    // listener has no such fallback
+                                    // semantics — each adapter must
+                                    // match on its own configured key.
+                                    let adapter_routing = |adapter: &Arc<dyn ChannelAdapter>| {
                                         let channel_type = adapter.channel_type();
                                         let ct_str = channel_type_str(&channel_type);
                                         let bound_agent = match adapter.account_id() {
@@ -1852,35 +1928,74 @@ impl BridgeManager {
                                             }
                                             None => router.channel_default(ct_str),
                                         };
+                                        let binding_peers = router.bound_recipients_for_agent(
+                                            requesting_agent,
+                                            ct_str,
+                                            adapter.account_id(),
+                                        );
+                                        (bound_agent, binding_peers)
+                                    };
 
-                                        // Recipients to notify on this adapter.
-                                        // Two sources, in order of precedence:
-                                        //   1. If `channel_default` resolves
-                                        //      to the requesting agent, the
-                                        //      adapter's static
-                                        //      `notification_recipients()`
-                                        //      list (the operator inbox /
-                                        //      admin list shape pre-#5002).
-                                        //   2. If `channel_default` is None
-                                        //      or points elsewhere, fall
-                                        //      back to `AgentBinding`-derived
-                                        //      `peer_id`s on this adapter
-                                        //      that route to the requesting
-                                        //      agent — this is the #5002
-                                        //      fix for adapters with
-                                        //      `default_agent = None` that
-                                        //      route purely via bindings.
-                                        //
-                                        // The two are NOT merged when (1)
-                                        // applies: pre-#5002 behaviour for
-                                        // operator-inbox channels is
-                                        // unchanged, and bindings on those
-                                        // channels are already covered by
-                                        // the inbound routing path. Mixing
-                                        // would re-enable the leak shape
-                                        // #4985 was about (admin inbox +
-                                        // unrelated bound chat both
-                                        // receiving the same approval).
+                                    // #8228: may the direct route below be
+                                    // narrowed to the adapters that route to
+                                    // the requesting agent?
+                                    //
+                                    // Pre-#8228 every adapter whose
+                                    // `channel_type` matched `approval.channel`
+                                    // sent the keyboard to the same `chat_id`.
+                                    // On a one-sidecar-per-agent deployment the
+                                    // bots that are not in that chat each fail
+                                    // and log a WARN — the
+                                    // N-1-warnings-per-approval symptom #8227
+                                    // is about, under a different message — and
+                                    // any sibling bot that *is* in the chat
+                                    // delivers a duplicate approval keyboard.
+                                    //
+                                    // Narrowing is only safe where some adapter
+                                    // on the originating channel actually shows
+                                    // that routing. An agent can be reached by
+                                    // mechanisms this lookup does not model —
+                                    // a role- or guild-gated `AgentBinding`
+                                    // matches every peer and so carries no
+                                    // `peer_id` for `bound_recipients_for_agent`
+                                    // to return, and broadcast routes live in a
+                                    // separate table — and there the narrow
+                                    // form would drop a notification that
+                                    // pre-#8228 delivered. When no adapter
+                                    // qualifies we therefore keep the old set:
+                                    // a duplicate keyboard is a smaller failure
+                                    // than a silently dropped approval.
+                                    let narrow_direct_route = match (
+                                        approval.sender_id.as_deref(),
+                                        approval.channel.as_deref(),
+                                    ) {
+                                        (Some(src_sender), Some(src_channel))
+                                            if !src_sender.is_empty() =>
+                                        {
+                                            adapters.iter().any(|candidate| {
+                                                let ct = candidate.channel_type();
+                                                if channel_type_str(&ct) != src_channel {
+                                                    return false;
+                                                }
+                                                let (bound, peers) = adapter_routing(candidate);
+                                                matches!(bound, Some(b) if b == requesting_agent)
+                                                    || !peers.is_empty()
+                                            })
+                                        }
+                                        _ => false,
+                                    };
+
+                                    for adapter in &adapters {
+                                        let channel_type = adapter.channel_type();
+                                        let ct_str = channel_type_str(&channel_type);
+                                        let (bound_agent, binding_peers) = adapter_routing(adapter);
+                                        let default_covers_agent = matches!(
+                                            bound_agent,
+                                            Some(bound) if bound == requesting_agent
+                                        );
+                                        let routes_to_requesting_agent =
+                                            default_covers_agent || !binding_peers.is_empty();
+
                                         // ── Fast path: route back to the
                                         // originating chat when the kernel
                                         // populated `sender_id` + `channel`
@@ -1903,8 +2018,21 @@ impl BridgeManager {
                                         if let (Some(src_sender), Some(src_channel)) =
                                             (approval.sender_id.as_deref(), approval.channel.as_deref())
                                         {
+                                            // The `narrow_direct_route` term is
+                                            // what stops the sibling bots of a
+                                            // one-sidecar-per-agent deployment
+                                            // from all firing at the same
+                                            // `chat_id` (#8228). It is only
+                                            // applied when some adapter on this
+                                            // channel demonstrably routes to
+                                            // the requesting agent, so a
+                                            // deployment routing by a mechanism
+                                            // the check cannot see keeps the
+                                            // pre-#8228 fast path.
                                             if src_channel == ct_str
                                                 && !src_sender.is_empty()
+                                                && (!narrow_direct_route
+                                                    || routes_to_requesting_agent)
                                             {
                                                 // Group-chat fix:
                                                 // prefer `chat_id` (group id)
@@ -1946,6 +2074,24 @@ impl BridgeManager {
                                                         error = %e,
                                                         "Failed to deliver approval notification (direct-route)"
                                                     );
+                                                    // Coverage is claimed on a
+                                                    // delivered notification,
+                                                    // not on an attempted one:
+                                                    // marking it before the
+                                                    // result is known lets a
+                                                    // run where every direct
+                                                    // send failed suppress the
+                                                    // aggregate warning
+                                                    // entirely.
+                                                    skipped.push(SkippedApprovalAdapter {
+                                                        adapter: adapter.name().to_string(),
+                                                        account_id: adapter
+                                                            .account_id()
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                        channel: ct_str.to_string(),
+                                                        reason: ApprovalSkipReason::DeliveryFailed,
+                                                    });
                                                 } else {
                                                     info!(
                                                         adapter = adapter.name(),
@@ -1953,6 +2099,7 @@ impl BridgeManager {
                                                         recipient = %direct_recipient.platform_id,
                                                         "Delivered approval notification (direct-route to originating chat)"
                                                     );
+                                                    covered_by_any_adapter = true;
                                                 }
                                                 // Direct route handled this
                                                 // adapter; skip the legacy
@@ -1961,108 +2108,103 @@ impl BridgeManager {
                                             }
                                         }
 
-                                        let recipients: Vec<ChannelUser> = match bound_agent {
-                                            Some(bound) if bound == requesting_agent => {
-                                                adapter.notification_recipients()
-                                            }
-                                            Some(_) => {
-                                                // channel_default points at a
-                                                // DIFFERENT agent. Even so,
-                                                // an explicit binding on the
-                                                // same adapter that targets
-                                                // the requesting agent is a
-                                                // valid delivery target —
-                                                // operators set the binding
-                                                // deliberately. This is the
-                                                // "Telegram bot bound to
-                                                // agent A by default but
-                                                // also bound to agent B in
-                                                // chat Z via AgentBinding"
-                                                // case. Fan out to those
-                                                // bound chats only; do NOT
-                                                // touch the static
-                                                // notification_recipients
-                                                // (that's agent A's
-                                                // operator inbox).
-                                                let peers = router.bound_recipients_for_agent(
-                                                    requesting_agent,
-                                                    ct_str,
-                                                    adapter.account_id(),
-                                                );
-                                                if peers.is_empty() {
-                                                    debug!(
-                                                        adapter = adapter.name(),
-                                                        account_id = adapter.account_id().unwrap_or(""),
-                                                        request_id = %approval.request_id,
-                                                        requesting_agent = %requesting_agent,
-                                                        "Adapter bound to a different agent and no peer-binding override — skipping approval broadcast"
-                                                    );
-                                                    continue;
-                                                }
-                                                peers
-                                                    .into_iter()
-                                                    .map(|peer| ChannelUser {
-                                                        platform_id: peer,
-                                                        display_name: String::new(),
-                                                        librefang_user: None,
-                                                    })
-                                                    .collect()
-                                            }
-                                            None => {
-                                                // No `channel_default` for
-                                                // this adapter's key. Pre-
-                                                // #5002 silently dropped
-                                                // here — that's the bug.
-                                                // Walk bindings and fan out
-                                                // to every `peer_id` whose
-                                                // binding resolves to the
-                                                // requesting agent on this
-                                                // (channel, account_id).
-                                                let peers = router.bound_recipients_for_agent(
-                                                    requesting_agent,
-                                                    ct_str,
-                                                    adapter.account_id(),
-                                                );
-                                                if peers.is_empty() {
-                                                    // No default AND no
-                                                    // binding-derived peers.
-                                                    // Surface this loudly:
-                                                    // the operator probably
-                                                    // forgot to configure
-                                                    // either (and would
-                                                    // otherwise have no
-                                                    // signal that approvals
-                                                    // are being dropped on
-                                                    // the floor).
-                                                    warn!(
-                                                        adapter = adapter.name(),
-                                                        account_id = adapter.account_id().unwrap_or(""),
-                                                        channel = ct_str,
-                                                        request_id = %approval.request_id,
-                                                        requesting_agent = %requesting_agent,
-                                                        "Approval dropped: no channel_default and no AgentBinding peer_id covers the requesting agent on this adapter"
-                                                    );
-                                                    continue;
-                                                }
-                                                peers
-                                                    .into_iter()
-                                                    .map(|peer| ChannelUser {
-                                                        platform_id: peer,
-                                                        display_name: String::new(),
-                                                        librefang_user: None,
-                                                    })
-                                                    .collect()
-                                            }
+                                        if !routes_to_requesting_agent {
+                                            // Says nothing about whether the
+                                            // approval is deliverable — a
+                                            // sibling adapter may well cover
+                                            // the agent — so it stays a debug
+                                            // line. The "operator forgot to
+                                            // configure anything" signal #5002
+                                            // wanted is the aggregate WARN
+                                            // after the loop.
+                                            debug!(
+                                                adapter = adapter.name(),
+                                                account_id = adapter.account_id().unwrap_or(""),
+                                                channel = ct_str,
+                                                request_id = %approval.request_id,
+                                                requesting_agent = %requesting_agent,
+                                                bound_elsewhere = bound_agent.is_some(),
+                                                "Adapter has no channel_default and no AgentBinding peer_id covering the requesting agent — skipping approval broadcast"
+                                            );
+                                            skipped.push(SkippedApprovalAdapter {
+                                                adapter: adapter.name().to_string(),
+                                                account_id: adapter
+                                                    .account_id()
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                channel: ct_str.to_string(),
+                                                reason: ApprovalSkipReason::NoRouting,
+                                            });
+                                            continue;
+                                        }
+
+                                        // Routing is resolved, so this is only
+                                        // the choice of *which* target list to
+                                        // use. The two are still not merged
+                                        // when `channel_default` names the
+                                        // requesting agent: pre-#5002
+                                        // behaviour for operator-inbox
+                                        // channels is unchanged, bindings on
+                                        // those channels are already covered
+                                        // by the inbound routing path, and
+                                        // mixing would re-enable the leak
+                                        // shape #4985 was about (admin inbox +
+                                        // unrelated bound chat both receiving
+                                        // the same approval).
+                                        let recipients: Vec<ChannelUser> = if default_covers_agent {
+                                            adapter.notification_recipients()
+                                        } else {
+                                            // `channel_default` is absent or
+                                            // points at a different agent, but
+                                            // an explicit binding on this
+                                            // adapter targets the requesting
+                                            // agent — operators set those
+                                            // deliberately. Fan out to the
+                                            // bound chats only; do NOT touch
+                                            // the static
+                                            // notification_recipients, which
+                                            // is the other agent's operator
+                                            // inbox.
+                                            binding_peers
+                                                .into_iter()
+                                                .map(|peer| ChannelUser {
+                                                    platform_id: peer,
+                                                    display_name: String::new(),
+                                                    librefang_user: None,
+                                                })
+                                                .collect()
                                         };
 
                                         if recipients.is_empty() {
+                                            // Only reachable via
+                                            // `notification_recipients()`:
+                                            // the binding branch cannot be
+                                            // empty here, the routing check
+                                            // above already `continue`d on
+                                            // that. So routing IS configured
+                                            // and correct, and blaming
+                                            // `channel_default` would send the
+                                            // operator to the one part of the
+                                            // config that needs no change.
                                             debug!(
                                                 adapter = adapter.name(),
+                                                account_id = adapter.account_id().unwrap_or(""),
+                                                channel = ct_str,
                                                 request_id = %approval.request_id,
-                                                "Adapter has no notification recipients — skipping approval broadcast"
+                                                "Adapter routes to the requesting agent but exposes no notification recipients — skipping approval broadcast"
                                             );
+                                            skipped.push(SkippedApprovalAdapter {
+                                                adapter: adapter.name().to_string(),
+                                                account_id: adapter
+                                                    .account_id()
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                channel: ct_str.to_string(),
+                                                reason: ApprovalSkipReason::NoRecipients,
+                                            });
                                             continue;
                                         }
+                                        let mut delivered_here = false;
                                         for user in &recipients {
                                             // `send_interactive` has a built-in
                                             // text fallback for adapters that
@@ -2095,8 +2237,71 @@ impl BridgeManager {
                                                     recipient = %user.platform_id,
                                                     "Delivered approval notification (inline buttons; adapters without `interactive` capability render the text body verbatim)"
                                                 );
+                                                delivered_here = true;
                                             }
                                         }
+                                        if delivered_here {
+                                            covered_by_any_adapter = true;
+                                        } else {
+                                            skipped.push(SkippedApprovalAdapter {
+                                                adapter: adapter.name().to_string(),
+                                                account_id: adapter
+                                                    .account_id()
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                channel: ct_str.to_string(),
+                                                reason: ApprovalSkipReason::DeliveryFailed,
+                                            });
+                                        }
+                                    }
+
+                                    // #5002's guarantee, evaluated once: an
+                                    // approval nobody can act on must not be
+                                    // swallowed silently.
+                                    //
+                                    // Skipped when there are no channel
+                                    // adapters at all — a daemon approving
+                                    // through the dashboard or CLI is not
+                                    // misconfigured, and warning there would
+                                    // trade one false positive for another.
+                                    if !covered_by_any_adapter && !adapters.is_empty() {
+                                        // The remedy is worded off what the
+                                        // adapters actually reported, because
+                                        // the three reasons send the operator
+                                        // to three different places and the
+                                        // pre-#8228 text asserted the first
+                                        // one unconditionally.
+                                        let remedy = if skipped.is_empty() {
+                                            "no adapter produced a delivery target"
+                                        } else if skipped
+                                            .iter()
+                                            .all(|s| s.reason == ApprovalSkipReason::NoRecipients)
+                                        {
+                                            "every adapter routing to this agent has an empty notification_recipients list — configure the adapter's admin / allowed-users list, not channel_default"
+                                        } else if skipped.iter().any(|s| {
+                                            s.reason == ApprovalSkipReason::DeliveryFailed
+                                        }) {
+                                            "delivery was attempted and every send failed — see the per-adapter errors above"
+                                        } else {
+                                            "no adapter has a channel_default or AgentBinding peer_id covering the requesting agent"
+                                        };
+                                        // The adapter / account_id / channel
+                                        // triples the #5002 per-adapter WARN
+                                        // carried: `adapters=N` alone gives an
+                                        // operator no way to tell which
+                                        // channels were even considered.
+                                        let considered = skipped
+                                            .iter()
+                                            .map(|s| s.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("; ");
+                                        warn!(
+                                            request_id = %approval.request_id,
+                                            requesting_agent = %requesting_agent,
+                                            adapters = adapters.len(),
+                                            skipped = %considered,
+                                            "Approval reached no channel: {remedy}"
+                                        );
                                     }
                                 }
                             }

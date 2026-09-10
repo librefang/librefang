@@ -1,0 +1,5 @@
+The Add-channel picker on the Channels page lists every catalog type again once a first instance is configured.
+The picker filtered on unconfigured rows, so a type with one configured instance had nowhere left to click to add a second one.
+One row per type is shown, taken from the catalog's discovery row, with a per-type configured-instance count riding on each row; a `[[sidecar_channels]]` entry on a channel type that is not in the bundled catalog stays out of the picker, since it has no schema to render and no adapter for the configure endpoint to save against.
+The create-vs-edit mode of the configure drawer is now passed explicitly by its two entry points (picker → create, card gear → edit) instead of being inferred from the row, so picking an already-configured type opens the form in create mode and forces a distinct instance name.
+Add is disabled until the catalog has actually loaded, because the button sits above the page's loading and error states and an unreachable daemon would otherwise open a picker whose empty state blamed configuration for a fetch that never happened. (#8091) (@DaBlitzStein)

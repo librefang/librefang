@@ -24,8 +24,11 @@ librefang agent new [<TEMPLATE>]
 
 **Behavior:**
 
-- Templates are discovered from: the repo `agents/` directory (dev builds), `~/.librefang/workspaces/agents/` (assistant pre-installed, others installed from dashboard), and `LIBREFANG_AGENTS_DIR` (env override).
+- Templates are discovered from: `~/.librefang/workspaces/agents/` (pre-installed by the registry sync) and `LIBREFANG_AGENTS_DIR` (env override).
 - Each template is a directory containing an `agent.toml` manifest.
+  A flat `<name>.toml` dropped into one of those directories is skipped, because discovery filters on `is_dir()` before it looks at any file.
+- Agent types authored through the dashboard, the `agent_type_create` tool or `save-as-agent-type` are written to `~/.librefang/agent-types/<name>.toml` instead (#7758), and this picker does not scan that directory.
+  The daemon does resolve them — `agent_spawn` and a workflow step's `{"type": ...}` search `agent-types/` first — so spawn one of those through the daemon rather than through `agent new`.
 - In daemon mode: sends `POST /api/agents` with the manifest. Agent is persistent.
 - In standalone mode: boots an in-process kernel. Agent is ephemeral.
 

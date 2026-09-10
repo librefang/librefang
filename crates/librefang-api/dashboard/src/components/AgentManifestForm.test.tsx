@@ -125,6 +125,23 @@ describe("AgentManifestForm — validation feedback", () => {
       "true",
     );
   });
+
+  it("opens the (defaultOpen=false) Shared Folders section and reddens its title on a validation error (#8013)", () => {
+    const state = emptyManifestForm();
+    state.workspaces.push({ _uid: "w1", name: "shared", path: "../escape", mode: "rw" });
+
+    render(
+      <Harness initialState={state} invalidFields={new Set(["workspaces.w1.path"])} />,
+    );
+
+    const pathInput = screen.getByPlaceholderText("agents.form.folder_path");
+    expect(pathInput).toHaveAttribute("aria-invalid", "true");
+    expect(pathInput.closest("details")).toHaveAttribute("open");
+    expect(pathInput.closest("details")?.querySelector("summary")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
 });
 
 describe("AgentManifestForm — tools/skills/mcp selection (#5246)", () => {

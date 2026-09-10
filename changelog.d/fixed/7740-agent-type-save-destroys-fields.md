@@ -1,0 +1,6 @@
+Editing an agent type from the WebUI Agent Types page no longer silently discards data.
+`PUT /api/templates/{name}` rebuilt the entire manifest from the flat JSON shape the editor sends, then overwrote the file on disk with `std::fs::write`.
+Every field outside the seven keys that shape carries — `[compaction]`, `max_history_messages`, `[[triggers]]`, `[resources]`, `[autonomous]`, `mcp_servers`, `tool_allowlist`, `session_mode`, `workspaces`, and everything else in `AgentManifest` — was silently reset to its default on every single save made through the WebUI editor, with the endpoint still returning 200.
+The route now reads the existing manifest off disk first, then applies only the fields the request body actually supplies through `AgentTypeSpec::apply_to`, leaving every other field untouched.
+A manifest that fails to parse is now refused outright rather than falling back to a blank one, because overwriting a file the daemon could not read is exactly the data loss this handler exists to prevent.
+The create path (`POST /api/templates`, and the agent-facing `agent_type_create` tool) is unaffected — building a brand-new manifest from a flat JSON body was always the correct behavior there; the bug was reusing that same rebuild-from-scratch logic for updates (#7859) (@DaBlitzStein)

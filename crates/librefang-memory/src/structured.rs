@@ -1,5 +1,6 @@
 //! SQLite structured store for key-value pairs and agent persistence.
 
+use crate::agent_tables::{execute_agent_deletes, AgentTableGroup};
 use chrono::Utc;
 use librefang_types::agent::{AgentEntry, AgentId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -822,12 +823,15 @@ impl StructuredStore {
 }
 
 /// Run every structured-store DELETE for an agent inside the caller's
-/// transaction. The single canonical list of agent-scoped tables;
-/// [`StructuredStore::remove_agent`] and
+/// transaction. [`StructuredStore::remove_agent`] and
 /// [`crate::substrate::MemorySubstrate::remove_agent`] both share this
-/// helper so a new agent-scoped table only has to be added in one place.
+/// helper, and the tables come from
+/// [`AGENT_SCOPED_TABLES`](crate::agent_tables::AGENT_SCOPED_TABLES), so a new
+/// agent-scoped table only has to be added in one place — and everything
+/// that asks whether an agent still has rows sees it too.
 ///
-/// Subquery-scoped deletes (`experiment_metrics` / `experiment_variants`)
+/// The two subquery-scoped deletes below are not `(table, column)` shaped,
+/// so they are spelled out here rather than listed in the constant. They
 /// must run before `prompt_experiments` is cleared — otherwise the
 /// `IN (SELECT ...)` matches nothing.
 pub(crate) fn execute_structured_agent_deletes(
@@ -839,44 +843,11 @@ pub(crate) fn execute_structured_agent_deletes(
          WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
         "DELETE FROM experiment_variants \
          WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
-        "DELETE FROM prompt_experiments WHERE agent_id = ?1",
-        "DELETE FROM prompt_versions WHERE agent_id = ?1",
-        "DELETE FROM approval_audit WHERE agent_id = ?1",
-        // NOTE: `audit_entries` is deliberately NOT purged here (#6553). It is
-        // the append-only WORM Merkle trail that `security verify` walks; each
-        // row's `prev_hash` links to the previous row's `hash`, so deleting an
-        // agent's rows opens a gap that breaks the chain downstream —
-        // indistinguishable from tampering. Purging an agent's identity must
-        // never touch the audit trail. The surviving rows keep the now-orphaned
-        // `agent_id`, which is correct: an audit trail records what happened,
-        // including to agents later removed. (`approval_audit` above is a
-        // separate flat table with its own time-based retention, not the Merkle
-        // chain, so it stays in the cascade.)
-        "DELETE FROM usage_events WHERE agent_id = ?1",
-        "DELETE FROM memories WHERE agent_id = ?1",
-        "DELETE FROM canonical_sessions WHERE agent_id = ?1",
-        "DELETE FROM kv_store WHERE agent_id = ?1",
-        "DELETE FROM task_queue WHERE agent_id = ?1",
-        "DELETE FROM entities WHERE agent_id = ?1",
-        "DELETE FROM relations WHERE agent_id = ?1",
-        "DELETE FROM events WHERE source_agent = ?1",
-        // pending_approvals (v26 — #3611) was missing from this
-        // cascade; the audit found that on `remove_agent` the table
-        // would retain rows for the deleted agent and a stale
-        // approval could fail-open on restart recovery. Authored
-        // approvals are scoped by `agent_id`, so the purge is a
-        // direct WHERE filter. (audit:
-        // agent-cascade-delete-missing-tables)
-        "DELETE FROM pending_approvals WHERE agent_id = ?1",
-        // goal_runs (v42) persists per-agent goal-run state; purge it on
-        // agent removal so deleting an agent doesn't orphan its runs.
-        "DELETE FROM goal_runs WHERE agent_id = ?1",
-        "DELETE FROM agents WHERE id = ?1",
     ] {
         tx.execute(stmt, rusqlite::params![agent_id])
             .map_err(LibreFangError::memory)?;
     }
-    Ok(())
+    execute_agent_deletes(tx, agent_id, AgentTableGroup::Structured)
 }
 
 #[cfg(test)]

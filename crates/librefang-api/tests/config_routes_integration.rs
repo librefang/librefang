@@ -1967,6 +1967,55 @@ async fn config_schema_reports_the_paths_the_write_endpoint_refuses() {
     );
 }
 
+/// `GET /api/config/schema` must carry `x-aux-tasks`, and it must carry every task.
+///
+/// It is the only enumeration of the auxiliary task list either editor has: the dashboard's `AuxiliaryLlmSection` builds its rows from it, and the TUI's `spawn_fetch_auxiliary` uses it to show tasks the operator has not configured yet.
+/// Both degrade quietly when it is missing — the dashboard renders zero rows, the TUI falls back to configured-tasks-only — so a dropped `insert` or a renamed key produces no error anywhere, and `AuxTask::ALL`'s own completeness test keeps passing because it never looks at the route (#8059 review).
+///
+/// The expected slugs are written out literally rather than derived from `AuxTask::ALL`.
+/// Deriving them would move both sides of the assertion together, so a variant dropped from `ALL` would leave this test green — which is the failure mode it exists to catch.
+#[tokio::test(flavor = "multi_thread")]
+async fn config_schema_enumerates_every_auxiliary_task() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/config/schema")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    let mut got: Vec<&str> = json
+        .get("x-aux-tasks")
+        .unwrap_or_else(|| {
+            panic!(
+                "GET /api/config/schema carried no `x-aux-tasks`; both the dashboard and the TUI \
+                 render an empty/partial task list without reporting anything"
+            )
+        })
+        .as_array()
+        .expect("`x-aux-tasks` is an array")
+        .iter()
+        .map(|v| v.as_str().expect("every aux task slug is a string"))
+        .collect();
+    got.sort_unstable();
+
+    let mut expected = [
+        "browser_vision",
+        "compression",
+        "fold",
+        "search",
+        "session_summary",
+        "skill_review",
+        "skill_workshop_review",
+        "title",
+        "vision",
+    ];
+    expected.sort_unstable();
+
+    assert_eq!(
+        got, expected,
+        "`x-aux-tasks` must name every AuxTask. A task missing here is a task neither editor \
+         can configure; a task here that no longer exists is a row that saves to a dead path."
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_escapes_untrusted_label_values() {
     let h = boot_router_with_api_key(API_KEY).await;

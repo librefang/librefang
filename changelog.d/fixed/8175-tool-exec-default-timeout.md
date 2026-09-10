@@ -1,0 +1,7 @@
+`ToolExecConfig` gains `default_timeout_secs`, so the local tool-execution backend takes its default per-command timeout from configuration instead of a hardcoded 30 seconds.
+`LocalBackend` documented `kernel config / agent manifest` as its source of truth while `ToolExecConfig` carried no timeout field at all, which left `build_backend` passing the constant on every path.
+Leaving the new key unset inherits the global `tool_timeout_secs`, so an operator who moves that one knob does not silently leave the backend behind on a value they never chose — but that is a change of default in one direction, from 30 seconds to 120, and an unconfigured local backend will now let a hung command run four times longer before its own guard would fire.
+Because that inherited value equals the tool-dispatch timeout that already wraps every tool call, the dispatch timeout is the one that expires; pin `default_timeout_secs` below it to make the backend's own guard the one that fires.
+`0` is rejected at boot rather than accepted into a daemon that starts clean and then fails every local command instantly, and the whole section is now returned by `GET /api/config`, so a value saved from the dashboard reads back instead of re-rendering as "not configured".
+The trait route is still opt-in and the tool runner continues to call the sandbox helpers directly, so this closes a gap in the backend's own configuration surface rather than changing what a running agent's commands do today.
+(#8175) (@DaBlitzStein)

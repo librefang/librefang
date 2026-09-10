@@ -142,6 +142,13 @@ export interface ManifestFormState {
   tools_disabled: boolean;
   inherit_parent_context: boolean;
   generate_identity_files: boolean;
+
+  workspaces: Array<{
+    _uid: string;
+    name: string;
+    path: string;
+    mode: "rw" | "r";
+  }>;
 }
 
 export interface ManifestExtras {
@@ -245,6 +252,7 @@ export const emptyManifestForm = (): ManifestFormState => ({
   tools_disabled: false,
   inherit_parent_context: true,
   generate_identity_files: true,
+  workspaces: [],
 });
 
 // Keys the form fully owns within each scope. Anything else is preserved
@@ -282,6 +290,7 @@ const FORM_TOP_LEVEL_KEYS = new Set([
   "context_injection",
   "response_format",
   "exec_policy",
+  "workspaces",
 ]);
 const FORM_MODEL_KEYS = new Set([
   "provider",
@@ -526,17 +535,33 @@ export const serializeManifestForm = (
   if (form.response_format.mode !== "text") {
     filteredTopExtras = omitKey(filteredTopExtras, "response_format");
   }
+
   const { inline: topInlineExtras, tables: topTableExtras } =
     splitTopLevelExtras(filteredTopExtras);
   for (const line of renderExtraScalars(topInlineExtras)) lines.push(line);
 
+  const deferredSectionExtras: Record<string, TomlTable | TomlTable[]> = {};
   // Section-extras that contain nested tables must NOT be inlined inside
   // the [section] block — a stray `[name]` header would re-anchor TOML
   // scoping for everything that follows. Defer them and emit later with
   // their full dotted key path, e.g. `[model.exotic_subtable]`.
-  const deferredSectionExtras: Record<string, TomlTable | TomlTable[]> = {};
+  // Preserved `[workspaces]` entries (mount-based declarations, or malformed
+  // non-path rows) re-emit as `[workspaces.<name>]` sub-tables beside the
+  // form's rows — routed here rather than through the trailer, which would
+  // emit a duplicate `[workspaces]` header.
+  if (isTomlTable(topTableExtras.workspaces)) {
+    for (const [name, decl] of Object.entries(topTableExtras.workspaces)) {
+      // Non-table garbage under a preserved entry is skipped rather than
+      // emitted as a header it cannot legally have.
+      if (!isTomlTable(decl)) continue;
+      deferredSectionExtras[`workspaces.${name}`] = decl;
+    }
+    delete topTableExtras.workspaces;
+  }
+
   const safeModelExtras = pluckSafeExtras(extras.model, deferredSectionExtras, "model");
   const safeResourceExtras = pluckSafeExtras(extras.resources, deferredSectionExtras, "resources");
+
   const safeCapabilityExtras = pluckSafeExtras(
     extras.capabilities,
     deferredSectionExtras,
@@ -548,6 +573,23 @@ export const serializeManifestForm = (
   const safeThinkingExtras = form.thinking.enabled
     ? pluckSafeExtras(extras.thinking, deferredSectionExtras, "thinking")
     : {};
+
+  // [workspaces] — table header, so it is emitted here, after every
+  // top-level scalar; a header inside the scalar block would scope the
+  // remaining bare keys into the table and silently delete them.
+
+  if (form.workspaces.length) {
+    const wsBody: string[] = [];
+    for (const ws of form.workspaces) {
+      const n = ws.name.trim();
+      const p = ws.path.trim();
+      if (!n || !p) continue;
+      const parts = [`path = ${escapeTomlString(p)}`];
+      if (ws.mode === "r") parts.push(`mode = "r"`);
+      wsBody.push(`${tomlBareKeyOrQuoted(n)} = { ${parts.join(", ")} }`);
+    }
+    if (wsBody.length) lines.push("", "[workspaces]", ...wsBody);
+  }
 
   // [model]
   const modelBody: string[] = [];
@@ -662,8 +704,15 @@ export const serializeManifestForm = (
   // `[model.exotic_subtable]` rather than quoting the dotted name.
   const nestedDeferred: TomlTable = {};
   for (const [dottedKey, value] of Object.entries(deferredSectionExtras)) {
-    const [section, subKey] = dottedKey.split(".", 2);
-    if (!subKey) continue;
+    // Split on the FIRST dot only. `String.split(".", 2)` truncates rather
+    // than preserving the remainder, so a preserved name that itself
+    // contains a dot (e.g. "workspaces.notes.v2", a legitimate arbitrary
+    // user string) lost everything after the second segment and
+    // overwrote a sibling entry.
+    const dot = dottedKey.indexOf(".");
+    if (dot === -1) continue;
+    const section = dottedKey.slice(0, dot);
+    const subKey = dottedKey.slice(dot + 1);
     if (!isTomlTable(nestedDeferred[section])) {
       nestedDeferred[section] = {};
     }
@@ -871,6 +920,39 @@ const parseSupportedJsonSchema = (raw: string): boolean | Record<string, unknown
   return undefined;
 };
 
+// Mirrors `Path::is_absolute` on the platforms the daemon runs on: POSIX
+// root, Windows drive letter, or UNC prefix.
+const isAbsoluteWorkspacePath = (path: string): boolean =>
+  path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path);
+
+// Mirrors the kernel's `WorkspaceMode` alias set (`#[serde(alias = "r",
+// alias = "read", alias = "read-only")]` on `ReadOnly`,
+// crates/librefang-types/src/agent.rs) and the TUI's
+// `canonical_workspace_mode` (crates/librefang-cli/src/tui/event.rs, #7835).
+// `"readonly"` is the enum's own canonical serialized form — what
+// `toml::to_string_pretty` writes on every save and what the template
+// endpoints publish — so it MUST be recognized here, or a read-only shared
+// folder silently becomes read-write the moment this form re-saves it.
+const READONLY_MODE_ALIASES = new Set(["r", "read", "read-only", "readonly"]);
+
+// TOML bare-key characters only. `expand_workspace_alias`
+// (crates/librefang-runtime/src/tool_runner/fs.rs) resolves `@name/rest` by
+// matching only the segment before the first `/` against the declared
+// name, so a name containing `/` (or other punctuation) serializes to a
+// manifest the kernel accepts but the agent can never address.
+const WORKSPACE_ALIAS_SAFE_NAME = /^[A-Za-z0-9_-]+$/;
+
+// Names already declared as preserved `[workspaces]` entries (mount-based
+// declarations the form can't render) — feeds `validateManifestForm`'s
+// collision check. Pulled out as a named helper, rather than inlined at
+// the call site, so the exact logic the app runs is covered by a test
+// instead of only the validator's own unit tests (#8013: this parameter
+// was previously wired nowhere in the app).
+export const preservedWorkspaceNamesFromExtras = (extras: ManifestExtras): string[] => {
+  const workspaces = extras.topLevel.workspaces;
+  return isTomlTable(workspaces) ? Object.keys(workspaces) : [];
+};
+
 // Form-validation errors. Returns an empty array when submittable.
 //
 // `model.provider` / `model.model` are deliberately NOT required here even
@@ -882,7 +964,12 @@ const parseSupportedJsonSchema = (raw: string): boolean | Record<string, unknown
 // error here made Save silently no-op on every agent (type) that was ever
 // created without a pinned provider — there was no toast, just two red
 // borders that may be scrolled out of view.
-export const validateManifestForm = (form: ManifestFormState): string[] => {
+export const validateManifestForm = (
+  form: ManifestFormState,
+  // Names already present as preserved declarations (e.g. mount-based
+  // entries), so a form row cannot silently collide with them.
+  preservedWorkspaceNames: Iterable<string> = [],
+): string[] => {
   const errors: string[] = [];
   if (!form.name.trim()) errors.push("name");
   if (form.schedule.mode === "periodic" && !form.schedule.cron.trim()) {
@@ -900,6 +987,38 @@ export const validateManifestForm = (form: ManifestFormState): string[] => {
       errors.push("response_format.schema");
     }
   }
+  // Folder rows: duplicate names produce a duplicate TOML key (hard parse
+  // failure on the daemon), and `path` mirrors the kernel's rule — relative
+  // to workspaces_dir, no `..`. A mount row carries an absolute host path
+  // and is not authored here, so only rows are checked.
+  //
+  // A wholly blank row (freshly added, untouched) is not an error and is
+  // dropped silently by the serializer. A half-filled row — only one of
+  // name/path set — is a different case: the serializer drops it exactly
+  // the same way, so without this check the agent is created believing it
+  // has a shared folder it does not have. Flag whichever side is blank.
+  const seenWorkspaceNames = new Set<string>(preservedWorkspaceNames);
+  for (const ws of form.workspaces) {
+    const name = ws.name.trim();
+    const wsPath = ws.path.trim();
+    if (!name && !wsPath) continue;
+
+    if (!name) {
+      errors.push(`workspaces.${ws._uid}.name`);
+    } else {
+      if (seenWorkspaceNames.has(name) || !WORKSPACE_ALIAS_SAFE_NAME.test(name)) {
+        errors.push(`workspaces.${ws._uid}.name`);
+      }
+      seenWorkspaceNames.add(name);
+    }
+
+    if (!wsPath) {
+      errors.push(`workspaces.${ws._uid}.path`);
+    } else if (isAbsoluteWorkspacePath(wsPath) || wsPath.split(/[\\/]/).includes("..")) {
+      errors.push(`workspaces.${ws._uid}.path`);
+    }
+  }
+
   return errors;
 };
 
@@ -1117,6 +1236,32 @@ export const parseManifestToml = (toml: string): ParseResult | ParseError => {
         position: asEnum(ci.position, INJECTION_POSITIONS, "system"),
         condition: asString(ci.condition),
       }));
+  }
+
+  // Only `path`-based declarations become rows. A `mount` entry points at an
+  // absolute host directory; rewriting it as an empty `path` and dropping it
+  // in the incomplete-row filter would silently delete the declaration on
+  // save, so the entry is preserved verbatim in extras instead (mirrors the
+  // TUI editor, #7835).
+  if (isTomlTable(parsed.workspaces)) {
+    const preservedWorkspaces: TomlTable = {};
+    for (const [name, v] of Object.entries(parsed.workspaces)) {
+      if (isTomlTable(v) && typeof (v as TomlTable).path === "string") {
+        form.workspaces.push({
+          _uid: generateParsedUid(),
+          name,
+          path: (v as TomlTable).path as string,
+          mode: READONLY_MODE_ALIASES.has(asString((v as TomlTable).mode))
+            ? ("r" as const)
+            : ("rw" as const),
+        });
+      } else {
+        preservedWorkspaces[name] = v;
+      }
+    }
+    if (Object.keys(preservedWorkspaces).length) {
+      extras.topLevel.workspaces = preservedWorkspaces;
+    }
   }
 
   return { ok: true, form, extras };

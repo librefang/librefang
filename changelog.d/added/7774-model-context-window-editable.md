@@ -1,0 +1,4 @@
+A model's context window and max output tokens are now editable overrides that survive the registry sync which used to overwrite them.
+`ModelOverrides` carried no `context_window` at all, so an operator pointing LibreFang at an OpenAI-compatible gateway had no way to tell it how large that model's window really is — and no way to correct a catalog entry that reported the wrong one.
+Both values now live in the sync-immune overrides side-table, and `resolve_context_window` honours the override even for a model with no catalog entry at all, which is the gateway case.
+The API reports the effective value alongside the raw catalog figure so a surface can show which of the two an operator is looking at, and `librefang models overrides <model>` covers the same ground for scripting (#7818, #7990) (@DaBlitzStein)

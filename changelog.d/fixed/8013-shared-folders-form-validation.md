@@ -1,0 +1,6 @@
+The Shared Folders section of the dashboard's agent-create form recognized only the literal mode value "r" as read-only, while the kernel's canonical serialized form for a read-only workspace — the one written by every manifest save and by every published agent template — is "readonly", so opening a template's read-only shared folder in Form mode and saving it silently upgraded it to read-write; the form now matches the kernel's full alias set (r, read, read-only, readonly).
+It also flags a half-filled folder row (a name with an empty path, or a path with an empty name) as an error instead of creating the agent while silently dropping the folder from the manifest.
+It rejects a folder name containing '/', whitespace, or '@', which the agent could declare but could never address through `@name/...`.
+It wires the duplicate-name check against a template's mount-based folders into the only call site that runs it, which previously left that check dead outside its own unit test.
+It reddens the title of the (collapsed by default) Shared Folders section on a validation error, instead of leaving the Create button looking dead with no visible explanation.
+It stops a preserved folder name that itself contains a dot from losing everything after the second dot on save, which silently overwrote a sibling declaration (#8013) (@DaBlitzStein)
