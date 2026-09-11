@@ -1715,7 +1715,7 @@ similarity_boost = 0.75
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable TTS synthesis. |
 | `provider` | string or null | `null` | Default TTS provider: `"openai"` or `"elevenlabs"`. |
-| `output_format` | string or null | `null` (→ `"mp3"`) | Default for the `text_to_speech` tool's `output_format` argument, applied to every provider: `"mp3"` or `"ogg_opus"`. Set `"ogg_opus"` when the audio is sent to a messaging channel as a voice note. A value passed in the tool call wins. |
+| `output_format` | string or null | `null` (→ `"mp3"`) | Default for the `text_to_speech` tool's `output_format` argument, applied to every provider: `"mp3"` or `"ogg_opus"`. `"mp3"` performs no conversion — the provider's own format is kept. Set `"ogg_opus"` when the audio is sent to a messaging channel as a voice note. A value passed in the tool call wins. |
 | `max_text_length` | usize | `4096` | Maximum text length in characters for a single TTS request. |
 | `timeout_secs` | u64 | `30` | Request timeout per TTS call in seconds. |
 

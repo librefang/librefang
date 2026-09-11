@@ -1572,6 +1572,9 @@ pub async fn mcp_http(
             // line — so the bridge has the live `[tts]` and must pass it.
             // Handing `None` here would make the same tool, on the same config,
             // return a different container to an MCP caller than to an agent.
+            // Only for callers that have a manifest workspace, mind: without
+            // one `finish_tts_result` returns base64 and skips conversion
+            // entirely, so the setting is inert on that path either way.
             Some(&cfg.tts),
             docker_opt,
             Some(state.kernel.processes()),

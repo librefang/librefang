@@ -2022,12 +2022,15 @@ impl LibreFangKernel {
             media_engine: Some(&self.media.media_engine),
             media_drivers: Some(&self.media.media_drivers),
             exec_policy: deferred.exec_policy.as_ref(),
-            // Gated on `enabled` exactly as the three agent-loop producers
-            // are. Passing the engine unconditionally meant a deployment with
-            // `[tts] enabled = false` still reached `TtsEngine::synthesize` on
-            // the approval-resume path — a real, billed synthesis with TTS
-            // switched off — and made the same call yield `.mp3` directly and
-            // `.ogg` after "Allow once".
+            // Gated on `enabled` exactly as the agent-loop producers are.
+            //
+            // Not a billing fix: `TtsEngine::synthesize` refuses on
+            // `!config.enabled` before any network call. The gate supplies the
+            // *live* value in place of the engine's boot-time clone, so a
+            // daemon hot-reloaded from `enabled = true` to `false` stops
+            // synthesising on resume too — and it removes the discrepancy where
+            // the same call yielded `.mp3` directly and `.ogg` after
+            // "Allow once".
             tts_engine: if tts_config.enabled {
                 Some(&self.media.tts_engine)
             } else {

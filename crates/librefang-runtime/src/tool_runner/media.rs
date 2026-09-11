@@ -1041,6 +1041,9 @@ pub(super) async fn tool_text_to_speech(
     // * the `[tts.google]` overrides are unconditional, so serving them from
     //   the live config would start replacing an explicit per-call voice /
     //   language / rate on deployments that never configured the block.
+    // * `elevenlabs.output_format` is the #6116 provider query parameter. It is
+    //   already guarded by `format.is_none()`, so it is the least harmful of
+    //   the three, but it moves with them rather than being split off alone.
     //
     // Both are real bugs — `[tts]` genuinely should apply with `enabled =
     // false` — but each is a behaviour change with its own blast radius, and

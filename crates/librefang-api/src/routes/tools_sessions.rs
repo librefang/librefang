@@ -322,10 +322,16 @@ pub async fn invoke_tool(
         Some(&exec_policy),
         // Gated on `enabled` like every other producer of this argument
         // (`messaging.rs`, `agent_execution.rs`, `ephemeral_spawn.rs`,
-        // `network.rs`, and the approval-resume context). Unconditional, a
-        // deployment with `[tts] enabled = false` and no TTS-capable media
-        // driver still reached `TtsEngine::synthesize` here — a real, billed
-        // provider request with TTS switched off.
+        // `network.rs`, and the approval-resume context).
+        //
+        // This does not stop a provider request: `TtsEngine::synthesize`
+        // already refuses on `!config.enabled` as its first statement, before
+        // any network call. What the gate buys is the *live* value — the engine
+        // holds the boot-time `config.tts.clone()`, so without it a daemon
+        // booted with `enabled = true` and hot-reloaded to `false` kept
+        // synthesising here, which is exactly the window `[tts] enabled` is
+        // classified N for. Plus one fewer producer behaving differently from
+        // the other five.
         if tts_config.enabled {
             Some(state.kernel.tts())
         } else {

@@ -1434,6 +1434,10 @@ pub struct TtsConfig {
     /// the built-in [`DEFAULT_TTS_OUTPUT_FORMAT`]; an `output_format` passed in
     /// the tool call always wins over this.
     ///
+    /// `"mp3"` is the name of the no-op, not a conversion target: it keeps
+    /// whatever the provider returned, so a provider configured to emit Opus
+    /// still emits Opus. Only `"ogg_opus"` triggers a conversion.
+    ///
     /// Set it to `"ogg_opus"` when the audio is destined for a messaging
     /// channel: a voice note has to be Ogg/Opus, and most providers return MP3,
     /// which such a channel rejects. Synthesis still reports success in that
