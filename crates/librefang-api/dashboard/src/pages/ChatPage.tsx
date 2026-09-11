@@ -126,6 +126,11 @@ function makeMessageId(prefix: string): string {
 const WS_MAX_RETRIES = 10;
 // Auth-failure close codes — do not reconnect on these
 const WS_AUTH_ERROR_CODES = new Set([4401, 4403]);
+// How long a liveness probe waits for the daemon to say anything at all.
+// Generous for a round trip on any link worth keeping, and far below the 180s
+// turn watchdog, so a socket found dead here is replaced long before that
+// watchdog would re-send the message over HTTP.
+const WS_PROBE_TIMEOUT_MS = 5_000;
 
 function useWebSocket(
   agentId: string | null,
@@ -173,6 +178,9 @@ function useWebSocket(
   // visibilitychange / online listeners below recover the socket
   // when the user comes back or the network reappears.
   const gaveUpRef = useRef(false);
+  // Armed while a liveness probe is outstanding, so a burst of visibilitychange
+  // events cannot stack probes on one socket.
+  const probeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Keep onAuthError in a ref to avoid triggering the effect when the caller
   // passes a fresh inline lambda on every render.
   const onAuthErrorRef = useRef(onAuthError);
@@ -294,13 +302,61 @@ function useWebSocket(
     // dead socket until they refresh the page (audit of #3930
     // 'silent giveup' finding).  Auth-error termination is left
     // alone — that genuinely needs a refresh to pick up new auth.
+    // Ask the daemon to prove the link is alive, because `readyState` cannot.
+    // `ws.rs` has answered {"type":"ping"} with {"type":"pong"} since the socket
+    // was written and nothing had ever called it; this is that caller, not a new
+    // protocol.
+    const probeLiveness = () => {
+      const socket = wsRef.current;
+      // CONNECTING / CLOSING / CLOSED already have their own paths; only a socket
+      // claiming OPEN can be lying.
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      // One probe per socket: visibilitychange and online can both fire on the
+      // same wake-up.
+      if (probeTimer.current) return;
+      // A turn in flight owns this window instead. `ws.rs` awaits the whole agent
+      // turn inside its main loop, so while one runs the daemon is not reading
+      // the socket and cannot answer a probe — timing out here would close a
+      // healthy chat mid-answer. `onDropRef` is non-null exactly while this
+      // socket is awaiting a response, and that turn's own 180s watchdog already
+      // covers it. Do not remove this guard without moving the daemon's turn off
+      // the socket's read loop first.
+      if (onDropRef.current) return;
+
+      const settle = () => {
+        if (probeTimer.current) clearTimeout(probeTimer.current);
+        probeTimer.current = null;
+        socket.removeEventListener("message", onAnyFrame);
+      };
+      // Any frame answers the probe, not just the pong — a stream delta is the
+      // same proof that the link carries traffic.
+      const onAnyFrame = () => settle();
+      socket.addEventListener("message", onAnyFrame);
+      probeTimer.current = setTimeout(() => {
+        settle();
+        // Hand off to the machinery that already exists: close() fires onclose,
+        // which runs the pending-turn recovery and the backoff reconnect.
+        socket.close();
+      }, WS_PROBE_TIMEOUT_MS);
+      socket.send(JSON.stringify({ type: "ping" }));
+    };
+
     const wakeUp = () => {
       if (authErrorRef.current) return;
-      if (!gaveUpRef.current) return;
-      gaveUpRef.current = false;
-      retriesRef.current = 0;
-      setAriaAnnouncement("Reconnecting…");
-      connect();
+      if (gaveUpRef.current) {
+        gaveUpRef.current = false;
+        retriesRef.current = 0;
+        setAriaAnnouncement("Reconnecting…");
+        connect();
+        return;
+      }
+      // Not having given up is not the same as being alive. A link that dies
+      // while the tab is hidden — suspend, wifi roam, a NAT drop — never fires
+      // `onclose`, so no retry is ever attempted, `gaveUpRef` stays false and
+      // this listener used to return here having done nothing. That silent case
+      // is the one it exists for; the retries-exhausted case above is the one
+      // where the browser already noticed (#3854, #3930, #4063).
+      probeLiveness();
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") wakeUp();
@@ -312,6 +368,12 @@ function useWebSocket(
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("online", wakeUp);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (probeTimer.current) {
+        // An outstanding probe would otherwise fire against the socket this
+        // teardown is replacing and close the new one's predecessor by surprise.
+        clearTimeout(probeTimer.current);
+        probeTimer.current = null;
+      }
       retriesRef.current = 0;
       authErrorRef.current = false;
       gaveUpRef.current = false;
@@ -354,7 +416,7 @@ const cacheSet = setCachedChatMessages<ChatMessage>;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
-function useChatMessages(
+export function useChatMessages(
   agentId: string | null,
   agents: AgentItem[] = [],
   sessionVersion = 0,
