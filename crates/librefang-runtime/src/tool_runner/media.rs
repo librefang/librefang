@@ -1006,6 +1006,7 @@ pub(super) async fn tool_text_to_speech(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     tts_engine: Option<&crate::tts::TtsEngine>,
+    tts_config: Option<&librefang_types::config::TtsConfig>,
     workspace_root: Option<&Path>,
 ) -> ToolResult {
     let text = input["text"]
@@ -1018,10 +1019,15 @@ pub(super) async fn tool_text_to_speech(
     // built-in `"mp3"`. Reading the config here is what lets a deployment whose
     // channel only accepts Ogg/Opus voice notes get a deliverable file without
     // the model having to remember an optional argument (#8272).
-    let output_format = crate::tts::resolve_tts_output_format(
-        input["output_format"].as_str(),
-        tts_engine.map(|e| e.tts_config()),
-    );
+    //
+    // `tts_config` is the turn's live `[tts]`, deliberately not
+    // `tts_engine.tts_config()`: the agent loop hands over `tts_engine` only
+    // when `[tts] enabled = true`, while this tool still runs on the
+    // media-driver path when it is false — so resolving through the engine
+    // ignored the operator's setting in the default configuration, and served
+    // a boot-time clone when it did not.
+    let output_format =
+        crate::tts::resolve_tts_output_format(input["output_format"].as_str(), tts_config);
 
     if let Some(cache) = media_drivers {
         let resolved_provider =
@@ -1653,6 +1659,150 @@ mod transcribe_window_tests {
         assert!(
             resolve_transcript_dest("t.txt", Some(root.path()), &[]).is_ok(),
             "an ordinary workspace-relative path must resolve"
+        );
+    }
+}
+
+#[cfg(test)]
+mod text_to_speech_output_format_tests {
+    use super::*;
+    use librefang_types::config::{CustomTtsConfig, TtsConfig};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A `TtsConfig` wired to a local mock endpoint, so the tool reaches
+    /// `finish_tts_result` with real bytes and no network egress.
+    fn config_for(server_uri: &str, output_format: Option<&str>) -> TtsConfig {
+        TtsConfig {
+            enabled: true,
+            provider: Some("mock-sidecar".to_string()),
+            output_format: output_format.map(str::to_string),
+            custom: CustomTtsConfig {
+                base_url: format!("{server_uri}/v1/audio/speech"),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    async fn mock_provider() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/audio/speech"))
+            // Not real MP3 — nothing decodes it. ffmpeg, when present, fails on
+            // it and `finish_tts_result` falls back with a warning that still
+            // names `ogg_opus`, which is what the assertions key on.
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ID3\x04\x00fake".to_vec()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Extracts the two response fields that together say which branch of
+    /// `finish_tts_result` ran.
+    fn branch_markers(raw: &str) -> (String, String) {
+        let v: serde_json::Value =
+            serde_json::from_str(raw).expect("text_to_speech returns a JSON object");
+        (
+            v["format"].as_str().unwrap_or_default().to_string(),
+            v["warning"].as_str().unwrap_or_default().to_string(),
+        )
+    }
+
+    /// The regression guard for #8272, placed on `tool_text_to_speech` itself
+    /// rather than on `resolve_tts_output_format`.
+    ///
+    /// The resolver's own unit tests pass even when the call site hands it
+    /// `None` — i.e. with the whole fix reverted — because they never observe
+    /// what the tool actually passes. This one does: revert `media.rs` to
+    /// `resolve_tts_output_format(input[…], None)` and it fails.
+    #[tokio::test]
+    async fn tool_honours_config_output_format_when_the_call_omits_it() {
+        let server = mock_provider().await;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let cfg = config_for(&server.uri(), Some("ogg_opus"));
+        let engine = crate::tts::TtsEngine::new(cfg.clone());
+
+        let result = tool_text_to_speech(
+            &serde_json::json!({ "text": "hello" }),
+            None, // no media drivers — exercise the TtsEngine path
+            Some(&engine),
+            Some(&cfg),
+            Some(workspace.path()),
+        )
+        .await
+        .expect("synthesis against the mock endpoint must succeed");
+
+        let (format, warning) = branch_markers(&result);
+        // Three environments, one property. With ffmpeg present and decodable
+        // audio the file is converted (`format == "ogg"`); with ffmpeg present
+        // and the stub bytes above it reports `OGG Opus conversion failed`;
+        // with no ffmpeg at all it reports `saved as original format instead of
+        // ogg_opus`. Every one of them proves the conversion arm was entered,
+        // which is the property under test — the arm is unreachable unless the
+        // operator's `[tts] output_format` actually reached the call site.
+        let entered_conversion_arm =
+            format == "ogg" || warning.to_ascii_lowercase().contains("opus");
+        assert!(
+            entered_conversion_arm,
+            "`[tts] output_format = \"ogg_opus\"` must reach the conversion \
+             branch when the tool call omits the argument; got format={format:?} \
+             warning={warning:?}"
+        );
+    }
+
+    /// The other half of the same property: with no operator default the tool
+    /// must still behave exactly as it did before #8272 — provider format,
+    /// no conversion attempt, no warning.
+    #[tokio::test]
+    async fn tool_leaves_the_provider_format_alone_when_nothing_is_configured() {
+        let server = mock_provider().await;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let cfg = config_for(&server.uri(), None);
+        let engine = crate::tts::TtsEngine::new(cfg.clone());
+
+        let result = tool_text_to_speech(
+            &serde_json::json!({ "text": "hello" }),
+            None,
+            Some(&engine),
+            Some(&cfg),
+            Some(workspace.path()),
+        )
+        .await
+        .expect("synthesis against the mock endpoint must succeed");
+
+        let (format, warning) = branch_markers(&result);
+        assert_eq!(format, "mp3", "unset config must keep the provider format");
+        assert!(
+            warning.is_empty(),
+            "no conversion was asked for: {warning:?}"
+        );
+    }
+
+    /// An explicit tool argument still wins over the operator default, on the
+    /// tool itself rather than on the resolver.
+    #[tokio::test]
+    async fn explicit_tool_argument_overrides_the_configured_default() {
+        let server = mock_provider().await;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let cfg = config_for(&server.uri(), Some("ogg_opus"));
+        let engine = crate::tts::TtsEngine::new(cfg.clone());
+
+        let result = tool_text_to_speech(
+            &serde_json::json!({ "text": "hello", "output_format": "mp3" }),
+            None,
+            Some(&engine),
+            Some(&cfg),
+            Some(workspace.path()),
+        )
+        .await
+        .expect("synthesis against the mock endpoint must succeed");
+
+        let (format, warning) = branch_markers(&result);
+        assert_eq!(format, "mp3");
+        assert!(
+            warning.is_empty(),
+            "no conversion was asked for: {warning:?}"
         );
     }
 }

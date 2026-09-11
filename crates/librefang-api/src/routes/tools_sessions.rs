@@ -300,6 +300,7 @@ pub async fn invoke_tool(
     let workspace_root = cfg.effective_workspaces_dir();
     let exec_policy = cfg.exec_policy.clone();
     let docker_config = cfg.docker.clone();
+    let tts_config = cfg.tts.clone();
     let kernel: Arc<dyn KernelHandle> = state.kernel.clone();
 
     let result = execute_tool(
@@ -320,6 +321,7 @@ pub async fn invoke_tool(
         Some(state.kernel.media_drivers()),
         Some(&exec_policy),
         Some(state.kernel.tts()),
+        Some(&tts_config),
         Some(&docker_config),
         Some(state.kernel.processes()),
         Some(state.kernel.process_registry()),

@@ -1684,6 +1684,7 @@ Gemini 完全不读取 thinking 配置。
 [tts]
 enabled = false
 provider = "openai"          # openai | elevenlabs
+output_format = "mp3"        # mp3 | ogg_opus
 max_text_length = 4096
 timeout_secs = 30
 
@@ -1706,6 +1707,7 @@ similarity_boost = 0.75
 |------|------|--------|------|
 | `enabled` | bool | `false` | 启用 TTS 合成。 |
 | `provider` | string 或 null | `null` | 默认 TTS 提供商：`"openai"` 或 `"elevenlabs"`。 |
+| `output_format` | string 或 null | `null`（→ `"mp3"`） | `text_to_speech` 工具 `output_format` 参数的默认值，对所有提供商生效：`"mp3"` 或 `"ogg_opus"`。当音频要作为语音消息发送到消息平台时设为 `"ogg_opus"`。工具调用中显式传入的值优先。 |
 | `max_text_length` | usize | `4096` | 单次 TTS 请求的最大文本长度（字符数）。 |
 | `timeout_secs` | u64 | `30` | 每次 TTS 调用的请求超时时间（秒）。 |
 

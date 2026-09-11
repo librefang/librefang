@@ -233,7 +233,7 @@ classified differently — the row note spells out which is which.
 | `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
-| `tts` | N | Text-to-speech config. |
+| `tts` | R/N | Text-to-speech config. `enabled` and `output_format` are **N**: the agent loop reads both from the turn's `config.load_full()` snapshot — `enabled` at the call site that decides whether to lend the `TtsEngine`, `output_format` through `LoopOptions.tts_config` — so a swap is effective on the next turn. Everything else (`provider`, `max_text_length`, `timeout_secs`, and the `[tts.openai]` / `[tts.elevenlabs]` / `[tts.google]` / `[tts.custom]` blocks) is **R**: it is reached through `TtsEngine`, which `boot.rs` constructs from `config.tts.clone()` with no rebuild path, exactly like `MediaEngine` above. `output_format` is carried outside that handle precisely so the operator default survives both halves — `enabled = false` still runs `text_to_speech` on the media-driver path, where the engine is never lent (#8272). |
 
 ### Notifications / inbox / observability
 

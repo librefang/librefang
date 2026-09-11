@@ -770,6 +770,7 @@ impl LibreFangKernel {
                 // ephemeral /btw turns; default-off config is a no-op.
                 parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
                 canvas_config: Some(self.config.load().canvas.clone()),
+                tts_config: Some(self.config.load().tts.clone()),
                 // Ephemeral /btw is a user-initiated turn, not a system fork.
                 system_call: false,
                 // #7744: `/btw` runs on an empty ephemeral session and the
@@ -1811,6 +1812,7 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            tts_config: Some(self.config.load().tts.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
             // #7744: resolved in `send_message_streaming_with_sender_and_opts`,
@@ -2011,6 +2013,7 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            tts_config: Some(self.config.load().tts.clone()),
             // #6463: this is a system-internal fork (currently only the
             // auto_dream background cycle) with no attributable end
             // user — it runs on the parent's canonical session with a `None`
@@ -2109,6 +2112,7 @@ impl LibreFangKernel {
             gateway_compression: Some(self.config.load().gateway_compression.clone()),
             parallel_tools_config: Some(self.config.load().parallel_tools.clone()),
             canvas_config: Some(self.config.load().canvas.clone()),
+            tts_config: Some(self.config.load().tts.clone()),
             // User-initiated main turn, not a system-internal fork.
             system_call: false,
             // #7744: resolved in `send_message_streaming_with_sender_and_opts`,

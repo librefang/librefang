@@ -1992,6 +1992,9 @@ impl LibreFangKernel {
         kernel_handle: &'a Arc<dyn librefang_runtime::kernel_handle::KernelHandle>,
         skill_snapshot: &'a librefang_skills::registry::SkillRegistry,
         deferred: &'a librefang_types::tool::DeferredToolExecution,
+        // Borrowed from the caller's `config.load()` guard: the guard has to
+        // outlive the context it is lent to, and a local one here would not.
+        tts_config: &'a librefang_types::config::TtsConfig,
     ) -> librefang_runtime::tool_runner::ToolExecContext<'a> {
         let cfg = self.config.load();
         librefang_runtime::tool_runner::ToolExecContext {
@@ -2020,6 +2023,7 @@ impl LibreFangKernel {
             media_drivers: Some(&self.media.media_drivers),
             exec_policy: deferred.exec_policy.as_ref(),
             tts_engine: Some(&self.media.tts_engine),
+            tts_config: Some(tts_config),
             docker_config: None,
             process_manager: Some(&self.processes.manager),
             sender_id: deferred.sender_id.as_deref(),
@@ -2102,7 +2106,13 @@ impl LibreFangKernel {
             .map_err(|e| format!("skill_registry lock poisoned: {e}"))?
             .snapshot();
 
-        let ctx = self.build_deferred_tool_exec_context(&kernel_handle, &skill_snapshot, deferred);
+        let resume_cfg = self.config.load();
+        let ctx = self.build_deferred_tool_exec_context(
+            &kernel_handle,
+            &skill_snapshot,
+            deferred,
+            &resume_cfg.tts,
+        );
 
         let result = execute_tool_raw(
             &deferred.tool_use_id,

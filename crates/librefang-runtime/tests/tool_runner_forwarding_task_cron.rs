@@ -347,6 +347,7 @@ fn make_ctx_owned<'a>(
         media_drivers: None,
         exec_policy: None,
         tts_engine: None,
+        tts_config: None,
         docker_config: None,
         process_manager: None,
         process_registry: None,
