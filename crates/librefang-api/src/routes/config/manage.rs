@@ -482,6 +482,7 @@ fn redacted_config_json(
     set!("tts", {
         "enabled": config.tts.enabled,
         "provider": config.tts.provider,
+        "output_format": config.tts.output_format,
         "max_text_length": config.tts.max_text_length,
         "timeout_secs": config.tts.timeout_secs,
     });
