@@ -1026,12 +1026,20 @@ pub(super) async fn tool_text_to_speech(
     // media-driver path when it is false — so resolving through the engine
     // ignored the operator's setting in the default configuration, and served
     // a boot-time clone when it did not.
+    // One effective `[tts]` for the whole function. `tts_config` is the turn's
+    // live section; the engine's boot-time clone is only a fallback for callers
+    // that predate the parameter. Every `[tts]` read below goes through this,
+    // so two keys of the same section cannot disagree about where they came
+    // from — before #8272 the reads three lines apart used different carriers.
+    let effective_tts: Option<&librefang_types::config::TtsConfig> =
+        tts_config.or_else(|| tts_engine.map(|e| e.tts_config()));
+
     let output_format =
-        crate::tts::resolve_tts_output_format(input["output_format"].as_str(), tts_config);
+        crate::tts::resolve_tts_output_format(input["output_format"].as_str(), effective_tts);
 
     if let Some(cache) = media_drivers {
         let resolved_provider =
-            provider.or_else(|| tts_engine.and_then(|e| e.tts_config().provider.as_deref()));
+            provider.or_else(|| effective_tts.and_then(|c| c.provider.as_deref()));
 
         let driver_result = if let Some(p) = resolved_provider {
             cache.get_or_create(p, None)
@@ -1051,8 +1059,8 @@ pub(super) async fn tool_text_to_speech(
         ) = if resolved_provider == Some("google_tts") {
             // Google TTS: override LLM-provided voice (e.g. "alloy") with the
             // configured one — Google doesn't recognise OpenAI voice names.
-            if let Some(engine) = tts_engine {
-                let cfg = &engine.tts_config().google;
+            if let Some(tts) = effective_tts {
+                let cfg = &tts.google;
                 (
                     Some(cfg.voice.clone()),
                     Some(cfg.language_code.clone()),
@@ -1068,7 +1076,7 @@ pub(super) async fn tool_text_to_speech(
             // `output_format` (default `opus_48000_32`) so the media-driver path
             // also produces Ogg/Opus for WhatsApp PTT (#6116).
             let el_format = if format.is_none() {
-                tts_engine.map(|e| e.tts_config().elevenlabs.output_format.clone())
+                effective_tts.map(|c| c.elevenlabs.output_format.clone())
             } else {
                 None
             };
@@ -1714,14 +1722,21 @@ mod text_to_speech_output_format_tests {
     ///
     /// The resolver's own unit tests pass even when the call site hands it
     /// `None` — i.e. with the whole fix reverted — because they never observe
-    /// what the tool actually passes. This one does: revert `media.rs` to
-    /// `resolve_tts_output_format(input[…], None)` and it fails.
+    /// what the tool actually passes. This one does, under both mutations that
+    /// matter: `resolve_tts_output_format(input[…], None)` and the older
+    /// `…, tts_engine.map(|e| e.tts_config()))`. The second is why the engine
+    /// below is built from a config that does not carry the format.
     #[tokio::test]
     async fn tool_honours_config_output_format_when_the_call_omits_it() {
         let server = mock_provider().await;
         let workspace = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(&server.uri(), Some("ogg_opus"));
-        let engine = crate::tts::TtsEngine::new(cfg.clone());
+        // The engine deliberately carries NO output format. If the tool ever
+        // goes back to reading `[tts]` off the engine handle, `tts_config` is
+        // the only place the value exists and this test goes red. Handing the
+        // same config to both carriers — as the first version of this test did
+        // — makes the two indistinguishable and the assertion vacuous.
+        let engine = crate::tts::TtsEngine::new(config_for(&server.uri(), None));
 
         let result = tool_text_to_speech(
             &serde_json::json!({ "text": "hello" }),
@@ -1759,7 +1774,11 @@ mod text_to_speech_output_format_tests {
         let server = mock_provider().await;
         let workspace = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(&server.uri(), None);
-        let engine = crate::tts::TtsEngine::new(cfg.clone());
+        // Mirror image of the test above: here the *engine* is the one carrying
+        // `ogg_opus`, and the live config says nothing. The tool must follow the
+        // live config, so reading the engine instead turns this green file into
+        // an `.ogg` and fails the assertion below.
+        let engine = crate::tts::TtsEngine::new(config_for(&server.uri(), Some("ogg_opus")));
 
         let result = tool_text_to_speech(
             &serde_json::json!({ "text": "hello" }),

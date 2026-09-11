@@ -1567,9 +1567,12 @@ pub async fn mcp_http(
             Some(state.kernel.media_drivers()),
             exec_policy,
             tts_opt,
-            // The network bridge has no agent-loop turn to carry `[tts]`; the
-            // tool falls back to its built-in default here.
-            None, // tts_config
+            // `cfg` is the owned snapshot taken above precisely so it can cross
+            // the `.await`, and `&cfg.docker` already rides along on the next
+            // line — so the bridge has the live `[tts]` and must pass it.
+            // Handing `None` here would make the same tool, on the same config,
+            // return a different container to an MCP caller than to an agent.
+            Some(&cfg.tts),
             docker_opt,
             Some(state.kernel.processes()),
             None, // process_registry (network bridge doesn't run agent tools)
