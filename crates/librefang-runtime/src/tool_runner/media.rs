@@ -1026,20 +1026,32 @@ pub(super) async fn tool_text_to_speech(
     // media-driver path when it is false — so resolving through the engine
     // ignored the operator's setting in the default configuration, and served
     // a boot-time clone when it did not.
-    // One effective `[tts]` for the whole function. `tts_config` is the turn's
-    // live section; the engine's boot-time clone is only a fallback for callers
-    // that predate the parameter. Every `[tts]` read below goes through this,
-    // so two keys of the same section cannot disagree about where they came
-    // from — before #8272 the reads three lines apart used different carriers.
-    let effective_tts: Option<&librefang_types::config::TtsConfig> =
-        tts_config.or_else(|| tts_engine.map(|e| e.tts_config()));
-
     let output_format =
-        crate::tts::resolve_tts_output_format(input["output_format"].as_str(), effective_tts);
+        crate::tts::resolve_tts_output_format(input["output_format"].as_str(), tts_config);
+
+    // Only `output_format` is resolved from the live `[tts]`. The three reads
+    // below stay on `tts_engine` deliberately, even though the handle is
+    // withheld when `[tts] enabled = false`:
+    //
+    // * `provider` pins the driver through `get_or_create`, which — unlike the
+    //   `detect_for_capability` fallback — does not check `is_configured()`. An
+    //   `enabled = false` deployment that names a provider it has no key for
+    //   currently auto-detects a working one; routing it through the live
+    //   config would break synthesis outright.
+    // * the `[tts.google]` overrides are unconditional, so serving them from
+    //   the live config would start replacing an explicit per-call voice /
+    //   language / rate on deployments that never configured the block.
+    //
+    // Both are real bugs — `[tts]` genuinely should apply with `enabled =
+    // false` — but each is a behaviour change with its own blast radius, and
+    // neither is what #8272 is about. Making them live would also move them out
+    // of the restart-required half of the `[tts]` reload classification, which
+    // is a second decision again. Left for a follow-up rather than smuggled in
+    // behind an output-format fix.
 
     if let Some(cache) = media_drivers {
         let resolved_provider =
-            provider.or_else(|| effective_tts.and_then(|c| c.provider.as_deref()));
+            provider.or_else(|| tts_engine.and_then(|e| e.tts_config().provider.as_deref()));
 
         let driver_result = if let Some(p) = resolved_provider {
             cache.get_or_create(p, None)
@@ -1059,8 +1071,8 @@ pub(super) async fn tool_text_to_speech(
         ) = if resolved_provider == Some("google_tts") {
             // Google TTS: override LLM-provided voice (e.g. "alloy") with the
             // configured one — Google doesn't recognise OpenAI voice names.
-            if let Some(tts) = effective_tts {
-                let cfg = &tts.google;
+            if let Some(engine) = tts_engine {
+                let cfg = &engine.tts_config().google;
                 (
                     Some(cfg.voice.clone()),
                     Some(cfg.language_code.clone()),
@@ -1076,7 +1088,7 @@ pub(super) async fn tool_text_to_speech(
             // `output_format` (default `opus_48000_32`) so the media-driver path
             // also produces Ogg/Opus for WhatsApp PTT (#6116).
             let el_format = if format.is_none() {
-                effective_tts.map(|c| c.elevenlabs.output_format.clone())
+                tts_engine.map(|e| e.tts_config().elevenlabs.output_format.clone())
             } else {
                 None
             };

@@ -33,6 +33,7 @@ fn resolve_elevenlabs_format<'a>(
 /// it selects the post-synthesis ffmpeg step that every provider's audio goes
 /// through, which is why it lives on `[tts]` rather than on one provider's
 /// block.
+#[cfg_attr(not(feature = "media"), allow(dead_code))]
 pub(crate) fn resolve_tts_output_format<'a>(
     request_override: Option<&'a str>,
     tts_config: Option<&'a TtsConfig>,

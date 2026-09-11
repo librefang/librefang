@@ -320,7 +320,17 @@ pub async fn invoke_tool(
         Some(state.kernel.media()),
         Some(state.kernel.media_drivers()),
         Some(&exec_policy),
-        Some(state.kernel.tts()),
+        // Gated on `enabled` like every other producer of this argument
+        // (`messaging.rs`, `agent_execution.rs`, `ephemeral_spawn.rs`,
+        // `network.rs`, and the approval-resume context). Unconditional, a
+        // deployment with `[tts] enabled = false` and no TTS-capable media
+        // driver still reached `TtsEngine::synthesize` here — a real, billed
+        // provider request with TTS switched off.
+        if tts_config.enabled {
+            Some(state.kernel.tts())
+        } else {
+            None
+        },
         Some(&tts_config),
         Some(&docker_config),
         Some(state.kernel.processes()),
