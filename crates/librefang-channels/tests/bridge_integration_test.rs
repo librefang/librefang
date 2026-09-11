@@ -2376,6 +2376,78 @@ async fn test_approval_listener_scopes_delivery_to_requesting_agent_adapter() {
     manager.stop().await;
 }
 
+/// #8160 regression: direct routing carries only the channel type, so it must
+/// still honor each adapter's account-qualified agent binding. Otherwise every
+/// adapter of the same type sends the approval keyboard to the originating
+/// chat, even when that adapter belongs to a different agent.
+#[tokio::test]
+async fn test_approval_listener_direct_route_scopes_to_requesting_agent_adapter() {
+    use librefang_types::event::{ApprovalRequestedEvent, Event, EventPayload, EventTarget};
+
+    let (handle, event_tx) = EventBusHandle::new();
+    let handle = Arc::new(handle);
+
+    let agent_a = AgentId::new();
+    let agent_b = AgentId::new();
+    let router = AgentRouter::new();
+    router.set_channel_default("telegram:bot-a".to_string(), agent_a);
+    router.set_channel_default("telegram:bot-b".to_string(), agent_b);
+    let router = Arc::new(router);
+
+    let adapter_a = NotifyingAdapter::with_account("telegram-a", "bot-a", Vec::new());
+    let adapter_b = NotifyingAdapter::with_account("telegram-b", "bot-b", Vec::new());
+    let adapter_a_ref = adapter_a.clone();
+    let adapter_b_ref = adapter_b.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter_a).await.unwrap();
+    manager.start_adapter(adapter_b).await.unwrap();
+    manager.start_approval_listener().await;
+
+    wait_until("approval listener subscribed", || {
+        event_tx.receiver_count() >= 1
+    })
+    .await;
+
+    event_tx
+        .send(Arc::new(Event::new(
+            agent_a,
+            EventTarget::System,
+            EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                request_id: "8160aaaa11112222".to_string(),
+                agent_id: agent_a.0.to_string(),
+                tool_name: "file_write".to_string(),
+                description: "write a file".to_string(),
+                risk_level: "high".to_string(),
+                sender_id: Some("user-1".to_string()),
+                channel: Some("telegram".to_string()),
+                chat_id: Some("originating-chat".to_string()),
+            }),
+        )))
+        .expect("broadcast send");
+
+    wait_until("approval delivered through originating adapter", || {
+        !adapter_a_ref.get_sent().is_empty()
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let sent_a = adapter_a_ref.get_sent();
+    assert_eq!(
+        sent_a.len(),
+        1,
+        "the adapter bound to the requesting agent should direct-route once: {sent_a:?}",
+    );
+    assert_eq!(sent_a[0].0, "originating-chat");
+    assert!(
+        adapter_b_ref.get_sent().is_empty(),
+        "an adapter bound to another agent must not direct-route the same approval: {:?}",
+        adapter_b_ref.get_sent(),
+    );
+
+    manager.stop().await;
+}
+
 /// #4985 follow-up: an adapter with no router binding (no
 /// `channel_default` set for its channel key) is suppressed rather than
 /// leaked to. Pre-fix code would have broadcast to it; the post-fix
