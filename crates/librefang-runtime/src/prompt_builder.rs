@@ -1347,12 +1347,54 @@ fn build_channel_section(
         }
     }
 
-    // Tell the agent it can send rich media via channel_send when the tool is available.
+    // Tell the agent it can send rich media via channel_send when the tool is available and the channel has a real messaging adapter behind it.
+    // The kernel-internal system channels have no external client, so a `channel_send` aimed at them fails (no adapter) and pushes the agent to fall back to some other channel on its own.
     let has_channel_send = granted_tools
         .iter()
         .any(|t| t == "channel_send" || t == "*");
     if has_channel_send {
-        if let Some(id) = sender_id {
+        // Match the literal `cron` / `autonomous` / `webui` sentinels rather
+        // than deriving "this is a background run" from
+        // `is_reserved_system_channel` — that predicate exists to stop
+        // externally-supplied channel names from colliding with a
+        // kernel-derived SessionId, an unrelated concern, and its reserved
+        // list can grow to include a future interactive surface. Keep these
+        // literals in sync with the kernel-side sentinels
+        // (`librefang_kernel::SYSTEM_CHANNEL_{CRON,AUTONOMOUS,WEBUI}`);
+        // runtime can't import the constants directly (circular dep —
+        // runtime is below kernel), same tradeoff as `agent_loop::mod::
+        // build_sender_prefix`.
+        if channel.trim().eq_ignore_ascii_case("webui") {
+            section.push_str(
+                "\n\nYou are on the LibreFang web interface. Files, images, and media you \
+                 generate are NOT delivered automatically — the browser only sees what your \
+                 reply text embeds. Include the `/api/uploads/...` URL the generating tool \
+                 returned in your response so it renders. Do NOT use `channel_send` to reply \
+                 here. Use it only to reach someone on a different channel (email, telegram, \
+                 …), naming that channel and recipient explicitly.",
+            );
+        } else if channel.trim().eq_ignore_ascii_case("cron")
+            || channel.trim().eq_ignore_ascii_case("autonomous")
+        {
+            // Kept byte-identical to the same branch on #7995, which rewrites
+            // this block from a different pre-image: the two landed on
+            // contradictory instructions for the same turn. The previous
+            // wording here said "do NOT use it here" and then, in the next
+            // sentence, explained how to use it. `channel_send` reads
+            // `channel` and `recipient` straight from its own input and
+            // dispatches to that adapter, so the turn's own sentinel channel
+            // never enters into it — a background turn can reach a person on a
+            // real channel exactly like any other turn. What is genuinely
+            // impossible is replying *into* `cron` / `autonomous`, which have
+            // no adapter, so that is what this says.
+            section.push_str(
+                "\n\nThis is a background run: no chat is attached to it, so `channel_send` \
+                 has no default channel or recipient to fall back to, and it cannot deliver \
+                 a reply into this system channel. To reach a person, call it with an \
+                 explicit real channel (e.g. \"telegram\", \"slack\") and recipient — \
+                 omitting either fails rather than falling back to a default.",
+            );
+        } else if let Some(id) = sender_id {
             section.push_str(&format!(
                 "\n\nTo send images, files, polls, or other media to the user, use the `channel_send` tool \
                  with channel=\"{channel}\" and recipient=\"{id}\". Set `image_url` for photos, \
