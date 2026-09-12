@@ -82,6 +82,16 @@ describe("plural-aware parity", () => {
     expect(parity.compareKeys(reference, new Set(["title"]), "en").missingPlural)
       .toEqual(["nested.count_one", "nested.count_other"]);
   });
+
+  it("rejects plural forms from unknown or removed families", () => {
+    const locale = new Set(["title", "nested.count_other", "deleted.count_one", "deleted.count_other"]);
+    expect(parity.compareKeys(reference, locale, "ko").extra)
+      .toEqual(["deleted.count_one", "deleted.count_other"]);
+  });
+
+  it.each(["zh_CN", "en.old", "README"])("rejects invalid or unsupported locale %s", (tag) => {
+    expect(() => parity.compareKeys(reference, reference, tag)).toThrow();
+  });
 });
 
 
@@ -96,6 +106,24 @@ it("returns a failing CLI status for a missing required form", () => {
     writeFileSync(join(dir, "ko.json"), JSON.stringify({ count_one: "unused" }));
     expect(parity.runParity(dir)).toBe(1);
     expect(error).toHaveBeenCalledWith("  missing (1):", ["count_other"]);
+  } finally {
+    log.mockRestore();
+    error.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("reports an invalid locale and continues checking subsequent files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "librefang-i18n-parity-"));
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    writeFileSync(join(dir, "en.json"), JSON.stringify({ title: "title" }));
+    writeFileSync(join(dir, "en.old.json"), JSON.stringify({ title: "title" }));
+    writeFileSync(join(dir, "ko.json"), JSON.stringify({ title: "title" }));
+    expect(parity.runParity(dir)).toBe(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("FAIL en.old.json:"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("OK   ko.json"));
   } finally {
     log.mockRestore();
     error.mockRestore();

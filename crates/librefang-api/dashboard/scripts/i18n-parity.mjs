@@ -60,6 +60,13 @@ export function compareKeys(reference, locale, tag) {
   const missing = [...refNonPlural].filter((key) => !localeNonPlural.has(key)).sort();
   const extra = [...localeNonPlural].filter((key) => !refNonPlural.has(key)).sort();
   const bases = new Set([...reference].filter((key) => PLURAL_SUFFIX_RE.test(key)).map(pluralBase));
+  for (const key of locale) {
+    if (PLURAL_SUFFIX_RE.test(key) && !bases.has(pluralBase(key))) extra.push(key);
+  }
+  extra.sort();
+  if (Intl.PluralRules.supportedLocalesOf([tag]).length === 0) {
+    throw new RangeError(`Unsupported locale: ${tag}`);
+  }
   const categories = new Intl.PluralRules(tag, { type: "cardinal" }).resolvedOptions().pluralCategories;
   const missingPlural = [];
   for (const base of bases) {
@@ -80,8 +87,15 @@ export function runParity(localesDir = LOCALES_DIR) {
 
   let drift = false;
   for (const file of others) {
-    const locale = loadFlat(file, localesDir);
-    const result = compareKeys(reference, locale, file.slice(0, -".json".length));
+    let locale, result;
+    try {
+      locale = loadFlat(file, localesDir);
+      result = compareKeys(reference, locale, file.slice(0, -".json".length));
+    } catch (error) {
+      drift = true;
+      console.error(`FAIL ${file}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
     const missing = [...result.missing, ...result.missingPlural].sort();
     const extra = result.extra;
     if (missing.length === 0 && extra.length === 0) {
