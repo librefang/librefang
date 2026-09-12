@@ -970,10 +970,42 @@ fn collect_required_i18n_keys(
     required_keys
 }
 
+/// Every locale directory under `locales/` that ships a `main.ftl`, sorted.
+///
+/// Read from disk so a locale added later is covered without anyone editing a
+/// list — the hole in #8151 was `ko` being absent from a hand-written one, and
+/// the same hole reopens for the next locale added if the list stays manual.
+///
+/// A directory without `main.ftl` is skipped rather than failing: the loader
+/// resolves that file specifically, so a directory that does not have one is
+/// not a locale the binary can serve.
+fn shipped_locales(manifest_dir: &Path) -> Vec<String> {
+    let locales_dir = manifest_dir.join("locales");
+    let mut locales: Vec<String> = std::fs::read_dir(&locales_dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", locales_dir.display()))
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            if !entry.path().join("main.ftl").is_file() {
+                return None;
+            }
+            entry.file_name().into_string().ok()
+        })
+        .collect();
+    locales.sort();
+    assert!(
+        locales.iter().any(|l| l == "en"),
+        "locales/en/main.ftl is the reference every other locale is checked against — \
+         finding no `en` means this scan is looking in the wrong place, not that English was dropped"
+    );
+    locales
+}
+
 fn assert_locale_covers_required_i18n_keys(
     manifest_dir: &Path,
     locale: &str,
-    display_name: &str,
     required_keys: &std::collections::BTreeSet<String>,
 ) {
     let locale_keys: std::collections::BTreeSet<String> =
@@ -989,7 +1021,8 @@ fn assert_locale_covers_required_i18n_keys(
 
     if !missing_keys.is_empty() {
         panic!(
-            "{display_name} locale is missing keys referenced by CLI Rust code:\n{}",
+            "locales/{locale}/main.ftl is missing {} key(s) referenced by CLI Rust code:\n{}",
+            missing_keys.len(),
             missing_keys.join("\n")
         );
     }
@@ -1094,10 +1127,16 @@ fn test_locales_cover_used_i18n_keys() {
     let known_prefixes = locale_key_prefixes(&english_keys.iter().cloned().collect::<Vec<_>>());
     let required_keys = collect_required_i18n_keys(manifest_dir, &known_prefixes);
 
-    assert_locale_covers_required_i18n_keys(manifest_dir, "en", "English", &required_keys);
-    assert_locale_covers_required_i18n_keys(manifest_dir, "uk", "Ukrainian", &required_keys);
-    assert_locale_covers_required_i18n_keys(manifest_dir, "zh-CN", "Chinese", &required_keys);
-    // ko was the one shipped locale this assertion did not cover, which is why the
-    // eight Auxiliary-tab keys reached a branch without anything failing.
-    assert_locale_covers_required_i18n_keys(manifest_dir, "ko", "Korean", &required_keys);
+    // Every locale that ships, discovered from disk rather than listed here.
+    //
+    // The list used to be hand-written, and `ko` was missing from it while
+    // `locales/ko/main.ftl` was a complete 2510-line locale — so eight
+    // Auxiliary-tab keys reached a branch with no Korean translation and
+    // nothing failed (#8151). Adding the missing line fixes that one locale;
+    // reading the directory fixes the shape, because the failure mode was a
+    // locale nobody remembered to list, and a hand-written list re-arms it for
+    // the next one added.
+    for locale in shipped_locales(manifest_dir) {
+        assert_locale_covers_required_i18n_keys(manifest_dir, &locale, &required_keys);
+    }
 }
