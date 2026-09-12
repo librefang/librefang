@@ -1,0 +1,3 @@
+The drift guard behind `docs/operations/config-reload.md` now compares each field's class letter, not just its name.
+It previously read column 1 and ignored column 2, which left the asymmetry that matters: a field missing from the table failed the test, while a field *misdescribed* in it passed — and misdescribed is the direction that harms an operator, because a row reading `N` for a restart-required field turns `POST /api/config/reload` into a call that reports success and changes nothing.
+`classified_reload_fields()` carries the class alongside the name so the code and the table have to agree, and a second test pins the class spellings to the set the doc's legend defines, so the two cannot agree on a typo instead. (#8306) (@houko)

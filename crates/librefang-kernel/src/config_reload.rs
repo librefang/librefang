@@ -1059,163 +1059,163 @@ pub const KERNEL_CONFIG_FIELD_ALIASES: &[&str] = &[
     "approval_policy", // alias for approval
 ];
 
-/// The exhaustive set of `KernelConfig` field names that
-/// [`build_reload_plan`] inspects and classifies (RequiresRestart /
-/// HotReload / Ignore).
+/// Every `KernelConfig` field name [`build_reload_plan`] inspects, mapped to the class it is documented under.
 ///
-/// This is a literal mirror of every field touched in
-/// `build_reload_plan_with_caps`. The
-/// `every_config_field_is_reload_classified` test asserts that this set is a
-/// superset of every real `KernelConfig` field, so a newly-added field that
-/// is not also wired into `build_reload_plan` fails the build instead of
-/// silently no-op-ing on `POST /api/config/reload`.
+/// `R` — restart required. `H` — hot-reloaded through a `HotAction`. `N` — no-op, the config swap is the whole of applying it.
+/// A `/`-joined value is a section that splits across classes by sub-field, as `queue` (`H/N/R`) and `external_auth` (`H/N`) do; the doc row's Meaning column says which sub-field falls where.
+/// `H*` is a class conditional on runtime state, which only `log_level` has.
 ///
-/// **When you add a field to `KernelConfig`:** add a branch to
-/// `build_reload_plan_with_caps` AND its name here. The test will remind you
-/// if you forget.
-pub fn classified_reload_fields() -> std::collections::BTreeSet<&'static str> {
+/// This is a literal mirror of every field touched in `build_reload_plan_with_caps`.
+/// The `every_config_field_is_reload_classified` test asserts that its keys are a superset of every real `KernelConfig` field, so a newly-added field that is not also wired into `build_reload_plan` fails the build instead of silently no-op-ing on `POST /api/config/reload`.
+///
+/// The class letter lives here rather than only in the doc table because a table no code reads can be wrong in the one direction that harms an operator: a field documented `N` that actually needs a restart makes `POST /api/config/reload` answer success and do nothing (#8305, and #8059 before it).
+/// With the letter mirrored, the two must agree — an edit to either side that forgets the other fails `doc_reload_table_matches_classified_reload_fields`.
+///
+/// **When you add a field to `KernelConfig`:** add a branch to `build_reload_plan_with_caps`, its name and class here, AND a row to `docs/operations/config-reload.md`.
+/// The tests will remind you if you forget any of the three.
+pub fn classified_reload_fields() -> std::collections::BTreeMap<&'static str, &'static str> {
     [
         // -- hand-tuned branches at the top of build_reload_plan --
-        "api_listen",
-        "api_key",
-        "api_key_hash",
-        "dashboard_user",
-        "dashboard_pass",
-        "dashboard_pass_hash",
-        "passkey_enabled",
-        "passkey_rp_id",
-        "passkey_rp_origin",
-        "network_enabled",
-        "network",
-        "memory",
-        "memory_wiki",
-        "proxy",
-        "default_model",
-        "home_dir",
-        "data_dir",
-        "stable_prefix_mode",
-        "vault",
-        "channels",
-        "sidecar_channels",
-        "skills",
-        "usage_footer",
-        "web",
-        "browser",
-        "approval",
-        "max_cron_jobs",
-        "webhook_triggers",
-        "extensions",
-        "mcp_servers",
-        "mcp_runtime_store",
-        "taint_rules",
-        "a2a",
-        "fallback_providers",
-        "credential_pools",
-        "provider_urls",
-        "provider_regions",
-        "tool_policy",
-        "users",
-        "groups",
-        "default_owner",
-        "proactive_memory",
-        "queue",
-        "usage",
-        "budget",
-        "sanitize",
-        "provider_api_keys",
-        "log_level",
-        "language",
-        "mode",
+        ("api_listen", "R"),
+        ("api_key", "N"),
+        ("api_key_hash", "N"),
+        ("dashboard_user", "H"),
+        ("dashboard_pass", "H"),
+        ("dashboard_pass_hash", "H"),
+        ("passkey_enabled", "R"),
+        ("passkey_rp_id", "R"),
+        ("passkey_rp_origin", "R"),
+        ("network_enabled", "R"),
+        ("network", "R"),
+        ("memory", "R"),
+        ("memory_wiki", "R"),
+        ("proxy", "H"),
+        ("default_model", "H"),
+        ("home_dir", "R"),
+        ("data_dir", "R"),
+        ("stable_prefix_mode", "N"),
+        ("vault", "R"),
+        ("channels", "H"),
+        ("sidecar_channels", "H"),
+        ("skills", "H"),
+        ("usage_footer", "H"),
+        ("web", "H"),
+        ("browser", "R"),
+        ("approval", "H"),
+        ("max_cron_jobs", "H"),
+        ("webhook_triggers", "H"),
+        ("extensions", "H"),
+        ("mcp_servers", "H"),
+        ("mcp_runtime_store", "N"),
+        ("taint_rules", "H"),
+        ("a2a", "H"),
+        ("fallback_providers", "H"),
+        ("credential_pools", "H"),
+        ("provider_urls", "H"),
+        ("provider_regions", "H"),
+        ("tool_policy", "H"),
+        ("users", "H"),
+        ("groups", "N"),
+        ("default_owner", "N"),
+        ("proactive_memory", "H"),
+        ("queue", "H/N/R"),
+        ("usage", "N"),
+        ("budget", "H"),
+        ("sanitize", "N"),
+        ("provider_api_keys", "H"),
+        ("log_level", "H*"),
+        ("language", "N"),
+        ("mode", "N"),
         // hot-reloadable: ReloadExternalAuth on IdP-identity change, noop
         // (live-read) otherwise — see the hand-tuned branch above.
-        "external_auth",
+        ("external_auth", "H/N"),
         // -- backfilled RESTART branches --
-        "config_version",
-        "cors_origin",
-        "trusted_hosts",
-        "trusted_proxies",
-        "trust_forwarded_for",
-        "allowed_mount_roots",
-        "require_auth_for_reads",
-        "external_auth_proxy",
-        "channel_role_mapping",
-        "include",
-        "exec_policy",
-        "bindings",
-        "tool_exec",
-        "auth_profiles",
-        "vertex_ai",
-        "azure_openai",
-        "oauth",
-        "provider_request_timeout_secs",
-        "provider_max_retries",
-        "provider_proxy_urls",
-        "local_probe_interval_secs",
-        "health_check",
-        "heartbeat",
-        "plugins",
-        "registry",
-        "rate_limit",
-        "strict_config",
-        "parallel_tools",
-        "workflow_stale_timeout_minutes",
-        "workflow_default_total_timeout_secs",
-        "background",
-        "log_dir",
-        "workspaces_dir",
-        "llm",
-        "reload",
-        "max_request_body_bytes",
-        "max_upload_size_bytes",
-        "max_concurrent_uploads",
-        "max_concurrent_bg_llm",
-        "auto_dream",
-        "rl_export",
-        "audit",
-        "telemetry",
-        "context_engine",
-        "session",
-        "task_board",
-        "broadcast",
-        "auto_reply",
-        "canvas",
-        "update_channel",
-        "inbox",
-        "prompt_intelligence",
-        "docker",
-        "trusted_manifest_signers",
-        "terminal",
+        ("config_version", "R"),
+        ("cors_origin", "R"),
+        ("trusted_hosts", "R"),
+        ("trusted_proxies", "R"),
+        ("trust_forwarded_for", "R"),
+        ("allowed_mount_roots", "R"),
+        ("require_auth_for_reads", "R"),
+        ("external_auth_proxy", "R"),
+        ("channel_role_mapping", "R"),
+        ("include", "R"),
+        ("exec_policy", "R"),
+        ("bindings", "R"),
+        ("tool_exec", "R"),
+        ("auth_profiles", "R"),
+        ("vertex_ai", "R"),
+        ("azure_openai", "R"),
+        ("oauth", "R"),
+        ("provider_request_timeout_secs", "R"),
+        ("provider_max_retries", "R"),
+        ("provider_proxy_urls", "R"),
+        ("local_probe_interval_secs", "R"),
+        ("health_check", "R"),
+        ("heartbeat", "R"),
+        ("plugins", "R"),
+        ("registry", "R/N"),
+        ("rate_limit", "R"),
+        ("strict_config", "R"),
+        ("parallel_tools", "R"),
+        ("workflow_stale_timeout_minutes", "R"),
+        ("workflow_default_total_timeout_secs", "R"),
+        ("background", "R"),
+        ("log_dir", "R"),
+        ("workspaces_dir", "R"),
+        ("llm", "N"),
+        ("reload", "R"),
+        ("max_request_body_bytes", "R"),
+        ("max_upload_size_bytes", "R"),
+        ("max_concurrent_uploads", "R"),
+        ("max_concurrent_bg_llm", "R"),
+        ("auto_dream", "R"),
+        ("rl_export", "R"),
+        ("audit", "R"),
+        ("telemetry", "R"),
+        ("context_engine", "R"),
+        ("session", "R"),
+        ("task_board", "N"),
+        ("broadcast", "R"),
+        ("auto_reply", "R"),
+        ("canvas", "R"),
+        ("update_channel", "R"),
+        ("inbox", "R"),
+        ("prompt_intelligence", "R"),
+        ("docker", "R"),
+        ("trusted_manifest_signers", "R"),
+        ("terminal", "R"),
         // -- backfilled NOOP branches --
-        "agent_max_iterations",
-        "max_history_messages",
-        "memory_fact_budget_percent",
-        "max_agent_call_depth",
-        "tool_timeout_secs",
-        "tool_timeouts",
-        "thinking",
-        "triggers",
-        "notification",
-        "tts",
-        "media",
-        "hands",
-        "links",
-        "privacy",
-        "pairing",
-        "gateway_compression",
-        "tool_results",
-        "tool_invoke",
-        "default_routing",
-        "prompt_caching",
-        "prompt_cache",
-        "compaction",
-        "providers",
-        "qwen_code_path",
-        "cron_session_max_tokens",
-        "cron_session_max_messages",
-        "cron_session_warn_fraction",
-        "cron_session_warn_total_tokens",
-        "cron_session_compaction_mode",
-        "cron_session_compaction_keep_recent",
+        ("agent_max_iterations", "N"),
+        ("max_history_messages", "N"),
+        ("memory_fact_budget_percent", "N"),
+        ("max_agent_call_depth", "N"),
+        ("tool_timeout_secs", "N"),
+        ("tool_timeouts", "N"),
+        ("thinking", "N"),
+        ("triggers", "H/N"),
+        ("notification", "N"),
+        ("tts", "N"),
+        ("media", "R"),
+        ("hands", "N"),
+        ("links", "N"),
+        ("privacy", "N"),
+        ("pairing", "N"),
+        ("gateway_compression", "N"),
+        ("tool_results", "N"),
+        ("tool_invoke", "N"),
+        ("default_routing", "N"),
+        ("prompt_caching", "N"),
+        ("prompt_cache", "N"),
+        ("compaction", "N"),
+        ("providers", "N"),
+        ("qwen_code_path", "N"),
+        ("cron_session_max_tokens", "N"),
+        ("cron_session_max_messages", "N"),
+        ("cron_session_warn_fraction", "N"),
+        ("cron_session_warn_total_tokens", "N"),
+        ("cron_session_compaction_mode", "N"),
+        ("cron_session_compaction_keep_recent", "N"),
     ]
     .into_iter()
     .collect()
@@ -2434,7 +2434,10 @@ mod tests {
             .filter(|f| !aliases.contains(f))
             .collect();
 
-        let covered = super::classified_reload_fields();
+        // Only the names matter here; the class each one carries is what
+        // `doc_reload_table_matches_classified_reload_fields` checks.
+        let covered: std::collections::BTreeSet<&str> =
+            super::classified_reload_fields().into_keys().collect();
 
         let missing: Vec<&str> = fields.difference(&covered).copied().collect();
         assert!(
@@ -2464,18 +2467,14 @@ mod tests {
         );
     }
 
-    /// The ops-facing reference table in `docs/operations/config-reload.md`
-    /// must list exactly the same set of fields that
-    /// [`super::classified_reload_fields`] classifies. The doc is
-    /// hand-transcribed from `build_reload_plan`, so without this guard a
-    /// classification change (or a newly-added field) could land in the code
-    /// while the doc silently rots — defeating the doc's stated purpose of
-    /// being the canonical "does this hot-reload?" answer.
+    /// The ops-facing reference table in `docs/operations/config-reload.md` must list exactly the same fields that [`super::classified_reload_fields`] classifies, **with the same class letter**.
+    /// The doc is hand-transcribed from `build_reload_plan`, so without this guard a classification change could land in the code while the doc silently rots — defeating the doc's stated purpose of being the canonical "does this hot-reload?" answer.
     ///
-    /// The doc lists each field as the first column of a markdown table row,
-    /// `| `field_name` | ... |`. We parse those backtick-wrapped leading
-    /// tokens and compare the set to `classified_reload_fields()` in both
-    /// directions.
+    /// Comparing the letter and not only the name is #8305. Until then this test read column 1 and ignored column 2, which left the asymmetry that matters: a field *missing* from the table failed the test, while a field *misdescribed* in it passed.
+    /// Misdescribed is the direction that harms an operator, because a row reading `N` for a restart-required field turns `POST /api/config/reload` into a call that reports success and changes nothing. #8059 is the prior instance of that class.
+    ///
+    /// Each field is the first column of a markdown table row, `| `field_name` | R | … |`.
+    /// The class is column 2 verbatim, so a section split across classes (`queue` is `H/N/R`) has to match on the whole string rather than on a set of letters — the ordering in the doc is the ordering here, which keeps the comparison total instead of letting `R/N` and `N/R` both pass.
     #[test]
     fn doc_reload_table_matches_classified_reload_fields() {
         // CARGO_MANIFEST_DIR = <repo>/crates/librefang-kernel
@@ -2485,8 +2484,9 @@ mod tests {
             panic!("failed to read {}: {e}", doc_path.display());
         });
 
-        // Collect the first-column backtick token of every table row.
-        let mut doc_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Collect `field -> class` from every table row.
+        let mut doc_fields: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for line in doc.lines() {
             let line = line.trim_start();
             let Some(rest) = line.strip_prefix("| `") else {
@@ -2496,21 +2496,41 @@ mod tests {
             // `[a-z0-9_]+`; anything else (legend rows, prose) won't match.
             let Some(end) = rest.find('`') else { continue };
             let token = &rest[..end];
-            if !token.is_empty()
-                && token
+            if token.is_empty()
+                || !token
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             {
-                doc_fields.insert(token.to_string());
+                continue;
             }
+            // Column 2 is what follows the closing backtick, between the next
+            // two pipes. A row whose shape does not yield one is a parse
+            // failure rather than a row to skip: silently dropping it is how
+            // the letter went unchecked in the first place.
+            let after_name = &rest[end + 1..];
+            let Some(after_pipe) = after_name.strip_prefix(" | ") else {
+                panic!(
+                    "table row for `{token}` does not have the expected `| `field` | CLASS | …` shape: {line}"
+                );
+            };
+            let Some(class_end) = after_pipe.find('|') else {
+                panic!("table row for `{token}` has no class column: {line}");
+            };
+            doc_fields.insert(
+                token.to_string(),
+                after_pipe[..class_end].trim().to_string(),
+            );
         }
 
-        let covered: std::collections::BTreeSet<String> = super::classified_reload_fields()
+        let covered: std::collections::BTreeMap<String, String> = super::classified_reload_fields()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(name, class)| (name.to_string(), class.to_string()))
             .collect();
 
-        let missing_from_doc: Vec<&String> = covered.difference(&doc_fields).collect();
+        let doc_names: std::collections::BTreeSet<&String> = doc_fields.keys().collect();
+        let covered_names: std::collections::BTreeSet<&String> = covered.keys().collect();
+
+        let missing_from_doc: Vec<&&String> = covered_names.difference(&doc_names).collect();
         assert!(
             missing_from_doc.is_empty(),
             "fields classified in build_reload_plan but absent from \
@@ -2518,11 +2538,52 @@ mod tests {
              Add a table row for each in the doc."
         );
 
-        let extra_in_doc: Vec<&String> = doc_fields.difference(&covered).collect();
+        let extra_in_doc: Vec<&&String> = doc_names.difference(&covered_names).collect();
         assert!(
             extra_in_doc.is_empty(),
             "docs/operations/config-reload.md lists field names that are not \
              classified in build_reload_plan (renamed/removed?): {extra_in_doc:?}"
+        );
+
+        // The half #8305 is about: the names agreeing says nothing about the
+        // letters agreeing, and the letter is the answer an operator came for.
+        let mismatched: Vec<String> = covered
+            .iter()
+            .filter_map(|(name, code_class)| {
+                let doc_class = doc_fields.get(name)?;
+                (doc_class != code_class)
+                    .then(|| format!("{name}: doc says `{doc_class}`, code says `{code_class}`"))
+            })
+            .collect();
+        assert!(
+            mismatched.is_empty(),
+            "class letter disagrees between docs/operations/config-reload.md and \
+             `classified_reload_fields()`:\n  {}\n\
+             Whichever is wrong, fix both — an operator reads the doc to decide \
+             whether an edit needs a restart.",
+            mismatched.join("\n  ")
+        );
+    }
+
+    /// The class recorded for a field must be one the legend defines, in the
+    /// spelling the legend uses.
+    ///
+    /// Without this, `classified_reload_fields()` and the doc could agree on a
+    /// typo — `HN` for `H/N`, or a lowercase `r` — and the comparison above
+    /// would pass over two copies of the same mistake.
+    #[test]
+    fn every_reload_class_is_a_known_spelling() {
+        const KNOWN: &[&str] = &["R", "H", "N", "H*", "H/N", "R/N", "H/N/R"];
+        let unknown: Vec<String> = super::classified_reload_fields()
+            .iter()
+            .filter(|(_, class)| !KNOWN.contains(class))
+            .map(|(name, class)| format!("{name}: `{class}`"))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unrecognised reload class(es): {unknown:?}\n\
+             Known spellings are {KNOWN:?}. A new combination needs adding here \
+             and explaining in the doc's legend."
         );
     }
 }
