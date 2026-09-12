@@ -3029,7 +3029,7 @@ export function AgentsPage() {
                       </Badge>
                     </DetailRow>
                     <DetailRow label={t("agents.budget_tokens")}>
-                      <span className="font-mono">{detailAgent.thinking.budget_tokens?.toLocaleString() ?? 0}</span>
+                      <span className="font-mono">{formatNumber(detailAgent.thinking.budget_tokens)}</span>
                     </DetailRow>
                     <DetailRow label={t("agents.stream_thinking")}>
                       <Badge variant={detailAgent.thinking.stream_thinking ? "brand" : "default"}>
