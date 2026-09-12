@@ -15196,6 +15196,13 @@
               "null"
             ]
           },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable failure reason (`template_not_found`,\n`template_read_failed`, `manifest_too_large`, `signature_invalid`,\n`invalid_manifest`, `agent_already_exists`, `spawn_failed`, …), the\nsame codes `POST /api/agents` returns as the response `code` field.\n`error` alone is already translated into nine locales, so a caller\ncannot branch on it to tell \"template missing\" apart from \"template\nunreadable\" without substring-matching localized prose (#8112)."
+          },
           "error": {
             "type": [
               "string",

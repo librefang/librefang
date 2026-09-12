@@ -442,6 +442,17 @@ const parseFloatish = (raw: string): number | null => {
   return n;
 };
 
+// The number inputs declare min/max, but min/max does not stop pasted or
+// programmatic values on a non-submitted form. `PATCH /api/agents/{id}/model`
+// rejects an out-of-range sampling value with an explicit 400 rather than
+// clamping it; `validateManifestForm` (below) mirrors those same ranges so
+// this editor reports the same conflict instead of silently rewriting the
+// number to one the operator never chose (#8112 review).
+const isInRange = (raw: string, min: number, max: number): boolean => {
+  const v = parseSignedFloat(raw);
+  return v === null || (v >= min && v <= max);
+};
+
 const writeStringScalar = (lines: string[], key: string, value: string): void => {
   if (!value) return;
   lines.push(`${key} = ${escapeTomlString(value)}`);
@@ -585,9 +596,9 @@ export const serializeManifestForm = (
   writeStringScalar(modelBody, "provider", form.model.provider.trim());
   writeStringScalar(modelBody, "model", form.model.model.trim());
   writeStringScalar(modelBody, "system_prompt", form.model.system_prompt);
-  writeNumberScalar(modelBody, "temperature", parseFloatish(form.model.temperature));
+  writeNumberScalar(modelBody, "temperature", parseSignedFloat(form.model.temperature));
   writeNumberScalar(modelBody, "max_tokens", parseInteger(form.model.max_tokens));
-  writeNumberScalar(modelBody, "top_p", parseFloatish(form.model.top_p));
+  writeNumberScalar(modelBody, "top_p", parseSignedFloat(form.model.top_p));
   writeNumberScalar(modelBody, "frequency_penalty", parseSignedFloat(form.model.frequency_penalty));
   writeNumberScalar(modelBody, "presence_penalty", parseSignedFloat(form.model.presence_penalty));
   writeNumberScalar(modelBody, "context_window", parseInteger(form.model.context_window));
@@ -968,6 +979,14 @@ export const validateManifestForm = (
       errors.push("response_format.schema");
     }
   }
+  // Sampling preferences — same ranges `PATCH /api/agents/{id}/model` enforces
+  // (crates/librefang-api/src/routes/agents/config.rs), so an out-of-range
+  // value is reported here too instead of reaching the TOML at all (#8112).
+  if (!isInRange(form.model.temperature, 0, 2)) errors.push("model.temperature");
+  if (!isInRange(form.model.top_p, 0, 1)) errors.push("model.top_p");
+  if (!isInRange(form.model.frequency_penalty, -2, 2)) errors.push("model.frequency_penalty");
+  if (!isInRange(form.model.presence_penalty, -2, 2)) errors.push("model.presence_penalty");
+
   // Folder rows: duplicate names produce a duplicate TOML key (hard parse
   // failure on the daemon), and `path` mirrors the kernel's rule — relative
   // to workspaces_dir, no `..`. A mount row carries an absolute host path

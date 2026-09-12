@@ -18,7 +18,7 @@ use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentManifest, ModelConfig};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::memory::{MemoryFragment, MemoryId};
@@ -27,7 +27,7 @@ use librefang_types::message::{
 };
 use librefang_types::model_catalog::VisionSupport;
 use librefang_types::tool::{AgentLoopSignal, DecisionTrace, ToolCall, ToolDefinition};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -465,6 +465,29 @@ pub(super) fn redact_images_for_text_only(mut messages: Vec<Message>, model: &st
         );
     }
     messages
+}
+
+/// Merge the typed sampling fields into the request's `extra_body` map.
+///
+/// `top_p` / `frequency_penalty` / `presence_penalty` are typed [`ModelConfig`]
+/// fields (#8112) but have no slot in [`CompletionRequest`]; the drivers flatten
+/// `extra_body` into the API request body, which is the same wire position
+/// these OpenAI-compatible parameters occupied when they were untyped
+/// `extra_params` keys. Merging at the single request-construction site keeps
+/// one wire path, and a `None` field sends nothing — providers without the
+/// parameter are unaffected. `BTreeMap` key order stays deterministic (#3298).
+pub(super) fn build_extra_body(model: &ModelConfig) -> Option<BTreeMap<String, serde_json::Value>> {
+    let mut body = model.extra_params.clone();
+    if let Some(v) = model.top_p {
+        body.insert("top_p".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = model.frequency_penalty {
+        body.insert("frequency_penalty".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = model.presence_penalty {
+        body.insert("presence_penalty".to_string(), serde_json::json!(v));
+    }
+    (!body.is_empty()).then_some(body)
 }
 
 /// Run the agent execution loop for a single user message.
@@ -1329,11 +1352,7 @@ async fn run_agent_loop_inner(
             prompt_cache_strategy,
             response_format: manifest.response_format.clone(),
             timeout_secs: timeout_override,
-            extra_body: if manifest.model.extra_params.is_empty() {
-                None
-            } else {
-                Some(manifest.model.extra_params.clone())
-            },
+            extra_body: build_extra_body(&manifest.model),
             agent_id: Some(agent_id_str.clone()),
             session_id: Some(session.id.to_string()),
             step_id: Some(iteration.to_string()),

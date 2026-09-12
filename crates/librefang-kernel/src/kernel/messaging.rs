@@ -501,6 +501,17 @@ impl LibreFangKernel {
         // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
         let tools: Vec<librefang_types::tool::ToolDefinition> = vec![];
         let mut manifest = entry.manifest.clone();
+        // #8112: this path skipped the per-model-override resolution that
+        // `execute_llm_agent` (kernel::agent_execution) already runs, so a
+        // `top_p` / `frequency_penalty` / `presence_penalty` set as a
+        // model-catalog override never reached an ephemeral (`/btw`) turn even
+        // though it reached the same agent's persistent-session turns. No
+        // routing runs on this path, so the manifest's provider/model is
+        // already final.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // Reuse the prompt-builder to get a proper system prompt
         {
@@ -2529,6 +2540,19 @@ impl LibreFangKernel {
                 );
             });
         }
+
+        // #8112: resolve the per-model-override sampling preferences
+        // (`top_p` / `frequency_penalty` / `presence_penalty`, plus
+        // `temperature` / `max_tokens`) the same way `execute_llm_agent`
+        // (kernel::agent_execution) does — this streaming dispatch path
+        // skipped that resolution entirely, so a catalog override never
+        // reached a streamed turn even though it reached the same agent's
+        // non-streaming turns. Placed after the session model override so it
+        // resolves against the model the turn will actually call.
+        super::manifest_helpers::apply_resolved_inference_params(
+            &self.llm.model_catalog.load(),
+            &mut manifest.model,
+        );
 
         // Resolve the context window: agent.toml override > per-model operator
         // override > catalog > session (#6568, #7774). Computed *after* the
