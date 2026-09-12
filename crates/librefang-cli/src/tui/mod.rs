@@ -579,9 +579,15 @@ impl App {
                 phase,
                 iteration,
                 max_iterations,
+                verify_max_retries,
             } => {
-                self.goals
-                    .apply_run_state(&goal_id, phase, iteration, max_iterations);
+                self.goals.apply_run_state(
+                    &goal_id,
+                    phase,
+                    iteration,
+                    max_iterations,
+                    verify_max_retries,
+                );
             }
             AppEvent::GoalRunFailed { goal_id, failure } => {
                 // Deliberately does NOT touch the cached run state: the last
@@ -2048,6 +2054,9 @@ impl App {
                 title,
                 description,
                 agent_id,
+                loop_engineering,
+                verify_agent_id,
+                evaluator_model,
             } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_create_goal(
@@ -2055,6 +2064,9 @@ impl App {
                         title,
                         description,
                         agent_id,
+                        loop_engineering,
+                        verify_agent_id,
+                        evaluator_model,
                         self.event_tx.clone(),
                     );
                 }
@@ -2064,9 +2076,17 @@ impl App {
                     event::spawn_delete_goal(backend, goal_id, self.event_tx.clone());
                 }
             }
-            goals::GoalsAction::StartRun { goal_id } => {
+            goals::GoalsAction::StartRun {
+                goal_id,
+                verify_max_retries,
+            } => {
                 if let Some(backend) = self.backend.to_ref() {
-                    event::spawn_start_goal_run(backend, goal_id, self.event_tx.clone());
+                    event::spawn_start_goal_run(
+                        backend,
+                        goal_id,
+                        verify_max_retries,
+                        self.event_tx.clone(),
+                    );
                 }
             }
             goals::GoalsAction::StopRun { goal_id } => {

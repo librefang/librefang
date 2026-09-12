@@ -182,7 +182,13 @@ pub async fn get_goal_run(
 /// POST /api/goals/{id}/start — Begin an autonomous long-horizon run that
 /// drives the goal's assigned agent toward completion (#5744).
 ///
-/// Optional body: `{ "max_iterations": <u32> }`.
+/// Optional body: `{ "max_iterations": <u32>, "verify_max_retries": <u32> }`.
+///
+/// Whether the run is verified at all is a property of the goal
+/// (`loop_engineering`, `verify_agent_id`, `evaluator_model`), not of the
+/// request, so every caller — dashboard, CLI, script — gets the verification
+/// the operator configured once. Only the per-run retry budget is a body
+/// field.
 pub async fn start_goal_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -246,9 +252,47 @@ pub async fn start_goal_run(
         },
     };
 
-    let started = state
-        .kernel
-        .start_goal_run(goal_id, agent_id, max_iterations);
+    // Loop-engineering configuration lives on the goal, not on the request, so
+    // a run started from the dashboard, the CLI or a script all get the same
+    // verification the operator configured once.
+    let loop_engineering = goal["loop_engineering"].as_bool().unwrap_or(false);
+    let stored_verifier = goal["verify_agent_id"]
+        .as_str()
+        .map(str::trim)
+        .unwrap_or("");
+    let verify_agent_id = if !loop_engineering || stored_verifier.is_empty() {
+        None
+    } else {
+        match stored_verifier.parse::<uuid::Uuid>() {
+            Ok(u) => Some(AgentId(u)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request(format!(
+                    "This goal's verify_agent_id ('{stored_verifier}') is not a valid agent UUID — reassign the verifier to repair it"
+                ))
+                .into_json_tuple();
+            }
+        }
+    };
+    let evaluator_model = goal["evaluator_model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let verify_max_retries = body
+        .as_ref()
+        .and_then(|b| b.0.get("verify_max_retries"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    let started = state.kernel.start_goal_run(
+        goal_id,
+        agent_id,
+        max_iterations,
+        loop_engineering,
+        verify_agent_id,
+        verify_max_retries,
+        evaluator_model,
+    );
     if !started {
         return ApiErrorResponse::internal("Failed to start goal run").into_json_tuple();
     }
@@ -398,6 +442,28 @@ pub async fn create_goal(
         }
     };
 
+    let loop_engineering = req["loop_engineering"].as_bool().unwrap_or(false);
+    // Same boundary rule as `agent_id`: reject a bad verifier id here rather
+    // than storing junk that `start_goal_run` has to reject later.
+    let verify_agent_id_str: Option<String> = req
+        .get("verify_agent_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+    if let Some(ref vid) = verify_agent_id_str {
+        if vid.parse::<uuid::Uuid>().is_err() {
+            return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+        }
+    }
+    // Deliberately NOT validated the way the verifier id is: a model id has no
+    // checkable shape, and whether it resolves depends on the provider config
+    // at call time, not at save time. An unresolvable id degrades — the runner
+    // warns per iteration and falls back to the agent's own marker. See the
+    // field doc on `librefang_types::goal::Goal::evaluator_model`.
+    let evaluator_model_str: Option<String> = req
+        .get("evaluator_model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string());
+
     let now = chrono::Utc::now().to_rfc3339();
     let goal_id = uuid::Uuid::new_v4().to_string();
     let mut entry = serde_json::json!({
@@ -406,6 +472,7 @@ pub async fn create_goal(
         "description": description,
         "status": status,
         "progress": progress,
+        "loop_engineering": loop_engineering,
         "created_at": now,
         "updated_at": now,
     });
@@ -415,6 +482,12 @@ pub async fn create_goal(
     }
     if let Some(ref aid) = agent_id_str {
         entry["agent_id"] = serde_json::Value::String(aid.clone());
+    }
+    if let Some(ref vid) = verify_agent_id_str {
+        entry["verify_agent_id"] = serde_json::Value::String(vid.clone());
+    }
+    if let Some(ref em) = evaluator_model_str {
+        entry["evaluator_model"] = serde_json::Value::String(em.clone());
     }
 
     // Atomic read-modify-write under BEGIN IMMEDIATE (#5138). Parent
@@ -520,12 +593,25 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::bad_request("A goal cannot be its own parent").into_json_tuple();
     }
 
+    let verifier_clear = req.get("verify_agent_id").is_some_and(is_clear_signal);
+
     let agent_update = match optional_uuid_field(&req, "agent_id") {
         Ok(value) => value,
         Err(()) => {
             return ApiErrorResponse::bad_request("Invalid agent_id").into_json_tuple();
         }
     };
+
+    // Same rule for the verifier, and for the same reason: storing an id the
+    // run path will refuse leaves the operator with a gate that looks
+    // configured and is not.
+    if !verifier_clear {
+        if let Some(vid) = req.get("verify_agent_id").and_then(|v| v.as_str()) {
+            if vid.trim().parse::<uuid::Uuid>().is_err() {
+                return ApiErrorResponse::bad_request("Invalid verify_agent_id").into_json_tuple();
+            }
+        }
+    }
 
     // --- Atomic validate-then-mutate under BEGIN IMMEDIATE (#5138) ---
     //
@@ -607,6 +693,26 @@ pub async fn update_goal_by_id(
                             g["agent_id"] = serde_json::Value::String(aid.clone());
                         } else {
                             g.as_object_mut().map(|obj| obj.remove("agent_id"));
+                        }
+                    }
+                    if let Some(loop_engineering) =
+                        req.get("loop_engineering").and_then(|v| v.as_bool())
+                    {
+                        g["loop_engineering"] = serde_json::json!(loop_engineering);
+                    }
+                    if let Some(verify_agent_id) = req.get("verify_agent_id") {
+                        if verifier_clear {
+                            g.as_object_mut().map(|obj| obj.remove("verify_agent_id"));
+                        } else if let Some(vid) = verify_agent_id.as_str() {
+                            g["verify_agent_id"] =
+                                serde_json::Value::String(vid.trim().to_string());
+                        }
+                    }
+                    if let Some(evaluator_model) = req.get("evaluator_model") {
+                        if is_clear_signal(evaluator_model) {
+                            g.as_object_mut().map(|obj| obj.remove("evaluator_model"));
+                        } else if let Some(em) = evaluator_model.as_str() {
+                            g["evaluator_model"] = serde_json::Value::String(em.trim().to_string());
                         }
                     }
                     g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
