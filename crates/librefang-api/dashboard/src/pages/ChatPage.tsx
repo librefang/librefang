@@ -33,10 +33,17 @@ import {
   setCachedChatMessages,
 } from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus, CheckSquare } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
-import { useUIStore } from "../lib/store";
+import {
+  useUIStore,
+  MIN_CHAT_SCALE,
+  MAX_CHAT_SCALE,
+  DEFAULT_CHAT_SCALE,
+  CHAT_SCALE_STEP,
+} from "../lib/store";
+import { conversationToMarkdown, exportFilename } from "../lib/chatExport";
 import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
 import { filterVisible } from "../lib/hiddenModels";
@@ -1329,9 +1336,17 @@ interface MessageBubbleProps {
   isSpeaking?: boolean;
   ttsStatus?: "idle" | "loading" | "playing" | "paused";
   ttsAvailable?: boolean;
+  /**
+   * Selection state for export. `undefined` means selection is off entirely,
+   * which is the normal case — the checkbox column only exists while the
+   * operator is choosing what to take out, so a transcript is not permanently
+   * fringed with controls nobody uses.
+   */
+  selected?: boolean;
+  onToggleSelected?: (messageId: string) => void;
 }
 
-const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable }: MessageBubbleProps) {
+const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy, copied, onSpeak, isSpeaking, ttsStatus, ttsAvailable, selected, onToggleSelected }: MessageBubbleProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
@@ -1370,8 +1385,32 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     );
   }
 
+  const selectable = onToggleSelected !== undefined;
+
   return (
-    <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
+    <motion.div
+      className={`flex items-start gap-2 ${isUser ? "justify-end" : "justify-start"}`}
+      variants={messageIn}
+      initial="initial"
+      animate="animate"
+    >
+      {/*
+        The checkbox only exists while the operator is choosing what to export.
+        A transcript permanently fringed with controls nobody uses is worse
+        than one extra click to start selecting, and `print:hidden` keeps it
+        out of the paper copy.
+      */}
+      {selectable && (
+        <label className="mt-1 shrink-0 cursor-pointer print:hidden">
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelected?.(message.id)}
+            aria-label={t("chat.export_select_message", { defaultValue: "Include this message in the export" })}
+            className="h-3.5 w-3.5 accent-brand"
+          />
+        </label>
+      )}
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
@@ -2430,8 +2469,10 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
-  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, onStartExportSelection, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
+  agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void;
+  /** Enter the pick-messages mode. Absent means the surface does not offer it. */
+  onStartExportSelection?: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
   /** Target agent id for the model picker PATCH. */
@@ -2550,6 +2591,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     const q = modelSearch.toLowerCase();
     return providers.filter(p => p.id.toLowerCase().includes(q));
   }, [providers, modelSearch]);
+
+  const chatScale = useUIStore((s) => s.chatScale);
+  const setChatScale = useUIStore((s) => s.setChatScale);
+  const scalePercent = Math.round(chatScale * 100);
 
   async function handleSelectModel(model: ModelItem) {
     const prev = optimisticModel ?? modelName ?? null;
@@ -2736,6 +2781,44 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             </div>
           )}
         </div>
+        {/*
+          Transcript size. Live, and remembered — the size that reads well on a
+          27" panel wastes a 13" one, so this is a setting rather than a default
+          someone picked once. It scales the transcript only; the composer and
+          this header keep their own size, so shrinking the text never shrinks
+          the controls you need to hit.
+        */}
+        <div className="hidden sm:flex items-center gap-0.5" data-testid="chat-scale-control">
+          <button
+            type="button"
+            onClick={() => setChatScale(chatScale - CHAT_SCALE_STEP)}
+            disabled={chatScale <= MIN_CHAT_SCALE}
+            aria-label={t("chat.scale_decrease", { defaultValue: "Smaller text" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:hover:text-text-dim/60 disabled:hover:bg-transparent"
+          >
+            <Minus className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setChatScale(DEFAULT_CHAT_SCALE)}
+            aria-label={t("chat.scale_reset", { defaultValue: "Reset text size" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="px-1 text-[10px] font-mono tabular-nums text-text-dim/50 hover:text-brand transition-colors"
+          >
+            {scalePercent}%
+          </button>
+          <button
+            type="button"
+            onClick={() => setChatScale(chatScale + CHAT_SCALE_STEP)}
+            disabled={chatScale >= MAX_CHAT_SCALE}
+            aria-label={t("chat.scale_increase", { defaultValue: "Larger text" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:hover:text-text-dim/60 disabled:hover:bg-transparent"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        </div>
         {/* Web Search toggle (off → auto → always → off) with config check */}
         {onWebSearchChange && (() => {
           const mode = webSearchAugmentation || "auto";
@@ -2887,6 +2970,20 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               <Download className="h-3 w-3" />
               <span className="hidden sm:inline">{t("chat.export", { defaultValue: "Export" })}</span>
             </button>
+            {/*
+              Separate from Export rather than a dropdown on it: the common case
+              is taking the whole conversation, and putting that behind a menu
+              would cost a click on every use to serve the rarer one.
+            */}
+            {onStartExportSelection && (
+              <button
+                onClick={onStartExportSelection}
+                title={t("chat.export_pick", { defaultValue: "Pick messages to export or print" })}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-brand hover:bg-brand/5 transition-colors"
+              >
+                <CheckSquare className="h-3 w-3" />
+              </button>
+            )}
             <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
               <X className="h-3 w-3" />
               {t("chat.clear_chat")}
@@ -3031,9 +3128,27 @@ export function ChatPage() {
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
+
+  // Export selection. `null` is "not choosing"; a Set is "choosing, and these
+  // are in". Kept as two states rather than an empty-Set sentinel so leaving
+  // selection mode cannot silently narrow a later export to whatever happened
+  // to be ticked minutes ago.
+  const [exportSelection, setExportSelection] = useState<Set<string> | null>(null);
+  const [exportThinking, setExportThinking] = useState(false);
+
+  const toggleExportSelected = useCallback((messageId: string) => {
+    setExportSelection((current) => {
+      if (current === null) return current;
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+  }, []);
   // Mobile-only: agent picker / session list slide-in sheet visibility.
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
+  const chatScale = useUIStore((s) => s.chatScale);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
   // #2959. Sessions are URL-driven per tab; other callers (CLI, cron) still
@@ -3253,43 +3368,6 @@ export function ChatPage() {
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
   // so operators can archive or share transcripts.
-  const handleExport = useCallback(() => {
-    if (messages.length === 0) return;
-    const agentName = agents.find(a => a.id === selectedAgentId)?.name ?? selectedAgentId;
-    const lines: string[] = [
-      `# Conversation with ${agentName}`,
-      "",
-      `_Exported: ${new Date().toISOString()}_`,
-      `_${messages.length} messages_`,
-      "",
-      "---",
-      "",
-    ];
-    for (const m of messages) {
-      const ts = m.timestamp instanceof Date ? m.timestamp.toISOString() : new Date(m.timestamp as string).toISOString();
-      const role = m.role === "assistant" ? agentName : m.role;
-      lines.push(`### ${role} · ${ts}`);
-      lines.push("");
-      if (m.content) {
-        lines.push(m.content);
-        lines.push("");
-      }
-      if (m.tools && m.tools.length > 0) {
-        lines.push(`_Tools: ${m.tools.map(t => t.name).join(", ")}_`);
-        lines.push("");
-      }
-    }
-    const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    const date = new Date().toISOString().slice(0, 10);
-    a.download = `chat-${agentName.replace(/[^a-zA-Z0-9-_]/g, "_")}-${date}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [messages, agents, selectedAgentId]);
   const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
@@ -3330,6 +3408,79 @@ export function ChatPage() {
   // in the response and handleBackendNewSession pins the URL, at which point
   // this becomes non-null and the highlight is correct.
   const activeSessionId = deriveDropdownActiveSessionId(urlSessionId);
+
+  const runExport = useCallback(
+    (mode: "download" | "print") => {
+      const chosen =
+        exportSelection === null
+          ? messages
+          : messages.filter((m) => exportSelection.has(m.id));
+      // Nothing ticked means nothing to take, and silently exporting the whole
+      // conversation instead would be the opposite of what was asked for.
+      if (chosen.length === 0) {
+        addToast(
+          t("chat.export_nothing_selected", {
+            defaultValue: "Select at least one message to export.",
+          }),
+          "info",
+        );
+        return;
+      }
+      const exportedAt = new Date();
+      const markdown = conversationToMarkdown(chosen, {
+        agentName: selectedAgent?.name ?? t("chat.bot"),
+        sessionId: activeSessionId,
+        includeThinking: exportThinking,
+        exportedAt,
+      });
+
+      if (mode === "print") {
+        // Printing the live page would carry the sidebar, the composer and
+        // whatever is scrolled out of view. A plain document of exactly the
+        // chosen messages is what someone means by "print the conversation".
+        const w = window.open("", "_blank", "noopener,noreferrer");
+        if (!w) {
+          addToast(
+            t("chat.export_popup_blocked", {
+              defaultValue: "Allow pop-ups to print the conversation.",
+            }),
+            "error",
+          );
+          return;
+        }
+        w.document.title = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
+        // `textContent`, not innerHTML: the transcript is model output, and
+        // this window is being built by hand rather than by React.
+        const pre = w.document.createElement("pre");
+        pre.style.whiteSpace = "pre-wrap";
+        pre.style.wordBreak = "break-word";
+        pre.style.fontFamily = "ui-monospace, monospace";
+        pre.style.fontSize = "12px";
+        pre.textContent = markdown;
+        w.document.body.appendChild(pre);
+        w.print();
+        return;
+      }
+
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = exportFilename(selectedAgent?.name ?? "conversation", exportedAt);
+      a.click();
+      // Revoking immediately can cancel the download in Safari; one turn of
+      // the event loop is enough and the object is small.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    },
+    [messages, exportSelection, exportThinking, selectedAgent, activeSessionId, addToast, t],
+  );
+
+  // Kept as a one-click "export everything" so the button behaves as it always
+  // has; `runExport` is the same path with a selection applied.
+  const handleExport = useCallback(() => {
+    if (messages.length === 0) return;
+    runExport("download");
+  }, [messages.length, runExport]);
   // Best-effort resolved session id, used only for features that need *some*
   // session reference (SSE attach viewer) but do not imply a UI "active"
   // guarantee.  Falls back to the most-recently-created session when the URL
@@ -3667,6 +3818,7 @@ export function ChatPage() {
               messageCount={messages.length}
               onClear={() => { void clearHistory(); }}
               onExport={handleExport}
+              onStartExportSelection={() => setExportSelection(new Set(messages.map((m) => m.id)))}
               wsConnected={wsConnected}
               modelName={selectedAgent?.model_name}
               modelProvider={selectedAgent?.model_provider}
@@ -3698,8 +3850,24 @@ export function ChatPage() {
             />
           )}
 
-          {/* Message area */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+          {/*
+            Message area.
+
+            The scale is `zoom` rather than a `font-size` the children inherit:
+            Tailwind's size utilities are `rem`-based, so a container font-size
+            scales none of them, and the transcript's subtree reaches
+            `MarkdownContent`, which other pages share and so cannot be moved
+            to `em` units for this. `zoom` reaches the whole subtree — type,
+            padding, avatars, code blocks — with one declaration and no shared
+            component touched.
+            It applies to this scroller only, so the composer, the header and
+            anything portalled to the body keep their own size.
+          */}
+          <div
+            className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 scrollbar-thin"
+            style={{ zoom: chatScale }}
+            data-testid="chat-message-area"
+          >
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
@@ -3718,7 +3886,7 @@ export function ChatPage() {
                 <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
                   <Bot className="h-10 w-10 text-brand" />
                 </div>
-                <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
+                <h3 className="text-base font-black">{selectedAgent?.name}</h3>
                 <p className="text-sm text-text-dim mt-2">{t("chat.welcome_system")}</p>
               </div>
             ) : (
@@ -3732,6 +3900,67 @@ export function ChatPage() {
                     {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
                   </button>
                 )}
+                {exportSelection !== null && (
+                  <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-brand/30 bg-surface/95 px-3 py-2 backdrop-blur print:hidden">
+                    <span className="text-[11px] font-bold text-brand">
+                      {t("chat.export_selected_count", {
+                        count: exportSelection.size,
+                        defaultValue: `${exportSelection.size} selected`,
+                      })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setExportSelection(new Set(messages.map((m) => m.id)))}
+                      className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:text-brand hover:bg-surface-hover"
+                    >
+                      {t("chat.export_select_all", { defaultValue: "Select all" })}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExportSelection(new Set())}
+                      className="rounded-lg px-2 py-1 text-[11px] text-text-dim hover:text-brand hover:bg-surface-hover"
+                    >
+                      {t("chat.export_select_none", { defaultValue: "Clear" })}
+                    </button>
+                    <label className="flex items-center gap-1.5 text-[11px] text-text-dim">
+                      <input
+                        type="checkbox"
+                        checked={exportThinking}
+                        onChange={(e) => setExportThinking(e.target.checked)}
+                        className="h-3 w-3 accent-brand"
+                      />
+                      {/* Off by default: reasoning traces are long, and they are
+                          the part most likely to carry something the operator
+                          would not paste elsewhere. */}
+                      {t("chat.export_include_reasoning", { defaultValue: "Include reasoning" })}
+                    </label>
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => runExport("download")}
+                        className="inline-flex items-center gap-1 rounded-lg border border-brand/30 bg-brand/10 px-2 py-1 text-[11px] font-bold text-brand hover:bg-brand/20"
+                      >
+                        <Download className="h-3 w-3" />
+                        {t("chat.export_as_markdown_short", { defaultValue: "Markdown" })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => runExport("print")}
+                        className="rounded-lg border border-border-subtle px-2 py-1 text-[11px] font-bold text-text-dim hover:text-brand"
+                      >
+                        {t("chat.export_print", { defaultValue: "Print" })}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExportSelection(null)}
+                        aria-label={t("chat.export_cancel", { defaultValue: "Cancel export" })}
+                        className="rounded-lg p-1 text-text-dim hover:text-brand"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <CompactionSummaryBanner summary={compactedSummary} isCompacting={isCompacting} />
                 {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
@@ -3744,6 +3973,8 @@ export function ChatPage() {
                     isSpeaking={tts.speakingMessageId === msg.id}
                     ttsStatus={tts.speakingMessageId === msg.id ? tts.status : "idle"}
                     ttsAvailable={ttsAvailable}
+                    selected={exportSelection?.has(msg.id)}
+                    onToggleSelected={exportSelection === null ? undefined : toggleExportSelected}
                   />
                 ))}
                 {/* Inline approval cards for pending requests */}
