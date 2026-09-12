@@ -654,13 +654,44 @@ pub async fn get_agent_channels(
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
-    let available: Vec<String> = state
-        .kernel
-        .config_ref()
+    let agent_name = entry.manifest.name.clone();
+    let config = state.kernel.config_ref();
+
+    // The allowlist is matched against a bare channel *type* — `agent_allows_channel`
+    // in `librefang-channels` compares against `channel_type_str(&message.channel)`,
+    // which the `the_roster_key_is_the_bare_channel_type` test pins — so the choices
+    // it offers are types, and one entry per type is the whole list.
+    // This used to map every configured instance to its type, so a host running
+    // three Telegram bots offered "telegram" three times, indistinguishable and
+    // all meaning the same thing.
+    let mut available: Vec<String> = Vec::new();
+    for sc in &config.sidecar_channels {
+        let ty = sc.channel_type.clone().unwrap_or_else(|| sc.name.clone());
+        if !available.contains(&ty) {
+            available.push(ty);
+        }
+    }
+
+    // Which instances exist, and which agent each one delivers to. This is the
+    // per-instance binding from #6131 (`[[sidecar_channels]].agent`), a separate
+    // and finer mechanism than the type allowlist above: the allowlist says which
+    // kinds of channel an agent may serve at all, the binding says which specific
+    // bot's messages arrive at it. Surfacing both from one place is what lets an
+    // agent's own editor answer "which of the three Telegram bots is mine?",
+    // which previously could only be read from the channel's side.
+    let instances: Vec<serde_json::Value> = config
         .sidecar_channels
         .iter()
-        .map(|sc| sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()))
+        .map(|sc| {
+            serde_json::json!({
+                "name": sc.name,
+                "channel_type": sc.channel_type.clone().unwrap_or_else(|| sc.name.clone()),
+                "agent": sc.agent,
+                "bound_to_this_agent": sc.agent.as_deref() == Some(agent_name.as_str()),
+            })
+        })
         .collect();
+
     let mode = if entry.manifest.channels.is_empty() {
         "all"
     } else {
@@ -671,6 +702,7 @@ pub async fn get_agent_channels(
         Json(serde_json::json!({
             "assigned": entry.manifest.channels,
             "available": available,
+            "instances": instances,
             "mode": mode,
         })),
     )

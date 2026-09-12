@@ -1730,6 +1730,50 @@ export async function getAgentMcpServers(
 }
 
 /**
+ * Per-agent channel assignment, returned by `GET /api/agents/{id}/channels`.
+ *
+ * Two different mechanisms, deliberately reported together:
+ *
+ * - `assigned` / `available` / `mode` are the manifest allowlist
+ *   (`agent.toml: channels`), matched against a bare channel **type** —
+ *   `agent_allows_channel` in `librefang-channels` compares
+ *   `channel_type_str(&message.channel)` — so `available` is one entry per
+ *   type, not per configured instance.
+ * - `instances` is the per-instance binding (`[[sidecar_channels]].agent`,
+ *   #6131): which specific bot delivers to which agent. Three Telegram bots
+ *   are three instances of one type, and only this tells them apart.
+ *
+ * Reading both from one place is what lets an agent's own editor answer
+ * "which of these bots is mine?", which previously could only be seen from
+ * the channel's side.
+ */
+export interface AgentChannelInstance {
+  /** `[[sidecar_channels]].name` — unique per instance. */
+  name: string;
+  /** The channel type this instance speaks; several instances share one. */
+  channel_type: string;
+  /** Agent this instance delivers to, or `null` when it has no binding. */
+  agent: string | null;
+  /** True when `agent` is the agent this response is about. */
+  bound_to_this_agent: boolean;
+}
+
+export interface AgentChannelsResponse {
+  assigned: string[];
+  available: string[];
+  instances: AgentChannelInstance[];
+  mode: "all" | "allowlist";
+}
+
+export async function getAgentChannels(
+  agentId: string,
+): Promise<AgentChannelsResponse> {
+  return get<AgentChannelsResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/channels`,
+  );
+}
+
+/**
  * PUT /api/agents/{id}/skills — replace the agent's skill allowlist.
  *
  * An empty array clears the allowlist, switching the agent back to "all"
