@@ -84,7 +84,7 @@ fn build_harness() -> VaultHarness {
         api_key_lock: state.api_key_lock.clone(),
         master_key: state.master_key.clone(),
         active_sessions: state.active_sessions.clone(),
-        dashboard_auth_enabled: false,
+        dashboard_auth_enabled: state.dashboard_auth_enabled.clone(),
         user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         allow_no_auth: true,
