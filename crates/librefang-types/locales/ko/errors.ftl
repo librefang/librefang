@@ -32,12 +32,14 @@ api-error-template-parse-failed = 템플릿 분석에 실패했습니다: { $err
 api-error-template-required = 'manifest_toml' 또는 'template' 중 하나가 필요합니다
 api-error-template-invalid-manifest = 유효하지 않은 템플릿 매니페스트입니다
 api-error-template-read-failed = 템플릿을 읽는 데 실패했습니다
+api-error-template-snapshot-failed = 현재 에이전트 유형의 스냅샷을 저장하지 못해 복원을 취소했으며 아무것도 덮어쓰지 않았습니다. 다시 시도하세요.
 api-error-template-promote-no-token = GitHub 토큰이 구성되지 않았습니다. 설정에서 GitHub를 연결하거나 GITHUB_TOKEN을 설정하세요.
 api-error-template-promote-review-required = 이 템플릿에는 게시 전에 제거해야 하는 비공개 정보가 아직 포함되어 있습니다. 검사 결과를 확인하고 매니페스트를 편집하세요.
 api-error-template-promote-render-failed = 정리된 매니페스트를 TOML로 렌더링할 수 없습니다: { $error }
 api-error-agent-type-exists = '{ $name }' 에이전트 타입이 이미 존재합니다
 api-error-agent-type-name-taken = '{ $name }'은(는) 실행 중인 에이전트의 이름입니다. 다른 이름을 사용하세요
 api-error-agent-type-not-editable = 에이전트 타입 '{ $name }'은(는) 실행 중인 에이전트 워크스페이스에서 왔으며 /api/agents 에서 관리됩니다
+api-error-registry-type-not-found = 에이전트 타입 '{ $name }'을(를) 레지스트리에서 찾을 수 없습니다
 
 # Manifest errors
 api-error-manifest-too-large = 매니페스트가 너무 큽니다 (최대 1MB)

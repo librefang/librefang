@@ -12714,6 +12714,73 @@
         }
       }
     },
+    "/api/templates/{name}/registry-diff": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name/registry-diff — Compare local agent type with its registry original.",
+        "description": "Scoped to `TemplateSource::AgentType` like `restore_from_registry` — a name that only resolves\nthrough a live agent's own workspace manifest has nothing `restore` can ever act on, so a diff\noffered for it is a comparison for a control that cannot succeed (#8042).",
+        "operationId": "get_agent_type_registry_diff",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Diff between local and registry versions"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          }
+        }
+      }
+    },
+    "/api/templates/{name}/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/templates/:name/restore — Overwrite local agent type with the registry version.",
+        "description": "Records two snapshots, because this write destroys the local copy by design.\nA manifest whose current content came from a hand-edit of the file has no snapshot anywhere, so the pre-restore content is recorded first (`pre-registry-restore`) — otherwise, after the overwrite, that content is gone from disk and was never in history either, leaving nothing to go back to.\nThat first snapshot is a precondition, not a courtesy: if it fails the route answers 500 and writes nothing, because proceeding would destroy the only copy of the content it just failed to save.\nThe post-restore content is then recorded too (`registry-restore`), so `GET /api/templates/{name}/history` reports the registry copy as current rather than the previous dashboard save.\nThat second one is best-effort — losing it costs a history row, not the manifest.",
+        "operationId": "restore_agent_type_from_registry",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Agent type name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent type restored from registry"
+          },
+          "404": {
+            "description": "Agent type or registry version not found"
+          },
+          "409": {
+            "description": "The name belongs to a live agent"
+          },
+          "500": {
+            "description": "The pre-restore snapshot could not be recorded; nothing was overwritten"
+          }
+        }
+      }
+    },
     "/api/templates/{name}/toml": {
       "get": {
         "tags": [

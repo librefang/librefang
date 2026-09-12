@@ -350,6 +350,21 @@ describe("query key factories", () => {
     it("does not collide with agentKeys, which owns a different domain", () => {
       expect(agentTypeKeys.all).not.toEqual(agentKeys.all);
     });
+
+    // #8042: `registryDiff` used to be a sibling of `details()`, so
+    // invalidating `detail(name)` after a restore/save never reached it and
+    // the diff drawer could show a stale pre-restore comparison. Nesting it
+    // under `detail(name)` — the same pattern `history` already uses — means
+    // any prefix-matching `invalidateQueries({ queryKey: detail(name) })`
+    // reaches it too.
+    it("nests registryDiff under detail, like history, so detail invalidation reaches it", () => {
+      expect(agentTypeKeys.registryDiff("coder")).toEqual([
+        ...agentTypeKeys.detail("coder"),
+        "registry-diff",
+      ]);
+      const prefix = agentTypeKeys.detail("coder");
+      expect(agentTypeKeys.registryDiff("coder").slice(0, prefix.length)).toEqual(prefix);
+    });
   });
 
   describe("invalidation patterns", () => {
