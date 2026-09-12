@@ -1635,11 +1635,18 @@ async fn workflow_run_depth_refusal_is_permission_denied_not_upstream() {
 ///
 /// - `send_channel_message` always succeeds (returns Ok).
 /// - `resolve_channel_owner` returns the configured `owner_id`.
-/// - `append_to_session` records calls into `appended`.
+/// - `append_to_session` records the `(SessionId, Message)` pair into `appended`; the session id is recorded because which session the mirror lands in is the thing #8243 got wrong.
 /// - `fail_append` makes `append_to_session` simulate a save failure (warn path).
 struct MirrorKernel {
     owner_id: Option<librefang_types::agent::AgentId>,
-    appended: Arc<std::sync::Mutex<Vec<librefang_types::message::Message>>>,
+    appended: Arc<
+        std::sync::Mutex<
+            Vec<(
+                librefang_types::agent::SessionId,
+                librefang_types::message::Message,
+            )>,
+        >,
+    >,
     fail_append: bool,
 }
 
@@ -1841,7 +1848,7 @@ impl SessionWriter for MirrorKernel {
 
     fn append_to_session(
         &self,
-        _session_id: librefang_types::agent::SessionId,
+        session_id: librefang_types::agent::SessionId,
         _agent_id: librefang_types::agent::AgentId,
         message: librefang_types::message::Message,
     ) {
@@ -1850,12 +1857,81 @@ impl SessionWriter for MirrorKernel {
             tracing::warn!("MirrorKernel: simulated append_to_session failure");
             return;
         }
-        self.appended.lock().unwrap().push(message);
+        self.appended.lock().unwrap().push((session_id, message));
     }
 }
 
 // `multi_thread` is required so that the `block_in_place` call inside
 // `append_to_session` does not panic (block_in_place requires a
+/// #8243: a `channel_send` to a reserved channel name must mirror into the external session, not the kernel's own.
+///
+/// `cron`, `autonomous` and `webui` name the kernel's internal system sessions, so every path that turns an operator-supplied channel name into a `SessionId` renames them to `ext-<name>` first — dispatch and execution through `LibreFangKernel::channel_session_id`, the bridge's `/new` through `session_scope`. The mirror derived its target with a bare `SessionId::for_sender_scope` and skipped that, which put the outbound message in the one session that must never carry channel traffic and left it out of the chat the operator is looking at.
+///
+/// Asserted both ways round. Equality with the external id alone would still pass if the guard were applied twice or the derivation changed shape, and inequality with the internal id alone would pass for any wrong-but-different session; together they pin the one id every other path resolves.
+#[tokio::test(flavor = "multi_thread")]
+async fn channel_send_mirror_renames_a_reserved_channel_before_deriving_the_session_8243() {
+    use librefang_types::agent::{AgentId, SessionId};
+
+    let owner = AgentId(uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap());
+
+    for reserved in librefang_channels::types::RESERVED_SYSTEM_CHANNEL_NAMES {
+        let appended = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(MirrorKernel {
+            owner_id: Some(owner),
+            appended: Arc::clone(&appended),
+            fail_append: false,
+        });
+
+        let input = serde_json::json!({
+            "channel": reserved,
+            "recipient": "99999",
+            "message": "outbound body",
+        });
+
+        tool_channel_send(
+            &input,
+            Some(&kernel),
+            None,
+            Some("99999"),
+            None,
+            None,
+            None, // sender_account_id
+            Some("caller-agent-id"),
+            &[],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("send to {reserved:?} should succeed: {e:?}"));
+
+        let appended = appended.lock().unwrap();
+        assert_eq!(
+            appended.len(),
+            1,
+            "expected exactly one mirrored message for {reserved:?}"
+        );
+        let landed = appended[0].0;
+
+        let external = SessionId::for_sender_scope(
+            owner,
+            &librefang_channels::types::sanitize_channel_name(reserved),
+            Some("99999"),
+        );
+        let internal = SessionId::for_sender_scope(owner, reserved, Some("99999"));
+        assert_ne!(
+            external, internal,
+            "the fixture is only meaningful while {reserved:?} and its ext- form derive different ids"
+        );
+
+        assert_eq!(
+            landed, external,
+            "mirror of a send to the reserved channel {reserved:?} must land in the ext- session, the one the inbound dispatch resolves"
+        );
+        assert_ne!(
+            landed, internal,
+            "mirror of a send to the reserved channel {reserved:?} landed in the kernel's own {reserved} session"
+        );
+    }
+}
+
 // multi-threaded runtime). This test exercises the mock-only path;
 // the real block_in_place coverage lives in `channel_send_mirror_test.rs`.
 #[tokio::test(flavor = "multi_thread")]
@@ -1895,12 +1971,12 @@ async fn test_channel_send_mirrors_to_channel_owner_session() {
     let msgs = appended.lock().unwrap();
     assert_eq!(msgs.len(), 1, "exactly one message should be mirrored");
     assert_eq!(
-        msgs[0].role,
+        msgs[0].1.role,
         Role::User,
         "mirrored message must use user role"
     );
 
-    let content = msgs[0].content.text_content();
+    let content = msgs[0].1.content.text_content();
     assert_eq!(
         content, r#"{"mirror_from":"caller-agent-id","body":"Hello from cron agent"}"#,
         "mirror text must be a JSON envelope with mirror_from and body fields"
@@ -1947,7 +2023,7 @@ async fn test_channel_send_mirrors_when_caller_is_channel_owner() {
     assert!(result.is_ok(), "send should succeed: {:?}", result);
     let msgs = appended.lock().unwrap();
     assert_eq!(msgs.len(), 1, "mirror must land even when caller == owner");
-    assert_eq!(msgs[0].role, Role::User);
+    assert_eq!(msgs[0].1.role, Role::User);
 }
 
 // `multi_thread` is required so that the `block_in_place` call inside
