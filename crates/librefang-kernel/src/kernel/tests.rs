@@ -18577,3 +18577,182 @@ fn a_requested_iteration_cap_is_clamped_to_the_operator_ceiling() {
         "zero is not a request for a worker that does nothing before answering"
     );
 }
+
+/// Buffered `tracing` writer for the #8221 warning tests.
+///
+/// Kept local to this pair of tests rather than promoted to a shared helper: `config.rs` and `cron.rs` each carry their own copy, and factoring the three together is a change to two files this PR has no other reason to touch.
+#[derive(Clone)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+impl CapturedLogs {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+
+    /// Install this buffer as the calling thread's subscriber for the duration of the returned guard.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(self.clone())
+            .with_ansi(false)
+            .with_target(false);
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(layer))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).expect("utf8")
+    }
+}
+
+/// A `KernelConfig` rooted in `dir` with `[tool_exec]` pointed at a well-formed SSH backend.
+///
+/// Well-formed matters: `ToolExecConfig::validate` rejects `kind = "ssh"` without a populated sub-table, and boot turns that rejection into a `BootFailed`. The configuration under test is the one that passes every existing check and still does nothing.
+fn ssh_tool_exec_config(dir: &std::path::Path) -> KernelConfig {
+    let home_dir = dir.join("librefang-tool-exec-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        tool_exec: librefang_types::tool_exec::ToolExecConfig {
+            kind: librefang_types::tool_exec::BackendKind::Ssh,
+            ssh: Some(librefang_types::tool_exec::SshBackendConfig {
+                host: "build.example.com".to_string(),
+                user: "agent".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..KernelConfig::default()
+    }
+}
+
+/// #8221: booting with `[tool_exec] kind = "ssh"` must say out loud that tool calls still run on the daemon host.
+///
+/// `docs/architecture/tool-exec-backends.md` has promised this warning since #3332 and it was never implemented, which left the deferral invisible: `librefang_runtime::tool_exec_backend::build_backend` has no production caller, so the resolved kind reaches nothing.
+/// An operator who set this to keep shell commands off the daemon machine got the opposite of what they configured, with a clean boot and no log line anywhere.
+///
+/// Asserting on the rendered text rather than on a predicate, because the text is the entire deliverable — a warning nobody can act on is the same defect one level up.
+#[test]
+fn boot_warns_that_a_non_local_tool_exec_backend_does_not_route_tool_calls_8221() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = ssh_tool_exec_config(tmp.path());
+
+    let logs = CapturedLogs::new();
+    let kernel = {
+        let _g = logs.install();
+        LibreFangKernel::boot_with_config(config).expect(
+            "a well-formed non-local backend is a missing feature, not a broken config; boot must succeed",
+        )
+    };
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8221"),
+        "warning must cite the tracking issue so the operator can find the status; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("ssh"),
+        "warning must name the backend that was configured and ignored; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    kernel.shutdown();
+}
+
+/// #8221, per-agent half: the same gap reached through `agent.toml`'s `tool_exec_backend`.
+///
+/// Warned per spawn rather than at boot because a manifest can be written long after the daemon started, so a boot-time sweep would never see it.
+/// The kernel here boots on the default (local) config, which also proves the two warnings are independent — this one fires with nothing wrong in `config.toml`.
+#[test]
+fn spawn_warns_that_a_per_agent_tool_exec_backend_does_not_route_tool_calls_8221() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp
+        .path()
+        .join("librefang-per-agent-tool-exec-warning-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // `validate_override` rejects an override whose sub-table is absent, so the manifest needs a config that can satisfy it. `kind` stays `local`: only the per-agent override is under test.
+    config.tool_exec.ssh = Some(librefang_types::tool_exec::SshBackendConfig {
+        host: "build.example.com".to_string(),
+        user: "agent".to_string(),
+        ..Default::default()
+    });
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let manifest = AgentManifest {
+        name: "remote-runner".to_string(),
+        description: "asks for a backend that does not exist yet".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        tool_exec_backend: Some(librefang_types::tool_exec::BackendKind::Ssh),
+        ..Default::default()
+    };
+
+    let logs = CapturedLogs::new();
+    {
+        let _g = logs.install();
+        kernel
+            .validate_spawnable(&manifest, "remote-runner")
+            .expect("an unimplemented backend must not make an agent unspawnable");
+    }
+
+    let captured = logs.text();
+    assert!(
+        captured.contains("#8221"),
+        "warning must cite the tracking issue; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("remote-runner"),
+        "warning must name the agent, since one manifest among many is the thing to fix; captured: {captured:?}"
+    );
+    assert!(
+        captured.contains("not a sandbox"),
+        "warning must deny the security property an operator most plausibly assumed; captured: {captured:?}"
+    );
+
+    // A local override is the configured default and must stay silent, or the warning becomes noise on every spawn.
+    let local = AgentManifest {
+        name: "local-runner".to_string(),
+        module: "builtin:chat".to_string(),
+        tool_exec_backend: Some(librefang_types::tool_exec::BackendKind::Local),
+        ..Default::default()
+    };
+    let quiet = CapturedLogs::new();
+    {
+        let _g = quiet.install();
+        kernel
+            .validate_spawnable(&local, "local-runner")
+            .expect("local override is always valid");
+    }
+    assert!(
+        !quiet.text().contains("#8221"),
+        "an explicit local override must not warn; captured: {:?}",
+        quiet.text()
+    );
+
+    kernel.shutdown();
+}

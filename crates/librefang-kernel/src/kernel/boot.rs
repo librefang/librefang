@@ -318,6 +318,22 @@ impl LibreFangKernel {
             );
         }
 
+        // A configured non-local backend does not route tool calls yet, and the operator has no other way to find that out (#8221).
+        //
+        // `docs/architecture/tool-exec-backends.md` states that the kernel warns here, and that warning was the one thing making the deferral visible — it was never implemented.
+        // So an operator who pointed `kind` at an SSH host to keep shell commands off this machine got the exact opposite of what they configured, silently.
+        // `validate()` above only rejects a malformed sub-table, so a well-formed `[tool_exec.ssh]` boots clean and every `shell_exec` still runs locally.
+        //
+        // Deliberately a `warn!` and not a boot failure: refusing to start would break deployments carrying the setting in anticipation, and this is a missing feature rather than a broken config.
+        if !config.tool_exec.kind.is_wired_into_dispatch() {
+            warn!(
+                configured_backend = config.tool_exec.kind.as_str(),
+                "[tool_exec] kind is set to a non-local backend, but tool calls still execute on the daemon host — \
+                 backend routing is not wired into tool dispatch yet (#8221). Shell and process tools ignore this \
+                 setting; it is not a sandbox."
+            );
+        }
+
         // Check TOTP configuration consistency
         if config.approval.second_factor == librefang_types::approval::SecondFactor::Totp {
             let vault_path = config.home_dir.join("vault.enc");

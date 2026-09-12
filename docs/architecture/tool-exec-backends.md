@@ -6,21 +6,22 @@ managed sandbox like Daytona. Issue #3332.
 
 ## Status
 
-This PR (#3332) lands the **trait + concrete backend implementations
-+ config plumbing**. It does **NOT** yet route the existing
-`tool_runner.rs` shell / `docker_exec` / process-spawn call sites
-through the trait — that migration is a deliberate follow-up because
-the call-site refactor is large enough to deserve its own review.
+This PR (#3332) lands the **trait + concrete backend implementations + config plumbing**.
+It does **NOT** yet route the existing `tool_runner.rs` shell / `docker_exec` / process-spawn call sites through the trait — that migration is a deliberate follow-up because the call-site refactor is large enough to deserve its own review.
 
-Concretely: configuring `tool_exec.kind = "ssh"` (or `"daytona"`) in
-`config.toml` resolves correctly through `resolve_backend_kind` and
-materialises the corresponding `ToolExecBackend` impl, but tool calls
-emitted by an LLM still flow through the legacy local / docker
-helpers. **The kernel emits a `WARN` at boot when `kind != "local"`**
-to make this visible. Operators experimenting with the SSH or Daytona
-backend should expect the override to take effect only after the
-follow-up PR migrates the call sites; until then, set `kind` to
-preview the resolver and feature-flag plumbing.
+Concretely: configuring `tool_exec.kind = "ssh"` (or `"daytona"`) in `config.toml` resolves correctly through `resolve_backend_kind` and materialises the corresponding `ToolExecBackend` impl, but tool calls emitted by an LLM still flow through the legacy local / docker helpers.
+`build_backend` has no caller outside the test suite, so the backend a deployment selects is built nowhere and discarded.
+
+**The kernel says so at both points where a backend can be selected**, since a silently ignored setting here reads as a security boundary that does not exist:
+
+- **Boot**, for the global `[tool_exec] kind`, whenever it is not `local` — `LibreFangKernel::boot_with_config` in `crates/librefang-kernel/src/kernel/boot.rs`.
+- **Every spawn**, for an agent's `tool_exec_backend` in `agent.toml` — `validate_spawnable` in `crates/librefang-kernel/src/kernel/spawn.rs`.
+  Per spawn rather than once at boot, because a manifest can be written or edited long after the daemon started.
+
+Both are `warn!` and neither rejects: the configuration is a missing feature, not a broken config, and deployments carrying the setting in anticipation should keep starting.
+The single source of truth for which backends are still unwired is `BackendKind::is_wired_into_dispatch`; whoever migrates the call sites updates that method, and `only_the_local_backend_is_wired_into_dispatch_8221` fails until they do.
+
+Operators experimenting with the SSH or Daytona backend should expect the override to take effect only after the follow-up PR migrates the call sites; until then, set `kind` to preview the resolver and feature-flag plumbing.
 
 ## Why a trait
 
