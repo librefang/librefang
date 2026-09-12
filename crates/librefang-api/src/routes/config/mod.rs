@@ -610,6 +610,16 @@ const WRITABLE_EXACT_PATHS: &[&str] = &[
     // Nothing posted them either: the dashboard keeps theme, language, and sidebar state in browser `localStorage` via zustand `persist` (key `librefang-ui-storage`), which is why the dead paths went unnoticed for so long.
     // An allowlist entry with no backing field is worse than a missing one — it reports success for a write that silently evaporates.
     "log_level",
+    // The one `[channels]` scalar that is both live and safe to set over HTTP (#8169).
+    //
+    // `ChannelsConfig` has three fields and they are not equivalent:
+    //
+    // * `file_download_max_bytes` — enforced on the inbound path, a plain `u64`. This one.
+    // * `file_download_dir` — a filesystem path. Every other path-valued setting (`log_dir`, `data_dir`, `home_dir`, `workspaces_dir`) is absent from this list and edited on disk; a download directory is not the field to break that with.
+    // * `file_upload_max_bytes` — documented as NOT enforced since the #5317–#5459 sidecar migration, which logs a WARN at boot rather than honouring it. Offering an editor for a value the daemon ignores is the `ui.*` shape above, one layer in.
+    //
+    // The other two stay out, so `non_writable_schema_paths` reports them and the dashboard renders them read-only instead of offering a save that 403s.
+    "channels.file_download_max_bytes",
     // History trim cap (gotcha bound by MIN_HISTORY_MESSAGES on reload).
     "max_history_messages",
     // Approval policy display knobs (NOT the second_factor enforcement
@@ -689,9 +699,15 @@ const WRITABLE_EXACT_PATHS: &[&str] = &[
 // section itself is NOT writable as a whole (would clobber the table),
 // because validate_config_key_path requires the path to have a leaf.
 const WRITABLE_SECTION_PREFIXES: &[&str] = &[
-    // Per-channel enable/feature toggles. Excludes `*.token` /
-    // `*.shared_secret` because those keys are scrubbed below.
-    "channels.",
+    // `channels.` was here for the per-channel enable/feature toggles, back when
+    // `ChannelsConfig` carried a `OneOrMany<*Config>` per vendor. The #5317–#5459
+    // sidecar migration removed those, leaving three file-transfer scalars at
+    // depth 1 — so the prefix accepted only depth-2 paths that resolve to no
+    // field, and rejected the three that do exist (#8169).
+    //
+    // Removed rather than moved to depth 1: of the three, only
+    // `file_download_max_bytes` should be writable over HTTP, and it is listed
+    // in `WRITABLE_EXACT_PATHS` above with the reasoning for the other two.
     // Web search / fetch knobs (URLs and timeouts).
     "web.",
     // Rate-limit display knobs.
@@ -826,13 +842,11 @@ const WRITABLE_SECTION_PREFIXES: &[&str] = &[
 // a bot/API token. Depth-2 (`channels.telegram.enabled` etc.) goes
 // through SCRUB_SUFFIXES which catches the `_env` blanket.
 //
-// State of this rule after the sidecar migration, recorded while auditing dangling allowlist entries for #6605.
-// `ChannelsConfig` no longer declares any per-vendor field — only the three file-transfer scalars (`file_download_dir`, `file_download_max_bytes`, `file_upload_max_bytes`), which sit at depth 1 and are therefore rejected by the rule above, while no depth-2 path under `channels.` resolves to a field at all.
-// A depth-2 write such as `channels.telegram.enabled` is still accepted, still lands a `[channels.telegram]` table in config.toml, and is still discarded by the next load — the same silent-no-op shape #6605 removed the `ui.*` entries for.
-// `every_writable_allowlist_entry_has_a_backing_config_field` cannot see it: the guard checks a section prefix at its base, and `channels` is a real `KernelConfig` field, so the dangling part sits one level below what the guard inspects.
-// The visible half is the mirror image: `ui_sections_overlay` declares a `channels` section and `ConfigPage` posts `<section>.<field>`, so the dashboard renders editors for the three real scalars and every save of one is rejected with 403.
-// Both candidate repairs (drop `channels.` so the surface matches the struct, or move it to depth 1 so the three real scalars become writable) change the write surface rather than the allowlist's internal consistency, so they are a maintainer call, not a mechanical consequence of #6605.
-const WRITABLE_DEPTH_2_ONLY_PREFIXES: &[&str] = &["channels."];
+// `channels.` was the only entry, and #8169 removed it: after the sidecar migration `ChannelsConfig` declares no per-vendor field, so the rule was rejecting the three scalars that exist at depth 1 while accepting depth-2 paths that resolve to nothing — `channels.telegram.enabled` landed a `[channels.telegram]` table in config.toml that the next load discarded, the same silent-no-op shape #6605 removed the `ui.*` entries for.
+// `channels.file_download_max_bytes` is now an exact path instead; the other two scalars stay non-writable for the reasons recorded there.
+//
+// The list is kept rather than deleted along with its last entry. The hazard it encodes is live: a section prefix whose depth-1 leaf is a struct carrying `*_token_env` / `*_secret_env` lets a wholesale depth-1 write redirect the env var a credential resolves from, which `SCRUB_SUFFIXES` cannot police inside a JSON payload. The next `OneOrMany<*Config>` section added to `WRITABLE_SECTION_PREFIXES` needs this, and re-deriving the rule from scratch is how it comes back missing.
+const WRITABLE_DEPTH_2_ONLY_PREFIXES: &[&str] = &[];
 
 /// Allowlist of user-tunable config paths writable via POST /api/config/set
 /// (#3458). Anything not in this list MUST be edited on disk.
@@ -1563,9 +1577,12 @@ url = "https://search.example.com"
         // Sectioned tunables — single leaf and one nested level both allowed.
         assert!(super::is_writable_config_path("web.search_provider"));
         assert!(super::is_writable_config_path("rate_limit.max_ws_per_ip"));
-        // This one pins the depth rule, NOT a backing field: post-sidecar-migration `ChannelsConfig` declares no per-vendor sub-table, so `channels.telegram.enabled` resolves to nothing and is the same silent-no-op shape as the `ui.*` paths above.
-        // It is left asserted-writable because dropping `channels.` or moving it to depth 1 changes the write surface, which is a maintainer call — see the note at `WRITABLE_DEPTH_2_ONLY_PREFIXES` for the evidence and both candidate repairs.
-        assert!(super::is_writable_config_path("channels.telegram.enabled"));
+        // The nested level, pinned on a path that resolves to a real field.
+        // This was `channels.telegram.enabled`, which resolved to nothing after
+        // the sidecar migration and was left asserted-writable only because the
+        // repair was an open maintainer call. #8169 made that call — see
+        // `channels_write_surface_matches_the_struct`.
+        assert!(super::is_writable_config_path("default_model.provider"));
 
         // Account / credential paths MUST be rejected.
         assert!(!super::is_writable_config_path("default_model.api_key"));
@@ -1653,15 +1670,17 @@ url = "https://search.example.com"
         assert!(!super::is_writable_config_path("fallback_providers"));
         assert!(!super::is_writable_config_path("taint_rules"));
 
-        // ── Round-5 review of #4678 ──────────────────────────────────
-        // `channels.<vendor>` (depth-1 wholesale-replace) MUST reject;
-        // depth-2 leaves under the same vendor stay open (per-field
-        // toggles via the dashboard).
+        // ── Round-5 review of #4678, revised by #8169 ────────────────
+        // `channels.<vendor>` never resolved to a field after the sidecar
+        // migration removed the per-vendor structs, and the depth-2 leaves
+        // that used to be the writable half do not resolve either — a write
+        // to one landed a `[channels.telegram]` table that the next load
+        // discarded. Both halves reject now.
         assert!(!super::is_writable_config_path("channels.telegram"));
         assert!(!super::is_writable_config_path("channels.whatsapp"));
         assert!(!super::is_writable_config_path("channels.email"));
-        assert!(super::is_writable_config_path("channels.telegram.enabled"));
-        assert!(super::is_writable_config_path("channels.whatsapp.enabled"));
+        assert!(!super::is_writable_config_path("channels.telegram.enabled"));
+        assert!(!super::is_writable_config_path("channels.whatsapp.enabled"));
 
         // `network.bootstrap_peers` MUST reject (DHT MITM via post-auth
         // peer redirect, threat model parallel to the round-4 removal
@@ -1672,6 +1691,42 @@ url = "https://search.example.com"
         assert!(super::is_writable_config_path("network.max_peers"));
         assert!(super::is_writable_config_path(
             "network.max_messages_per_peer_per_minute"
+        ));
+    }
+
+    /// #8169: the `[channels]` write surface must match the three scalars the
+    /// struct actually has, and only the one of them that is both live and not
+    /// a filesystem path may be set over HTTP.
+    ///
+    /// Before this, the dashboard rendered editors for all three and every save
+    /// returned 403, because `channels.` was depth-2-only and all three sit at
+    /// depth 1.
+    #[test]
+    fn channels_write_surface_matches_the_struct() {
+        // Live, plain `u64`, enforced on the inbound path — the one that opens.
+        assert!(
+            super::is_writable_config_path("channels.file_download_max_bytes"),
+            "the enforced inbound cap is the field the dashboard's channels section exists to edit"
+        );
+
+        // A filesystem path. Every other path-valued setting is edited on disk;
+        // this assertion is what keeps a download directory from becoming the
+        // exception nobody decided on.
+        assert!(!super::is_writable_config_path(
+            "channels.file_download_dir"
+        ));
+        for path_valued in ["log_dir", "data_dir", "home_dir", "workspaces_dir"] {
+            assert!(
+                !super::is_writable_config_path(path_valued),
+                "`{path_valued}` is the precedent `channels.file_download_dir` follows — if this \
+                 now passes, revisit that decision rather than deleting this line"
+            );
+        }
+
+        // Documented as not enforced since the #5317–#5459 sidecar migration.
+        // Offering an editor for a value the daemon ignores is the `ui.*` shape.
+        assert!(!super::is_writable_config_path(
+            "channels.file_upload_max_bytes"
         ));
     }
 

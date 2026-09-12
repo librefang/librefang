@@ -1,0 +1,4 @@
+The dashboard's Channels settings section can be saved again.
+Every save of one of its three fields returned 403: the sidecar migration reduced `[channels]` to three depth-1 scalars while the write allowlist still required depth-2 paths for that section, so the fields that exist were rejected and the `channels.<vendor>.<key>` paths the rule did accept resolved to nothing — a write landed a `[channels.telegram]` table in `config.toml` that the next load discarded.
+`channels.file_download_max_bytes` is now writable; `file_download_dir` is not, matching every other path-valued setting (`log_dir`, `data_dir`, `home_dir`, `workspaces_dir`), and neither is `file_upload_max_bytes`, which the daemon has not enforced since the sidecar migration.
+Both appear read-only in the dashboard rather than as an edit that fails, because the UI takes that verdict from the server. (#8308) (@houko)
