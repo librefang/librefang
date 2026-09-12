@@ -13,6 +13,9 @@ fn main() {
     // Compile-time `env!` would keep pointing at the worktree that originally
     // compiled it when another worktree reuses the same target directory.
     let dashboard_dir = build_paths::dashboard_dir();
+    // A second worktree sharing this target directory needs a fresh run when
+    // its placeholder is absent, even if all environment inputs are unchanged.
+    println!("cargo:rerun-if-changed=static/react");
     if !dashboard_dir.exists() {
         std::fs::create_dir_all(&dashboard_dir)
             .expect("failed to create static/react placeholder directory");

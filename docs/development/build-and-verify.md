@@ -86,7 +86,7 @@ Four things about that invocation are load-bearing:
   Sharing one target dir across worktrees on different branches corrupts cargo's incremental cache: cargo reuses compiled metadata from another code state and emits phantom errors, such as `missing field 'x'` for a field the current source does not even define.
   Deriving the volume name from the worktree keeps each branch isolated.
   The cargo *download* cache (`librefang-cargo`) is safe to share — it holds fetched `.crate` files, not compiled artifacts.
-  The API build script still resolves its dashboard placeholder from the runtime `CARGO_MANIFEST_DIR`, so a reused build-script binary cannot write `static/react` into a sibling worktree.
+  The API build script still resolves its dashboard placeholder from the runtime `CARGO_MANIFEST_DIR`, so a reused build-script binary cannot write `static/react` into a sibling worktree. The placeholder is a declared build input, so a missing directory triggers a fresh run even when the target directory is shared.
 - **Scope is still mandatory**: `-p <crate>`, or the `kind(lib)|kind(bin)` nextest filter, never the unscoped workspace form.
 
 The container runs **Linux only**.
