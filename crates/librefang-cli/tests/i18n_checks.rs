@@ -972,13 +972,9 @@ fn collect_required_i18n_keys(
 
 /// Every locale directory under `locales/` that ships a `main.ftl`, sorted.
 ///
-/// Read from disk so a locale added later is covered without anyone editing a
-/// list — the hole in #8151 was `ko` being absent from a hand-written one, and
-/// the same hole reopens for the next locale added if the list stays manual.
+/// Read from disk so a locale added later is covered without anyone editing a list — the hole in #8151 was `ko` being absent from a hand-written one, and the same hole reopens for the next locale added if the list stays manual.
 ///
-/// A directory without `main.ftl` is skipped rather than failing: the loader
-/// resolves that file specifically, so a directory that does not have one is
-/// not a locale the binary can serve.
+/// A directory without `main.ftl` is skipped rather than failing: the loader resolves that file specifically, so a directory that does not have one is not a locale the binary can serve.
 fn shipped_locales(manifest_dir: &Path) -> Vec<String> {
     let locales_dir = manifest_dir.join("locales");
     let mut locales: Vec<String> = std::fs::read_dir(&locales_dir)
@@ -1129,13 +1125,8 @@ fn test_locales_cover_used_i18n_keys() {
 
     // Every locale that ships, discovered from disk rather than listed here.
     //
-    // The list used to be hand-written, and `ko` was missing from it while
-    // `locales/ko/main.ftl` was a complete 2510-line locale — so eight
-    // Auxiliary-tab keys reached a branch with no Korean translation and
-    // nothing failed (#8151). Adding the missing line fixes that one locale;
-    // reading the directory fixes the shape, because the failure mode was a
-    // locale nobody remembered to list, and a hand-written list re-arms it for
-    // the next one added.
+    // The list used to be hand-written, and `ko` was missing from it while `locales/ko/main.ftl` was a complete 2510-line locale — so eight Auxiliary-tab keys reached a branch with no Korean translation and nothing failed (#8151).
+    // Adding the missing line fixes that one locale; reading the directory fixes the shape, because the failure mode was a locale nobody remembered to list, and a hand-written list re-arms it for the next one added.
     for locale in shipped_locales(manifest_dir) {
         assert_locale_covers_required_i18n_keys(manifest_dir, &locale, &required_keys);
     }
