@@ -1040,7 +1040,7 @@ pub async fn config_reload(
                 &state.api_key_lock,
                 &state.master_key,
                 &state.user_api_keys,
-        &state.dashboard_auth_enabled,
+                &state.dashboard_auth_enabled,
                 plan.config_stored,
             )
             .await;
