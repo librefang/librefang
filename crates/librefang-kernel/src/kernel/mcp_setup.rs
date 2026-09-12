@@ -15,6 +15,12 @@ use std::sync::Arc;
 use super::*;
 use crate::McpSubsystemApi;
 
+/// Sentinel `McpConnection::connect` returns instead of an error message when the server
+/// answered 401 and supports OAuth: the PKCE flow is UI-driven, so the daemon only records
+/// the state and waits. Not a connect failure, and both readers in this module have to
+/// recognise it — named once here rather than spelled out at each site.
+const OAUTH_NEEDS_AUTH: &str = "OAUTH_NEEDS_AUTH";
+
 /// Coerce the trait-borrowed `Arc<dyn McpOAuthProvider + Send + Sync>` to
 /// the unsized `Arc<dyn McpOAuthProvider>` that `McpServerConfig` expects.
 fn oauth_provider_clone(
@@ -23,6 +29,127 @@ fn oauth_provider_clone(
     let with_bounds: Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync> =
         Arc::clone(kernel.oauth_provider_ref());
     with_bounds
+}
+
+/// Why [`LibreFangKernel::reconnect_mcp_server`] did not produce a live connection.
+///
+/// Typed rather than a formatted `String` so the API layer can answer with the right status without matching on prose.
+/// Every one of these used to arrive as `Err(String)` and left `POST /api/mcp/servers/{name}/reconnect` no choice but 500 — including [`Self::ConnectFailed`], which is an external dependency that did not answer and is not a fault of this daemon at all.
+///
+/// The variants carry only what is safe to hand a caller.
+/// A raw MCP error can quote a URL with a token in its query or an authenticated server's response body, which is why the route still refuses to echo one; [`Self::ConnectFailed`] instead names the failure class and the endpoint an operator configured themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpReconnectError {
+    /// No entry with this id exists in the effective server set.
+    NotConfigured { id: String },
+    /// The entry exists but declares no transport, so there is nothing to dial.
+    NoTransport { id: String },
+    /// The server is in [`McpAuthState::NeedsAuth`](librefang_runtime::mcp_oauth::McpAuthState::NeedsAuth) and the operator has not completed the OAuth flow.
+    NeedsAuth { id: String },
+    /// The connection attempt reached [`McpConnection::connect`](librefang_runtime::mcp::McpConnection::connect) and failed — a process that would not spawn, a handshake that never completed, an endpoint that refused.
+    ///
+    /// The underlying error text stays in the `ERROR` log and in `GET /api/mcp/health`'s `last_error`; what travels here is the class plus [`transport`](Self::transport_kind) and [`target`](Self::target).
+    ConnectFailed {
+        id: String,
+        /// Transport kind as configured: `stdio`, `sse`, `http` or `http_compat`.
+        transport: &'static str,
+        /// The dialed endpoint with its secret-bearing parts removed — see [`connect_target`].
+        target: String,
+    },
+}
+
+impl McpReconnectError {
+    /// Transport kind, when the failure got far enough to know one.
+    pub fn transport_kind(&self) -> Option<&'static str> {
+        match self {
+            Self::ConnectFailed { transport, .. } => Some(transport),
+            _ => None,
+        }
+    }
+
+    /// The scrubbed endpoint, when the failure got far enough to have dialed one.
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            Self::ConnectFailed { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for McpReconnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConfigured { id } => write!(f, "No MCP config found for server '{id}'"),
+            Self::NoTransport { id } => write!(f, "MCP server '{id}' has no transport configured"),
+            Self::NeedsAuth { id } => write!(
+                f,
+                "MCP server '{id}' requires OAuth authorization before reconnecting"
+            ),
+            Self::ConnectFailed {
+                id,
+                transport,
+                target,
+            } => write!(
+                f,
+                "MCP server '{id}' did not answer over {transport} transport ({target})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for McpReconnectError {}
+
+/// Transport kind label for [`McpReconnectError::ConnectFailed`] and the audit entry.
+///
+/// Exhaustive rather than a literal at each construction site so a new `McpTransport` variant fails to compile instead of silently reporting the wrong kind.
+///
+/// Keyed on the runtime `McpTransport` rather than the config-side `McpTransportEntry` so the one pair of helpers serves both callers: the typed error, which still holds the config entry, and `connect_mcp_wired`, which has already translated it.
+pub(super) fn transport_kind(transport: &librefang_runtime::mcp::McpTransport) -> &'static str {
+    use librefang_runtime::mcp::McpTransport;
+    match transport {
+        McpTransport::Stdio { .. } => "stdio",
+        McpTransport::Sse { .. } => "sse",
+        McpTransport::Http { .. } => "http",
+        McpTransport::HttpCompat { .. } => "http_compat",
+    }
+}
+
+/// What was dialed, with the parts that can carry a credential removed.
+///
+/// For `stdio` that is the program name **without its arguments** — `npx`, not `npx -y @scope/server --token=…`.
+/// For the URL transports it is scheme, host and port only: no path, no query, no userinfo.
+/// Both halves are values the operator typed into their own MCP config and can already read back from `GET /api/mcp/servers`; the arguments and the query string are where a token actually lives, so they stay out.
+///
+/// A URL that will not parse degrades to its scheme (or `invalid-url`) rather than falling back to the raw string, because the whole point is that the raw string is the thing that may hold the secret.
+///
+/// **The asymmetry is deliberate**: a URL loses its path, a `stdio` command keeps its own.
+/// A `command` like `/opt/secrets/mcp-abc123/bin/server` therefore travels in full.
+/// The two paths are not the same kind of thing — a URL path is chosen by the server operator and routinely carries session or token segments, while the command path is what the local operator typed as the program to run and *is* the answer to "which server failed", the one detail that makes a stdio failure actionable at all.
+/// Dropping it to a bare basename would leave two servers running `server` from different directories indistinguishable.
+pub(super) fn connect_target(transport: &librefang_runtime::mcp::McpTransport) -> String {
+    use librefang_runtime::mcp::McpTransport;
+    match transport {
+        McpTransport::Stdio { command, .. } => command.clone(),
+        McpTransport::Sse { url } | McpTransport::Http { url } => scrub_url(url),
+        McpTransport::HttpCompat { base_url, .. } => scrub_url(base_url),
+    }
+}
+
+/// Reduce a URL to `scheme://host[:port]`, dropping userinfo, path, query and fragment.
+///
+/// Built up from `scheme()` and `host_str()` rather than taken from `Url::authority()`, which would be the obvious way to fold these three lines into one: `authority()` **includes** `user:password@`, so that refactor would silently start leaking userinfo.
+/// `raw_reconnect_error_never_reaches_the_client` covers that with a userinfo fixture.
+fn scrub_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => match parsed.port() {
+                Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+                None => format!("{}://{host}", parsed.scheme()),
+            },
+            None => parsed.scheme().to_string(),
+        },
+        Err(_) => "invalid-url".to_string(),
+    }
 }
 
 impl LibreFangKernel {
@@ -39,9 +166,42 @@ impl LibreFangKernel {
         let reporter = crate::mcp_health_reporter::KernelMcpHealthReporter::shared(Arc::clone(
             &self.mcp.mcp_health,
         ));
+        let name = config.name.clone();
+        let transport = transport_kind(&config.transport);
+        let target = connect_target(&config.transport);
         librefang_runtime::mcp::McpConnection::connect(config)
             .await
             .map(|conn| conn.with_health_reporter(reporter))
+            .inspect_err(|e| {
+                // `OAUTH_NEEDS_AUTH` is not a failure: it is the connect path's signal
+                // that the server answered 401 and the PKCE flow belongs to the UI, which
+                // `connect_mcp_servers` turns into `McpAuthState::NeedsAuth` one frame up.
+                // Auditing it as a connect failure would mark a server that is working
+                // exactly as designed as broken, once per boot and once per reload for as
+                // long as the operator has not signed in.
+                if e != OAUTH_NEEDS_AUTH {
+                    self.audit_mcp_connect_failure(&name, transport, &target);
+                }
+            })
+    }
+
+    /// Record a failed MCP connect in the audit trail so it reaches the dashboard's Logs page.
+    ///
+    /// Until this existed the only trace of an MCP server that would not start was a `tracing` `ERROR` in the daemon's journal.
+    /// The Logs page reads `GET /api/audit/recent`, and `/api/logs/stream` streams the same audit entries — neither has ever carried the daemon's `tracing` output — so the screen an operator opens when something breaks was empty by construction while the daemon was writing errors.
+    /// Emitting here rather than at the HTTP handler covers every connect path at once: boot, `reload_mcp_servers`, the operator's reconnect, the health loop's auto-reconnect and the per-agent pool in `accessors.rs` all funnel through this one method, which the #7963 drift guard already forces them to.
+    ///
+    /// `outcome` leads with `error` because that is what the dashboard's `auditLogLevel` reads to colour a row — the level is derived from the outcome text, not from the action.
+    ///
+    /// **This does not flood the audit log**, which is the reason it needs no rate limiting: `reconnect_attempts` is reset only by `mark_ok`, and `should_reconnect` requires it to stay under `max_reconnect_attempts` (10), so a server that is permanently broken contributes roughly eleven entries per daemon lifetime plus one per operator click.
+    fn audit_mcp_connect_failure(&self, name: &str, transport: &'static str, target: &str) {
+        use crate::MeteringSubsystemApi;
+        MeteringSubsystemApi::audit_log(self).record(
+            "system",
+            crate::audit::AuditAction::McpConnect,
+            format!("MCP server '{name}' ({transport}: {target})"),
+            "error: connect failed",
+        );
     }
 
     async fn mcp_connection_requires_auth(&self, server_name: &str) -> bool {
@@ -146,7 +306,7 @@ impl LibreFangKernel {
                     // MCP server that supports OAuth). The MCP connection layer
                     // returns "OAUTH_NEEDS_AUTH" when auth is required but defers
                     // the actual PKCE flow to the API layer.
-                    if err_str == "OAUTH_NEEDS_AUTH" {
+                    if err_str == OAUTH_NEEDS_AUTH {
                         info!(
                             server = %server_config.name,
                             "MCP server requires OAuth — waiting for UI-driven auth"
@@ -593,7 +753,12 @@ impl LibreFangKernel {
     }
 
     /// Reconnect a single MCP server by id.
-    pub async fn reconnect_mcp_server(self: &Arc<Self>, id: &str) -> Result<usize, String> {
+    ///
+    /// The error is [`McpReconnectError`] rather than a formatted string so callers can tell an external server that would not answer from a config problem on this side — see that type for why the distinction reaches HTTP.
+    pub async fn reconnect_mcp_server(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<usize, McpReconnectError> {
         use librefang_runtime::mcp::{McpServerConfig, McpTransport};
         use librefang_types::config::McpTransportEntry;
 
@@ -609,11 +774,9 @@ impl LibreFangKernel {
         };
 
         let server_config =
-            server_config.ok_or_else(|| format!("No MCP config found for server '{id}'"))?;
+            server_config.ok_or_else(|| McpReconnectError::NotConfigured { id: id.to_string() })?;
         if self.mcp_connection_requires_auth(id).await {
-            return Err(format!(
-                "MCP server '{id}' requires OAuth authorization before reconnecting"
-            ));
+            return Err(McpReconnectError::NeedsAuth { id: id.to_string() });
         }
 
         // Disconnect existing connection if any
@@ -640,15 +803,12 @@ impl LibreFangKernel {
         let transport_entry = match &server_config.transport {
             Some(t) => t,
             None => {
-                let error = format!(
-                    "MCP server '{}' has no transport configured",
-                    server_config.name
-                );
-                self.mcp.mcp_health.report_error(id, error.clone());
+                let error = McpReconnectError::NoTransport { id: id.to_string() };
+                self.mcp.mcp_health.report_error(id, error.to_string());
                 return Err(error);
             }
         };
-        let transport = match transport_entry {
+        let dialed = match transport_entry {
             McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                 command: command.clone(),
                 args: args.clone(),
@@ -666,9 +826,13 @@ impl LibreFangKernel {
             },
         };
 
+        // Captured before `dialed` moves into the config: the failure arm needs them, and re-deriving there would be a second match to keep in step with this one.
+        let failed_transport = transport_kind(&dialed);
+        let failed_target = connect_target(&dialed);
+
         let mcp_config = McpServerConfig {
             name: server_config.name.clone(),
-            transport,
+            transport: dialed,
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
             headers: server_config.headers.clone(),
@@ -715,7 +879,24 @@ impl LibreFangKernel {
                     "outcome" => "failure",
                 )
                 .increment(1);
-                Err(format!("Reconnect failed for '{id}': {e}"))
+                // The same sentinel `connect_mcp_servers` special-cases twenty lines up:
+                // the server answered 401 and wants the UI-driven PKCE flow. Reporting
+                // that as "the server did not answer" would send the operator hunting a
+                // network fault when what they owe it is a sign-in. The pre-check above
+                // only catches a server *already* in `NeedsAuth`; this is the reconnect
+                // that discovers it.
+                if e == OAUTH_NEEDS_AUTH {
+                    self.mcp.mcp_auth_states.lock().await.insert(
+                        id.to_string(),
+                        librefang_runtime::mcp_oauth::McpAuthState::NeedsAuth,
+                    );
+                    return Err(McpReconnectError::NeedsAuth { id: id.to_string() });
+                }
+                Err(McpReconnectError::ConnectFailed {
+                    id: id.to_string(),
+                    transport: failed_transport,
+                    target: failed_target,
+                })
             }
         }
     }

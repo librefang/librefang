@@ -117,6 +117,11 @@ pub enum AuditAction {
     /// The entry is the first row of the repaired chain, linked to the last row that still verified, and its detail is a JSON document naming the break, the number of rows severed, and the archive file holding them together with that archive's SHA-256.
     /// Committing the digest here is what makes the preserved rows tamper-evident too: altering the archive after the repair no longer matches the hash the chain vouches for.
     ChainReanchored,
+    /// An MCP server's connect or reconnect handshake failed.
+    /// Detail carries the server name, its transport kind and the scrubbed endpoint that was dialed; `outcome` leads with `error`.
+    ///
+    /// Recorded because the daemon's `tracing` output reaches no HTTP surface: the dashboard's Logs page and `/api/logs/stream` both read this audit trail, so before this variant an MCP server that would not start left the operator nothing to look at short of the system journal.
+    McpConnect,
 }
 
 impl AuditAction {
@@ -153,6 +158,7 @@ impl AuditAction {
             AuditAction::A2aDiscovered => "A2aDiscovered",
             AuditAction::A2aTrusted => "A2aTrusted",
             AuditAction::ChainReanchored => "ChainReanchored",
+            AuditAction::McpConnect => "McpConnect",
         }
     }
 }
@@ -203,6 +209,7 @@ impl std::str::FromStr for AuditAction {
             "A2aDiscovered" => AuditAction::A2aDiscovered,
             "A2aTrusted" => AuditAction::A2aTrusted,
             "ChainReanchored" => AuditAction::ChainReanchored,
+            "McpConnect" => AuditAction::McpConnect,
             other => return Err(UnknownAuditAction(other.to_string())),
         })
     }

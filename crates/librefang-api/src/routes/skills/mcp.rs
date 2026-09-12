@@ -940,6 +940,8 @@ pub async fn get_mcp_catalog_entry(
     responses(
         (status = 200, description = "Reconnect an MCP server", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not configured", body = crate::types::JsonObject),
+        (status = 409, description = "The server's own configuration blocks the reconnect — no transport declared, or an OAuth authorization the operator has not completed", body = crate::types::JsonObject),
+        (status = 502, description = "The MCP server did not answer", body = crate::types::JsonObject),
     )
 )]
 pub async fn reconnect_mcp_server_handler(
@@ -964,21 +966,54 @@ pub async fn reconnect_mcp_server_handler(
             })),
         ),
         Err(e) => {
-            // Scrub the raw reconnect error (audit:
-            // rusqlite-errors-leak); operators keep the detail in the
-            // log, the client sees the generic body alongside the
-            // structured status fields.
+            // The raw error still goes only to the log — an MCP failure can quote a URL with a token in its query, or an authenticated server's response body, so the scrub that #8263 documents stays.
+            // What changed is the classification upstream of it: a server that will not answer is an external dependency failing, not a fault of this daemon, and answering 500 sent the operator looking in the wrong place. The typed reason below is what makes the difference visible without echoing the error text.
             tracing::error!(error = %e, server = %name, "MCP reconnect failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "id": name,
-                    "status": "error",
-                    "error": "Internal server error",
-                })),
-            )
+            reconnect_failure_response(&name, &e)
         }
     }
+}
+
+/// Classify a [`McpReconnectError`] into the status and body the caller sees.
+///
+/// Typed on the variant rather than on the message, for the reason #8263 gives: a string match breaks on the first refactor, and the message is precisely what the scrub exists to stop anyone depending on.
+///
+/// `502` for [`McpReconnectError::ConnectFailed`] because the failure is an upstream dependency that did not answer — the same reading `routes/media.rs` and `routes/network.rs` already give an upstream that will not respond.
+/// `409` for the two config-state failures: the request is well-formed and the resource exists, but the server's own stored state makes the reconnect impossible until an operator changes something. The `code` field, not the status, is what separates them.
+fn reconnect_failure_response(
+    name: &str,
+    error: &librefang_kernel::McpReconnectError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use librefang_kernel::McpReconnectError as E;
+
+    let (status, code) = match error {
+        // Unreachable through this handler today — the effective-set check above answers first — but a reconnect racing a config reload can still land here, and 404 is the same answer either way.
+        E::NotConfigured { .. } => (StatusCode::NOT_FOUND, "mcp_server_not_configured"),
+        E::NoTransport { .. } => (StatusCode::CONFLICT, "mcp_transport_missing"),
+        E::NeedsAuth { .. } => (StatusCode::CONFLICT, "mcp_needs_auth"),
+        E::ConnectFailed { .. } => (StatusCode::BAD_GATEWAY, "mcp_connect_failed"),
+    };
+
+    // `transport` / `target` exist only for `ConnectFailed`; the config-state
+    // failures never got as far as dialing anything.
+    let mut details = serde_json::json!({ "id": name });
+    if let Some(transport) = error.transport_kind() {
+        details["transport"] = serde_json::json!(transport);
+    }
+    if let Some(target) = error.target() {
+        details["target"] = serde_json::json!(target);
+    }
+
+    ApiErrorResponse {
+        error: error.to_string(),
+        code: None,
+        r#type: None,
+        details: Some(details),
+        request_id: None,
+        status,
+    }
+    .with_code(code)
+    .into_json_tuple()
 }
 
 /// GET /api/mcp/health — Health snapshot across all configured MCP servers.

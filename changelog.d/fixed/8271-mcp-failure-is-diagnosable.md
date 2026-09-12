@@ -1,0 +1,5 @@
+An MCP server that will not start now says why, and says it where an operator can already see it.
+  `POST /api/mcp/servers/{name}/reconnect` answered 500 with a generic body for a server that never completed its handshake — sending the operator to look for a fault inside this daemon when what failed was an external dependency that did not answer, and giving them nothing to act on.
+  The reason was in the daemon's journal the whole time, so learning it took an SSH session.
+  The answer is now 502 for a server that did not answer and 409 for one whose own stored configuration blocks the reconnect, and the body carries the failure class, the transport kind and the endpoint that was dialed with its arguments, path and query stripped — the parts that can hold a token.
+  Failed MCP connects are also recorded in the audit trail, which is what the dashboard's Logs page reads, so a server that will not start now leaves a trace on the screen an operator opens when something breaks instead of only in the system journal. (#8271) (@DaBlitzStein)

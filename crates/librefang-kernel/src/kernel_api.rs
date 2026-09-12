@@ -490,7 +490,10 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     async fn disconnect_mcp_server(&self, name: &str) -> bool;
     async fn retry_mcp_connection(self: Arc<Self>, server_name: &str);
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String>;
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String>;
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError>;
 
     // ====================================================================
     // Triggers / workflows / events
@@ -1363,7 +1366,10 @@ impl KernelApi for LibreFangKernel {
     async fn reload_mcp_servers(self: Arc<Self>) -> Result<usize, String> {
         LibreFangKernel::reload_mcp_servers(&self).await
     }
-    async fn reconnect_mcp_server(self: Arc<Self>, id: &str) -> Result<usize, String> {
+    async fn reconnect_mcp_server(
+        self: Arc<Self>,
+        id: &str,
+    ) -> Result<usize, crate::McpReconnectError> {
         LibreFangKernel::reconnect_mcp_server(&self, id).await
     }
 

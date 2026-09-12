@@ -47,6 +47,10 @@ subtle = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+# Already in this crate's build graph through librefang-runtime and
+# librefang-runtime-mcp; named here so `connect_target` can strip a URL down
+# to scheme/host without hand-rolling a parser.
+url = { workspace = true }
 regex-lite = { workspace = true }
 regex = { workspace = true }
 cron = "0.17"
