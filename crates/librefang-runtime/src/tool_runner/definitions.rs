@@ -426,6 +426,10 @@ use instead of web_fetch + file_write (which round-trips the entire body through
                             "type": "array",
                             "items": { "type": "string" },
                             "description": "Permanent only: preset necessary shell commands based on the agent's task (e.g., [\"uv *\", \"pnpm *\"]). "
+                        },
+                        "profile": {
+                            "type": "string",
+                            "description": "Model profile the new agent should run on, by name (e.g. 'quick', 'coder', 'architect', 'researcher'). Works for both shapes: a permanent agent is pinned to the profile's provider and model, and a worker (ephemeral) runs its task on the profile's model. Use a cheap profile for narrow work — a sub-agent that only checks whether something is done does not need the most capable model. Omit to inherit the default model. Naming a profile that does not exist fails with the list of available ones. When the spawning agent is capped by its own [model.router_override], only profiles it permits are accepted, and an explicit `model` override is refused."
                         }
                     },
                     "required": ["name"]

@@ -436,6 +436,14 @@ func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (inter
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
 }
 
+func (r *AgentsResource) GetAgentModelRouting(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/model_routing", id), nil, nil)
+}
+
+func (r *AgentsResource) SetAgentModelRouting(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model_routing", id), data, nil)
+}
+
 func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
 }
@@ -1062,6 +1070,10 @@ func (r *ModelsResource) CatalogUpdate() (interface{}, error) {
 
 func (r *ModelsResource) ListCredentialPools() (interface{}, error) {
 	return r.client.request("GET", "/api/credential-pools", nil, nil)
+}
+
+func (r *ModelsResource) ListModelRouterProfiles() (interface{}, error) {
+	return r.client.request("GET", "/api/model-router/profiles", nil, nil)
 }
 
 func (r *ModelsResource) ListAllModels() (interface{}, error) {

@@ -992,6 +992,8 @@ fn test_spawn_agent_applies_local_default_model_override() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -1474,6 +1476,8 @@ fn test_set_agent_model_clears_overrides_when_provider_changes() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "cloudverse".to_string(),
                     model: "anthropic-claude-4-5-sonnet".to_string(),
                     max_tokens: Some(4096),
@@ -14596,6 +14600,8 @@ fn test_context_report_uses_catalog_context_window_not_200k() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "fake-provider".to_string(),
             model: "fake-1m-model".to_string(),
             ..Default::default()
@@ -14644,6 +14650,8 @@ fn test_context_report_honours_manifest_context_window_override() {
         author: "test".to_string(),
         module: "builtin:chat".to_string(),
         model: ModelConfig {
+            mode: librefang_types::agent::ModelMode::Fixed,
+            router_override: None,
             provider: "ollama".to_string(),
             model: "some-local-model".to_string(),
             context_window: Some(262_144),
@@ -14759,6 +14767,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "default".to_string(),
                     model: "default".to_string(),
                     max_tokens: Some(4096),
@@ -14785,6 +14795,8 @@ fn sync_default_model_agents_migrates_legacy_and_keeps_default_sentinel() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "anthropic".to_string(),
                     model: "claude-old-default".to_string(),
                     max_tokens: Some(4096),
@@ -15091,6 +15103,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "poolside/laguna-xs.2:free".to_string(),
                     max_tokens: Some(4096),
@@ -15118,6 +15132,8 @@ fn sync_default_model_agents_with_old_model_spares_agents_on_other_models() {
                 author: "test".to_string(),
                 module: "builtin:chat".to_string(),
                 model: ModelConfig {
+                    mode: librefang_types::agent::ModelMode::Fixed,
+                    router_override: None,
                     provider: "openrouter".to_string(),
                     model: "openai/gpt-4o".to_string(),
                     max_tokens: Some(4096),
@@ -17471,6 +17487,24 @@ fn ephemeral_spawn_wires_every_capability_the_permanent_path_wires() {
         "the ephemeral worker must receive a kernel handle — without it every \
          kernel-backed tool answers `Unavailable`, and a worker could never reach \
          `agent_spawn`, which is what the depth guard exists to bound"
+    );
+
+    // Same shape, same reason (#7789 review): the four `apply_model_override`
+    // unit tests exercise the extracted function, and nothing else asserts the
+    // spawn path still calls it. Whether it is called, and on what, *is* an
+    // argument at a call site — inline the block again, or narrow it back to
+    // `&mut manifest.model`, and every provider- and model-keyed field of the
+    // parent (its endpoint, its key, its window, its output cap, its extension
+    // params, its whole fallback chain) rides into the worker unchanged, with
+    // no test the poorer.
+    assert!(
+        ephemeral.contains("apply_model_override(&mut manifest, over)"),
+        "the ephemeral spawn path must hand the *whole* manifest to \
+         `apply_model_override`. Scoped to `manifest.model` it structurally \
+         cannot clear `fallback_models`, whose entries carry their own \
+         `api_key_env` and `base_url` — so the first fallback promotes the \
+         worker onto the parent's model with the parent's credential, past \
+         `allowed_profiles` and `cost_budget` alike"
     );
 }
 

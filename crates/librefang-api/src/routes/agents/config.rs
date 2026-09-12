@@ -1,5 +1,8 @@
 use super::*;
 use librefang_skills::registry::SkillRegistry;
+use librefang_types::agent::ModelMode;
+use librefang_types::model_profile::{AgentRouterOverride, CostTier};
+use std::collections::BTreeSet;
 use std::sync::{RwLock, RwLockReadGuard};
 
 fn read_agent_skills_registry(
@@ -740,6 +743,201 @@ pub async fn set_agent_channels(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "channels": channels})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-agent model routing
+// ---------------------------------------------------------------------------
+
+/// GET /api/agents/{id}/model_routing — Read an agent's model routing settings.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/model_routing",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "An agent's model routing mode and router override", body = crate::types::JsonObject)
+    )
+)]
+pub async fn get_agent_model_routing(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+            )
+        }
+    };
+    if !super::super::can_access_agent(&state, agent_id, api_user.as_ref()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+        );
+    }
+    let mode = match entry.manifest.model.mode {
+        ModelMode::Fixed => "fixed",
+        ModelMode::Flexible => "flexible",
+    };
+    let router_override = entry.manifest.model.router_override.as_ref();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "mode": mode,
+            "allowed_profiles": router_override
+                .map(|o| o.allowed_profiles.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default(),
+            "cost_budget": router_override
+                .and_then(|o| o.cost_budget)
+                .map(|t| t.as_str()),
+            "default_profile": router_override.and_then(|o| o.default_profile.clone()),
+        })),
+    )
+}
+
+/// PUT /api/agents/{id}/model_routing — Update an agent's model routing settings.
+///
+/// `mode` is `"fixed"` or `"flexible"`. In `"fixed"` mode no override is
+/// stored: the remaining fields describe constraints on a routing decision
+/// that will not happen, and persisting them would let a later flip back to
+/// `"flexible"` silently resurrect stale constraints the operator has
+/// forgotten about.
+///
+/// `cost_budget` accepts `"cheap"`, `"medium"`, `"expensive"`, or `null` for
+/// no cap; any other string is rejected rather than silently treated as "no
+/// cap", because a typo that removed a spending cap would be invisible.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/model_routing",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "Mode, allowed profiles, cost budget and default profile"),
+    responses(
+        (status = 200, description = "Updated model routing settings", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id, mode or cost budget", body = crate::types::JsonObject)
+    )
+)]
+pub async fn set_agent_model_routing(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+
+    let mode = match body["mode"].as_str() {
+        Some("flexible") => ModelMode::Flexible,
+        // Absent or explicit "fixed" both mean fixed — the backward-compatible
+        // default. Anything else is a typo worth surfacing.
+        None | Some("fixed") => ModelMode::Fixed,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": t.t_args(
+                        "api-error-generic",
+                        &[("error", &format!("unknown model routing mode '{other}' (expected 'fixed' or 'flexible')"))],
+                    )
+                })),
+            )
+        }
+    };
+
+    let router_override = if mode == ModelMode::Flexible {
+        let allowed_profiles: BTreeSet<String> = body["allowed_profiles"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let cost_budget = match &body["cost_budget"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => match CostTier::parse(s) {
+                Some(tier) => Some(tier),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": t.t_args(
+                                "api-error-generic",
+                                &[("error", &format!("unknown cost budget '{s}' (expected 'cheap', 'medium', 'expensive' or null)"))],
+                            )
+                        })),
+                    )
+                }
+            },
+            _ => None,
+        };
+
+        Some(AgentRouterOverride {
+            fixed: false,
+            allowed_profiles,
+            cost_budget,
+            default_profile: body["default_profile"].as_str().map(String::from),
+        })
+    } else {
+        None
+    };
+
+    match state
+        .kernel
+        .set_agent_model_routing(agent_id, mode, router_override.clone())
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "mode": match mode {
+                    ModelMode::Fixed => "fixed",
+                    ModelMode::Flexible => "flexible",
+                },
+                "allowed_profiles": router_override
+                    .as_ref()
+                    .map(|o| o.allowed_profiles.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "cost_budget": router_override
+                    .as_ref()
+                    .and_then(|o| o.cost_budget)
+                    .map(|t| t.as_str()),
+                "default_profile": router_override
+                    .as_ref()
+                    .and_then(|o| o.default_profile.clone()),
+            })),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,

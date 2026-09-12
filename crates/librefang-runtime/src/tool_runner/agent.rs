@@ -176,12 +176,37 @@ pub(super) async fn tool_agent_send(
 }
 
 /// Build agent manifest TOML from parsed parameters.
+///
+/// `profile` is the already-resolved model-router profile the spawned agent
+/// should run on, or `None` to leave the model unset so the child inherits the
+/// kernel default exactly as it did before profiles existed.
+///
+/// A profile pins `provider` and `model` outright rather than setting
+/// `mode = "flexible"`. Naming a profile at spawn time is a request for *that*
+/// model — a verifier asked to run on `quick` should stay on `quick`, not be
+/// handed to the per-turn router which could move it back onto an expensive
+/// model on the next turn. It also means the parameter works with
+/// `[model_router] enabled = false`, which is the common case for an operator
+/// who wants cheap subagents without automatic routing everywhere.
+///
+/// `parent_override` is the spawning agent's own `[model.router_override]`,
+/// copied verbatim into the child's manifest when it has one (#7789 review).
+/// Checking the requested profile against the parent only constrains the first
+/// hop: a parent budgeted at `cheap` could spawn a permitted child, hand it
+/// `agent_spawn`, and have *that* child — born with no override, which every
+/// caller reads as unconstrained — spawn on the most expensive profile in the
+/// catalog, billed to the same operator. Propagating the override means a
+/// child is capped at most as loosely as its parent however many hops down the
+/// chain it sits. It also makes `fixed = true` bind the subtree rather than
+/// only refusing the parent a profile of its own.
 pub(super) fn build_agent_manifest_toml(
     name: &str,
     system_prompt: &str,
     tools: Vec<String>,
     shell: Vec<String>,
     network: bool,
+    profile: Option<&librefang_types::model_profile::ModelProfile>,
+    parent_override: Option<&librefang_types::model_profile::AgentRouterOverride>,
 ) -> Result<String, String> {
     let mut tools = tools;
     let has_shell = !shell.is_empty();
@@ -201,15 +226,164 @@ pub(super) fn build_agent_manifest_toml(
         capabilities["shell"] = serde_json::json!(shell);
     }
 
+    let mut model_json = serde_json::json!({
+        "system_prompt": system_prompt,
+    });
+    if let Some(profile) = profile {
+        model_json["provider"] = serde_json::json!(profile.provider);
+        model_json["model"] = serde_json::json!(profile.model);
+        // Only carried when the profile actually states one, so a profile
+        // without an explicit window keeps the runtime's own resolution
+        // (registry, persisted cache, live `/v1/models` probe) rather than
+        // pinning a value the profile author never chose.
+        if let Some(context_window) = profile.context_window {
+            model_json["context_window"] = serde_json::json!(context_window);
+        }
+    }
+    if let Some(parent_override) = parent_override {
+        model_json["router_override"] = serde_json::to_value(parent_override)
+            .map_err(|e| format!("Failed to serialize parent router_override: {e}"))?;
+    }
+
     let manifest_json = serde_json::json!({
         "name": name,
-        "model": {
-            "system_prompt": system_prompt,
-        },
+        "model": model_json,
         "capabilities": capabilities,
     });
 
     toml::to_string(&manifest_json).map_err(|e| format!("Failed to serialize to TOML: {}", e))
+}
+
+/// Error for an `agent_spawn` naming a profile that is not in the catalog.
+///
+/// An [`InvalidParameter`](ToolError::InvalidParameter) rather than
+/// `Upstream` (#7789 review): the name is present but wrong, the caller can
+/// fix it on its next turn, and relaying it as a 5xx-class subsystem failure
+/// would feed retry logic a call that can never succeed. Lists what *is*
+/// available, because the caller is usually an LLM: an error that only says
+/// "unknown" invites a second guess, while one that enumerates the catalog
+/// lets the next attempt succeed. `available` is already ordered by the
+/// catalog (#3298), so the message is stable across retries.
+pub(super) fn unknown_profile_error(name: &str, available: &[String]) -> ToolError {
+    if available.is_empty() {
+        return ToolError::InvalidParameter {
+            name: "profile",
+            reason: format!(
+                "Unknown model profile '{name}'. No model profiles are configured — \
+                 add them to ~/.librefang/model_profiles.toml."
+            ),
+        };
+    }
+    ToolError::InvalidParameter {
+        name: "profile",
+        reason: format!(
+            "Unknown model profile '{name}'. Available profiles: {}.",
+            available.join(", ")
+        ),
+    }
+}
+
+/// Refusal for an `agent_spawn { profile }` the spawning agent's own
+/// `[model.router_override]` does not permit (#7789 review).
+///
+/// [`PermissionDenied`](ToolError::PermissionDenied) rather than `Upstream`
+/// (#7789 review): the caller's own cap refusing its request is an
+/// authorisation fact, not a downstream outage, and relaying it as a
+/// 5xx-class error would feed retry logic a call that can never succeed.
+/// Same shape as [`unknown_profile_error`]: name what was asked for, then
+/// state what the constraint allows, so the caller — usually an LLM — can
+/// retry correctly instead of guessing. The permitted list is computed only
+/// on this failure branch (#7789 review): on the success path it reloads the
+/// whole catalog once per profile name to build a string nobody reads.
+pub(super) fn check_profile_against_parent(
+    kh: &Arc<dyn KernelHandle>,
+    profile: &librefang_types::model_profile::ModelProfile,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+) -> Result<(), ToolError> {
+    if override_.fixed {
+        return Err(ToolError::PermissionDenied(format!(
+            "Model profile '{name}' cannot be used here: the spawning agent is pinned with \
+             `[model.router_override] fixed = true`, which opts out of every profile — for its \
+             own turns and for the agents it spawns. Spawn without a profile, or ask the \
+             operator to relax the pin.",
+            name = profile.name,
+        )));
+    }
+    if !override_.permits(profile) {
+        let permitted = permitted_profile_names(kh, override_);
+        let detail = if permitted.is_empty() {
+            "No profile in the catalog satisfies this agent's `[model.router_override]` \
+             — its `allowed_profiles` / `cost_budget` constraints exclude every profile, \
+             so no profile can be named here. Ask the operator to relax the override."
+                .to_string()
+        } else {
+            format!("Permitted profiles: {}.", permitted.join(", "))
+        };
+        return Err(ToolError::PermissionDenied(format!(
+            "Model profile '{name}' is not permitted for this agent by its \
+             `[model.router_override]`. {detail}",
+            name = profile.name,
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve and gate the profile an `agent_spawn` call named (#7789 review).
+///
+/// Shared by the permanent and the ephemeral spawn path so both get the same
+/// gate: an unknown name fails with the catalog enumerated, the spawning
+/// agent's own `[model.router_override]` is honoured, and a provider nobody
+/// configured a key for is refused before an agent is born onto it. That
+/// credential guard mirrors the one `route_to_profile` applies per turn,
+/// where a wrong choice costs one turn; here a wrong choice is persisted
+/// into a manifest, so it refuses instead of falling back.
+fn gate_spawn_profile(
+    kh: &Arc<dyn KernelHandle>,
+    profile_name: &str,
+    parent_override: Option<&librefang_types::model_profile::AgentRouterOverride>,
+) -> Result<librefang_types::model_profile::ModelProfile, ToolError> {
+    let profile = kh
+        .resolve_model_profile(profile_name)
+        .ok_or_else(|| unknown_profile_error(profile_name, &kh.model_profile_names()))?;
+    if let Some(override_) = parent_override {
+        check_profile_against_parent(kh, &profile, override_)?;
+    }
+    // `InvalidParameter`, not `Upstream` (#7789 review): `upstream_msg` builds
+    // `Upstream { source: None }`, which the `From<ToolError>` bridge lifts to
+    // `ToolExecution { tool_id: "unknown", … }` — the 5xx-class result an
+    // operator's own configuration must not be reported as. A provider with no
+    // key is not a downstream outage and does not become true on retry, so
+    // reporting it as one hands retry-on-5xx logic a call that can never
+    // succeed and counts a config gap as a provider failure in telemetry. Same
+    // reasoning as `unknown_profile_error` above: the caller named a profile
+    // whose provider is unusable, and the name is what must change.
+    kh.check_provider_credentials(&profile.provider)
+        .map_err(|reason| ToolError::InvalidParameter {
+            name: "profile",
+            reason: format!(
+                "Cannot pin agent to model profile '{name}': {reason}.",
+                name = profile.name,
+            ),
+        })?;
+    Ok(profile)
+}
+
+/// The parent's permitted profile names, ordered by the catalog (#3298).
+///
+/// Filters the full catalog through the parent's override with the same
+/// `AgentRouterOverride::permits` predicate the per-turn router uses, so a
+/// refusal enumerates exactly what a correct retry can name.
+fn permitted_profile_names(
+    kh: &Arc<dyn KernelHandle>,
+    override_: &librefang_types::model_profile::AgentRouterOverride,
+) -> Vec<String> {
+    kh.model_profile_names()
+        .into_iter()
+        .filter(|name| {
+            kh.resolve_model_profile(name)
+                .is_some_and(|p| override_.permits(&p))
+        })
+        .collect()
 }
 
 /// Expand a list of tool names into full `Capability` grants for the parent.
@@ -337,8 +511,80 @@ pub(super) async fn tool_agent_spawn(
         })
         .unwrap_or_default();
 
-    let manifest_toml = build_agent_manifest_toml(name, system_prompt, tools, shell, network)
-        .map_err(ToolError::upstream_msg)?;
+    // The spawning agent's own `[model.router_override]`, looked up once
+    // (#7789 review). It does two jobs below: it gates the profile this call
+    // asks for, and it is copied onto the child so the cap survives the hop.
+    //
+    // When a profile is being requested, a failed lookup fails the spawn
+    // closed: a live agent mid-turn always resolves, so a miss means the id
+    // names no agent — including one handed in by the REST tool endpoint,
+    // where `agent_id` is caller-supplied — and treating that as
+    // "unconstrained" would make an unresolvable id the cheapest way around
+    // every cap in this file.
+    //
+    // When no profile is requested there is no cap to enforce on this hop,
+    // and a miss also means there is no manifest left to read, so there is
+    // nothing to propagate either. The miss then degrades to "no override to
+    // copy" — exactly what a spawn produced before this PR existed — instead
+    // of hard-failing spawns that never named a profile, like the REST tool
+    // endpoint's caller-supplied `agent_id` and the deferred/approval-gated
+    // resume path forwarding a stored id after the requesting agent left the
+    // registry (#7789 review).
+    let profile_requested = input.get("profile").is_some_and(|v| !v.is_null());
+    let parent_override = match parent_id {
+        Some(parent) => match kh.model_router_override_for(parent) {
+            Ok(override_) => override_,
+            Err(reason) if profile_requested => {
+                return Err(ToolError::Internal(format!(
+                    "Cannot verify the spawning agent's model-router constraints, so the spawn is \
+                     refused rather than granting an unconstrained child: {reason}."
+                )));
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+
+    // Resolve the profile name before spawning so an unknown name fails loudly
+    // here instead of silently producing an agent on the wrong model.
+    //
+    // The request is then checked against the parent's override: the same
+    // `allowed_profiles` and `cost_budget` the per-turn router applies, plus a
+    // hard refusal when the parent is `fixed`. Without this, delegation is a
+    // way around every per-agent constraint the profile layer introduces — an
+    // agent budgeted at `cheap` could spawn a helper on the most expensive
+    // profile in the catalog, billed to the same operator, with the parent's
+    // cap never applied.
+    //
+    // A `profile` present but of the wrong JSON type is refused rather than
+    // taking the absent arm (#7789 review): `as_str()` on a mistyped value is
+    // `None`, and a silent drop is exactly the failure this lookup exists to
+    // prevent, reached one type-confusion earlier.
+    let profile = match input.get("profile") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let profile_name = v.as_str().ok_or(ToolError::InvalidParameter {
+                name: "profile",
+                reason: "expected a profile name as a string".to_string(),
+            })?;
+            Some(gate_spawn_profile(
+                kh,
+                profile_name,
+                parent_override.as_ref(),
+            )?)
+        }
+    };
+
+    let manifest_toml = build_agent_manifest_toml(
+        name,
+        system_prompt,
+        tools,
+        shell,
+        network,
+        profile.as_ref(),
+        parent_override.as_ref(),
+    )
+    .map_err(ToolError::upstream_msg)?;
     // Build parent capabilities from the parent's allowed tools list.
     // This prevents a sub-agent from escalating privileges beyond what
     // its parent is permitted to use (capability inheritance enforcement).
@@ -433,26 +679,109 @@ async fn tool_agent_spawn_ephemeral(
     };
     request.tools = requested;
 
-    // Only `provider` and `model` are read out of the caller's `model` object.
-    // `EphemeralModelOverride` cannot carry `base_url` or `api_key_env` — see
-    // its doc comment for why widening it would be a credential-exfiltration
-    // primitive rather than a convenience.
-    if let Some(model) = input["model"].as_object() {
-        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
-            provider: model
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            model: model
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        });
-    } else if let Some(model) = input["model"].as_str() {
-        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
-            provider: None,
-            model: Some(model.to_string()),
-        });
+    // A `profile` is honoured here the same as on the permanent path (#7789
+    // review): resolve it, check it against the spawning agent's own
+    // `[model.router_override]`, verify the provider has credentials, and
+    // map it onto the worker's `EphemeralModelOverride`, which already
+    // carries `provider` + `model`. An explicit `model` object or string is
+    // still honoured, but only when the parent has no cap to route around:
+    // a parent pinned `fixed` or budgeted at `cost_budget` gets an explicit
+    // refusal rather than a worker billed past its cap (#7789 review) — the
+    // `profile` gate above already covers the named-profile case, and there
+    // is no cost tier for an arbitrary model id to check it against.
+    //
+    // Only `provider` and `model` are read out of the caller's `model`
+    // object. `EphemeralModelOverride` cannot carry `base_url` or
+    // `api_key_env` — see its doc comment for why widening it would be a
+    // credential-exfiltration primitive rather than a convenience.
+    let profile_requested = input.get("profile").is_some_and(|v| !v.is_null());
+    let model_requested = input.get("model").is_some_and(|v| !v.is_null());
+    if profile_requested || model_requested {
+        let parent_override = kh.model_router_override_for(parent).map_err(|reason| {
+            ToolError::Internal(format!(
+                "Cannot verify the spawning agent's model-router constraints, so the worker \
+                     is refused rather than billed past an unverified cap: {reason}."
+            ))
+        })?;
+        if profile_requested {
+            if model_requested {
+                return Err(ToolError::InvalidParameter {
+                    name: "profile",
+                    reason: "give either `profile` or an explicit `model` override, not both"
+                        .to_string(),
+                });
+            }
+            let profile_name = input.get("profile").and_then(|v| v.as_str()).ok_or(
+                ToolError::InvalidParameter {
+                    name: "profile",
+                    reason: "expected a profile name as a string".to_string(),
+                },
+            )?;
+            let profile = gate_spawn_profile(kh, profile_name, parent_override.as_ref())?;
+            request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+                provider: Some(profile.provider),
+                model: Some(profile.model),
+            });
+        } else {
+            match parent_override.as_ref() {
+                // `allowed_profiles` is the third cap this override carries and
+                // binds in its own right — `AgentRouterOverride::permits`
+                // rejects a profile outside the list independently of
+                // `cost_budget` (model_profile.rs). Without it, a parent capped
+                // by `allowed_profiles = ["quick"]` and nothing else has
+                // `profile: "architect"` refused by `check_profile_against_parent`
+                // while an explicit `model` override naming the same expensive
+                // model runs — the exact bypass this arm exists to close, one
+                // field short (#7789 review).
+                Some(override_)
+                    if override_.fixed
+                        || override_.cost_budget.is_some()
+                        || !override_.allowed_profiles.is_empty() =>
+                {
+                    let cap = if override_.fixed {
+                        "`fixed = true`".to_string()
+                    } else if let Some(budget) = override_.cost_budget {
+                        format!("`cost_budget = \"{}\"`", budget.as_str())
+                    } else {
+                        format!(
+                            "`allowed_profiles = [{}]`",
+                            override_
+                                .allowed_profiles
+                                .iter()
+                                .map(|p| format!("\"{p}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
+                    return Err(ToolError::PermissionDenied(format!(
+                        "The spawning agent is capped by its `[model.router_override]` ({cap}), \
+                         so an explicit `model` override is refused — delegate with a `profile` \
+                         instead, or ask the operator to relax the cap."
+                    )));
+                }
+                // Unconstrained parent (or one with no cap): the explicit
+                // model override is honoured, parsed exactly as before.
+                _ => {
+                    if let Some(model) = input["model"].as_object() {
+                        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+                            provider: model
+                                .get("provider")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                            model: model
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
+                        });
+                    } else if let Some(model) = input["model"].as_str() {
+                        request.model = Some(librefang_types::ephemeral::EphemeralModelOverride {
+                            provider: None,
+                            model: Some(model.to_string()),
+                        });
+                    }
+                }
+            }
+        }
     }
 
     request.max_iterations = input["max_iterations"]

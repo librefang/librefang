@@ -266,12 +266,7 @@ impl LibreFangKernel {
             manifest.model.system_prompt = prompt.to_string();
         }
         if let Some(over) = request.model.as_ref() {
-            if let Some(provider) = over.provider.as_deref() {
-                manifest.model.provider = provider.to_string();
-            }
-            if let Some(model) = over.model.as_deref() {
-                manifest.model.model = model.to_string();
-            }
+            apply_model_override(&mut manifest, over);
         }
 
         // ── System prompt ───────────────────────────────────────────────────
@@ -660,5 +655,309 @@ impl LibreFangKernel {
         librefang_memory::EphemeralRunStore::new(self.memory.substrate.pool())
             .rollup_for_parent(&parent_id.0.to_string())
             .map_err(KernelError::LibreFang)
+    }
+}
+
+/// Apply an `EphemeralModelOverride` to the worker's manifest.
+///
+/// With no `agent_type` the worker manifest is `parent.manifest.clone()`, so
+/// every provider- or model-keyed field arrives describing the **parent's**
+/// model. None of them travels with an override, and the permanent spawn path
+/// never carries them because it builds a fresh manifest from the profile
+/// (#7789 review).
+///
+/// Takes the whole manifest, not just `manifest.model`: `fallback_models` is a
+/// sibling of `model` on `AgentManifest` and carries its own credentials, so a
+/// function scoped to `ModelConfig` structurally cannot close the inheritance.
+fn apply_model_override(
+    manifest: &mut librefang_types::agent::AgentManifest,
+    over: &librefang_types::ephemeral::EphemeralModelOverride,
+) {
+    let model = &mut manifest.model;
+    let provider_changed = over
+        .provider
+        .as_deref()
+        .is_some_and(|p| !p.eq_ignore_ascii_case(&model.provider));
+    let model_changed = over.model.as_deref().is_some_and(|m| m != model.model);
+
+    // `context_window` is written for one model, and `resolve_context_window`
+    // ranks the manifest's own value above the catalog — so a parent pinned by
+    // `architect` at 1M tokens spawning a `quick` worker budgeted claude-haiku at
+    // 1M: compaction never fires and the provider rejects the oversized request.
+    // Cleared on a model change and not only a provider change, because that case
+    // stays inside `anthropic` and is the one an operator actually hits.
+    //
+    // `max_tokens` is the same story from the output side: it reaches the wire
+    // through `effective_max_tokens()` with no clamp against the catalog, so a
+    // parent at 64000 spawning a Haiku worker earns the identical provider
+    // rejection. `max_output_tokens` sits in the same conceptual bucket but has
+    // no reader on the request path — only the registry, the catalog and the
+    // dashboard — so it is deliberately left alone rather than cleared on
+    // speculation.
+    //
+    // `extra_params` is flattened straight into the request body as
+    // `extra_body`, and its own doc-comment calls it provider-specific: a parent
+    // on Qwen with `enable_memory`, or on OpenAI with `reasoning_effort`, would
+    // otherwise post those keys to anthropic.
+    if provider_changed || model_changed {
+        model.context_window = None;
+        model.max_tokens = None;
+        model.extra_params.clear();
+    }
+    // `api_key_env` / `base_url` are keyed to the provider. Left in place they
+    // send the new provider's requests to the parent's endpoint with the parent's
+    // key — note `check_provider_credentials` has just asserted that the
+    // *profile's* provider has a key, which is then not the one used. A
+    // model-only override stays inside the provider they were written for, so it
+    // keeps them.
+    if provider_changed {
+        model.api_key_env = None;
+        model.base_url = None;
+    }
+
+    if let Some(provider) = over.provider.as_deref() {
+        model.provider = provider.to_string();
+    }
+    if let Some(m) = over.model.as_deref() {
+        model.model = m.to_string();
+    }
+
+    // The last inheritance path, and the one that defeats the clears above on
+    // the second request rather than the first: every `FallbackModel` carries
+    // its own `api_key_env`, `base_url` and `extra_params`, and
+    // `resolve_effective_fallbacks` treats `Some([…])` as the agent's exclusive
+    // chain. A parent whose chain falls back to its expensive model under
+    // `MY_PROXY_KEY` hands that entry to a `quick` worker; the first rate-limit
+    // on haiku then promotes the worker onto the parent's model with the
+    // parent's credential, past both `allowed_profiles` and `cost_budget`.
+    //
+    // `None` rather than `Some(vec![])`: it restores the global
+    // `fallback_providers` chain, which is exactly what a manifest freshly built
+    // from a profile carries, so the ephemeral and permanent paths agree.
+    if provider_changed || model_changed {
+        manifest.fallback_models = None;
+    }
+}
+
+#[cfg(test)]
+mod model_override_tests {
+    use super::apply_model_override;
+    use librefang_types::agent::{AgentManifest, FallbackModel, ModelConfig};
+    use librefang_types::ephemeral::EphemeralModelOverride;
+
+    /// A parent pinned to a custom OpenAI-compatible proxy, at a large window,
+    /// with an output cap and a provider extension its model understands.
+    fn parent_pinned_to_a_proxy() -> AgentManifest {
+        manifest_with(ModelConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key_env: Some("MY_PROXY_KEY".to_string()),
+            base_url: Some("https://proxy.internal/v1".to_string()),
+            context_window: Some(1_000_000),
+            max_tokens: Some(64_000),
+            extra_params: [("reasoning_effort".to_string(), serde_json::json!("high"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    fn manifest_with(model: ModelConfig) -> AgentManifest {
+        AgentManifest {
+            name: "parent".to_string(),
+            model,
+            ..Default::default()
+        }
+    }
+
+    fn over(provider: Option<&str>, model: Option<&str>) -> EphemeralModelOverride {
+        EphemeralModelOverride {
+            provider: provider.map(str::to_string),
+            model: model.map(str::to_string),
+        }
+    }
+
+    /// The consequence, rather than the mechanism: the sibling tests assert that `fallback_models` is cleared, this one asserts what that clearing buys.
+    /// It composes the spawn-time rewrite with `resolve_effective_fallbacks`, the function that actually decides the worker's **second** request — `Some(list)` is treated as the agent's exclusive chain, so anything inherited here is what the worker escalates onto when haiku rate-limits.
+    ///
+    /// That second-request timing is what makes the defect expensive to find: the clears above make the *first* call go to anthropic on anthropic's credential, so every assertion about it looks correct while the parent's chain rides along untouched underneath.
+    /// Against the pre-fix call site — `apply_model_override(&mut manifest.model, over)` — this fails with the parent's `MY_PROXY_KEY` in the resolved chain.
+    #[test]
+    fn the_workers_second_request_cannot_reach_the_parents_credential() {
+        let mut manifest = parent_pinned_to_a_proxy();
+        manifest.fallback_models = Some(vec![FallbackModel {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key_env: Some("MY_PROXY_KEY".to_string()),
+            base_url: Some("https://proxy.internal/v1".to_string()),
+            extra_params: std::collections::BTreeMap::new(),
+        }]);
+
+        apply_model_override(
+            &mut manifest,
+            &over(Some("anthropic"), Some("claude-haiku-4-5")),
+        );
+
+        // No global chain configured, so whatever comes back is what the worker inherited.
+        let chain =
+            crate::kernel::llm_drivers::resolve_effective_fallbacks(&manifest.fallback_models, &[]);
+
+        assert!(
+            !chain
+                .iter()
+                .any(|f| f.api_key_env.as_deref() == Some("MY_PROXY_KEY")),
+            "the worker escalates onto the parent's credential on its second request; \
+             got chain {chain:?}"
+        );
+    }
+
+    /// The credential half: a cross-provider override that keeps the parent's
+    /// `base_url` / `api_key_env` posts anthropic-shaped requests to the parent's
+    /// proxy with the parent's key — while `check_provider_credentials` has just
+    /// asserted that *anthropic* has a key, which is not the one that would be used.
+    #[test]
+    fn a_provider_change_drops_the_parents_endpoint_and_key() {
+        let mut manifest = parent_pinned_to_a_proxy();
+
+        apply_model_override(
+            &mut manifest,
+            &over(Some("anthropic"), Some("claude-haiku-4-5")),
+        );
+
+        assert_eq!(manifest.model.provider, "anthropic");
+        assert_eq!(manifest.model.model, "claude-haiku-4-5");
+        assert_eq!(
+            manifest.model.api_key_env, None,
+            "the parent's key names a credential for the parent's provider"
+        );
+        assert_eq!(
+            manifest.model.base_url, None,
+            "the parent's endpoint speaks the parent's provider's wire format"
+        );
+    }
+
+    /// The budget half, and the case a provider-only guard would miss: `architect`
+    /// and `quick` are both `anthropic`, so the provider never changes and only a
+    /// model-keyed clear saves the worker from being budgeted at the parent's window.
+    #[test]
+    fn a_model_change_within_one_provider_still_drops_the_window() {
+        let mut manifest = manifest_with(ModelConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-1".to_string(),
+            context_window: Some(1_000_000),
+            ..Default::default()
+        });
+
+        apply_model_override(&mut manifest, &over(None, Some("claude-haiku-4-5")));
+
+        assert_eq!(manifest.model.model, "claude-haiku-4-5");
+        assert_eq!(
+            manifest.model.context_window, None,
+            "a 1M-token budget on a Haiku worker never compacts and is rejected by the provider"
+        );
+    }
+
+    /// The clears are scoped to what actually changed: an override naming the
+    /// values already in place is not a reason to discard an operator's pinning.
+    #[test]
+    fn an_override_that_changes_nothing_keeps_the_parents_pinning() {
+        let mut manifest = parent_pinned_to_a_proxy();
+        manifest.fallback_models = Some(vec![parent_fallback()]);
+
+        apply_model_override(&mut manifest, &over(Some("OpenAI"), Some("gpt-4o")));
+
+        assert_eq!(
+            manifest.model.api_key_env.as_deref(),
+            Some("MY_PROXY_KEY"),
+            "provider compared case-insensitively; nothing moved, nothing to clear"
+        );
+        assert_eq!(
+            manifest.model.base_url.as_deref(),
+            Some("https://proxy.internal/v1")
+        );
+        assert_eq!(manifest.model.context_window, Some(1_000_000));
+        assert_eq!(manifest.model.max_tokens, Some(64_000));
+        assert!(manifest.model.extra_params.contains_key("reasoning_effort"));
+        assert!(
+            manifest.fallback_models.is_some(),
+            "the worker is still the parent's model, so the parent's chain still describes it"
+        );
+    }
+
+    /// A model-only override stays inside the provider the endpoint and key were
+    /// written for, so those two must survive it.
+    #[test]
+    fn a_model_only_override_keeps_the_providers_endpoint_and_key() {
+        let mut manifest = parent_pinned_to_a_proxy();
+
+        apply_model_override(&mut manifest, &over(None, Some("gpt-4o-mini")));
+
+        assert_eq!(manifest.model.api_key_env.as_deref(), Some("MY_PROXY_KEY"));
+        assert_eq!(
+            manifest.model.base_url.as_deref(),
+            Some("https://proxy.internal/v1")
+        );
+        assert_eq!(
+            manifest.model.context_window, None,
+            "the window was written for gpt-4o"
+        );
+    }
+
+    /// The parent's fallback entry: its own model, its own credential, its own
+    /// endpoint — everything `apply_model_override` clears on the primary.
+    fn parent_fallback() -> FallbackModel {
+        FallbackModel {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key_env: Some("MY_PROXY_KEY".to_string()),
+            base_url: Some("https://proxy.internal/v1".to_string()),
+            extra_params: Default::default(),
+        }
+    }
+
+    /// The inheritance path that survives every clear on the primary and only
+    /// fires on the *second* request: `resolve_effective_fallbacks` treats
+    /// `Some([…])` as the agent's exclusive chain, so the first rate-limit on
+    /// the cheap worker promotes it onto the parent's expensive model with the
+    /// parent's key — past `allowed_profiles` and `cost_budget` alike.
+    #[test]
+    fn a_model_change_drops_the_parents_fallback_chain() {
+        let mut manifest = parent_pinned_to_a_proxy();
+        manifest.fallback_models = Some(vec![parent_fallback()]);
+
+        apply_model_override(
+            &mut manifest,
+            &over(Some("anthropic"), Some("claude-haiku-4-5")),
+        );
+
+        assert!(
+            manifest.fallback_models.is_none(),
+            "the parent's chain names the parent's model under the parent's credential; \
+             None restores the global fallback_providers a profile-built manifest would carry"
+        );
+    }
+
+    /// `extra_params` is flattened into the request body verbatim and
+    /// `max_tokens` reaches the wire through `effective_max_tokens()` with no
+    /// clamp — both are provider/model-keyed exactly like `context_window`.
+    #[test]
+    fn a_model_change_drops_the_parents_output_cap_and_extension_params() {
+        let mut manifest = parent_pinned_to_a_proxy();
+
+        apply_model_override(
+            &mut manifest,
+            &over(Some("anthropic"), Some("claude-haiku-4-5")),
+        );
+
+        assert_eq!(
+            manifest.model.max_tokens, None,
+            "a 64000-token output cap on a Haiku worker is the same provider rejection \
+             the window clear exists to avoid"
+        );
+        assert!(
+            manifest.model.extra_params.is_empty(),
+            "OpenAI's reasoning_effort posted to anthropic, got: {:?}",
+            manifest.model.extra_params
+        );
     }
 }
