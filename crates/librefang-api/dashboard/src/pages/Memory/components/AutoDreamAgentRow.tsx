@@ -10,6 +10,7 @@ import type {
   AutoDreamUsage,
 } from "../../../api";
 import { formatRelativeMs, formatHours } from "../formatters";
+import { formatNumber } from "../../../lib/format";
 
 export function autoDreamStatusVariant(status: AutoDreamStatusName): BadgeVariant {
   switch (status) {
@@ -269,7 +270,7 @@ export function AutoDreamAgentRow({
                 )}
               >
                 <span className="font-mono">{cacheStats.hitPct}%</span>{" "}
-                ({usage.cache_read_input_tokens.toLocaleString()}/{cacheStats.totalInputTokens.toLocaleString()} tok)
+                ({formatNumber(usage.cache_read_input_tokens)}/{formatNumber(cacheStats.totalInputTokens)} tok)
               </span>
               {typeof usage.cost_usd === "number" && (
                 <>

@@ -93,6 +93,7 @@ import {
   CloudOff,
   ExternalLink,
 } from "lucide-react";
+import { formatNumber } from "../lib/format";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -431,7 +432,7 @@ const SkillCard = React.memo(function SkillCard({
           {downloads !== undefined && (
             <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
               <Download className="w-3 h-3" />
-              {downloads.toLocaleString()}
+              {formatNumber(downloads)}
             </span>
           )}
           {variant === "installed" && toolsCount !== undefined && (
@@ -805,7 +806,7 @@ function CreateSkillModal({
             })}
           />
           <p className="text-[10px] text-text-dim mt-1">
-            {promptContext.length.toLocaleString()} / 160,000
+            {formatNumber(promptContext.length)} / 160,000
           </p>
         </div>
         <div>
@@ -878,7 +879,7 @@ function EvolveUpdatePane({
         className="w-full h-64 px-3 py-2 text-sm rounded-lg bg-surface-2 border border-border text-text-main resize-y font-mono"
       />
       <p className="text-[10px] text-text-dim">
-        {content.length.toLocaleString()} / 160,000
+        {formatNumber(content.length)} / 160,000
       </p>
       <Input
         value={changelog}
@@ -1108,7 +1109,7 @@ function EvolveUploadPane({
             {t("skills.evo_load_from_disk", { defaultValue: "Load from disk" })}
           </Button>
           <span className="text-[10px] text-text-dim">
-            {content.length.toLocaleString()} chars
+            {formatNumber(content.length)} chars
           </span>
         </div>
       </div>
@@ -1641,7 +1642,7 @@ function SkillDetailModal({
             </p>
             <p>
               {t("skills.evo_prompt_size", { defaultValue: "Prompt context" })}:{" "}
-              {detail.prompt_context_length.toLocaleString()} chars
+              {formatNumber(detail.prompt_context_length)} chars
             </p>
             <p className="font-mono truncate">{detail.path}</p>
           </div>

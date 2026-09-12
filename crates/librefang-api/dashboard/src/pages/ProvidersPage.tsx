@@ -1,6 +1,6 @@
 import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
-import { formatCompact } from "../lib/format";
+import { formatCompact, formatNumber } from "../lib/format";
 import { memo, useId, useMemo, useRef, useState, useCallback, useEffect, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -358,7 +358,7 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             label={t("providers.context_window")}
             savedMessage={t("providers.context_window_saved")}
             hintDefault={t("providers.context_window_hint_default")}
-            hintOverride={t("providers.context_window_hint_override", { value: catalogWindow != null ? catalogWindow.toLocaleString() : "-" })}
+            hintOverride={t("providers.context_window_hint_override", { value: catalogWindow != null ? formatNumber(catalogWindow) : "-" })}
             addToast={addToast}
           />
           <ModelLimitEditor
@@ -371,7 +371,7 @@ function ProviderModelLimitsSection({ providerId, addToast }: {
             label={t("providers.max_tokens")}
             savedMessage={t("providers.max_tokens_saved")}
             hintDefault={t("providers.max_tokens_hint_default")}
-            hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? catalogMaxOut.toLocaleString() : "-" })}
+            hintOverride={t("providers.max_tokens_hint_override", { value: catalogMaxOut != null ? formatNumber(catalogMaxOut) : "-" })}
             addToast={addToast}
           />
         </>
@@ -635,7 +635,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
             <p className={`text-xs font-black ${getLatencyColor(p.latency_ms)}`}>{p.latency_ms != null ? `${p.latency_ms}ms` : "-"}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.latency")}</p>
           </div>
-          <div className="text-center" title={p.max_output_tokens != null ? p.max_output_tokens.toLocaleString() : undefined}>
+          <div className="text-center" title={p.max_output_tokens != null ? formatNumber(p.max_output_tokens) : undefined}>
             <p className="text-xs font-black">{p.max_output_tokens != null ? formatCompact(p.max_output_tokens) : "-"}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.max_tokens")}</p>
           </div>
@@ -760,7 +760,7 @@ const ProviderCard = memo(function ProviderCard({ provider: p, isSelected, isDef
           </div>
           <div
             className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50"
-            title={p.max_output_tokens != null ? p.max_output_tokens.toLocaleString() : undefined}
+            title={p.max_output_tokens != null ? formatNumber(p.max_output_tokens) : undefined}
           >
             <div className="flex items-center gap-1.5 mb-1">
               <Gauge className="w-3 h-3 text-brand" />
@@ -1610,7 +1610,7 @@ function CredentialKeyRow({ cred }: { cred: CredentialPoolKeySnapshot }) {
         <span className="text-text-dim">priority {cred.priority}</span>
       </div>
       <div className="flex items-center gap-3 shrink-0">
-        <span className="text-text-dim">{cred.request_count.toLocaleString()} reqs</span>
+        <span className="text-text-dim">{formatNumber(cred.request_count)} reqs</span>
         {statusBadge}
       </div>
     </div>

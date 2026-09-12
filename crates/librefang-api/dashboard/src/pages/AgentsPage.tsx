@@ -91,6 +91,7 @@ import {
   useSetAgentSkills,
 } from "../lib/mutations/agents";
 import { useBindPromptVersionToAgent } from "../lib/mutations/prompts";
+import { formatNumber } from "../lib/format";
 
 /**
  * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
@@ -2802,7 +2803,7 @@ export function AgentsPage() {
                           <span className="font-mono">
                             {detailAgent.model.max_tokens == null
                               ? t("agents.form.inherit_default")
-                              : detailAgent.model.max_tokens.toLocaleString()}
+                              : formatNumber(detailAgent.model.max_tokens)}
                           </span>
                         </DetailRow>
                         <DetailRow label={t("agents.temperature")}>
@@ -3156,7 +3157,7 @@ export function AgentsPage() {
                       {t("agents.token_injected_total", { defaultValue: "Injected per request" })}
                     </span>
                     <span className="font-mono font-bold">
-                      {detailAgent.injected_footprint_tokens.toLocaleString()}
+                      {formatNumber(detailAgent.injected_footprint_tokens)}
                     </span>
                   </div>
                   {(agentEventsQuery.data ?? []).length > 0 && (

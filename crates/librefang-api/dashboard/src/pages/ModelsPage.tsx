@@ -1,4 +1,4 @@
-import { formatCost as formatCostUtil } from "../lib/format";
+import { formatCost as formatCostUtil, formatNumber } from "../lib/format";
 import type {
   MediaModelEndpoint,
   MediaModelEndpointDraft,
@@ -1433,7 +1433,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
   const catalogHint = useCallback(
     (declared?: number): string | undefined =>
       declared && declared > 0
-        ? t("models.catalog_value", { value: declared.toLocaleString() })
+        ? t("models.catalog_value", { value: formatNumber(declared) })
         : undefined,
     [t],
   );

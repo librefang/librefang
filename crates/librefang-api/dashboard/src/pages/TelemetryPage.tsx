@@ -1,4 +1,4 @@
-import { formatCompact } from "../lib/format";
+import { formatCompact, formatNumber } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
 import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -296,13 +296,13 @@ export function TelemetryPage() {
             <MetricCard
               label={t("telemetry.total_requests")}
               icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
-              value={<p className="text-xl font-black tracking-tight" title={totalRequests.toLocaleString()}>{formatCompact(totalRequests)}</p>}
+              value={<p className="text-xl font-black tracking-tight" title={formatNumber(totalRequests)}>{formatCompact(totalRequests)}</p>}
               variant="brand"
             />
             <MetricCard
               label={t("telemetry.total_tokens")}
               icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
-              value={<p className="text-xl font-black tracking-tight text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
+              value={<p className="text-xl font-black tracking-tight text-brand" title={formatNumber(totalTokens)}>{formatCompact(totalTokens)}</p>}
               variant="brand"
               sub={
                 <span className="font-mono">
@@ -316,7 +316,7 @@ export function TelemetryPage() {
             <MetricCard
               label={t("telemetry.llm_calls")}
               icon={<MessageSquare className="w-3.5 h-3.5 text-accent" />}
-              value={<p className="text-xl font-black tracking-tight" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>}
+              value={<p className="text-xl font-black tracking-tight" title={formatNumber(totalLlmCalls)}>{formatCompact(totalLlmCalls)}</p>}
               variant="accent"
               sub={
                 <span className="font-mono">
@@ -362,7 +362,7 @@ export function TelemetryPage() {
                 </p>
               }
               variant={errorRateVariant}
-              sub={totalRequests > 0 ? `${errorCount.toLocaleString()} / ${totalRequests.toLocaleString()}` : undefined}
+              sub={totalRequests > 0 ? `${formatNumber(errorCount)} / ${formatNumber(totalRequests)}` : undefined}
             />
           </StaggerList>
 
@@ -391,7 +391,7 @@ export function TelemetryPage() {
                           {(a.provider || a.model) && (
                             <Badge variant="default" className="font-mono text-[10px]">{a.provider}/{a.model}</Badge>
                           )}
-                          <span className="text-sm font-black text-brand text-right tabular-nums" title={a.tokens.toLocaleString()}>
+                          <span className="text-sm font-black text-brand text-right tabular-nums" title={formatNumber(a.tokens)}>
                             {formatCompact(a.tokens)}
                             <span className="text-[10px] font-normal text-text-dim ml-0.5">{t("telemetry.unit_tokens")}</span>
                           </span>
@@ -400,7 +400,7 @@ export function TelemetryPage() {
                         {inOut > 0 && (
                           <div
                             className="flex h-1 w-full rounded-full overflow-hidden bg-border-subtle/30"
-                            title={`${a.inputTokens.toLocaleString()} in · ${a.outputTokens.toLocaleString()} out`}
+                            title={`${formatNumber(a.inputTokens)} in · ${formatNumber(a.outputTokens)} out`}
                           >
                             <div style={{ width: `${inputPct}%` }} className="bg-success/60" />
                             <div style={{ width: `${100 - inputPct}%` }} className="bg-warning/60" />
@@ -443,7 +443,7 @@ export function TelemetryPage() {
                         <Badge variant="default" className="font-mono text-[10px] w-14 justify-center shrink-0">{r.method}</Badge>
                         <span className="text-xs font-mono flex-1 truncate" title={r.path}>{r.path}</span>
                         <StatusBar ok={r.ok} redirect={r.redirect} client={r.client} server={r.server} total={r.total} maxTotal={maxTotal} />
-                        <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
+                        <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={formatNumber(r.total)}>{formatCompact(r.total)}</span>
                       </div>
                     ));
                   })()}

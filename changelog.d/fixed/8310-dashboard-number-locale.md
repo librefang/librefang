@@ -1,0 +1,4 @@
+Dashboard number formatting is pinned to one locale, so the same figure reads the same for every operator.
+Counts went through a bare `toLocaleString()`, which resolves against the browser's language — a token total rendered `2,000` for one operator and `2000` for another (Spanish does not group four-digit numbers) looking at the same daemon, in a column meant to be compared row against row.
+Timestamps are unchanged and still follow the viewer's locale, which is what a reader wants from a time and not from a count.
+This also fixes `AnalyticsPage.test.tsx` failing on `main` itself wherever the environment locale was not English (#8156), and the `format.ts` tests that built their expected values from the same ambient locale the implementation used — agreeing with themselves whatever it was. (#8310) (@houko)

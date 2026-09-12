@@ -1,4 +1,4 @@
-import { formatBytes, formatCost } from "../lib/format";
+import { formatBytes, formatCost, formatNumber } from "../lib/format";
 import { safeStorageGet, safeStorageSet } from "../lib/safeStorage";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
@@ -2382,8 +2382,8 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
 
   const clampedPct = Math.max(0, Math.min(100, pct));
   const label = t("chat.context_usage", {
-    used: used.toLocaleString(),
-    max: max.toLocaleString(),
+    used: formatNumber(used),
+    max: formatNumber(max),
     pct: clampedPct.toFixed(1),
   });
   const ariaLabel = t("chat.context_usage_aria", { pct: clampedPct.toFixed(1) });
@@ -2395,7 +2395,7 @@ function ContextUsageIndicator({ agentId, sessionId }: { agentId: string; sessio
   // the operator cannot explain. Refs #7774.
   const assumedLabel = assumed ? t("chat.context_usage_assumed") : "";
   const assumedDetail = assumed
-    ? t("chat.context_usage_assumed_detail", { max: max.toLocaleString() })
+    ? t("chat.context_usage_assumed_detail", { max: formatNumber(max) })
     : "";
 
   return (

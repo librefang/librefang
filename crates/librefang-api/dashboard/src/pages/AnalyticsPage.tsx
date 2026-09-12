@@ -1,4 +1,4 @@
-import { formatCompact, formatCost } from "../lib/format";
+import { formatCompact, formatCost, formatNumber } from "../lib/format";
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
@@ -319,10 +319,10 @@ function ProviderBudgetsCard({
                     <td className="py-2 px-2 text-right font-mono">
                       <div className="flex flex-col items-end gap-1">
                         <span>
-                          {row.tokens_this_hour.toLocaleString()}
+                          {formatNumber(row.tokens_this_hour)}
                           <span className="text-text-dim/60">
                             {" / "}
-                            {row.cap_tokens_per_hour > 0 ? row.cap_tokens_per_hour.toLocaleString() : "∞"}
+                            {row.cap_tokens_per_hour > 0 ? formatNumber(row.cap_tokens_per_hour) : "∞"}
                           </span>
                         </span>
                         <ProviderCapBar
@@ -962,9 +962,9 @@ export function AnalyticsPage() {
                         </td>
                         <td className="px-3 py-2 text-right">{a.call_count ?? a.calls ?? 0}</td>
                         <td className="px-3 py-2 text-right">{a.tool_calls ?? 0}</td>
-                        <td className="px-3 py-2 text-right font-mono text-text-dim">{(a.input_tokens ?? 0).toLocaleString()}</td>
-                        <td className="px-3 py-2 text-right font-mono text-text-dim">{(a.output_tokens ?? 0).toLocaleString()}</td>
-                        <td className="px-3 py-2 text-right font-mono">{(a.total_tokens ?? 0).toLocaleString()}</td>
+                        <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.input_tokens ?? 0)}</td>
+                        <td className="px-3 py-2 text-right font-mono text-text-dim">{formatNumber(a.output_tokens ?? 0)}</td>
+                        <td className="px-3 py-2 text-right font-mono">{formatNumber(a.total_tokens ?? 0)}</td>
                         <td className="px-3 py-2 text-right font-mono">{formatCost(a.total_cost_usd ?? a.cost ?? 0)}</td>
                       </tr>
                     ))}
@@ -1071,9 +1071,9 @@ export function AnalyticsPage() {
                           <td className="py-2 px-3 text-right font-mono">{(m.avg_latency_ms ?? 0).toFixed(0)}ms</td>
                           <td className="py-2 px-3 text-right font-mono">{m.p95_latency_ms ?? 0}ms</td>
                           <td className="py-2 px-3 text-right font-mono text-text-dim">{(m.min_latency_ms ?? 0)}/{(m.max_latency_ms ?? 0)}ms</td>
-                          <td className="py-2 px-3 text-right font-mono text-text-dim">{(m.total_input_tokens ?? 0).toLocaleString()}</td>
-                          <td className="py-2 px-3 text-right font-mono text-text-dim">{(m.total_output_tokens ?? 0).toLocaleString()}</td>
-                          <td className="py-2 px-3 text-right font-mono">{((m.total_input_tokens ?? 0) + (m.total_output_tokens ?? 0)).toLocaleString()}</td>
+                          <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_input_tokens ?? 0)}</td>
+                          <td className="py-2 px-3 text-right font-mono text-text-dim">{formatNumber(m.total_output_tokens ?? 0)}</td>
+                          <td className="py-2 px-3 text-right font-mono">{formatNumber((m.total_input_tokens ?? 0) + (m.total_output_tokens ?? 0))}</td>
                         </tr>
                       ))}
                     </tbody>
