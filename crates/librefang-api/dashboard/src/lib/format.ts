@@ -1,19 +1,13 @@
 /**
  * The locale every number on the dashboard is formatted in.
  *
- * Pinned rather than left to resolve from the environment. `toLocaleString()`
- * with no argument, and `Intl.NumberFormat(undefined, …)`, follow the host's
- * `LC_ALL` / `LANG` under Node and the browser's language on a page — so the
- * same figure renders as `2,000` for one operator and `2000` for another
- * (Spanish does not group four-digit numbers) against the same daemon.
+ * Pinned rather than left to resolve from the environment.
+ * `toLocaleString()` with no argument, and `Intl.NumberFormat(undefined, …)`, follow the host's `LC_ALL` / `LANG` under Node and the browser's language on a page — so the same figure renders as `2,000` for one operator and `2000` for another (Spanish does not group four-digit numbers) against the same daemon.
  *
- * It also made `AnalyticsPage.test.tsx` fail on `main` itself wherever the
- * environment locale was not English, because the component and the assertion
- * disagreed about which locale was in force (#8156).
+ * It also made `AnalyticsPage.test.tsx` fail on `main` itself wherever the environment locale was not English, because the component and the assertion disagreed about which locale was in force (#8156).
  *
- * Dates deliberately keep the ambient locale — see `lib/datetime.ts`. A
- * timestamp is read as "when, for me"; a token count is read against the row
- * above it.
+ * Dates deliberately keep the ambient locale — see `lib/datetime.ts`.
+ * A timestamp is read as "when, for me"; a token count is read against the row above it.
  */
 export const NUMBER_LOCALE = "en-US";
 

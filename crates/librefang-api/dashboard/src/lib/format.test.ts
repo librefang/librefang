@@ -1,21 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { NUMBER_LOCALE, formatBytes, formatCompact, formatCost, formatNumber } from "./format";
 
-// Built against the same pinned locale the formatters use. This used to pass
-// `undefined`, which made both sides follow the environment: the assertion and
-// the implementation drifted together, so the test agreed with itself no matter
-// what and asserted nothing about the output an operator sees (#8156).
+// Built against the same pinned locale the formatters use.
+// This used to pass `undefined`, which made both sides follow the environment: the assertion and the implementation drifted together, so the test agreed with itself no matter what and asserted nothing about the output an operator sees (#8156).
 const oneDecimal = new Intl.NumberFormat(NUMBER_LOCALE, {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
 });
 
 describe("numeric formatters", () => {
-  // Literal expectations, not `Intl`-derived ones. Everything else in this file
-  // builds its expected value from the same API the implementation uses, which
-  // catches a wrong tier or a dropped sign but cannot catch the whole output
-  // shifting with the environment — the failure #8156 was about. These are the
-  // assertions that fail if the pinned locale is removed.
+  // Literal expectations, not `Intl`-derived ones.
+  // Everything else in this file builds its expected value from the same API the implementation uses, which catches a wrong tier or a dropped sign but cannot catch the whole output shifting with the environment — the failure #8156 was about.
+  // These are the assertions that fail if the pinned locale is removed.
   it("groups thousands the same way regardless of the environment locale", () => {
     expect(formatNumber(2_000)).toBe("2,000");
     expect(formatNumber(1_234_567)).toBe("1,234,567");
