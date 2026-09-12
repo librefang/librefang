@@ -1,0 +1,4 @@
+Cancelling a goal run now discards its pause checkpoint even when that checkpoint cannot be read back.
+`load_pause_checkpoint` reports `None` both for "there is no checkpoint" and for "there is a row I could not parse" — a substrate read error is swallowed by its `.ok().flatten()`, and so is a row whose `agent_id` is missing or malformed — and cancel used that `None` to decide whether to delete anything.
+So a transient storage failure at cancel time left the checkpoint in place, and the next start silently resumed the run the operator had just cancelled, which is precisely the outcome the cancel path exists to prevent.
+The delete is now unconditional and the read only decides what the call reports, which costs nothing because deleting an absent key was already a no-op. (#7973) (@DaBlitzStein)

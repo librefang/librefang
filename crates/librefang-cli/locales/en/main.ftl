@@ -2471,6 +2471,7 @@ cmd-goal-finished = Goal finished successfully.
 cmd-goal-max-iterations = Goal stopped: iteration cap reached.
 cmd-goal-rate-limited = Goal stopped: provider rate limit.
 cmd-goal-stopped = Goal run stopped.
+cmd-goal-paused = Goal run paused.
 cmd-goal-error = error: { $error }
 cmd-goal-unknown-error = unknown error
 cmd-goal-watch-poll-error = Could not read the run state ({ $count }/{ $max }); retrying…

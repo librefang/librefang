@@ -2463,6 +2463,7 @@ cmd-goal-finished = 目标已成功完成。
 cmd-goal-max-iterations = 目标已停止：已达迭代上限。
 cmd-goal-rate-limited = 目标已停止：提供商限流。
 cmd-goal-stopped = 目标运行已停止。
+cmd-goal-paused = 目标运行已暂停。
 cmd-goal-error = 错误：{ $error }
 cmd-goal-unknown-error = 未知错误
 cmd-goal-watch-poll-error = 无法读取运行状态（{ $count }/{ $max }）；正在重试…

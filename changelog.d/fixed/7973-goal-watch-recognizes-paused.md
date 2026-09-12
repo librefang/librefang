@@ -1,0 +1,2 @@
+`librefang goal --watch` now recognizes a `paused` run instead of treating it as unclassified state.
+The daemon can report a goal's run as `paused` (an operator-triggered pause, resumable later), but the CLI's terminal-phase table had no entry for it, so `--watch` burned its bounded unobservable-poll retry budget and exited with a generic "gave up observing the run" message instead of reporting that the run was paused. (#7973) (@DaBlitzStein)
