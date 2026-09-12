@@ -2143,7 +2143,7 @@ tui-agents-hints-save =     [↑↓] 탐색  [Space] 전환  [Enter] 저장  [Es
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = 사용자 지정 에이전트
 tui-agents-placeholder-prompt = 당신은 유용한 에이전트입니다.
-tui-agents-label-placeholder = 자리 표시자: { $placeholder }
+tui-agents-label-placeholder =     자리 표시자: { $placeholder }
 
 tui-agents-detail-id =   ID:       
 tui-agents-detail-name =   이름:      

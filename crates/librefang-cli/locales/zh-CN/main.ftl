@@ -1289,7 +1289,7 @@ tui-triggers-label-prompt = 提示词模板:
 tui-triggers-placeholder-prompt = 处理此项: {"{"}event{"}"}
 tui-triggers-label-max-fires = 最大触发次数 (0 = 无限制):
 tui-triggers-placeholder-max-fires = 0
-tui-triggers-review-agent = 智能体:   
+tui-triggers-review-agent =   智能体:   
 tui-triggers-review-pattern =   模式:   
 tui-triggers-review-prompt =   提示词: 
 tui-triggers-review-max =   最大:    
