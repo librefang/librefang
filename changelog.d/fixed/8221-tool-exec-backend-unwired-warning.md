@@ -1,0 +1,4 @@
+The daemon now warns when `[tool_exec] kind` or an agent's `tool_exec_backend` names a backend that tool calls never actually reach.
+`docs/architecture/tool-exec-backends.md` has said since #3332 that the kernel emits this warning at boot, and it was never implemented — `librefang_runtime::tool_exec_backend::build_backend` still has no caller outside the test suite, so the resolved backend is discarded and every tool runs as a subprocess on the daemon host.
+An operator who pointed `kind` at an SSH host to keep shell commands off that machine therefore got a clean boot, a passing config validation, and the exact opposite of what they configured, with nothing in the log to say so.
+The setting is still accepted rather than rejected — deployments carrying it in anticipation should keep starting — but boot and every affected spawn now say plainly that it is ignored and is not a sandbox. (@houko)
