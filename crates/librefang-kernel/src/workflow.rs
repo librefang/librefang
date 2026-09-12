@@ -3737,6 +3737,7 @@ impl WorkflowEngine {
             output_tokens: 0,
             duration_ms: 0,
             error: None,
+            variables: Self::snapshot_variables(variables),
         };
         if let Some(mut r) = self.runs.get_mut(&run_id) {
             r.step_results.push(step_result);
