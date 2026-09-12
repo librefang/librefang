@@ -2470,6 +2470,7 @@ cmd-goal-finished = 목표가 성공적으로 완료되었습니다.
 cmd-goal-max-iterations = 목표 중지: 반복 한도에 도달했습니다.
 cmd-goal-rate-limited = 목표 중지: 제공자 속도 제한.
 cmd-goal-stopped = 목표 실행이 중지되었습니다.
+cmd-goal-paused = 목표 실행이 일시 중지되었습니다.
 cmd-goal-error = 오류: { $error }
 cmd-goal-unknown-error = 알 수 없는 오류
 cmd-goal-watch-poll-error = 실행 상태를 읽을 수 없습니다({ $count }/{ $max }); 다시 시도하는 중…

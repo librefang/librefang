@@ -12,6 +12,13 @@ boundary.
 The whole subsystem is **off by default and opted into per agent** with `[skill_workshop] enabled = true` in `agent.toml` (or the matching `[agents.<name>]` section of a `HAND.toml`).
 An agent that omits the block never runs the workshop at all.
 
+### Producers other than the after-turn hook
+
+The `pending/` queue is the approval boundary for every machine-proposed skill, and the after-turn hook is not its only producer.
+The background skill reviewer (`auto_evolve` / `background_skill_review`) files its create and update proposals here, and so does an autonomous goal run whose agent emitted `GOAL_LEARNED:` markers (#7785).
+Each producer has its own opt-in — a goal run's is the goal's `loop_engineering` flag, not `[skill_workshop] enabled` — but none of them can install a skill: promotion is `approve_candidate` in every case, and the cap / TTL come from the producing agent's `[skill_workshop]` block regardless.
+Drafts that did not come from a conversation turn are tagged with a sentinel `explicit_instruction` trigger naming the producer (`auto_evolve_reviewer`, `auto_evolve_reviewer_update`, `goal_learned`), so a reviewer reading `librefang skill pending show` can tell where one came from.
+
 Once enabled, the remaining defaults are the conservative knob set: heuristic-only review (no LLM call), pending policy (every candidate waits for human approve / reject), 20-candidate cap.
 Operators that want LLM refinement additionally set `review_mode = "threshold_llm"`.
 

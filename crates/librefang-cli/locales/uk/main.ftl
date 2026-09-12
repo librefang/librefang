@@ -2555,6 +2555,7 @@ cmd-goal-finished = Ціль успішно завершено.
 cmd-goal-max-iterations = Ціль зупинено: досягнуто ліміт ітерацій.
 cmd-goal-rate-limited = Ціль зупинено: ліміт запитів провайдера.
 cmd-goal-stopped = Запуск цілі зупинено.
+cmd-goal-paused = Запуск цілі призупинено.
 cmd-goal-error = помилка: { $error }
 cmd-goal-unknown-error = невідома помилка
 cmd-goal-watch-poll-error = Не вдалося прочитати стан запуску ({ $count }/{ $max }); повторна спроба…
