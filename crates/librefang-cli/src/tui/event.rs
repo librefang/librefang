@@ -142,7 +142,22 @@ pub enum AppEvent {
     /// Workflow list loaded.
     WorkflowListLoaded(Vec<WorkflowInfo>),
     /// Workflow runs loaded for a specific workflow.
-    WorkflowRunsLoaded(Vec<WorkflowRun>),
+    ///
+    /// `runs` is `None` when the fetch did not produce a run list — a
+    /// transport error, a non-2xx status, or a body that was not the expected
+    /// array. The screen then keeps whatever it was already showing instead of
+    /// blanking to "No runs yet", which is what a transient 500 or an expired
+    /// API key used to do once per keypress and would now do every two seconds.
+    ///
+    /// `clear_loading` is false for the background auto-refresh. The `loading`
+    /// flag belongs to a load the operator asked for and is rendered by both
+    /// the workflow list and the run-result pane; a poll landing just after
+    /// they launched a run would otherwise drop the run-result spinner while
+    /// the run is still executing.
+    WorkflowRunsLoaded {
+        runs: Option<Vec<WorkflowRun>>,
+        clear_loading: bool,
+    },
     /// Workflow run completed.
     WorkflowRunResult(String),
     /// Workflow created successfully.
@@ -1308,42 +1323,120 @@ pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
+/// Render a run's `state` cell from the run-list payload.
+///
+/// `WorkflowRunState` is an externally tagged enum, so its data-carrying
+/// variant serializes as an object (`{"paused": {"reason": …}}`) rather than a
+/// string. Reading it with `as_str()` alone printed `?` for every paused run —
+/// precisely the run where "which step is it on" matters most, since it is
+/// stopped at an operator step waiting for a human.
+fn run_state_label(state: &serde_json::Value) -> String {
+    state
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| state.as_object().and_then(|o| o.keys().next()).cloned())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Wall-clock duration of a run, from the `started_at` / `completed_at` pair
+/// the run-list payload already carries.
+///
+/// The payload has no `duration` key and never had one, so this column read an
+/// empty string on every row until it was derived here.
+/// A run still in flight has no `completed_at`; it gets an empty cell rather
+/// than a figure that would be stale the moment it was drawn.
+fn run_duration_label(run: &serde_json::Value) -> String {
+    let parse = |k: &str| {
+        run[k]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+    };
+    let (Some(started), Some(completed)) = (parse("started_at"), parse("completed_at")) else {
+        return String::new();
+    };
+    let secs = (completed - started).num_seconds().max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60),
+    }
+}
+
 /// Fetch workflow runs in background.
+///
+/// `clear_loading` is passed through to [`AppEvent::WorkflowRunsLoaded`]; the
+/// auto-refresh passes `false` so it never writes the screen-wide spinner flag.
+///
+/// Exactly one event is sent on every path, including the failures. A silent
+/// return would leave an operator-initiated load's spinner up forever, which is
+/// what happened with the daemon stopped.
 pub fn spawn_fetch_workflow_runs(
     backend: BackendRef,
     workflow_id: String,
     tx: mpsc::Sender<AppEvent>,
+    clear_loading: bool,
 ) {
-    std::thread::spawn(move || match backend {
-        BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client(api_key.as_deref());
-
-            if let Ok(resp) = client
-                .get(format!("{base_url}/api/workflows/{workflow_id}/runs"))
-                .send()
-            {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let runs: Vec<WorkflowRun> = body
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .map(|r| WorkflowRun {
-                                    id: r["id"].as_str().unwrap_or("?").to_string(),
-                                    state: r["state"].as_str().unwrap_or("?").to_string(),
-                                    duration: r["duration"].as_str().unwrap_or("").to_string(),
-                                    output_preview: r["output"].as_str().unwrap_or("").to_string(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let _ = tx.send(AppEvent::WorkflowRunsLoaded(runs));
-                }
+    std::thread::spawn(move || {
+        let runs = match backend {
+            BackendRef::Daemon { base_url, api_key } => {
+                let client = make_daemon_client(api_key.as_deref());
+                client
+                    .get(format!("{base_url}/api/workflows/{workflow_id}/runs"))
+                    .send()
+                    .ok()
+                    // The daemon answers errors with a JSON body, so
+                    // `json::<Value>()` succeeds on a 401 or a 500 just as it
+                    // does on the run list. Consult the status before the body.
+                    .filter(|resp| resp.status().is_success())
+                    .and_then(|resp| resp.json::<serde_json::Value>().ok())
+                    .and_then(|body| body.as_array().map(|arr| parse_workflow_runs(arr)))
             }
-        }
-        BackendRef::InProcess(_) => {
-            let _ = tx.send(AppEvent::WorkflowRunsLoaded(Vec::new()));
-        }
+            BackendRef::InProcess(_) => Some(Vec::new()),
+        };
+        let _ = tx.send(AppEvent::WorkflowRunsLoaded {
+            runs,
+            clear_loading,
+        });
     });
+}
+
+/// Map the run-list payload onto the rows the run history draws, newest first.
+///
+/// `GET /api/workflows/{id}/runs` is backed by `engine.list_runs(None)`, which
+/// iterates a `DashMap` and so has no ordering at all. Leaving it unordered
+/// makes the retained list selection meaningless under auto-refresh: a run
+/// created while the operator is watching lands at an arbitrary position and
+/// shifts every row below it, moving the highlight onto a different run than
+/// the one they were following.
+///
+/// `started_at` is compared as text rather than parsed: the daemon writes it
+/// with `DateTime<Utc>::to_rfc3339()`, so every value is fixed-width down to
+/// the seconds and carries the same `+00:00` offset, which makes lexicographic
+/// order chronological. The run id breaks ties so two runs started in the same
+/// instant keep a stable position between polls instead of inheriting the
+/// `DashMap`'s order.
+fn parse_workflow_runs(arr: &[serde_json::Value]) -> Vec<WorkflowRun> {
+    let mut runs: Vec<WorkflowRun> = arr
+        .iter()
+        .map(|r| WorkflowRun {
+            id: r["id"].as_str().unwrap_or("?").to_string(),
+            state: run_state_label(&r["state"]),
+            started_at: r["started_at"].as_str().unwrap_or("").to_string(),
+            duration: run_duration_label(r),
+            steps_completed: r["steps_completed"].as_u64().unwrap_or(0) as usize,
+            // Absent or null for anything the daemon does not report as
+            // running — that gate lives in `WorkflowRun::live_step_index` and
+            // is deliberately not second-guessed here.
+            current_step_index: r["current_step_index"].as_u64().map(|i| i as usize),
+            total_steps: r["total_steps"].as_u64().unwrap_or(0) as usize,
+        })
+        .collect();
+    runs.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    runs
 }
 
 /// Fetch a workflow's declared `input_schema` parameters for the run-input form.
@@ -5426,6 +5519,112 @@ mod tests {
             // `AgentLoopResult`), so the wrong-variant message cannot print it.
             _ => panic!("expected MemoryConfigFailed(FetchFailure::Error), got another AppEvent"),
         }
+    }
+
+    /// Same for the workflow run history. The auto-refresh sets an in-flight
+    /// flag before spawning, and only the event clears it — a path that
+    /// returned silently would wedge the poll after its first failure, and an
+    /// operator-initiated load would keep its spinner up forever.
+    /// `runs: None` is what says "nothing to show for this attempt", so the
+    /// screen keeps the rows it already had.
+    #[test]
+    fn workflow_runs_fetch_reports_an_unreachable_daemon() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fetch_workflow_runs(unreachable_daemon(), "wf-1".to_string(), tx, true);
+
+        let ev = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("an unreachable daemon must still produce an event");
+        match ev {
+            AppEvent::WorkflowRunsLoaded {
+                runs,
+                clear_loading,
+            } => {
+                assert!(
+                    runs.is_none(),
+                    "a failed fetch must not report an empty run list as a result"
+                );
+                assert!(clear_loading, "the operator's own load owns the spinner");
+            }
+            _ => panic!("expected WorkflowRunsLoaded, got another AppEvent"),
+        }
+    }
+
+    /// `WorkflowRunState` is externally tagged, so `Paused` arrives as an
+    /// object rather than a string. Reading it with `as_str()` alone printed
+    /// `?` in the State column for every paused run — the one case where
+    /// "which step is it on" matters most, because it is stopped at an
+    /// operator step waiting for a human.
+    #[test]
+    fn a_paused_run_shows_its_state_rather_than_a_question_mark() {
+        assert_eq!(run_state_label(&serde_json::json!("running")), "running");
+        assert_eq!(
+            run_state_label(&serde_json::json!({
+                "paused": {
+                    "resume_token_hash": "deadbeef",
+                    "reason": "waiting on approval",
+                    "paused_at": "2026-09-09T10:00:00+00:00",
+                }
+            })),
+            "paused"
+        );
+        assert_eq!(run_state_label(&serde_json::Value::Null), "?");
+    }
+
+    /// The run-list payload has no `duration` key, so the column read an empty
+    /// string on every row until it was derived from the timestamps it does
+    /// carry.
+    #[test]
+    fn duration_is_derived_from_the_timestamps_the_payload_carries() {
+        let finished = serde_json::json!({
+            "started_at": "2026-09-09T10:00:00+00:00",
+            "completed_at": "2026-09-09T10:02:05+00:00",
+        });
+        assert_eq!(run_duration_label(&finished), "2m05s");
+
+        // Still in flight: no `completed_at`, so no figure rather than one
+        // that would be stale the moment it was drawn.
+        let running = serde_json::json!({ "started_at": "2026-09-09T10:00:00+00:00" });
+        assert_eq!(run_duration_label(&running), "");
+    }
+
+    /// `list_runs(None)` iterates a `DashMap`, so the payload arrives in no
+    /// order at all. Under a two-second auto-refresh that makes the retained
+    /// selection meaningless: a run created while the operator watches lands
+    /// at an arbitrary position and shifts the rows below it, moving the
+    /// highlight onto a run they were not following.
+    #[test]
+    fn the_run_history_is_ordered_newest_first() {
+        let payload = vec![
+            serde_json::json!({"id": "mid",    "started_at": "2026-09-09T10:01:00+00:00"}),
+            serde_json::json!({"id": "oldest", "started_at": "2026-09-09T09:00:00+00:00"}),
+            serde_json::json!({"id": "newest", "started_at": "2026-09-09T11:30:00+00:00"}),
+        ];
+        let runs = parse_workflow_runs(&payload);
+        assert_eq!(
+            runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["newest", "mid", "oldest"]
+        );
+    }
+
+    /// Same instant, two runs: the order has to come from somewhere stable, or
+    /// the two rows swap between polls and the highlight follows.
+    #[test]
+    fn runs_started_in_the_same_instant_keep_a_stable_order() {
+        let at = "2026-09-09T10:00:00+00:00";
+        let forward = parse_workflow_runs(&[
+            serde_json::json!({"id": "a", "started_at": at}),
+            serde_json::json!({"id": "b", "started_at": at}),
+        ]);
+        let reversed = parse_workflow_runs(&[
+            serde_json::json!({"id": "b", "started_at": at}),
+            serde_json::json!({"id": "a", "started_at": at}),
+        ]);
+        assert_eq!(
+            forward.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            reversed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            "the payload's own order must not decide the rows"
+        );
     }
 
     /// Same for a goal's run state, and the event must name the goal so the

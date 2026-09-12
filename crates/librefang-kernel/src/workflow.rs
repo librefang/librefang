@@ -1281,6 +1281,24 @@ pub struct WorkflowRun {
     pub state: WorkflowRunState,
     /// Results from each completed step.
     pub step_results: Vec<StepResult>,
+    /// Index of the currently executing step (0-based), if running.
+    ///
+    /// The sequential executor sets it at the top of each step iteration.
+    /// The DAG executor sets it once per layer, to the lowest-indexed step of
+    /// the layer it is about to run: a layer executes concurrently, so no
+    /// single index describes it, and the lowest one is a step that really is
+    /// in flight. A DAG run therefore skips indices rather than counting
+    /// through every one.
+    ///
+    /// Cleared on every terminal and pause transition so a finished run never
+    /// reports a live step. Read through [`WorkflowRun::live_step_index`],
+    /// never directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step_index: Option<usize>,
+    /// Total number of steps in the workflow (copied at creation so the
+    /// UI can show "Step 2/4" without loading the definition separately).
+    #[serde(default)]
+    pub total_steps: usize,
     /// Final output (set when workflow completes).
     pub output: Option<String>,
     /// Error message if failed.
@@ -1343,6 +1361,36 @@ impl WorkflowRun {
         self.paused_variables.clear();
         self.paused_current_input = None;
     }
+
+    /// The step index to report to an observer: `Some(i)` only while the run
+    /// is actually executing step `i`.
+    ///
+    /// The write side already clears `current_step_index` at every transition
+    /// out of Running: terminal exits from either executor go through
+    /// `WorkflowEngine::cleanup_terminal_pause_state`, and the handful of
+    /// transitions that never reach it (`cancel_run`, `mark_run_failed`,
+    /// `recover_stale_running_runs`, `fail_operator_run`, and the three
+    /// Running→Paused entries) clear it at their own assignment.
+    /// That is a short list rather than the ~28 branch-local copies an earlier
+    /// revision of this change carried, but it is still a list, and `state` is
+    /// a plain field any future branch can assign without touching either.
+    ///
+    /// Gating the *read* on the state removes the need to get that right for
+    /// the two places the field is ever observed (the run-detail and run-list
+    /// JSON), so a branch added later that forgets the clear still cannot make
+    /// a finished run advertise a step it is no longer executing.
+    ///
+    /// The predicate is a whitelist rather than `!is_terminal()` so that a
+    /// state variant added later fails closed: reporting no progress for a
+    /// live run is a display gap, reporting a step for a run that ended is a
+    /// lie, and only one of those is worth defaulting to.
+    pub fn live_step_index(&self) -> Option<usize> {
+        if matches!(self.state, WorkflowRunState::Running) {
+            self.current_step_index
+        } else {
+            None
+        }
+    }
 }
 
 /// External pause request lodged on a `WorkflowRun`. Pre-generates the
@@ -1394,6 +1442,11 @@ pub struct StepResult {
     /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits it from the JSON of successful steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Variable bindings at the time this step executed (`{{var}}` → resolved value).
+    /// Captured so the debug view can show what each placeholder resolved to.
+    /// `#[serde(default)]` keeps runs persisted before this field was added deserializable, and `skip_serializing_if` omits the field from the JSON of steps that bound nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, String>,
 }
 
 /// Preview of a single step produced by a dry-run (no LLM calls made).
@@ -1606,6 +1659,7 @@ fn mark_run_failed(
     if let Some(mut r) = runs.get_mut(run_id) {
         if !matches!(r.state, WorkflowRunState::Cancelled) {
             r.state = WorkflowRunState::Failed;
+            r.current_step_index = None;
             r.error = Some(error.to_string());
             r.completed_at = Some(Utc::now());
         }
@@ -2565,6 +2619,8 @@ impl WorkflowEngine {
             input,
             state: WorkflowRunState::Pending,
             step_results: Vec::new(),
+            current_step_index: None,
+            total_steps: workflow.steps.len(),
             output: None,
             error: None,
             started_at: Utc::now(),
@@ -2706,6 +2762,7 @@ impl WorkflowEngine {
                 "Recovering stale workflow run interrupted by daemon restart"
             );
             run.state = WorkflowRunState::Failed;
+            run.current_step_index = None;
             run.error = Some("Interrupted by daemon restart".to_string());
             run.completed_at = Some(now);
             run.clear_pause_state();
@@ -2777,6 +2834,13 @@ impl WorkflowEngine {
             // but only store the hash at rest.
             let shutdown_token = Uuid::new_v4();
             let shutdown_token_hash = Self::hash_resume_token(&shutdown_token);
+            // The run is no longer executing a step, so it must not keep
+            // advertising one. This transition never reaches
+            // `cleanup_terminal_pause_state` — Paused is not a terminal state
+            // and the shutdown sweep does not go through an executor — so the
+            // clear belongs next to the assignment, as at the other two
+            // Running->Paused entries.
+            run.current_step_index = None;
             run.state = WorkflowRunState::Paused {
                 resume_token_hash: shutdown_token_hash,
                 reason: "Interrupted by daemon shutdown".to_string(),
@@ -2890,6 +2954,7 @@ impl WorkflowEngine {
             output_tokens: 0,
             duration_ms: 0,
             error: None,
+            variables: Self::snapshot_variables(variables),
         };
         if let Some(mut r) = runs.get_mut(&run_id) {
             r.step_results.push(step_result);
@@ -2925,6 +2990,21 @@ impl WorkflowEngine {
         let mut out = input[..end].to_string();
         out.push('…');
         out
+    }
+
+    /// Snapshot the variable bindings in scope for a step's debug view,
+    /// truncating each value through [`Self::truncate_operator_input_trace`].
+    ///
+    /// The cap is load-bearing, not cosmetic.
+    /// A binding holds a whole step output, and this map is copied into every `StepResult`, serialized whole into the `workflow_runs.step_results` column and returned whole by the run-detail endpoint, so an uncapped snapshot makes a run's persisted size quadratic in the number of `output_var` steps — each step carrying its own copy of every earlier step's output.
+    /// Nothing in this module bounds `workflow.steps.len()`, so a 30-step chain of 10 KB outputs would add megabytes of duplicated text to one row and ship it on every poll.
+    /// A debug view only has to answer what a placeholder resolved to, and a prefix answers that.
+    ///
+    /// `BTreeMap` rather than `HashMap` because the result is serialized into a persisted row and into the API response; a stable key order keeps that output byte-identical across processes (#3298).
+    fn snapshot_variables(vars: &HashMap<String, String>) -> BTreeMap<String, String> {
+        vars.iter()
+            .map(|(k, v)| (k.clone(), Self::truncate_operator_input_trace(v)))
+            .collect()
     }
 
     /// Build the synthetic `StepResult.prompt` trace value for an
@@ -3376,6 +3456,7 @@ impl WorkflowEngine {
                 | WorkflowRunState::Paused { .. } => {
                     let was_paused = run.state.is_paused();
                     run.state = WorkflowRunState::Cancelled;
+                    run.current_step_index = None;
                     run.completed_at = Some(Utc::now());
                     // Clear any pending pause request so the executor cannot
                     // re-pause a cancelled run.
@@ -3824,6 +3905,7 @@ impl WorkflowEngine {
                 return;
             }
             r.state = WorkflowRunState::Failed;
+            r.current_step_index = None;
             r.error = Some(reason.to_string());
             r.completed_at = Some(Utc::now());
             r.clear_pause_state();
@@ -4274,13 +4356,24 @@ impl WorkflowEngine {
         result
     }
 
-    /// Wipe pause-related fields on the run if it ended up in a terminal
-    /// state (Completed / Failed). Called once at the bottom of
-    /// `execute_run` and `resume_run` so every terminal transition gets
-    /// the same cleanup, regardless of which inner branch (sequential
-    /// happy path, DAG entry-guard refuse, mid-step Failed) ran. Avoids
-    /// scattering identical clear-five-fields blocks across ~10 sites.
+    /// Wipe pause-related fields and the live step index on the run if it
+    /// ended up in a terminal state (Completed / Failed / Cancelled). Called
+    /// once at the bottom of `execute_run` and `resume_run` so every terminal
+    /// transition gets the same cleanup, regardless of which inner branch
+    /// (sequential happy path, DAG entry-guard refuse, mid-step Failed) ran.
+    /// Avoids scattering identical clear-blocks across ~10 sites.
     /// See #3335 review.
+    ///
+    /// `current_step_index` is cleared here rather than in each executor
+    /// branch: `execute_run_sequential` and `execute_run_dag` are only ever
+    /// reached from `execute_run` and `resume_run`, and both call this
+    /// unconditionally on the way out, so one clear here covers every terminal
+    /// exit from either executor instead of ~22 hand-maintained copies that a
+    /// new branch has to remember to add. The transitions that happen outside
+    /// the executors — `cancel_run`, `mark_run_failed`,
+    /// `recover_stale_running_runs`, `fail_operator_run` and the Running→Paused
+    /// entries — clear it at their own assignment, since they never pass
+    /// through here.
     async fn cleanup_terminal_pause_state(&self, run_id: WorkflowRunId) {
         if let Some(mut run) = self.runs.get_mut(&run_id) {
             if matches!(
@@ -4289,6 +4382,7 @@ impl WorkflowEngine {
                     | WorkflowRunState::Failed
                     | WorkflowRunState::Cancelled
             ) {
+                run.current_step_index = None;
                 run.clear_pause_state();
                 // Drop the per-run notifier — the run is terminal and no
                 // retry sleep will ever need to be woken again.
@@ -4355,6 +4449,12 @@ impl WorkflowEngine {
         let mut all_outputs: Vec<String> = Vec::new();
 
         while i < workflow.steps.len() {
+            // Update the run's current_step_index so pollers (dashboard)
+            // can show live progress as each step begins executing.
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
+                run.current_step_index = Some(i);
+            }
+
             // Pause-request gate. Honored at the top of every step
             // iteration so an in-flight step is allowed to finish before
             // the run pauses — partial-step rollback would be a much
@@ -4369,6 +4469,7 @@ impl WorkflowEngine {
             let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                 if let Some(pause) = run.pause_request.take() {
                     run.paused_step_index = Some(i);
+                    run.current_step_index = None;
                     run.paused_variables = variables
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
@@ -4485,6 +4586,7 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            let step_vars = Self::snapshot_variables(&variables);
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -4495,6 +4597,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4596,6 +4699,12 @@ impl WorkflowEngine {
                     let results = futures::future::join_all(futures).await;
                     let duration_ms = start.elapsed().as_millis() as u64;
 
+                    // Snapshot the bindings the fan-out prompts were expanded
+                    // against, before the result loop starts inserting each
+                    // step's own `output_var`. Every fan-out step in the group
+                    // saw the same bindings, so one snapshot serves them all.
+                    let fan_out_vars = Self::snapshot_variables(&variables);
+
                     for (k, result) in results.into_iter().enumerate() {
                         let (_, ref step_name, agent_id, ref agent_name) = step_infos[k];
                         let fan_step = fan_out_steps[k].1;
@@ -4612,6 +4721,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: fan_out_vars.clone(),
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4760,6 +4870,7 @@ impl WorkflowEngine {
 
                     match result {
                         Ok(Some((output, input_tokens, output_tokens))) => {
+                            let step_vars = Self::snapshot_variables(&variables);
                             let step_result = StepResult {
                                 step_name: step.name.clone(),
                                 agent_id: agent_id.to_string(),
@@ -4770,6 +4881,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                                 error: None,
+                                variables: step_vars,
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -4847,6 +4959,7 @@ impl WorkflowEngine {
 
                         match result {
                             Ok(Some((output, input_tokens, output_tokens))) => {
+                                let step_vars = Self::snapshot_variables(&variables);
                                 let step_result = StepResult {
                                     step_name: format!("{} (iter {})", step.name, loop_iter + 1),
                                     agent_id: agent_id.to_string(),
@@ -4857,6 +4970,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                     error: None,
+                                    variables: step_vars,
                                 };
                                 if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
@@ -4985,6 +5099,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms,
                         error: None,
+                        variables: Self::snapshot_variables(&variables),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5036,6 +5151,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: Self::snapshot_variables(&variables),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5077,6 +5193,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: Self::snapshot_variables(&variables),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5198,6 +5315,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: None,
+                                variables: Self::snapshot_variables(&variables),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5240,6 +5358,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: Self::snapshot_variables(&variables),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5358,6 +5477,7 @@ impl WorkflowEngine {
                                         output_tokens: 0,
                                         duration_ms,
                                         error: None,
+                                        variables: Self::snapshot_variables(&variables),
                                     };
                                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                                         r.step_results.push(step_result);
@@ -5441,6 +5561,7 @@ impl WorkflowEngine {
                                 output_tokens: 0,
                                 duration_ms,
                                 error: Some(reason.clone()),
+                                variables: Self::snapshot_variables(&variables),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -5514,6 +5635,7 @@ impl WorkflowEngine {
                         output_tokens: 0,
                         duration_ms: 0,
                         error: None,
+                        variables: Self::snapshot_variables(&variables),
                     };
                     if let Some(mut r) = self.runs.get_mut(&run_id) {
                         r.step_results.push(step_result);
@@ -5571,6 +5693,7 @@ impl WorkflowEngine {
                     let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
                         if let Some(pause) = run.pause_request.take() {
                             run.paused_step_index = Some(i);
+                            run.current_step_index = None;
                             run.paused_variables = variables
                                 .iter()
                                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -5747,6 +5870,22 @@ impl WorkflowEngine {
                 "Executing DAG layer"
             );
 
+            // Report live progress on the DAG path too. Without this the
+            // sequential executor is the only one that ever assigns the field,
+            // so every workflow that declares a `depends_on` — which is
+            // exactly the condition that routes here — reports
+            // `current_step_index: null` for its whole life and the feature is
+            // silently absent on the runs most worth watching.
+            // A layer's steps run concurrently, so there is no single step the
+            // run "is on"; the lowest-indexed one is a step that really is
+            // executing and is bounded by `total_steps`, which is the most an
+            // observer can be told truthfully here.
+            if let Some(&layer_first_step) = layer.iter().min() {
+                if let Some(mut run) = self.runs.get_mut(&run_id) {
+                    run.current_step_index = Some(layer_first_step);
+                }
+            }
+
             if layer.len() == 1 {
                 // Single step in layer — execute directly (no concurrency overhead)
                 let step_idx = layer[0];
@@ -5805,6 +5944,7 @@ impl WorkflowEngine {
 
                 match result {
                     Ok(Some((output, input_tokens, output_tokens))) => {
+                        let step_vars = Self::snapshot_variables(&variables);
                         let step_result = StepResult {
                             step_name: step.name.clone(),
                             agent_id: agent_id.to_string(),
@@ -5815,6 +5955,7 @@ impl WorkflowEngine {
                             output_tokens,
                             duration_ms,
                             error: None,
+                            variables: step_vars,
                         };
                         if let Some(mut r) = self.runs.get_mut(&run_id) {
                             r.step_results.push(step_result);
@@ -5967,6 +6108,16 @@ impl WorkflowEngine {
                 let results = futures::future::join_all(futures).await;
                 let layer_duration_ms = layer_start.elapsed().as_millis() as u64;
 
+                // Snapshot the bindings every prompt in this layer was expanded
+                // against, before the result loop starts inserting each step's
+                // own `output_var`. Every step in the layer was dispatched
+                // against the same map, so one snapshot serves them all —
+                // taking it inside the loop would show step k the bindings
+                // written by steps 0..k, which it never saw, and would make
+                // which siblings get a truthful map depend on `step_metas`
+                // ordering. Same reasoning as `fan_out_vars` above.
+                let layer_vars = Self::snapshot_variables(&variables);
+
                 for (k, (result, step_duration_ms)) in results.into_iter().enumerate() {
                     let (step_idx, ref step_name, agent_id, ref agent_name, _dep_failed) =
                         step_metas[k];
@@ -5984,6 +6135,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms: step_duration_ms,
                                 error: None,
+                                variables: layer_vars.clone(),
                             };
                             if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
@@ -7188,6 +7340,7 @@ fn workflow_run_to_row(run: &WorkflowRun) -> WorkflowRunRow {
         paused_variables: paused_variables_json,
         paused_current_input: run.paused_current_input.clone(),
         step_results: step_results_json,
+        total_steps: run.total_steps as i64,
         started_at: run.started_at.to_rfc3339(),
         completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
         created_at: run.started_at.to_rfc3339(),
@@ -7304,6 +7457,8 @@ fn row_to_workflow_run(row: &WorkflowRunRow) -> Result<WorkflowRun, String> {
         input: row.input.clone(),
         state,
         step_results,
+        current_step_index: None,
+        total_steps: row.total_steps.max(0) as usize,
         output: row.output.clone(),
         error: row.error.clone(),
         started_at,
@@ -10481,6 +10636,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt(
             "summarize",
@@ -10523,6 +10679,7 @@ prompt_template = "do {{x}}"
             output_tokens: 5,
             duration_ms: 100,
             error: None,
+            variables: BTreeMap::new(),
         }];
         let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
         assert!(prompt.contains("..."));
@@ -10877,9 +11034,12 @@ prompt_template = "do {{x}}"
                 output_tokens: 20,
                 duration_ms: 100,
                 error: None,
+                variables: BTreeMap::new(),
             }],
             output: Some("final output".to_string()),
             error: None,
+            current_step_index: None,
+            total_steps: 0,
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
             pause_request: None,
@@ -10888,6 +11048,314 @@ prompt_template = "do {{x}}"
             paused_current_input: None,
             owner_agent_id: None,
         }
+    }
+
+    /// The write-side clears are what keeps a finished run from advertising a
+    /// step it is no longer executing, and they are maintained by remembering
+    /// to add one to each transition that leaves Running without passing
+    /// through `cleanup_terminal_pause_state`. This pins the guarantee to the
+    /// read instead: a branch that forgets the clear still cannot surface a
+    /// live step, because `live_step_index` asks the state rather than
+    /// trusting the field.
+    #[test]
+    fn live_step_index_is_none_for_a_non_running_run_that_kept_its_index() {
+        let states = [
+            WorkflowRunState::Pending,
+            WorkflowRunState::Completed,
+            WorkflowRunState::Failed,
+            WorkflowRunState::Cancelled,
+            WorkflowRunState::Paused {
+                resume_token_hash: "deadbeef".to_string(),
+                reason: "waiting".to_string(),
+                paused_at: Utc::now(),
+            },
+        ];
+        for state in states {
+            let mut run = make_terminal_run(state.clone());
+            // The clear the imagined new branch forgot to write.
+            run.current_step_index = Some(1);
+            assert_eq!(
+                run.live_step_index(),
+                None,
+                "a run in {state:?} must not report a live step index"
+            );
+        }
+    }
+
+    /// The other half of the whitelist: gating the read must not hide progress
+    /// on a run that really is executing a step.
+    #[test]
+    fn live_step_index_reports_the_step_a_running_run_is_executing() {
+        let mut run = make_terminal_run(WorkflowRunState::Running);
+        run.current_step_index = Some(1);
+        assert_eq!(run.live_step_index(), Some(1));
+    }
+
+    // -- live step progress ------------------------------------------------
+
+    /// `WorkflowStep` is eleven fields and these tests vary four of them.
+    fn progress_step(
+        name: &str,
+        prompt: &str,
+        output_var: Option<&str>,
+        depends_on: &[&str],
+    ) -> WorkflowStep {
+        WorkflowStep {
+            name: name.to_string(),
+            agent: StepAgent::ByName {
+                name: "a".to_string(),
+            },
+            prompt_template: prompt.to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 30,
+            error_mode: ErrorMode::Fail,
+            output_var: output_var.map(str::to_string),
+            inherit_context: None,
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            session_mode: None,
+            required_skills: Vec::new(),
+        }
+    }
+
+    fn progress_workflow(name: &str, steps: Vec<WorkflowStep>) -> Workflow {
+        Workflow {
+            id: WorkflowId::new(),
+            name: name.to_string(),
+            description: String::new(),
+            steps,
+            created_at: Utc::now(),
+            layout: None,
+            total_timeout_secs: None,
+            input_schema: None,
+            owner: None,
+        }
+    }
+
+    /// Echoes the prompt back as the step output, so a step's recorded output
+    /// is whatever its template expanded to.
+    macro_rules! echo_sender {
+        () => {
+            |_id: AgentId, msg: String, _sm: Option<SessionMode>| async move {
+                Ok((msg, 1u64, 1u64))
+            }
+        };
+    }
+
+    fn step_named<'a>(run: &'a WorkflowRun, name: &str) -> &'a StepResult {
+        run.step_results
+            .iter()
+            .find(|s| s.step_name == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "step '{name}' missing; recorded: {:?}",
+                    run.step_results
+                        .iter()
+                        .map(|s| &s.step_name)
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    /// Steps in one DAG layer are dispatched concurrently against a single
+    /// `variables` map, so none of them can have seen a sibling's
+    /// `output_var` — that binding does not exist until the results come
+    /// back. Snapshotting inside the result loop instead recorded, for the
+    /// step processed second, a map containing the first one's output, which
+    /// asserts that a placeholder resolved when the prompt in the very same
+    /// `StepResult` shows it did not.
+    ///
+    /// Both siblings bind, so the assertion holds whichever order
+    /// `topological_sort` puts them in — with the snapshot inside the loop,
+    /// whichever is processed second is polluted either way.
+    #[tokio::test]
+    async fn dag_layer_siblings_do_not_record_each_others_bindings() {
+        let engine = WorkflowEngine::new();
+        let wf = progress_workflow(
+            "dag-siblings",
+            vec![
+                progress_step("A", "root", Some("a"), &[]),
+                progress_step("B", "b-sees {{a}}", Some("b"), &["A"]),
+                progress_step("C", "c-sees {{a}}", Some("c"), &["A"]),
+            ],
+        );
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "in".to_string()).await.unwrap();
+        engine
+            .execute_run(run_id, mock_resolver, echo_sender!())
+            .await
+            .expect("DAG run must succeed");
+
+        let run = engine.runs.get(&run_id).expect("run vanished");
+        for (me, sibling) in [("B", "c"), ("C", "b")] {
+            let s = step_named(&run, me);
+            assert!(
+                s.variables.contains_key("a"),
+                "{me} was dispatched after A bound `a`, so it must record it: {:?}",
+                s.variables
+            );
+            assert!(
+                !s.variables.contains_key(sibling),
+                "{me} ran concurrently with its sibling and cannot have seen `{sibling}`: {:?}",
+                s.variables
+            );
+        }
+    }
+
+    /// A binding holds a whole step output, and the snapshot is copied into
+    /// every later step's `StepResult`, persisted whole and returned whole by
+    /// the run-detail endpoint. Uncapped, a chain of `output_var` steps makes
+    /// the persisted run quadratic in its own step count.
+    #[tokio::test]
+    async fn step_variable_snapshot_truncates_each_binding() {
+        let engine = WorkflowEngine::new();
+        // The echo sender returns the expanded prompt, so `big`'s value is
+        // this literal — comfortably past the 200-char trace cap.
+        let long = "x".repeat(5_000);
+        let wf = progress_workflow(
+            "long-binding",
+            vec![
+                progress_step("bind", &long, Some("big"), &[]),
+                progress_step("read", "{{big}}", None, &[]),
+            ],
+        );
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "in".to_string()).await.unwrap();
+        engine
+            .execute_run(run_id, mock_resolver, echo_sender!())
+            .await
+            .expect("run must succeed");
+
+        let run = engine.runs.get(&run_id).expect("run vanished");
+        let recorded = step_named(&run, "read")
+            .variables
+            .get("big")
+            .expect("`big` must be in scope for the second step");
+        assert!(
+            recorded.chars().count() <= WorkflowEngine::OPERATOR_INPUT_TRACE_CAP + 1,
+            "snapshot kept {} chars of a 5000-char binding",
+            recorded.chars().count()
+        );
+        assert!(
+            recorded.ends_with('…'),
+            "a truncated value must say so: {recorded:?}"
+        );
+    }
+
+    /// A `Transform` step reads `current_input` and writes its own
+    /// `output_var`, so it is part of the binding chain — and it is the first
+    /// step someone debugging a mid-chain transform opens. Recording an empty
+    /// map made the run detail drop the field entirely
+    /// (`skip_serializing_if`), which reads as "no bindings existed here"
+    /// rather than "not captured".
+    #[tokio::test]
+    async fn operator_steps_record_the_bindings_in_scope() {
+        let engine = WorkflowEngine::new();
+        let mut transform = progress_step("shout", "", None, &[]);
+        transform.mode = StepMode::Transform {
+            code: "TRANSFORMED".to_string(),
+        };
+        let wf = progress_workflow(
+            "transform-chain",
+            vec![
+                progress_step("bind", "hello", Some("greeting"), &[]),
+                transform,
+            ],
+        );
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "in".to_string()).await.unwrap();
+        engine
+            .execute_run(run_id, mock_resolver, echo_sender!())
+            .await
+            .expect("run must succeed");
+
+        let run = engine.runs.get(&run_id).expect("run vanished");
+        let s = step_named(&run, "shout");
+        assert_eq!(
+            s.agent_name, "_operator:transform",
+            "fixture must exercise the operator path"
+        );
+        assert_eq!(
+            s.variables.get("greeting").map(String::as_str),
+            Some("hello"),
+            "the transform ran with `greeting` bound and must record it: {:?}",
+            s.variables
+        );
+    }
+
+    /// `execute_run` routes to the DAG executor as soon as any step declares
+    /// a `depends_on`, which is exactly the shape of workflow whose progress
+    /// is worth watching. With the index assigned on the sequential path
+    /// only, those runs reported `current_step_index: null` for their whole
+    /// life and the feature was absent where it mattered most.
+    #[tokio::test]
+    async fn a_dag_run_reports_a_live_step_index_while_executing() {
+        let engine = WorkflowEngine::new();
+        let wf = progress_workflow(
+            "dag-progress",
+            vec![
+                progress_step("A", "first", None, &[]),
+                progress_step("B", "second", None, &["A"]),
+            ],
+        );
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "in".to_string()).await.unwrap();
+
+        // Sample what an API poller would read at the moment each step is
+        // dispatched — the only window in which a live index exists.
+        let seen: Arc<std::sync::Mutex<Vec<Option<usize>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let runs = Arc::clone(&engine.runs);
+        let sender = move |_id: AgentId, msg: String, _sm: Option<SessionMode>| {
+            let sink = Arc::clone(&sink);
+            let runs = Arc::clone(&runs);
+            async move {
+                let observed = runs.get(&run_id).and_then(|r| r.live_step_index());
+                sink.lock().unwrap().push(observed);
+                Ok((msg, 1u64, 1u64))
+            }
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("DAG run must succeed");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![Some(0), Some(1)],
+            "each DAG layer must publish the step it is running"
+        );
+    }
+
+    /// The terminal clear lives in `cleanup_terminal_pause_state`, which
+    /// `execute_run` and `resume_run` call unconditionally on the way out of
+    /// either executor. No executor branch clears the field itself any more,
+    /// so this asserts on the raw field rather than `live_step_index` — the
+    /// gated read would answer `None` for a finished run either way and would
+    /// not notice the choke point going missing.
+    #[tokio::test]
+    async fn a_finished_run_keeps_no_step_index_on_the_field_itself() {
+        let engine = WorkflowEngine::new();
+        let wf = progress_workflow(
+            "terminal-clear",
+            vec![
+                progress_step("one", "1", None, &[]),
+                progress_step("two", "2", None, &[]),
+            ],
+        );
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "in".to_string()).await.unwrap();
+        engine
+            .execute_run(run_id, mock_resolver, echo_sender!())
+            .await
+            .expect("run must succeed");
+
+        let run = engine.runs.get(&run_id).expect("run vanished");
+        assert!(matches!(run.state, WorkflowRunState::Completed));
+        assert_eq!(
+            run.current_step_index, None,
+            "the last step's index must not survive the run"
+        );
     }
 
     #[test]
@@ -10947,6 +11415,8 @@ prompt_template = "do {{x}}"
             step_results: vec![],
             output: None,
             error: None,
+            current_step_index: None,
+            total_steps: 0,
             started_at: Utc::now(),
             completed_at: None,
             pause_request: None,
@@ -11001,6 +11471,8 @@ prompt_template = "do {{x}}"
         let future_started_at = Utc::now() + chrono::Duration::hours(1);
         let run = WorkflowRun {
             state: WorkflowRunState::Running,
+            current_step_index: None,
+            total_steps: 0,
             started_at: future_started_at,
             completed_at: None,
             ..make_terminal_run(WorkflowRunState::Pending)
@@ -11052,6 +11524,8 @@ prompt_template = "do {{x}}"
         let stale_started_at = Utc::now() - chrono::Duration::hours(1);
         let run = WorkflowRun {
             state: WorkflowRunState::Running,
+            current_step_index: None,
+            total_steps: 0,
             started_at: stale_started_at,
             completed_at: None,
             ..make_terminal_run(WorkflowRunState::Pending)
@@ -11098,6 +11572,12 @@ prompt_template = "do {{x}}"
 
         let running = WorkflowRun {
             state: WorkflowRunState::Running,
+            // Mid-step, as any run this sweep finds Running will be. The
+            // shutdown pause is a transition out of Running that never
+            // reaches `cleanup_terminal_pause_state`, so it has to clear the
+            // live index itself or the paused run keeps advertising a step
+            // nothing is executing.
+            current_step_index: Some(2),
             ..make_terminal_run(WorkflowRunState::Pending)
         };
         let running_id = running.id;
@@ -11141,6 +11621,19 @@ prompt_template = "do {{x}}"
                 drained, 2,
                 "drain must transition exactly the Running + Pending pair \
                  (Completed / Failed / Paused must be skipped)"
+            );
+            // Asserted on the live engine, not the reloaded one:
+            // `row_to_workflow_run` rebuilds every run with
+            // `current_step_index: None`, so the same check after the restart
+            // boundary would pass whether or not the drain cleared anything.
+            assert_eq!(
+                engine
+                    .runs
+                    .get(&running_id)
+                    .expect("running missing")
+                    .current_step_index,
+                None,
+                "a run paused for shutdown is executing nothing and must report no live step"
             );
         }
 
