@@ -1453,18 +1453,6 @@ pub fn spawn_fetch_workflow_params(
         let _ = tx.send(AppEvent::WorkflowParamsLoaded(fetch));
     });
 }
-/// How long the daemon may hold the run request open before handing the run back as a background task.
-///
-/// Same reasoning as `WORKFLOW_RUN_WAIT_MS` in the `workflow run` command: `?wait=true` on its own ties the run's lifetime to the request, so a workflow slower than this thread's 60 s client timeout would be killed by the disconnect.
-/// 45 s leaves 15 s of that budget for the response itself.
-const WORKFLOW_RUN_WAIT_MS: u64 = 45_000;
-
-/// The wait has to expire before this thread's own client does, or a slow run comes back as a disconnect instead of the 202 the screen knows how to render.
-const _: () = assert!(
-    WORKFLOW_RUN_WAIT_MS < 60_000,
-    "spawn_run_workflow builds a 60 s client; a longer wait can never return 202"
-);
-
 /// Render one workflow-run response for the Workflows screen.
 ///
 /// Reading `output` and nothing else meant a 202 (still running) and a 422 (the run failed) both rendered the generic "completed" line, so the screen announced success on every failure.
@@ -1491,12 +1479,16 @@ pub fn spawn_run_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client =
-                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
+            // Both the client timeout and the wait come from `commands::automation` so this screen cannot ask the daemon for a different deadline than `librefang workflow run` does for the same workflow (#8170).
+            let client = make_daemon_client_with_timeout(
+                api_key.as_deref(),
+                Duration::from_secs(crate::commands::automation::WORKFLOW_RUN_CLIENT_TIMEOUT_SECS),
+            );
 
             match client
                 .post(format!(
-                    "{base_url}/api/workflows/{workflow_id}/run?wait=true&timeout_ms={WORKFLOW_RUN_WAIT_MS}"
+                    "{base_url}/{}",
+                    crate::commands::automation::workflow_run_path(&workflow_id)
                 ))
                 .json(&serde_json::json!({"input": input}))
                 .send()
@@ -1504,9 +1496,9 @@ pub fn spawn_run_workflow(
                 Ok(resp) => {
                     let status = resp.status();
                     let body: serde_json::Value = resp.json().unwrap_or_default();
-                    let _ = tx.send(AppEvent::WorkflowRunResult(
-                        workflow_run_result_message(status, &body),
-                    ));
+                    let _ = tx.send(AppEvent::WorkflowRunResult(workflow_run_result_message(
+                        status, &body,
+                    )));
                 }
                 // The request never left, so there is no run status to report.
                 // `spawn_create_workflow` already established `-` as the
