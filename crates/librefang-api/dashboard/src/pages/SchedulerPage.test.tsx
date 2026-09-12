@@ -257,12 +257,14 @@ describe("SchedulerPage", () => {
     // Before any click there should be NO confirm buttons in the page.
     expect(screen.queryByText("common.confirm")).not.toBeInTheDocument();
 
-    // Locate the trash button by its lucide-trash2 svg ancestor. There are
-    // two trash buttons (one per schedule row, one per trigger row); the
-    // schedule's is first in DOM order.
-    const trashIcons = document.querySelectorAll("svg.lucide-trash-2");
-    expect(trashIcons.length).toBeGreaterThanOrEqual(2);
-    const scheduleTrashBtn = trashIcons[0].closest("button") as HTMLButtonElement;
+    // Locate the trash button through the schedule's own row, the way the
+    // run-schedule test below does. Selecting on the icon's `lucide-*` class
+    // ties the test to lucide's internal naming: 1.41.0 renamed trash-2 to
+    // trash and the query silently matched nothing.
+    // Order in row: [active toggle, run, trash].
+    const scheduleCard = screen.getByText("morning report").closest("div")!
+      .parentElement!;
+    const scheduleTrashBtn = within(scheduleCard).getAllByRole("button")[2];
     fireEvent.click(scheduleTrashBtn);
     // First click only flips confirm state — mutation not called yet.
     expect(mutateAsync).not.toHaveBeenCalled();
