@@ -335,7 +335,6 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/mcp/catalog", Expect::DashboardRead),
     re("/api/mcp/health", Expect::DashboardRead),
     re("/api/config", Expect::DashboardRead),
-    re("/api/mcp/servers", Expect::DashboardRead),
     re("/api/models", Expect::DashboardRead),
     re("/api/models/aliases", Expect::DashboardRead),
     re("/api/network/status", Expect::DashboardRead),
@@ -357,6 +356,13 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).
     re("/api/mcp/servers/test-srv", Expect::Authed),
     re("/api/mcp/servers/test-srv/auth/status", Expect::Authed),
+    // #8304: `/api/mcp/servers` came out of PUBLIC_ROUTES_DASHBOARD_READS —
+    // it returns each server's transport verbatim (stdio `command`/`args`,
+    // or an SSE/HTTP `url` with its query string, where a remote MCP
+    // endpoint's credential normally lives) — and is now gated to Admin by
+    // `min_role_for_privileged_get`, so it belongs with its `{name}` sibling
+    // above rather than in the dashboard-reads group below.
+    re("/api/mcp/servers", Expect::Authed),
     // The `/api/hands/` prefix used to publish everything under an item, in the same class as the `/api/cron/` removal: the linked agent session (every message plus tool inputs and results), the raw HAND.toml with its authored prompt, the instance config, and a live browser screenshot the handler takes by driving the agent's browser on a GET.
     // Only the item read itself (`/api/hands/{id}`, above) stays in the dashboard-read group.
     re("/api/hands/my-hand/manifest", Expect::Authed),
