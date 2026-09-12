@@ -233,7 +233,9 @@ classified differently — the row note spells out which is which.
 | `media` | R | Media-understanding config — `MediaEngine` captures it by value at boot with no rebuild path, so a change needs a restart. |
 | `links` | N | Link-understanding config. |
 | `canvas` | R | Canvas (A2UI) config. |
-| `tts` | R/N | Text-to-speech config. `enabled` and `output_format` are **N**: both are re-read per turn from the config snapshot — `enabled` at the call sites that decide whether to lend the `TtsEngine`, `output_format` through `LoopOptions.tts_config` — so a swap is in force on the next turn. Everything else (`provider`, `max_text_length`, `timeout_secs`, and the `[tts.openai]` / `[tts.elevenlabs]` / `[tts.google]` / `[tts.custom]` blocks) is **R**: it is reached through `TtsEngine`, which `boot.rs` builds once from `config.tts.clone()` with no rebuild path, the same shape as `MediaEngine` and `BrowserManager` above. `build_reload_plan` makes the split the way `registry` does — `restart_if_changed` on the section with the two live keys masked out, `noop_if_changed` on each of them — which is also what lets `should_store_config` accept the swap, so `output_format` reaches the next turn instead of being discarded (#8272). |
+| `tts` | R | Text-to-speech config — captured in `TtsEngine`, which `boot.rs` builds once from `config.tts.clone()` with no rebuild path, the same shape as `media` and `browser` above. Covers `provider`, `max_text_length`, `timeout_secs` and the `[tts.openai]` / `[tts.elevenlabs]` / `[tts.google]` / `[tts.custom]` blocks. |
+| `tts.enabled` | N | Re-read per turn by the agent loop, at the call sites that decide whether to lend the `TtsEngine`. |
+| `tts.output_format` | N | Re-read per turn by `tool_text_to_speech`, through `LoopOptions.tts_config`. Carved out of the restart-required half deliberately: `should_store_config` only accepts a plan carrying a hot action or a noop change, so classifying the whole section R would have discarded the swap and left the value resolving to its boot-time value (#8272). |
 
 ### Notifications / inbox / observability
 

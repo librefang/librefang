@@ -2529,6 +2529,7 @@ async fn spent_network_byte_quota_refuses_web_fetch_before_it_dials() {
         None,            // media_drivers
         None,            // exec_policy
         None,            // tts_engine
+        None,            // tts_config
         None,            // docker_config
         None,            // process_manager
         None,            // process_registry
@@ -2594,6 +2595,7 @@ async fn spent_network_byte_quota_leaves_non_egress_tools_alone() {
         None,            // media_drivers
         None,            // exec_policy
         None,            // tts_engine
+        None,            // tts_config
         None,            // docker_config
         None,            // process_manager
         None,            // process_registry
@@ -2677,6 +2679,7 @@ async fn web_fetch_charges_the_agent_for_the_bytes_it_actually_read() {
         None,            // media_drivers
         None,            // exec_policy
         None,            // tts_engine
+        None,            // tts_config
         None,            // docker_config
         None,            // process_manager
         None,            // process_registry
@@ -2729,6 +2732,7 @@ async fn a_tool_that_moves_no_bytes_reports_nothing() {
         None,            // media_drivers
         None,            // exec_policy
         None,            // tts_engine
+        None,            // tts_config
         None,            // docker_config
         None,            // process_manager
         None,            // process_registry
