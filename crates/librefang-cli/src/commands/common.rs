@@ -354,9 +354,25 @@ pub(crate) fn daemon_client() -> reqwest::blocking::Client {
     daemon_client_with_api_key(read_api_key().as_deref())
 }
 
+/// The timeout `daemon_client` and friends build with when the caller does not name one.
+pub(crate) const DEFAULT_DAEMON_CLIENT_TIMEOUT_SECS: u64 = 120;
+
 pub(crate) fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
-    let mut builder =
-        crate::http_client::client_builder().timeout(std::time::Duration::from_secs(120));
+    daemon_client_with_api_key_and_timeout(
+        api_key,
+        std::time::Duration::from_secs(DEFAULT_DAEMON_CLIENT_TIMEOUT_SECS),
+    )
+}
+
+/// A daemon client whose timeout the caller chooses.
+///
+/// Exists for the one request whose duration is bounded by the work rather than by the network: `POST /api/workflows/{id}/run?wait=true` asks the daemon to hold the connection, so the wait it asks for and the timeout the client is built with have to be chosen together (#8170).
+/// Every other command wants [`DEFAULT_DAEMON_CLIENT_TIMEOUT_SECS`] and should keep calling `daemon_client`.
+pub(crate) fn daemon_client_with_api_key_and_timeout(
+    api_key: Option<&str>,
+    timeout: std::time::Duration,
+) -> reqwest::blocking::Client {
+    let mut builder = crate::http_client::client_builder().timeout(timeout);
 
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
