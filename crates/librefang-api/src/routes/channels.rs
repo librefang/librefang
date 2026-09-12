@@ -2859,12 +2859,8 @@ mod sidecar_configuration_write_tests {
             None,
         );
 
-        // `walk` canonicalizes before recording a hit, so compare against the
-        // canonical form rather than the path this test happened to build.
-        // On macOS `tempfile::tempdir()` lands under `/var/folders/…`, which is
-        // a symlink to `/private/var/folders/…`, so the two spellings differ
-        // there and are identical on Linux — which is why this only ever failed
-        // on the macOS runner.
+        // `walk` canonicalizes before recording a hit, so compare against the canonical form rather than the path this test happened to build.
+        // On macOS `tempfile::tempdir()` lands under `/var/folders/…`, which is a symlink to `/private/var/folders/…`, so the two spellings differ there and are identical on Linux — which is why this only ever failed on the macOS runner.
         let expected_included = std::fs::canonicalize(&included_path).unwrap();
         assert!(matches!(
             result,
