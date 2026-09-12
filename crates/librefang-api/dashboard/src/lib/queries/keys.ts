@@ -77,6 +77,17 @@ export const agentKeys = {
   // is separate from `tools`: an MCP read must not be invalidated by a tool write.
   mcpServers: (agentId: string) =>
     [...agentKeys.all, "mcpServers", agentId] as const,
+  // Full manifest as raw TOML (#7742) — backs the dashboard's full manifest
+  // editor, distinct from `detail(id)`'s curated JSON projection.
+  manifest: (agentId: string) =>
+    [...agentKeys.all, "manifest", agentId] as const,
+  // Per-agent channel allowlist (#7742) — backs the Configure drawer's
+  // Channels section. Named distinctly from `channelKeys` (the
+  // instance-wide `/api/channels` integration domain) to avoid confusion
+  // between "channels this agent is reachable from" and "channels
+  // configured on this instance".
+  channels: (agentId: string) =>
+    [...agentKeys.all, "channels", agentId] as const,
 };
 
 // Central prompt repository (#6160). The fleet-wide overview

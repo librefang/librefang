@@ -87,3 +87,51 @@ export function isMcpServerGranted(
   const target = normalizeMcpName(server);
   return (mcpServers ?? []).some((s) => normalizeMcpName(s) === target);
 }
+
+/** What an MCP server's card in the Tools tab can do, and therefore what it may say.
+ *
+ * - `granted` / `grantable` — the grant is a per-server pin in `mcp_servers`, so the card toggles it.
+ * - `wildcard` — the grant comes from `mcp_servers = ["*"]`; revoking it means editing the wildcard, not this card.
+ * - `hard-disabled` — `tools_disabled` or `mcp_disabled` makes the kernel skip MCP entirely, so a staged grant would arm a save that changes nothing.
+ *
+ * The three branches that render these cards (the all-tools grid, and the assigned/available lists of the allowlist view) each derived this inline and disagreed, which is how a card ended up inert, clickable and labelled "click to assign" all at once (#7749 review).
+ */
+export type McpGroupCardState = "granted" | "grantable" | "wildcard" | "hard-disabled";
+
+export function mcpGroupCardState(args: {
+  granted: boolean;
+  mode: McpGrantMode;
+  hardDisabled: boolean;
+}): McpGroupCardState {
+  if (args.hardDisabled) return "hard-disabled";
+  if (args.mode === "all") return "wildcard";
+  return args.granted ? "granted" : "grantable";
+}
+
+/** Whether clicking the card stages a change. The two inert states must not arm a save. */
+export function isMcpGroupCardActionable(state: McpGroupCardState): boolean {
+  return state === "granted" || state === "grantable";
+}
+
+/**
+ * Add or remove `server` from a staged `mcp_servers` grant list, comparing
+ * names after `normalizeMcpName` so a draft that already carries
+ * `"Brave-Search"` recognizes a toggle of `"brave_search"` as "already
+ * granted" rather than adding a case/dash-variant duplicate.
+ *
+ * Powers the Tools tab's per-group MCP grant/revoke (#6565 follow-up): the
+ * agent detail Tools tab used to point operators at a non-existent "MCP
+ * servers tab" to change an MCP grant because `PUT /agents/{id}/tools`
+ * cannot carry `mcp_servers` — the grant now stages here instead and saves
+ * through the dedicated `PUT /agents/{id}/mcp_servers` endpoint.
+ */
+export function toggleMcpServerGrant(
+  current: readonly string[],
+  server: string,
+): string[] {
+  const target = normalizeMcpName(server);
+  const granted = current.some((s) => normalizeMcpName(s) === target);
+  return granted
+    ? current.filter((s) => normalizeMcpName(s) !== target)
+    : [...current, server];
+}
