@@ -33,10 +33,16 @@ import {
   setCachedChatMessages,
 } from "../lib/chatSessionCache";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu, Minus } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
-import { useUIStore } from "../lib/store";
+import {
+  useUIStore,
+  MIN_CHAT_SCALE,
+  MAX_CHAT_SCALE,
+  DEFAULT_CHAT_SCALE,
+  CHAT_SCALE_STEP,
+} from "../lib/store";
 import { copyToClipboard } from "../lib/clipboard";
 import { ToolCallsPanel } from "../components/ui/ToolCallsPanel";
 import { filterVisible } from "../lib/hiddenModels";
@@ -2551,6 +2557,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     return providers.filter(p => p.id.toLowerCase().includes(q));
   }, [providers, modelSearch]);
 
+  const chatScale = useUIStore((s) => s.chatScale);
+  const setChatScale = useUIStore((s) => s.setChatScale);
+  const scalePercent = Math.round(chatScale * 100);
+
   async function handleSelectModel(model: ModelItem) {
     const prev = optimisticModel ?? modelName ?? null;
     setOptimisticModel(model.id);
@@ -2735,6 +2745,44 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               </div>
             </div>
           )}
+        </div>
+        {/*
+          Transcript size. Live, and remembered — the size that reads well on a
+          27" panel wastes a 13" one, so this is a setting rather than a default
+          someone picked once. It scales the transcript only; the composer and
+          this header keep their own size, so shrinking the text never shrinks
+          the controls you need to hit.
+        */}
+        <div className="hidden sm:flex items-center gap-0.5" data-testid="chat-scale-control">
+          <button
+            type="button"
+            onClick={() => setChatScale(chatScale - CHAT_SCALE_STEP)}
+            disabled={chatScale <= MIN_CHAT_SCALE}
+            aria-label={t("chat.scale_decrease", { defaultValue: "Smaller text" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:hover:text-text-dim/60 disabled:hover:bg-transparent"
+          >
+            <Minus className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setChatScale(DEFAULT_CHAT_SCALE)}
+            aria-label={t("chat.scale_reset", { defaultValue: "Reset text size" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="px-1 text-[10px] font-mono tabular-nums text-text-dim/50 hover:text-brand transition-colors"
+          >
+            {scalePercent}%
+          </button>
+          <button
+            type="button"
+            onClick={() => setChatScale(chatScale + CHAT_SCALE_STEP)}
+            disabled={chatScale >= MAX_CHAT_SCALE}
+            aria-label={t("chat.scale_increase", { defaultValue: "Larger text" })}
+            title={t("chat.scale_current", { defaultValue: "Text size: {{percent}}%", percent: scalePercent })}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors disabled:opacity-30 disabled:hover:text-text-dim/60 disabled:hover:bg-transparent"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
         </div>
         {/* Web Search toggle (off → auto → always → off) with config check */}
         {onWebSearchChange && (() => {
@@ -3034,6 +3082,7 @@ export function ChatPage() {
   // Mobile-only: agent picker / session list slide-in sheet visibility.
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
+  const chatScale = useUIStore((s) => s.chatScale);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
   // #2959. Sessions are URL-driven per tab; other callers (CLI, cron) still
@@ -3698,8 +3747,24 @@ export function ChatPage() {
             />
           )}
 
-          {/* Message area */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+          {/*
+            Message area.
+
+            The scale is `zoom` rather than a `font-size` the children inherit:
+            Tailwind's size utilities are `rem`-based, so a container font-size
+            scales none of them, and the transcript's subtree reaches
+            `MarkdownContent`, which other pages share and so cannot be moved
+            to `em` units for this. `zoom` reaches the whole subtree — type,
+            padding, avatars, code blocks — with one declaration and no shared
+            component touched.
+            It applies to this scroller only, so the composer, the header and
+            anything portalled to the body keep their own size.
+          */}
+          <div
+            className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 scrollbar-thin"
+            style={{ zoom: chatScale }}
+            data-testid="chat-message-area"
+          >
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
@@ -3718,7 +3783,7 @@ export function ChatPage() {
                 <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
                   <Bot className="h-10 w-10 text-brand" />
                 </div>
-                <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
+                <h3 className="text-base font-black">{selectedAgent?.name}</h3>
                 <p className="text-sm text-text-dim mt-2">{t("chat.welcome_system")}</p>
               </div>
             ) : (
