@@ -56,6 +56,8 @@ pub enum AgentSubScreen {
     EditMcpServers,
     /// Edit the channel allowlist for an existing agent
     EditChannels,
+    /// Edit model routing (mode, profile allowlist, cost budget) for existing agent
+    EditModelRouting,
     /// Edit the inference parameters (temperature, ladders, limits) for an existing agent
     EditModelParams,
     /// Spawning agent (waiting for result)
@@ -104,6 +106,31 @@ pub struct AgentSelectState {
     // agent has always had.
     pub available_channels: Vec<(String, bool)>,
     pub channel_cursor: usize,
+
+    // Model routing editor
+    /// `"fixed"` or `"flexible"`.
+    pub model_mode: String,
+    /// The resolved profile catalog with this agent's allowlist applied:
+    /// `(profile name, allowed)`. All-unchecked means "any profile".
+    pub router_profiles: Vec<(String, bool)>,
+    pub router_profile_cursor: usize,
+    /// Index into [`COST_BUDGET_OPTIONS`].
+    pub cost_budget_idx: usize,
+    /// The fallback profile loaded from the agent's stored routing settings.
+    /// Not editable from this screen — carried through unchanged on save so
+    /// it is not silently cleared (#7781 review).
+    pub router_default_profile: Option<String>,
+    /// The per-agent router bypass loaded from the agent's stored routing
+    /// settings. Not editable from this screen — carried through unchanged
+    /// on save for the same reason as `router_default_profile` (#7781
+    /// review).
+    pub router_fixed: bool,
+    /// Set only by `AgentModelRoutingLoaded`. `Enter` in the routing editor
+    /// is a no-op while this is `false` — a fetch that failed after `r` was
+    /// pressed must not let a save write the reset placeholder values (or,
+    /// before the reset, a previous agent's stale ones) onto this agent
+    /// (#7781 review).
+    pub routing_loaded: bool,
 
     // Inference-parameter editor (detail view)
     pub model_params: super::model_params::ModelParamsEditor,
@@ -182,6 +209,24 @@ pub enum AgentAction {
     /// `Default::default()`, because nothing ever wrote them: every agent read as "all skills"
     /// and "no MCP servers" no matter what its manifest said.
     LoadAgentDetail(String),
+    /// Update an agent's model routing mode and router override.
+    UpdateModelRouting {
+        id: String,
+        /// `"fixed"` or `"flexible"`.
+        mode: String,
+        /// Empty means "any profile".
+        allowed_profiles: Vec<String>,
+        /// `None` means "no cap".
+        cost_budget: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        default_profile: Option<String>,
+        /// Not editable from this screen — the value loaded from the
+        /// agent's stored settings, carried through unchanged (#7781 review).
+        fixed: bool,
+    },
+    /// Fetch an agent's model routing settings and the profile catalog.
+    FetchAgentModelRouting(String),
     /// Fetch the agent's current inference parameters before editing them.
     FetchAgentModelParams(String),
     /// Persist edited inference parameters. `None` in a pair clears the agent's
@@ -191,6 +236,18 @@ pub enum AgentAction {
         changes: Vec<(String, Option<f64>)>,
     },
 }
+
+/// Cost-budget choices in the model routing editor, cycled with `+` / `-`.
+///
+/// `(i18n key for the label, wire value)`. The first entry is the no-cap
+/// choice, which has no `CostTier`; the rest map onto one. The label is a
+/// translation key rather than the display text so the picker is localised.
+pub const COST_BUDGET_OPTIONS: &[(&str, Option<&str>)] = &[
+    ("tui-agents-label-routing-no-cap", None),
+    ("tui-agents-label-routing-cheap", Some("cheap")),
+    ("tui-agents-label-routing-medium", Some("medium")),
+    ("tui-agents-label-routing-expensive", Some("expensive")),
+];
 
 impl AgentSelectState {
     pub fn new() -> Self {
@@ -218,6 +275,13 @@ impl AgentSelectState {
             available_channels: Vec::new(),
             channel_cursor: 0,
             mcp_cursor: 0,
+            model_mode: "fixed".to_string(),
+            router_profiles: Vec::new(),
+            router_profile_cursor: 0,
+            cost_budget_idx: 0,
+            router_default_profile: None,
+            router_fixed: false,
+            routing_loaded: false,
             spawned_toml: None,
             status_msg: String::new(),
         }
@@ -239,6 +303,13 @@ impl AgentSelectState {
         self.mcp_cursor = 0;
         self.available_channels.clear();
         self.channel_cursor = 0;
+        self.model_mode = "fixed".to_string();
+        self.router_profiles.clear();
+        self.router_profile_cursor = 0;
+        self.cost_budget_idx = 0;
+        self.router_default_profile = None;
+        self.router_fixed = false;
+        self.routing_loaded = false;
         self.spawned_toml = None;
         self.status_msg.clear();
         self.search_active = false;
@@ -416,6 +487,7 @@ impl AgentSelectState {
             AgentSubScreen::EditSkills => self.handle_edit_skills(key),
             AgentSubScreen::EditMcpServers => self.handle_edit_mcp_servers(key),
             AgentSubScreen::EditChannels => self.handle_edit_channels(key),
+            AgentSubScreen::EditModelRouting => self.handle_edit_model_routing(key),
             AgentSubScreen::Spawning => AgentAction::Continue,
         }
     }
@@ -547,6 +619,25 @@ impl AgentSelectState {
                     let id = detail.id.clone();
                     self.sub = AgentSubScreen::EditChannels;
                     return AgentAction::FetchAgentChannels(id);
+                }
+            }
+            KeyCode::Char('r') => {
+                // Edit model routing for this agent. Reset the editor state
+                // up front: if the fetch below fails (FetchError instead of
+                // AgentModelRoutingLoaded), a stale value left over from
+                // whatever agent was edited last must not get written onto
+                // this one on Enter (#7781 review).
+                if let Some(ref detail) = self.detail {
+                    let id = detail.id.clone();
+                    self.model_mode = "fixed".to_string();
+                    self.router_profiles.clear();
+                    self.router_profile_cursor = 0;
+                    self.cost_budget_idx = 0;
+                    self.router_default_profile = None;
+                    self.router_fixed = false;
+                    self.routing_loaded = false;
+                    self.sub = AgentSubScreen::EditModelRouting;
+                    return AgentAction::FetchAgentModelRouting(id);
                 }
             }
             KeyCode::Char('p') => {
@@ -874,6 +965,99 @@ impl AgentSelectState {
         AgentAction::Continue
     }
 
+    /// Model routing editor.
+    ///
+    /// `Tab` flips fixed <-> flexible, `Space` toggles a profile in the
+    /// allowlist, `+` / `-` cycle the cost budget, `Enter` saves.
+    ///
+    /// Enter always emits [`AgentAction::UpdateModelRouting`] — including for
+    /// `fixed`, which is how an operator turns routing back off. Returning to
+    /// the detail screen without emitting would silently discard the edit.
+    fn handle_edit_model_routing(&mut self, key: KeyEvent) -> AgentAction {
+        let profile_count = self.router_profiles.len();
+        let flexible = self.model_mode == "flexible";
+        match key.code {
+            KeyCode::Esc => {
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            KeyCode::Tab => {
+                self.model_mode = if flexible { "fixed" } else { "flexible" }.to_string();
+            }
+            KeyCode::Up | KeyCode::Char('k') if flexible && self.router_profile_cursor > 0 => {
+                self.router_profile_cursor -= 1;
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if flexible
+                    && profile_count > 0
+                    && self.router_profile_cursor < profile_count - 1 =>
+            {
+                self.router_profile_cursor += 1;
+            }
+            KeyCode::Char(' ') if flexible && profile_count > 0 => {
+                let checked = &mut self.router_profiles[self.router_profile_cursor].1;
+                *checked = !*checked;
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') if flexible => {
+                self.cost_budget_idx = (self.cost_budget_idx + 1) % COST_BUDGET_OPTIONS.len();
+            }
+            KeyCode::Char('-') if flexible => {
+                self.cost_budget_idx = if self.cost_budget_idx == 0 {
+                    COST_BUDGET_OPTIONS.len() - 1
+                } else {
+                    self.cost_budget_idx - 1
+                };
+            }
+            KeyCode::Enter => {
+                // The fetch that populates this screen may still be in
+                // flight or may have failed (`AppEvent::FetchError` only
+                // writes a status message; it does not leave the editor).
+                // Saving before `AgentModelRoutingLoaded` ever arrived would
+                // write this screen's reset placeholder values over the
+                // agent's real settings (#7781 review).
+                // The two cases are indistinguishable from in here, and a
+                // failed fetch cannot be retried from inside the editor —
+                // so the message names both and points at the way out
+                // (Esc, then `r`, which re-dispatches the fetch) instead of
+                // repeating "still loading" forever at an operator whose
+                // fetch is never coming back.
+                if !self.routing_loaded {
+                    self.status_msg = crate::i18n::t("tui-agents-model-routing-not-loaded");
+                    return AgentAction::Continue;
+                }
+                if let Some(ref detail) = self.detail {
+                    // In fixed mode the allowlist and budget describe a routing
+                    // decision that will not happen, so they are not sent — the
+                    // server clears the override wholesale.
+                    let (allowed_profiles, cost_budget) = if flexible {
+                        (
+                            self.router_profiles
+                                .iter()
+                                .filter(|(_, checked)| *checked)
+                                .map(|(name, _)| name.clone())
+                                .collect(),
+                            COST_BUDGET_OPTIONS[self.cost_budget_idx]
+                                .1
+                                .map(str::to_string),
+                        )
+                    } else {
+                        (Vec::new(), None)
+                    };
+                    return AgentAction::UpdateModelRouting {
+                        id: detail.id.clone(),
+                        mode: self.model_mode.clone(),
+                        allowed_profiles,
+                        cost_budget,
+                        default_profile: self.router_default_profile.clone(),
+                        fixed: self.router_fixed,
+                    };
+                }
+                self.sub = AgentSubScreen::AgentDetail;
+            }
+            _ => {}
+        }
+        AgentAction::Continue
+    }
+
     fn handle_edit_mcp_servers(&mut self, key: KeyEvent) -> AgentAction {
         let len = self.available_mcp.len();
         match key.code {
@@ -1032,6 +1216,10 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
             draw_edit_allowlist(f, area, state);
             return;
         }
+        AgentSubScreen::EditModelRouting => {
+            draw_edit_model_routing(f, area, state);
+            return;
+        }
         AgentSubScreen::EditModelParams => {
             draw_edit_model_params(f, area, state);
             return;
@@ -1045,6 +1233,7 @@ pub fn draw(f: &mut Frame, area: Rect, state: &mut AgentSelectState) {
         | AgentSubScreen::EditSkills
         | AgentSubScreen::EditMcpServers
         | AgentSubScreen::EditChannels
+        | AgentSubScreen::EditModelRouting
         | AgentSubScreen::EditModelParams => unreachable!(),
         AgentSubScreen::CreateMethod => crate::i18n::t("tui-agents-title-create-method"),
         AgentSubScreen::TemplatePicker => crate::i18n::t("tui-agents-title-templates"),
@@ -1660,6 +1849,104 @@ fn draw_edit_allowlist(f: &mut Frame, area: Rect, state: &AgentSelectState) {
     );
 }
 
+/// Model routing editor: mode, profile allowlist, cost budget.
+///
+/// Labels are the human-readable names an operator recognises; the wire
+/// values (`fixed` / `flexible`, `cheap` / `medium` / `expensive`) are shown
+/// in the value column rather than as the label itself.
+fn draw_edit_model_routing(f: &mut Frame, area: Rect, state: &AgentSelectState) {
+    let inner = widgets::render_screen_block(
+        f,
+        area,
+        crate::i18n::t("tui-agents-title-model-routing").trim(),
+    );
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(3),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let flexible = state.model_mode == "flexible";
+    let mode_label = if flexible {
+        crate::i18n::t("tui-agents-label-routing-flexible")
+    } else {
+        crate::i18n::t("tui-agents-label-routing-fixed")
+    };
+    // Label and value are joined inside the Fluent message rather than by a
+    // format literal here, so a locale can reorder or re-punctuate the line.
+    let mode_line = crate::i18n::t_args("tui-agents-line-routing-mode", &[("mode", &mode_label)]);
+    f.render_widget(
+        Paragraph::new(format!(
+            "{}\n{}",
+            mode_line,
+            crate::i18n::t("tui-agents-hint-routing-mode"),
+        )),
+        chunks[0],
+    );
+
+    if !flexible {
+        // Nothing below applies while the agent is pinned to its own model;
+        // showing a disabled picker would imply the values still matter.
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-routing-fixed-explainer")),
+            chunks[1],
+        );
+    } else if state.router_profiles.is_empty() {
+        f.render_widget(
+            widgets::empty_state(&crate::i18n::t("tui-agents-label-no-router-profiles")),
+            chunks[1],
+        );
+    } else {
+        let items: Vec<ListItem> = state
+            .router_profiles
+            .iter()
+            .enumerate()
+            .map(|(i, (name, checked))| {
+                let check = if *checked { "\u{25c9}" } else { "\u{25cb}" };
+                let style = if i == state.router_profile_cursor {
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(format!("  {check} {name}")).style(style)
+            })
+            .collect();
+        f.render_widget(List::new(items), chunks[1]);
+    }
+
+    let budget_label = crate::i18n::t(COST_BUDGET_OPTIONS[state.cost_budget_idx].0);
+    let allowed = state
+        .router_profiles
+        .iter()
+        .filter(|(_, checked)| *checked)
+        .count();
+    let allowlist_summary = if !flexible {
+        String::new()
+    } else if allowed == 0 {
+        crate::i18n::t("tui-agents-label-routing-any-profile")
+    } else {
+        format!("{allowed}")
+    };
+    f.render_widget(
+        Paragraph::new(crate::i18n::t_args(
+            "tui-agents-line-routing-summary",
+            &[("budget", &budget_label), ("allowed", &allowlist_summary)],
+        )),
+        chunks[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(crate::i18n::t("tui-agents-hints-model-routing"))
+            .style(Style::default().fg(theme::DIM)),
+        chunks[3],
+    );
+}
+
 /// Width of the label column in the inference-parameter editor, in cells.
 const LABEL_COLUMN_WIDTH: usize = 22;
 
@@ -1819,6 +2106,127 @@ mod tests {
         assert!(
             !toml.contains("max_llm_tokens_per_hour = 200000"),
             "template must not re-introduce the 200000 hourly cap"
+        );
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// #7781 review: `default_profile` is not editable from this screen, so
+    /// saving a routing edit (Enter) must carry through whatever value was
+    /// loaded rather than silently dropping it.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_default_profile() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+        state.routing_loaded = true;
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting {
+                default_profile, ..
+            } => {
+                assert_eq!(
+                    default_profile,
+                    Some("coder".to_string()),
+                    "save must not clear the loaded default_profile"
+                );
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
+    }
+
+    /// #7781 review: `fixed` — the per-agent router bypass — is not
+    /// editable from this screen either, and the InProcess save path used
+    /// to hardcode it to `false` unconditionally. Same contract as
+    /// `default_profile` above.
+    #[test]
+    fn saving_model_routing_preserves_the_loaded_fixed_flag() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-1".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_fixed = true;
+        state.routing_loaded = true;
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        match action {
+            AgentAction::UpdateModelRouting { fixed, .. } => {
+                assert!(fixed, "save must not clear the loaded fixed flag");
+            }
+            _ => panic!("Enter must emit UpdateModelRouting"),
+        }
+    }
+
+    /// #7781 review: opening the editor for a different agent (`r` from the
+    /// detail pane) must not let the previous agent's routing values leak
+    /// into a save for the new one if the fetch that follows fails.
+    #[test]
+    fn entering_the_routing_editor_resets_stale_values() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-2".to_string(),
+            ..AgentDetail::default()
+        });
+        // Simulate leftover state from a previously edited agent.
+        state.model_mode = "flexible".to_string();
+        state.router_profiles = vec![("coder".to_string(), true)];
+        state.router_profile_cursor = 1;
+        state.cost_budget_idx = 2;
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+        state.routing_loaded = true;
+
+        state.handle_detail(key(KeyCode::Char('r')));
+
+        assert_eq!(state.model_mode, "fixed");
+        assert!(state.router_profiles.is_empty());
+        assert_eq!(state.router_profile_cursor, 0);
+        assert_eq!(state.cost_budget_idx, 0);
+        assert_eq!(state.router_default_profile, None);
+        assert!(!state.router_fixed);
+        assert!(
+            !state.routing_loaded,
+            "re-entering must require a fresh AgentModelRoutingLoaded before Enter can save"
+        );
+    }
+
+    /// #7781 review: if the fetch after `r` fails (or has not returned yet),
+    /// `Enter` must not save — it would write this screen's reset
+    /// placeholder values over the agent's real settings. `FetchError` only
+    /// sets a status message; it does not leave the editor, so this guard
+    /// is the only thing standing between a failed fetch and a bad write.
+    #[test]
+    fn saving_before_routing_loaded_is_a_no_op() {
+        let mut state = AgentSelectState::new();
+        state.detail = Some(AgentDetail {
+            id: "agent-3".to_string(),
+            ..AgentDetail::default()
+        });
+        state.model_mode = "flexible".to_string();
+        state.router_default_profile = Some("coder".to_string());
+        state.router_fixed = true;
+        // routing_loaded defaults to false and was not set here.
+
+        let action = state.handle_edit_model_routing(key(KeyCode::Enter));
+
+        assert!(
+            matches!(action, AgentAction::Continue),
+            "Enter must not emit a save before the real settings have loaded"
+        );
+        assert!(
+            !state.status_msg.is_empty(),
+            "the operator needs to know why Enter did nothing"
         );
     }
 }

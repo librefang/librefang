@@ -1,0 +1,4 @@
+A daemon restart no longer nulls a per-agent `context_window`, `max_output_tokens` or `[model.extra_params]` on an agent that inherits the global model.
+The boot restore shares `clear_stale_provider_overrides` with the model picker and the router, but called it under a branch whose first condition is true for a row *already* on the `default` sentinel — where the two assignments above it restate what is there and no endpoint moves.
+Clearing there is not repointing hygiene: the branch runs on every boot, so a deliberate override disappeared on the next restart and the following `save_agent` made the loss permanent, with the dashboard showing the field blank as if the save had failed.
+The call is now gated on an actual repoint, which is what both sibling call sites already do (#7781) (@DaBlitzStein)

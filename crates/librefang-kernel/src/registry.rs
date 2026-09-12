@@ -75,6 +75,34 @@ fn warn_if_concurrency_fields_changed(
     );
 }
 
+/// Clear the overrides that describe the *previous* provider's endpoint —
+/// its credentials, its capacity limits, and its non-standard request
+/// parameters — so a provider change never leaves them attached to the new
+/// one (#7781 review).
+///
+/// Shared by every path that repoints an agent at a different provider:
+/// [`AgentRegistry::switch_model_provider`] (the dashboard's model picker,
+/// via `set_agent_model`), the model router's `apply_routed_profile` /
+/// `apply_tier_routed_model`, and the boot-time normalisation of a restored
+/// legacy agent back to the `default` sentinel. One list of fields, so a
+/// future addition cannot be cleared on one path and forgotten on the other —
+/// which is exactly how `context_window` / `max_output_tokens` came to be
+/// dropped by the router and kept by the picker.
+///
+/// The fields left alone are the ones that mean the same thing on any
+/// endpoint: `max_tokens`, the four sampling knobs, `system_prompt`, and the
+/// router's own `mode` / `router_override`. `extra_params` is not one of
+/// them — it is flattened verbatim into the request body and is
+/// provider-specific by definition (Qwen's `enable_memory` has no meaning to
+/// Anthropic, which rejects the unknown key rather than ignoring it).
+pub(crate) fn clear_stale_provider_overrides(model: &mut librefang_types::agent::ModelConfig) {
+    model.api_key_env = None;
+    model.base_url = None;
+    model.context_window = None;
+    model.max_output_tokens = None;
+    model.extra_params.clear();
+}
+
 impl AgentRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
@@ -506,6 +534,46 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Point an agent at a **different** provider's model, dropping every
+    /// override that described the previous provider's endpoint (#7781
+    /// review).
+    ///
+    /// Distinct from [`Self::update_model_and_provider`], which is the
+    /// same-provider swap and must leave genuine per-agent overrides alone.
+    pub fn switch_model_provider(
+        &self,
+        id: AgentId,
+        new_model: String,
+        new_provider: String,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.model = new_model;
+            entry.manifest.model.provider = new_provider;
+            clear_stale_provider_overrides(&mut entry.manifest.model);
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Replace an agent's whole `[model]` block.
+    ///
+    /// For restoring a snapshot taken before a multi-field mutation — the
+    /// caller already holds every value, and putting them back one setter at
+    /// a time would leave the entry half-rolled-back in between.
+    pub fn set_model_config(
+        &self,
+        id: AgentId,
+        model: librefang_types::agent::ModelConfig,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model = model;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
     /// Update an agent's max_tokens (requested response length).
     ///
     /// `None` clears the agent's own value, putting the field back to
@@ -595,6 +663,25 @@ impl AgentRegistry {
     ) -> LibreFangResult<()> {
         self.with_entry_mut(id, |entry| {
             entry.manifest.web_search_augmentation = mode;
+            entry.last_active = chrono::Utc::now();
+        })?;
+        self.notify_changed();
+        Ok(())
+    }
+
+    /// Update an agent's model selection mode and per-agent router override
+    /// (profile allowlist + cost budget). Mutates the manifest only; use
+    /// [`crate::LibreFangKernel::set_agent_model_routing`] to also persist to
+    /// SQLite and `agent.toml`. Mirrors `update_web_search_augmentation`.
+    pub fn update_model_routing(
+        &self,
+        id: AgentId,
+        mode: librefang_types::agent::ModelMode,
+        router_override: Option<librefang_types::model_profile::AgentRouterOverride>,
+    ) -> LibreFangResult<()> {
+        self.with_entry_mut(id, |entry| {
+            entry.manifest.model.mode = mode;
+            entry.manifest.model.router_override = router_override;
             entry.last_active = chrono::Utc::now();
         })?;
         self.notify_changed();

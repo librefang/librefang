@@ -2712,14 +2712,34 @@ impl LibreFangKernel {
                                 })
                                 .unwrap_or(false);
 
-                        if (is_default_provider && is_default_model)
+                        // True when the row is already on the sentinel, so the two assignments
+                        // below restate what is there and no endpoint moves.
+                        let already_on_sentinel = is_default_provider && is_default_model;
+
+                        if already_on_sentinel
                             || toml_says_default
                             || is_legacy_auto_spawned_assistant
                         {
                             restored_entry.manifest.model.provider = "default".to_string();
                             restored_entry.manifest.model.model = "default".to_string();
-                            restored_entry.manifest.model.api_key_env = None;
-                            restored_entry.manifest.model.base_url = None;
+                            // Same repointing as the model picker and the router, so the same
+                            // field list: this restated only the credentials, which left the
+                            // pinned model's context window and output cap attached to whatever
+                            // `default` resolves to (#7781 review).
+                            //
+                            // Gated on an actual repoint, like both sibling sites
+                            // (`agent_execution.rs` on the no-change case, `ephemeral_spawn.rs`
+                            // on `provider_changed || model_changed`). An agent already on the
+                            // sentinel has not moved endpoints, and this branch runs on every
+                            // boot: clearing there would wipe an operator's hand-set
+                            // `context_window`, `max_output_tokens` and `[model.extra_params]`
+                            // on each daemon restart, then persist the loss at the next
+                            // `save_agent`.
+                            if !already_on_sentinel {
+                                crate::registry::clear_stale_provider_overrides(
+                                    &mut restored_entry.manifest.model,
+                                );
+                            }
                         }
                     }
 

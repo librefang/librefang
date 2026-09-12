@@ -637,6 +637,205 @@ pub(crate) fn lookup_canonical_uuid(base: &str, name: &str) -> Option<String> {
     None
 }
 
+/// `librefang agent routing <agent>` — show an agent's model routing settings.
+pub(crate) fn cmd_agent_routing_show(agent_id_str: &str, json: bool) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let agent_id = resolve_agent_id(&base, agent_id_str);
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/agents/{agent_id}/model_routing"))
+            .send(),
+    );
+
+    if let Some(err) = body.get("error").and_then(|e| e.as_str()) {
+        eprintln!(
+            "{}",
+            i18n::t_args("agent-routing-failed", &[("error", err)])
+        );
+        std::process::exit(1);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
+        return;
+    }
+
+    let mode = body["mode"].as_str().unwrap_or("fixed");
+    ui::kv(&i18n::t("agent-routing-label-mode"), mode);
+    if mode != "flexible" {
+        println!("{}", i18n::t("agent-routing-fixed-explainer"));
+        return;
+    }
+    let allowed: Vec<&str> = body["allowed_profiles"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let allowed_display = if allowed.is_empty() {
+        i18n::t("agent-routing-any-profile")
+    } else {
+        allowed.join(", ")
+    };
+    ui::kv(&i18n::t("agent-routing-label-allowed"), &allowed_display);
+    let budget = body["cost_budget"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| i18n::t("agent-routing-no-cap"));
+    ui::kv(&i18n::t("agent-routing-label-budget"), &budget);
+    if let Some(default_profile) = body["default_profile"].as_str() {
+        ui::kv(&i18n::t("agent-routing-label-default"), default_profile);
+    }
+    // #7781 review: `fixed` now survives a save instead of getting cleared,
+    // so it needs to be visible somewhere — this was the one field human
+    // mode never printed, even though --json already exposed it.
+    if body["fixed"].as_bool().unwrap_or(false) {
+        ui::kv_warn(
+            &i18n::t("agent-routing-label-fixed"),
+            &i18n::t("agent-routing-fixed-opt-out"),
+        );
+    }
+}
+
+/// Build the PUT body for `routing-set` (#7781 review).
+///
+/// `set_agent_model_routing` is a read-modify-write — a key absent from the
+/// body preserves whatever is already stored — so `profiles`, `budget` and
+/// `default_profile` are included only when their flag was actually passed.
+/// Sending them unconditionally (the previous behavior) meant narrowing the
+/// allowlist with `--profiles` alone silently cleared the budget, and vice
+/// versa: the same "write what you didn't edit" defect the PUT handler and
+/// the TUI were fixed for.
+///
+/// An empty string is the explicit way to clear each one — distinct from
+/// omitting the flag — matching the sentinel `--default-profile ""` already
+/// used before this fix: `--profiles ""` clears the allowlist (any profile
+/// allowed), `--budget ""` clears the cap (no cap).
+fn build_routing_set_payload(
+    mode: &str,
+    profiles: Option<&str>,
+    budget: Option<&str>,
+    default_profile: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "mode": mode });
+    if let Some(p) = profiles {
+        let allowed: Vec<String> = p
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        payload["allowed_profiles"] = serde_json::json!(allowed);
+    }
+    if let Some(b) = budget {
+        payload["cost_budget"] = if b.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(b)
+        };
+    }
+    if let Some(dp) = default_profile {
+        payload["default_profile"] = serde_json::json!(dp);
+    }
+    payload
+}
+
+/// `librefang agent routing-set <agent> --mode …` — update model routing.
+pub(crate) fn cmd_agent_routing_set(
+    agent_id_str: &str,
+    mode: &str,
+    profiles: Option<&str>,
+    budget: Option<&str>,
+    default_profile: Option<&str>,
+) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let agent_id = resolve_agent_id(&base, agent_id_str);
+    let payload = build_routing_set_payload(mode, profiles, budget, default_profile);
+
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .put(format!("{base}/api/agents/{agent_id}/model_routing"))
+            .json(&payload)
+            .send(),
+    );
+
+    if body.get("status").is_some() {
+        println!(
+            "{}",
+            i18n::t_args(
+                "agent-routing-updated",
+                &[("id", &agent_id), ("mode", mode)]
+            )
+        );
+    } else {
+        let err_fallback = i18n::t("error-unknown");
+        eprintln!(
+            "{}",
+            i18n::t_args(
+                "agent-routing-failed",
+                &[("error", body["error"].as_str().unwrap_or(&err_fallback))]
+            )
+        );
+        std::process::exit(1);
+    }
+}
+
+/// `librefang agent routing-profiles` — list the resolved profile catalog.
+pub(crate) fn cmd_agent_routing_profiles(json: bool) {
+    let Some(base) = find_daemon() else {
+        eprintln!("{}", i18n::t("agent-set-no-daemon"));
+        std::process::exit(1);
+    };
+    let client = daemon_client();
+    let body = daemon_json(
+        client
+            .get(format!("{base}/api/model-router/profiles"))
+            .send(),
+    );
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
+        return;
+    }
+
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    println!(
+        "{}",
+        i18n::t_args(
+            "agent-routing-profiles-header",
+            &[("enabled", if enabled { "on" } else { "off" })]
+        )
+    );
+    let Some(profiles) = body["profiles"].as_array() else {
+        return;
+    };
+    for p in profiles {
+        println!(
+            "  {:<14} {:<10} {:<28} {}",
+            p["name"].as_str().unwrap_or(""),
+            p["cost_tier"].as_str().unwrap_or(""),
+            format!(
+                "{}/{}",
+                p["provider"].as_str().unwrap_or(""),
+                p["model"].as_str().unwrap_or("")
+            ),
+            p["description"].as_str().unwrap_or(""),
+        );
+    }
+}
+
 pub(crate) fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
         "model" => {
@@ -1134,7 +1333,7 @@ pub(crate) fn cmd_message(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_inference_param;
+    use super::{build_routing_set_payload, parse_inference_param};
 
     #[test]
     fn inherit_literals_become_json_null() {
@@ -1175,5 +1374,45 @@ mod tests {
         assert!(parse_inference_param("max_tokens", "lots").is_err());
         assert!(parse_inference_param("max_tokens", "0.5").is_err());
         assert!(parse_inference_param("temperature", "hot").is_err());
+    }
+
+    /// #7781 review: narrowing the allowlist with `--profiles` alone must
+    /// not touch the stored budget, and vice versa — each omitted flag
+    /// leaves its key out of the payload entirely.
+    #[test]
+    fn omitted_flags_are_absent_from_the_payload() {
+        let payload = build_routing_set_payload("flexible", Some("coder,quick"), None, None);
+        assert!(payload.get("allowed_profiles").is_some());
+        assert!(
+            payload.get("cost_budget").is_none(),
+            "an omitted --budget must not send a clearing null"
+        );
+        assert!(payload.get("default_profile").is_none());
+
+        let payload = build_routing_set_payload("flexible", None, Some("cheap"), None);
+        assert!(
+            payload.get("allowed_profiles").is_none(),
+            "an omitted --profiles must not send a clearing []"
+        );
+        assert_eq!(payload["cost_budget"], serde_json::json!("cheap"));
+    }
+
+    /// An explicit empty string is the documented way to clear the
+    /// allowlist (any profile) or the budget (no cap) — distinct from
+    /// omitting the flag.
+    #[test]
+    fn empty_string_flags_clear_explicitly() {
+        let payload = build_routing_set_payload("flexible", Some(""), Some(""), None);
+        assert_eq!(payload["allowed_profiles"], serde_json::json!([]));
+        assert_eq!(payload["cost_budget"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn profiles_are_split_trimmed_and_empty_entries_dropped() {
+        let payload = build_routing_set_payload("flexible", Some(" coder , , quick "), None, None);
+        assert_eq!(
+            payload["allowed_profiles"],
+            serde_json::json!(["coder", "quick"])
+        );
     }
 }

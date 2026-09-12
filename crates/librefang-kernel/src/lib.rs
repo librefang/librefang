@@ -33,6 +33,7 @@ pub mod kernel_api;
 pub mod log_reload;
 pub mod mcp_health_reporter;
 pub mod mcp_oauth_provider;
+pub mod model_router;
 pub mod oauth_cache_invalidator;
 pub use librefang_kernel_metering as metering;
 pub mod orchestration;
