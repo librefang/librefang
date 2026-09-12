@@ -699,15 +699,10 @@ const WRITABLE_EXACT_PATHS: &[&str] = &[
 // section itself is NOT writable as a whole (would clobber the table),
 // because validate_config_key_path requires the path to have a leaf.
 const WRITABLE_SECTION_PREFIXES: &[&str] = &[
-    // `channels.` was here for the per-channel enable/feature toggles, back when
-    // `ChannelsConfig` carried a `OneOrMany<*Config>` per vendor. The #5317–#5459
-    // sidecar migration removed those, leaving three file-transfer scalars at
-    // depth 1 — so the prefix accepted only depth-2 paths that resolve to no
-    // field, and rejected the three that do exist (#8169).
+    // `channels.` was here for the per-channel enable/feature toggles, back when `ChannelsConfig` carried a `OneOrMany<*Config>` per vendor.
+    // The #5317–#5459 sidecar migration removed those, leaving three file-transfer scalars at depth 1 — so the prefix accepted only depth-2 paths that resolve to no field, and rejected the three that do exist (#8169).
     //
-    // Removed rather than moved to depth 1: of the three, only
-    // `file_download_max_bytes` should be writable over HTTP, and it is listed
-    // in `WRITABLE_EXACT_PATHS` above with the reasoning for the other two.
+    // Removed rather than moved to depth 1: of the three, only `file_download_max_bytes` should be writable over HTTP, and it is listed in `WRITABLE_EXACT_PATHS` above with the reasoning for the other two.
     // Web search / fetch knobs (URLs and timeouts).
     "web.",
     // Rate-limit display knobs.
