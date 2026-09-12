@@ -551,8 +551,8 @@ impl App {
                         // set the flag would otherwise leave the pane spinning
                         // forever, with the message underneath it invisible
                         // behind the spinner (#8059 review). `loading` is shared
-                        // by all four panes, so this belongs here rather than in
-                        // any one fetch helper.
+                        // by every pane, so this belongs here rather than in any
+                        // one fetch helper.
                         self.settings.loading = false;
                         self.settings.status_msg = err;
                     }
@@ -831,6 +831,41 @@ impl App {
             }
             AppEvent::ProviderTestResult(result) => {
                 self.settings.test_result = Some(result);
+            }
+            AppEvent::VaultKeysLoaded(keys) => {
+                self.settings.vault_keys = keys;
+                if !self.settings.vault_keys.is_empty()
+                    && self.settings.vault_list.selected().is_none()
+                {
+                    self.settings.vault_list.select(Some(0));
+                }
+                self.settings.loading = false;
+            }
+            // A write that lands under an environment override is stored and
+            // inert. Confirming it as a plain success is the report houko
+            // flagged: the operator walks away believing they changed what the
+            // daemon uses.
+            AppEvent::VaultKeySaved(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-saved-env-override"
+                    } else {
+                        "tui-mod-vault-key-saved"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
+            }
+            AppEvent::VaultKeyDeleted(key, source) => {
+                self.settings.status_msg = crate::i18n::t_args(
+                    if source == settings::VaultKeySource::Environment {
+                        "tui-mod-vault-key-deleted-env-override"
+                    } else {
+                        "tui-mod-vault-key-deleted"
+                    },
+                    &[("key", &key)],
+                );
+                self.refresh_settings_vault();
             }
             AppEvent::ModelCatalogLoaded(list) => {
                 self.models.models = list;
@@ -1645,6 +1680,13 @@ impl App {
         }
     }
 
+    fn refresh_settings_vault(&mut self) {
+        if let Some(backend) = self.backend.to_ref() {
+            self.settings.loading = true;
+            event::spawn_fetch_vault_keys(backend, self.event_tx.clone());
+        }
+    }
+
     fn refresh_groups(&mut self) {
         if let Some(backend) = self.backend.to_ref() {
             self.groups.loading = true;
@@ -2340,6 +2382,17 @@ impl App {
             settings::SettingsAction::RefreshTools => self.refresh_settings_tools(),
             settings::SettingsAction::RefreshBackups => self.refresh_settings_backups(),
             settings::SettingsAction::RefreshAuxiliary => self.refresh_settings_auxiliary(),
+            settings::SettingsAction::RefreshVault => self.refresh_settings_vault(),
+            settings::SettingsAction::SetVaultKey { key, value } => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_set_vault_key(backend, key, value, self.event_tx.clone());
+                }
+            }
+            settings::SettingsAction::DeleteVaultKey(key) => {
+                if let Some(backend) = self.backend.to_ref() {
+                    event::spawn_delete_vault_key(backend, key, self.event_tx.clone());
+                }
+            }
             settings::SettingsAction::SaveProviderKey { name, key } => {
                 if let Some(backend) = self.backend.to_ref() {
                     event::spawn_save_provider_key(backend, name, key, self.event_tx.clone());

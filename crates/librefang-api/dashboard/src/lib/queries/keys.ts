@@ -527,6 +527,19 @@ export const configKeys = {
   rawToml: () => [...configKeys.all, "rawToml"] as const,
 };
 
+/**
+ * Credential vault (`/api/vault/keys`, #8164).
+ *
+ * Only ever caches the allowlist and a per-key set/not-set boolean; the API has
+ * no read-back endpoint, so there is no `detail(key)` holding a value and none
+ * should ever be added.
+ */
+export const vaultKeys = {
+  all: ["vault"] as const,
+  lists: () => [...vaultKeys.all, "list"] as const,
+  list: () => [...vaultKeys.lists()] as const,
+};
+
 export const registryKeys = {
   all: ["registry"] as const,
   schema: (contentType: string) =>

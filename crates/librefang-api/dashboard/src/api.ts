@@ -3857,6 +3857,58 @@ export async function revokePasskey(
   return response.json();
 }
 
+// --- Credential vault write surface (#8164) ---
+
+/**
+ * Where the daemon actually resolves a vault key from.
+ *
+ * The daemon reads its own process environment before it touches the vault, so
+ * `set` alone describes storage rather than behaviour: on a host that exports
+ * `GITHUB_TOKEN` a vault-only flag reads `false` while promotion works, and
+ * reads `false` again after a delete that revoked nothing.
+ */
+export type VaultKeySource = "unset" | "vault" | "environment";
+
+/**
+ * One allowlisted vault key, whether the vault holds it, and where the daemon
+ * would actually take its value from. There is deliberately no `value` field:
+ * `/api/vault/keys` reports names, a boolean and a source, and the API has no
+ * read-back endpoint at all, so nothing on this side of the wire can ever
+ * display a stored secret.
+ *
+ * Both fields are needed and they answer different questions: `set` is vault
+ * presence, `source` is the effective credential. An operator whose environment
+ * overrides the key still has to know whether their write landed.
+ */
+export interface VaultKeyStatus {
+  key: string;
+  set: boolean;
+  source: VaultKeySource;
+}
+
+/**
+ * The set of keys a surface may manage, straight from the daemon's
+ * `WRITABLE_KEYS` allowlist. Never hard-code the list client-side — adding a
+ * key server-side must be enough to make it appear here.
+ */
+export async function listVaultKeys(): Promise<VaultKeyStatus[]> {
+  const data = await get<{ keys: VaultKeyStatus[] }>("/api/vault/keys");
+  return data.keys ?? [];
+}
+
+export async function setVaultKey(
+  key: string,
+  value: string,
+): Promise<VaultKeyStatus> {
+  return put<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`, {
+    value,
+  });
+}
+
+export async function deleteVaultKey(key: string): Promise<VaultKeyStatus> {
+  return del<VaultKeyStatus>(`/api/vault/keys/${encodeURIComponent(key)}`);
+}
+
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/reject`, {});
 }
