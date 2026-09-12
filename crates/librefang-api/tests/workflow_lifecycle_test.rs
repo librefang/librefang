@@ -884,6 +884,106 @@ async fn run_detail_exposes_per_step_error_for_failed_step() {
     );
 }
 
+/// `GET /api/workflows/runs/{run_id}` reports `total_steps` from the workflow
+/// definition, which the dashboard's live progress bar (#7997) needs and which
+/// was previously absent from this payload entirely.
+///
+/// It must never report `step_results.len()` as `current_step_index`. This
+/// endpoint used to emit exactly that and call it the step now executing; even
+/// here, on two steps that each run once, that is 2 against a total of 2 —
+/// "step 3 of 2" the moment the run finishes. A `StepMode::Loop` pushes one
+/// result per iteration and makes it arbitrarily larger than the total.
+///
+/// The assertion targets that value rather than the field name, because #8177
+/// adds `current_step_index` here as a tracked index the total genuinely bounds.
+/// Both are correct at once: the tracked index may appear, the execution count
+/// may not.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_detail_reports_total_steps_and_no_derived_step_index() {
+    use librefang_kernel::workflow::{
+        ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    };
+
+    let h = boot().await;
+    let engine = h.state.kernel.workflow_engine();
+
+    // Two independent Transform steps with trivial templates — both
+    // execute (and succeed) without any agent call, same as the
+    // failed-step test above.
+    let make_step = |name: &str| WorkflowStep {
+        name: name.to_string(),
+        agent: StepAgent::ByName {
+            name: "unused".to_string(),
+        },
+        prompt_template: String::new(),
+        mode: StepMode::Transform {
+            code: "{{ prev }}".to_string(),
+        },
+        timeout_secs: 10,
+        error_mode: ErrorMode::Fail,
+        output_var: None,
+        inherit_context: None,
+        depends_on: vec![],
+        session_mode: None,
+        required_skills: Vec::new(),
+    };
+    let wf = Workflow {
+        id: WorkflowId::new(),
+        name: "two-step-transform".to_string(),
+        description: String::new(),
+        steps: vec![make_step("s1"), make_step("s2")],
+        created_at: chrono::Utc::now(),
+        layout: None,
+        total_timeout_secs: None,
+        input_schema: None,
+        owner: None,
+    };
+    let wf_id = engine.register(wf).await;
+    let run_id = engine
+        .create_run(wf_id, "input".to_string())
+        .await
+        .expect("create run");
+
+    let resolver =
+        |_a: &StepAgent| -> Option<(librefang_types::agent::AgentId, String, bool)> { None };
+    let sender =
+        |_id: librefang_types::agent::AgentId,
+         msg: String,
+         _sm: Option<librefang_types::agent::SessionMode>| async move { Ok((msg, 0u64, 0u64)) };
+    let _ = engine.execute_run(run_id, resolver, sender).await;
+
+    let (status, detail) = get(&h, &format!("/api/workflows/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail:?}");
+    let steps = detail["step_results"]
+        .as_array()
+        .expect("step_results array");
+    assert_eq!(
+        steps.len(),
+        2,
+        "both transform steps must have run: {detail:?}"
+    );
+    assert_eq!(
+        detail["total_steps"], 2,
+        "total_steps must come from the workflow definition: {detail:?}"
+    );
+    // Deliberately not `is_none()`. What must never come back is the *derived*
+    // value, not the name: #8177 adds `current_step_index` to this payload as a
+    // tracked index gated on `WorkflowRunState::Running`, which `total_steps`
+    // really does bound and which is the one safe to render as a fraction.
+    // Asserting the key is absent would fail the moment #8177 lands, and whoever
+    // merged second would delete this assertion — taking the guard with it.
+    if let Some(index) = detail.get("current_step_index") {
+        assert_ne!(
+            index,
+            &serde_json::json!(steps.len()),
+            "`current_step_index` must not be the execution count: `step_results` \
+             counts executions, so it reads 2 of 2 here, exceeds the total for any \
+             `StepMode::Loop` step, and falls short of it for a skipped \
+             `StepMode::Conditional`: {detail:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/workflows/{id}/runs scoping (regression)
 // ---------------------------------------------------------------------------

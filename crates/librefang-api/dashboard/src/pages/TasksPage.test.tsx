@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TasksPage } from "./TasksPage";
 import { useTaskQueue, useTaskQueueStatus } from "../lib/queries/runtime";
+import { useAgents } from "../lib/queries/agents";
 import {
   useCreateTask,
   useUpdateTaskStatus,
@@ -15,6 +16,10 @@ import {
 vi.mock("../lib/queries/runtime", () => ({
   useTaskQueue: vi.fn(),
   useTaskQueueStatus: vi.fn(),
+}));
+
+vi.mock("../lib/queries/agents", () => ({
+  useAgents: vi.fn(),
 }));
 
 vi.mock("../lib/mutations/runtime", () => ({
@@ -40,6 +45,7 @@ const m = <T,>(fn: T) => fn as unknown as ReturnType<typeof vi.fn>;
 
 const useTaskQueueMock       = m(useTaskQueue);
 const useTaskQueueStatusMock = m(useTaskQueueStatus);
+const useAgentsMock          = m(useAgents);
 const useCreateTaskMock      = m(useCreateTask);
 const useUpdateTaskStatusMock = m(useUpdateTaskStatus);
 const useDeleteTaskMock      = m(useDeleteTask);
@@ -115,9 +121,20 @@ const SAMPLE_TASKS = [
 
 const SAMPLE_STATUS = { total: 4, pending: 1, in_progress: 1, completed: 1, failed: 1 };
 
+// The agent registry, which is what the pickers are built from. `SAMPLE_TASKS`
+// stores assignees by *name* — the pre-existing spelling — while the picker
+// posts ids, so these fixtures together cover both stored forms.
+const SAMPLE_AGENTS = [
+  { id: "11111111-1111-4111-8111-111111111111", name: "agent-alpha" },
+  { id: "22222222-2222-4222-8222-222222222222", name: "agent-beta" },
+  { id: "33333333-3333-4333-8333-333333333333", name: "agent-gamma" },
+];
+const ALPHA_ID = SAMPLE_AGENTS[0].id;
+
 function setQueryDefaults() {
   useTaskQueueMock.mockReturnValue(makeQuery({ tasks: SAMPLE_TASKS, total: SAMPLE_TASKS.length }));
   useTaskQueueStatusMock.mockReturnValue(makeQuery(SAMPLE_STATUS));
+  useAgentsMock.mockReturnValue(makeQuery(SAMPLE_AGENTS));
 }
 
 function setMutationDefaults() {
@@ -363,12 +380,16 @@ describe("TasksPage", () => {
       });
     });
 
-    it("does not render malformed task records without an id", () => {
+    it("does not render malformed task records without an id, and the total tile agrees", () => {
       useTaskQueueMock.mockReturnValue(
         makeQuery({ tasks: [{ status: "pending", title: "Missing id" }], total: 1 }),
       );
       renderPage();
       expect(screen.queryByText("Missing id")).not.toBeInTheDocument();
+      // The counters must derive from the same filtered list as the cards —
+      // an id-less row that renders no card must not be counted either.
+      const totalLabel = screen.getByText("tasks.status_total");
+      expect(totalLabel.previousElementSibling).toHaveTextContent("0");
     });
 
     it("shows Delete button for completed tasks and calls deleteTask mutation", async () => {
@@ -417,7 +438,10 @@ describe("TasksPage", () => {
     it("filters tasks by assigned agent", () => {
       renderPage();
       const filterSelect = screen.getByDisplayValue("tasks.all_agents");
-      fireEvent.change(filterSelect, { target: { value: "agent-alpha" } });
+      // The option value is the agent id; the sample tasks store the *name*.
+      // Matching both spellings is what keeps pre-existing tasks filterable
+      // after the picker moved to ids.
+      fireEvent.change(filterSelect, { target: { value: ALPHA_ID } });
 
       // After filtering, only agent-alpha tasks visible (pending + completed)
       expect(screen.getByText("Pending task title")).toBeInTheDocument();
@@ -425,5 +449,81 @@ describe("TasksPage", () => {
       // agent-beta tasks not visible
       expect(screen.queryByText("Running task")).not.toBeInTheDocument();
     });
+  });
+
+  // ── The reported bug: the picker was built from the assignees of tasks that
+  //    already existed, so it could not offer an agent that had never been
+  //    assigned one, and kept offering agents that no longer exist. ──────────
+  describe("agent picker is sourced from the agent registry", () => {
+    it("offers an agent that has no tasks yet", () => {
+      renderPage();
+      // agent-gamma appears in no task in SAMPLE_TASKS. Under the old
+      // derived-from-tasks list it was unreachable; it must be selectable now.
+      const filterSelect = screen.getByDisplayValue("tasks.all_agents");
+      const offered = Array.from(filterSelect.querySelectorAll("option")).map(
+        (o) => o.textContent,
+      );
+      expect(offered).toContain("agent-gamma");
+    });
+
+    it("stops offering an agent that has been deleted, even while its tasks remain", () => {
+      // agent-beta is gone from the registry but still owns two tasks.
+      useAgentsMock.mockReturnValue(
+        makeQuery(SAMPLE_AGENTS.filter((a) => a.name !== "agent-beta")),
+      );
+      renderPage();
+      const filterSelect = screen.getByDisplayValue("tasks.all_agents");
+      const offered = Array.from(filterSelect.querySelectorAll("option")).map(
+        (o) => o.textContent,
+      );
+      expect(offered).not.toContain("agent-beta");
+      // Its tasks stay visible and readable — they are not hidden by the
+      // agent's absence, only unfilterable.
+      expect(screen.getByText("Running task")).toBeInTheDocument();
+      expect(screen.getAllByText("agent-beta").length).toBeGreaterThan(0);
+    });
+
+    it("offers every registered agent even when the board is empty", () => {
+      useTaskQueueMock.mockReturnValue(makeQuery({ tasks: [], total: 0 }));
+      useTaskQueueStatusMock.mockReturnValue(
+        makeQuery({ total: 0, pending: 0, in_progress: 0, completed: 0, failed: 0 }),
+      );
+      renderPage();
+      fireEvent.click(screen.getAllByText("tasks.new_task")[0]);
+      const assigneeSelect = screen.getByDisplayValue("tasks.assignee_none");
+      const offered = Array.from(assigneeSelect.querySelectorAll("option")).map(
+        (o) => o.textContent,
+      );
+      // Previously an empty board meant an empty list, which downgraded the
+      // field to a free-text box that could only produce a rejected post.
+      expect(offered).toEqual(
+        expect.arrayContaining(["agent-alpha", "agent-beta", "agent-gamma"]),
+      );
+    });
+  });
+
+  it("renders an id-assigned task under the agent name, not a raw UUID", () => {
+    useTaskQueueMock.mockReturnValue(
+      makeQuery({
+        tasks: [
+          {
+            id: "t-byid",
+            status: "pending",
+            title: "Posted by id",
+            description: "d",
+            assigned_to: ALPHA_ID,
+            created_at: new Date().toISOString(),
+          },
+        ],
+        total: 1,
+      }),
+    );
+    renderPage();
+    // Scoped to the card's badge — "agent-alpha" also appears as a filter
+    // option, so a bare text query would not prove the card resolved it.
+    const badge = document.querySelector(`span[title="${ALPHA_ID}"]`);
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe("agent-alpha");
+    expect(screen.queryByText(ALPHA_ID)).not.toBeInTheDocument();
   });
 });

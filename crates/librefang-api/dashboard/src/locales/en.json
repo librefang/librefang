@@ -1772,9 +1772,6 @@
     "delete_failed": "Delete failed",
     "run_failed": "Run failed",
     "run_started": "Run started",
-    "rerun": "Re-run with same parameters",
-    "rerun_started": "Re-run started with the same parameters",
-    "rerun_failed": "Re-run failed",
     "runs_label": "runs",
     "schedule_failed": "Schedule creation failed",
     "skip": "skip",
@@ -1818,7 +1815,26 @@
       "load_failed": "Failed to load pending operator reviews.",
       "review_run": "Review {{workflow}} — {{step}}",
       "more_pending": "+{{count}} more pending"
-    }
+    },
+    "console": "Console",
+    "console_completed": "Completed in {{duration}} — {{tokens}} tokens",
+    "console_executing": "Executing… {{done}}/{{total}} steps done",
+    "console_failed": "Failed: {{error}}",
+    "console_run_started": "Run started — {{steps}} steps defined",
+    "console_var_line": "{{varName}} = \"{{value}}\"",
+    "console_step_line": "Step {{current}}/{{total}} \"{{name}}\" → {{agent}}",
+    "console_step_line_failed": "Step {{current}}/{{total}} \"{{name}}\" → {{agent}} FAILED",
+    "step_via": "via {{agent}}",
+    "console_step_io": "Prompt: {{inTokens}} tokens → Response: {{outTokens}} tokens in {{duration}}",
+    "console_step_error": "Error: {{error}}",
+    "rerun_hint": "Re-run with these parameters",
+    "rerun_same": "Re-run with same parameters",
+    "rerun_started": "Re-run started with the same parameters",
+    "rerun_failed": "Re-run failed",
+    "starting": "Starting…",
+    "steps_executed": "{{executed}} of {{total}} steps executed…",
+    "step_output": "Output",
+    "step_pending": "Pending…"
   },
   "scheduler": {
     "title": "Scheduler",
@@ -4185,7 +4201,6 @@
     "field_description": "Description",
     "field_description_placeholder": "Describe the task for the agent...",
     "field_assignee": "Assignee (optional)",
-    "field_assignee_placeholder": "Agent name or ID",
     "submit": "Create Task",
     "cancel": "Cancel",
     "empty": "No tasks",
@@ -4196,7 +4211,10 @@
     "status_pending": "Pending",
     "status_in_progress": "In Progress",
     "status_completed": "Completed",
-    "status_failed": "Failed"
+    "status_failed": "Failed",
+    "assignee_none": "Unassigned — any agent may claim it",
+    "no_agents_hint": "No agents registered yet. Create an agent before assigning tasks.",
+    "field_description_hint": "The agent reads this verbatim. Include the goal, the constraints, and what \"done\" looks like."
   },
   "prompts": {
     "title": "Prompts",

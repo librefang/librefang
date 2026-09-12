@@ -1773,9 +1773,6 @@
     "delete_failed": "删除失败",
     "run_failed": "运行失败",
     "run_started": "运行已启动",
-    "rerun": "用相同参数重跑",
-    "rerun_started": "已用相同参数重新运行",
-    "rerun_failed": "重跑失败",
     "schedule_failed": "创建计划失败",
     "skip": "跳过",
     "agent_not_found": "未找到 Agent",
@@ -1818,7 +1815,26 @@
       "load_failed": "无法加载待处理的操作员审查。",
       "review_run": "审查 {{workflow}} — {{step}}",
       "more_pending": "另有 {{count}} 项待处理"
-    }
+    },
+    "console": "控制台",
+    "console_completed": "已完成，耗时 {{duration}} — {{tokens}} 个token",
+    "console_executing": "执行中… 已完成 {{done}}/{{total}} 步",
+    "console_failed": "失败：{{error}}",
+    "console_run_started": "运行已开始 — 定义了 {{steps}} 个步骤",
+    "console_var_line": "{{varName}} = \"{{value}}\"",
+    "console_step_line": "步骤 {{current}}/{{total}} \"{{name}}\" → {{agent}}",
+    "console_step_line_failed": "步骤 {{current}}/{{total}} \"{{name}}\" → {{agent}} 失败",
+    "step_via": "经由 {{agent}}",
+    "console_step_io": "提示：{{inTokens}} 个token → 响应：{{outTokens}} 个token，耗时 {{duration}}",
+    "console_step_error": "错误：{{error}}",
+    "rerun_hint": "使用这些参数重新运行",
+    "rerun_same": "使用相同参数重新运行",
+    "rerun_started": "已用相同参数重新运行",
+    "rerun_failed": "重跑失败",
+    "starting": "启动中…",
+    "steps_executed": "已执行 {{total}} 个步骤中的 {{executed}} 个…",
+    "step_output": "输出",
+    "step_pending": "等待中…"
   },
   "scheduler": {
     "title": "调度器",
@@ -4185,7 +4201,6 @@
     "field_description": "描述",
     "field_description_placeholder": "描述要分配给智能体的任务...",
     "field_assignee": "分配给（可选）",
-    "field_assignee_placeholder": "智能体名称或 ID",
     "submit": "创建任务",
     "cancel": "取消",
     "empty": "暂无任务",
@@ -4196,7 +4211,10 @@
     "status_pending": "待处理",
     "status_in_progress": "进行中",
     "status_completed": "已完成",
-    "status_failed": "失败"
+    "status_failed": "失败",
+    "assignee_none": "未分配 — 任何智能体都可认领",
+    "no_agents_hint": "尚未注册任何智能体。请先创建智能体再分配任务。",
+    "field_description_hint": "智能体会逐字读取此内容。请写明目标、约束以及完成标准。"
   },
   "prompts": {
     "title": "提示词",

@@ -1776,9 +1776,6 @@
     "delete_failed": "Usuwanie nie powiodło się",
     "run_failed": "Uruchomienie nie powiodło się",
     "run_started": "Uruchomienie rozpoczęte",
-    "rerun": "Uruchom ponownie z tymi samymi parametrami",
-    "rerun_started": "Uruchomienie ponowne rozpoczęte z tymi samymi parametrami",
-    "rerun_failed": "Uruchomienie ponowne nie powiodło się",
     "runs_label": "uruchomienia",
     "schedule_failed": "Nie udało się utworzyć harmonogramu",
     "skip": "pomiń",
@@ -1824,7 +1821,26 @@
       "load_failed": "Nie udało się wczytać oczekujących weryfikacji operatora.",
       "review_run": "Zweryfikuj {{workflow}} — {{step}}",
       "more_pending": "+{{count}} oczekujących"
-    }
+    },
+    "console": "Konsola",
+    "console_completed": "Ukończono w {{duration}} — {{tokens}} tokenów",
+    "console_executing": "Wykonywanie… {{done}}/{{total}} kroków ukończono",
+    "console_failed": "Błąd: {{error}}",
+    "console_run_started": "Uruchomienie rozpoczęte — zdefiniowano {{steps}} kroków",
+    "console_var_line": "{{varName}} = \"{{value}}\"",
+    "console_step_line": "Krok {{current}}/{{total}} \"{{name}}\" → {{agent}}",
+    "console_step_line_failed": "Krok {{current}}/{{total}} \"{{name}}\" → {{agent}} NIEPOWODZENIE",
+    "step_via": "przez {{agent}}",
+    "console_step_io": "Prompt: {{inTokens}} tokenów → Odpowiedź: {{outTokens}} tokenów w {{duration}}",
+    "console_step_error": "Błąd: {{error}}",
+    "rerun_hint": "Uruchom ponownie z tymi parametrami",
+    "rerun_same": "Uruchom ponownie z tymi samymi parametrami",
+    "rerun_started": "Uruchomienie ponowne rozpoczęte z tymi samymi parametrami",
+    "rerun_failed": "Uruchomienie ponowne nie powiodło się",
+    "starting": "Uruchamianie…",
+    "steps_executed": "Wykonano {{executed}} z {{total}} kroków…",
+    "step_output": "Wynik",
+    "step_pending": "Oczekiwanie…"
   },
   "scheduler": {
     "title": "Harmonogram",
@@ -4195,7 +4211,6 @@
     "field_description": "Opis",
     "field_description_placeholder": "Opisz zadanie dla agenta...",
     "field_assignee": "Przypisany agent (opcjonalnie)",
-    "field_assignee_placeholder": "Nazwa lub ID agenta",
     "submit": "Utwórz zadanie",
     "cancel": "Anuluj",
     "empty": "Brak zadań",
@@ -4206,7 +4221,10 @@
     "status_pending": "Oczekujące",
     "status_in_progress": "W toku",
     "status_completed": "Zakończone",
-    "status_failed": "Nieudane"
+    "status_failed": "Nieudane",
+    "assignee_none": "Nieprzypisane — dowolny agent może pobrać",
+    "no_agents_hint": "Nie zarejestrowano jeszcze żadnych agentów. Utwórz agenta przed przypisywaniem zadań.",
+    "field_description_hint": "Agent czyta to dosłownie. Podaj cel, ograniczenia i kryteria ukończenia."
   },
   "prompts": {
     "title": "Prompty",
