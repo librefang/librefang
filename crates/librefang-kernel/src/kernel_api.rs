@@ -174,14 +174,41 @@ pub trait KernelApi: KernelHandle + Send + Sync {
     /// Start a long-horizon autonomous run driving `agent_id` toward
     /// `goal_id`. `max_iterations` bounds the run (default
     /// [`librefang_types::goal::DEFAULT_GOAL_MAX_ITERATIONS`]).
+    ///
+    /// `loop_engineering` opts the run into the verifier gate and the
+    /// evaluator; the three arguments after it are inert without it.
+    #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool;
     /// Stop an active goal run. Returns whether a run was stopped.
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Pause an active goal run, checkpointing progress for a later resume.
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool;
+    /// Resume a goal run from its pause checkpoint.
+    ///
+    /// Takes the same loop-engineering arguments as [`Self::start_goal_run`]:
+    /// the checkpoint records the run's progress, not its verifier
+    /// configuration, so a resume that did not carry them would silently drop
+    /// the gate the operator configured on the goal.
+    #[allow(clippy::too_many_arguments)]
+    fn resume_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) -> bool;
     /// Snapshot the observable state of a goal's run, if one is active.
     fn goal_run_state(
         &self,
@@ -973,16 +1000,52 @@ impl KernelApi for LibreFangKernel {
         LibreFangKernel::preview_step_agent(self, agent_ref)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_goal_run(
         &self,
         goal_id: librefang_types::goal::GoalId,
         agent_id: AgentId,
         max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
     ) -> bool {
-        self.goal_run_start(goal_id, agent_id, max_iterations)
+        self.goal_run_start(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
     fn stop_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
         self.goal_run_stop(goal_id)
+    }
+    fn pause_goal_run(&self, goal_id: librefang_types::goal::GoalId) -> bool {
+        self.goal_run_pause(goal_id)
+    }
+    fn resume_goal_run(
+        &self,
+        goal_id: librefang_types::goal::GoalId,
+        agent_id: AgentId,
+        max_iterations: Option<u32>,
+        loop_engineering: bool,
+        verify_agent_id: Option<AgentId>,
+        verify_max_retries: Option<u32>,
+        evaluator_model: Option<String>,
+    ) -> bool {
+        self.goal_run_resume(
+            goal_id,
+            agent_id,
+            max_iterations,
+            loop_engineering,
+            verify_agent_id,
+            verify_max_retries,
+            evaluator_model,
+        )
     }
     fn goal_run_state(
         &self,

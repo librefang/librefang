@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type GoalItem, type GoalRunState, type GoalTemplate } from "../api";
+import { useAgents } from "../lib/queries/agents";
 import { useGoals, useGoalTemplates, useGoalRun } from "../lib/queries/goals";
 import {
   useCreateGoal,
@@ -17,7 +18,13 @@ import { Button } from "../components/ui/Button";
 import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
+import {
+  DEFAULT_GOAL_TICK_INTERVAL_SECS,
+  MAX_GOAL_TICK_INTERVAL_SECS,
+  MIN_GOAL_TICK_INTERVAL_SECS,
+  parseGoalTickInterval,
+} from "../lib/goalTickInterval";
+import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, Pause, Square, ChevronDown, ChevronRight, Zap, Ban, Activity } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -134,6 +141,7 @@ const goalRunPhaseBadge = (
 ): { variant: BadgeVariant; icon?: React.ComponentType<{ className?: string }> } => {
   switch (phase) {
     case "running":                 return { variant: "brand",   icon: Activity };
+    case "paused":                  return { variant: "warning", icon: Pause };
     case "finished":                return { variant: "success", icon: CheckCircle2 };
     case "stopped":                 return { variant: "warning", icon: Ban };
     case "rate_limited":            return { variant: "error",   icon: AlertTriangle };
@@ -261,12 +269,17 @@ export function GoalsPage() {
   const { t } = useTranslation();
   const addToast = useUIStore((s) => s.addToast);
   const [expandedById, setExpandedById] = useState<Record<string, boolean>>({});
-  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0 });
+  // `tick_interval_secs` is held as a string so an empty field means "leave it
+  // at the default" — a number would have to pick a sentinel, and 0 is a value
+  // the backend rejects rather than a way to say "unset".
+  const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "", evaluator_model: "", tick_interval_secs: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0 });
+  const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as "pending" | "in_progress" | "completed", progress: 0, agent_id: "", loop_engineering: false, verify_agent_id: "", evaluator_model: "", tick_interval_secs: "" });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
+  const agentsQuery = useAgents();
+  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const goalsQuery = useGoals();
   const templatesQuery = useGoalTemplates();
   const [applyingTemplate, setApplyingTemplate] = useState<string | null>(null);
@@ -281,9 +294,27 @@ export function GoalsPage() {
     e.preventDefault();
     if (!createDraft.title.trim()) return;
     try {
-      await createMutation.mutateAsync(createDraft);
+      // Drop blank parent_id / agent_id instead of posting `""` (#6562): the form seeds both as empty strings, and an empty parent_id used to fail the backend's parent-existence check with "Parent goal '' not found".
+      // The verifier and the evaluator model get the same treatment for the
+      // same reason: the backend rejects a non-UUID verify_agent_id outright.
+      // Same for a blank cadence: omitting the field is what leaves the goal on
+      // the default, whereas `""` fails the backend's integer check.
+      const { parent_id, agent_id, verify_agent_id, evaluator_model, tick_interval_secs, ...rest } = createDraft;
+      const cadence = parseGoalTickInterval(tick_interval_secs);
+      if (cadence === undefined) {
+        addToast(t("goals.tick_interval_out_of_range", { min: MIN_GOAL_TICK_INTERVAL_SECS, max: MAX_GOAL_TICK_INTERVAL_SECS }), "error");
+        return;
+      }
+      await createMutation.mutateAsync({
+        ...rest,
+        ...(parent_id.trim() ? { parent_id: parent_id.trim() } : {}),
+        ...(agent_id.trim() ? { agent_id: agent_id.trim() } : {}),
+        ...(verify_agent_id.trim() ? { verify_agent_id: verify_agent_id.trim() } : {}),
+        ...(evaluator_model.trim() ? { evaluator_model: evaluator_model.trim() } : {}),
+        ...(cadence === null ? {} : { tick_interval_secs: cadence }),
+      });
       addToast(t("common.success"), "success");
-      setCreateDraft({ title: "", description: "", status: "pending", progress: 0 });
+      setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "", loop_engineering: false, verify_agent_id: "", evaluator_model: "", tick_interval_secs: "" });
     } catch (err) {
       addToast(toastErr(err, t("common.error")), "error");
     }
@@ -321,14 +352,41 @@ export function GoalsPage() {
         goal.status === "in_progress" || goal.status === "completed"
           ? goal.status
           : "pending",
-      progress: goal.progress || 0
+      progress: goal.progress || 0,
+      agent_id: goal.agent_id || "",
+      loop_engineering: goal.loop_engineering ?? false,
+      verify_agent_id: goal.verify_agent_id || "",
+      evaluator_model: goal.evaluator_model || "",
+      tick_interval_secs:
+        goal.tick_interval_secs === undefined ? "" : String(goal.tick_interval_secs),
     });
   };
 
   const handleSaveEdit = async () => {
     if (!editingId || !editDraft.title.trim()) return;
+    // Checked here rather than left to the input's `min` / `max`: this block is
+    // not a `<form>` and Save is a plain button, so those attributes never
+    // trigger constraint validation. The title, status, progress and agent
+    // changes travel in the same payload, and `validate_tick_interval` refuses
+    // it before the `structured_modify` transaction — so one bad cadence used
+    // to discard the entire edit and report only the cadence.
+    const cadence = parseGoalTickInterval(editDraft.tick_interval_secs);
+    if (cadence === undefined) {
+      addToast(t("goals.tick_interval_out_of_range", { min: MIN_GOAL_TICK_INTERVAL_SECS, max: MAX_GOAL_TICK_INTERVAL_SECS }), "error");
+      return;
+    }
     try {
-      await updateMutation.mutateAsync({ id: editingId, data: editDraft });
+      // `null` is the backend's clear signal; an empty select means "none".
+      await updateMutation.mutateAsync({
+        id: editingId,
+        data: {
+          ...editDraft,
+          agent_id: editDraft.agent_id.trim() || null,
+          verify_agent_id: editDraft.verify_agent_id.trim() || null,
+          evaluator_model: editDraft.evaluator_model.trim() || null,
+          tick_interval_secs: cadence,
+        },
+      });
       addToast(t("common.success"), "success");
       setEditingId(null);
     } catch (err) {
@@ -538,6 +596,29 @@ export function GoalsPage() {
                 <input id="goal-create-title" value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
                 <label htmlFor="goal-create-description" className="sr-only">{t("goals.goal_desc_placeholder")}</label>
                 <textarea id="goal-create-description" value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
+                <label htmlFor="goal-create-agent" className="sr-only">{t("goals.assigned_agent")}</label>
+                <select id="goal-create-agent" value={createDraft.agent_id} onChange={e => setCreateDraft({...createDraft, agent_id: e.target.value})} className={inputClass}>
+                  <option value="">{t("goals.no_agent_selected")}</option>
+                  {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                </select>
+                {/* Outside the loop-engineering block on purpose: the runner reads the cadence on every autonomous run, not only a loop-engineered one. Bounds and default come from lib/goalTickInterval, which mirrors librefang-types. */}
+                <label htmlFor="goal-create-tick" className="sr-only">{t("goals.tick_interval")}</label>
+                <input id="goal-create-tick" type="number" min={MIN_GOAL_TICK_INTERVAL_SECS} max={MAX_GOAL_TICK_INTERVAL_SECS} value={createDraft.tick_interval_secs} onChange={e => setCreateDraft({...createDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder", { defaultSecs: DEFAULT_GOAL_TICK_INTERVAL_SECS })} className={inputClass} />
+                <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
+                  <input type="checkbox" checked={createDraft.loop_engineering} onChange={e => setCreateDraft({...createDraft, loop_engineering: e.target.checked})} className="rounded" />
+                  {t("goals.loop_engineering")}
+                </label>
+                {createDraft.loop_engineering && (
+                  <>
+                    <label htmlFor="goal-create-verifier" className="sr-only">{t("goals.verifier_agent")}</label>
+                    <select id="goal-create-verifier" value={createDraft.verify_agent_id} onChange={e => setCreateDraft({...createDraft, verify_agent_id: e.target.value})} className={inputClass}>
+                      <option value="">{t("goals.no_verifier_selected")}</option>
+                      {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                    </select>
+                    <label htmlFor="goal-create-evaluator" className="sr-only">{t("goals.evaluator_model")}</label>
+                    <input id="goal-create-evaluator" value={createDraft.evaluator_model} onChange={e => setCreateDraft({...createDraft, evaluator_model: e.target.value})} placeholder={t("goals.evaluator_model_placeholder")} className={inputClass} />
+                  </>
+                )}
                 <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
                   {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
                 </Button>
@@ -569,9 +650,31 @@ export function GoalsPage() {
                             </select>
                             <label htmlFor="goal-edit-progress" className="sr-only">{t("goals.progress")}</label>
                             <input id="goal-edit-progress" type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
+                            <label htmlFor="goal-edit-agent" className="sr-only">{t("goals.assigned_agent")}</label>
+                            <select id="goal-edit-agent" value={editDraft.agent_id} onChange={e => setEditDraft({...editDraft, agent_id: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                              <option value="">{t("goals.no_agent_selected")}</option>
+                              {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                            </select>
+                            <label htmlFor="goal-edit-tick" className="sr-only">{t("goals.tick_interval")}</label>
+                            <input id="goal-edit-tick" type="number" min={MIN_GOAL_TICK_INTERVAL_SECS} max={MAX_GOAL_TICK_INTERVAL_SECS} value={editDraft.tick_interval_secs} onChange={e => setEditDraft({...editDraft, tick_interval_secs: e.target.value})} placeholder={t("goals.tick_interval_placeholder", { defaultSecs: DEFAULT_GOAL_TICK_INTERVAL_SECS })} className={`${inputClass} flex-1 min-w-[120px]`} />
                             <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
                             <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
                           </div>
+                          <label className="flex items-center gap-2 text-xs text-text-dim cursor-pointer">
+                            <input type="checkbox" checked={editDraft.loop_engineering} onChange={e => setEditDraft({...editDraft, loop_engineering: e.target.checked})} className="rounded" />
+                            {t("goals.loop_engineering")}
+                          </label>
+                          {editDraft.loop_engineering && (
+                            <div className="flex flex-wrap gap-2">
+                              <label htmlFor="goal-edit-verifier" className="sr-only">{t("goals.verifier_agent")}</label>
+                              <select id="goal-edit-verifier" value={editDraft.verify_agent_id} onChange={e => setEditDraft({...editDraft, verify_agent_id: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
+                                <option value="">{t("goals.no_verifier_selected")}</option>
+                                {agents.map(a => <option key={a.id} value={a.id}>{a.name || a.id}</option>)}
+                              </select>
+                              <label htmlFor="goal-edit-evaluator" className="sr-only">{t("goals.evaluator_model")}</label>
+                              <input id="goal-edit-evaluator" value={editDraft.evaluator_model} onChange={e => setEditDraft({...editDraft, evaluator_model: e.target.value})} placeholder={t("goals.evaluator_model_placeholder")} className={`${inputClass} flex-1 min-w-[120px]`} />
+                            </div>
+                          )}
                         </div>
                       ) : confirmDeleteId === r.goal.id ? (
                         <div className="p-3 sm:p-4 flex items-center justify-between gap-3">
@@ -603,6 +706,11 @@ export function GoalsPage() {
                               <Badge variant={goalStatusBadgeVariant(status)} className="shrink-0">
                                 {statusLabel(status)}
                               </Badge>
+                              {r.goal.loop_engineering && (
+                                <Badge variant="info" className="shrink-0" title={t("goals.loop_engineering_hint")}>
+                                  {t("goals.loop_engineering")}
+                                </Badge>
+                              )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                               {status !== "completed" && <GoalRunControl goal={r.goal} />}

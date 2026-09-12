@@ -1,0 +1,3 @@
+Suspend a long-horizon goal run and pick it up later with `POST /api/goals/{id}/pause` and `POST /api/goals/{id}/resume`.
+Until now `stop` was the only way to halt a run and it discarded the run's state, so an operator who wanted to free an agent for an hour could only express that as "throw away the last forty iterations and start over".
+A pause lets the loop finish the turn it is on, then checkpoints its iteration count, progress and start time, so the run stays visible in `GET /api/goals/{id}/run` in the new `paused` phase while nothing is being spent on it, and a resume continues the same run under the same iteration budget rather than beginning a new one (#7973) (@DaBlitzStein)

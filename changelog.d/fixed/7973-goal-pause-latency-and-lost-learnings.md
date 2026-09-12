@@ -1,0 +1,3 @@
+Pausing a goal run no longer waits out the whole configured tick interval, and no longer discards the lessons the run had already captured.
+The pause/stop flags were only checked at the top of the run loop, so a `tick_interval_secs` set close to its 24-hour maximum meant a requested pause could sit unobserved for up to a day; the inter-tick sleep now wakes every second to re-check them.
+The `GOAL_LEARNED:` lessons a run collects before pausing are now carried into its resume checkpoint and threaded back into the resumed run's own accumulator, instead of resetting to nothing on every pause. (#7973) (@DaBlitzStein)

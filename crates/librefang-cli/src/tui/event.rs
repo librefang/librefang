@@ -4354,6 +4354,7 @@ fn goal_from_json(g: &serde_json::Value) -> GoalInfo {
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        tick_interval_secs: g["tick_interval_secs"].as_u64(),
         run_phase: None,
         run_iteration: None,
         run_max_iterations: None,
@@ -4418,16 +4419,22 @@ pub fn spawn_create_goal(
     title: String,
     description: String,
     agent_id: String,
+    tick_interval_secs: Option<u64>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
             let client = make_daemon_client(api_key.as_deref());
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "title": title,
                 "description": description,
                 "agent_id": agent_id,
             });
+            // Omitted rather than sent as null: the goal document only carries
+            // the field when it overrides the default cadence.
+            if let Some(secs) = tick_interval_secs {
+                body["tick_interval_secs"] = serde_json::json!(secs);
+            }
             match client
                 .post(format!("{base_url}/api/goals"))
                 .json(&body)

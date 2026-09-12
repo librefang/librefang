@@ -1153,6 +1153,18 @@ export interface GoalItem {
   agent_id?: string;
   status?: string;
   progress?: number;
+  /** Opt into the verifier gate, the evaluator and captured lessons. */
+  loop_engineering?: boolean;
+  /** Agent that judges the worker's output; only used with loop_engineering. */
+  verify_agent_id?: string;
+  /** Model that judges goal completion; only used with loop_engineering. */
+  evaluator_model?: string;
+  /**
+   * Pause between the autonomous runner's loop iterations, in seconds.
+   * Absent means the compiled default (2s). Applies to every run, not only
+   * loop-engineered ones.
+   */
+  tick_interval_secs?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -4540,6 +4552,10 @@ export async function createGoal(payload: {
   agent_id?: string;
   status?: string;
   progress?: number;
+  loop_engineering?: boolean;
+  verify_agent_id?: string;
+  evaluator_model?: string;
+  tick_interval_secs?: number;
 }): Promise<GoalItem> {
   return post<GoalItem>("/api/goals", payload);
 }
@@ -4553,6 +4569,11 @@ export async function updateGoal(
     progress?: number;
     parent_id?: string | null;
     agent_id?: string | null;
+    loop_engineering?: boolean;
+    verify_agent_id?: string | null;
+    evaluator_model?: string | null;
+    /** `null` clears the override and restores the default cadence. */
+    tick_interval_secs?: number | null;
   }
 ): Promise<GoalItem> {
   // Issue #3832: handler now returns the mutated GoalItem instead of an ack
@@ -4569,11 +4590,14 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
 export interface GoalRunState {
   goal_id: string;
   agent_id: string;
-  phase: "running" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
+  phase: "running" | "paused" | "finished" | "max_iterations_reached" | "rate_limited" | "stopped";
   iteration: number;
   max_iterations: number;
   last_progress: number;
   last_error?: string;
+  verify_agent_id?: string;
+  verify_max_retries?: number;
+  evaluator_model?: string;
   started_at: string;
   updated_at: string;
 }
@@ -4581,7 +4605,7 @@ export interface GoalRunState {
 /** Begin an autonomous run that drives the goal's assigned agent. */
 export async function startGoalRun(
   goalId: string,
-  payload?: { max_iterations?: number }
+  payload?: { max_iterations?: number; verify_max_retries?: number }
 ): Promise<{ ok: boolean; run: GoalRunState | null }> {
   return post<{ ok: boolean; run: GoalRunState | null }>(
     `/api/goals/${encodeURIComponent(goalId)}/start`,
