@@ -689,10 +689,10 @@ mcp-catalog-install-hint =   MCP 서버를 설치하려면 `librefang mcp add <i
 mcp-none-configured = 구성된 MCP 서버가 없습니다.
 mcp-list-catalog-hint =   설치 가능한 항목을 나열하려면 `librefang mcp catalog`을(를) 사용하십시오.
 mcp-vault-set-hint =   librefang vault set { $name }  # { $help }
-mcp-header-name = name
+mcp-header-name = 이름
 mcp-header-template-id = template_id
-mcp-header-transport = transport
-mcp-header-details = details
+mcp-header-transport = 전송
+mcp-header-details = 세부 정보
 
 # monitoring.rs
 monitoring-audit-reset-destructive = 감사 초기화 재설정은 파괴적입니다 — 진행하려면 `--confirm`과 함께 다시 실행하십시오
@@ -1077,7 +1077,7 @@ ui-label-next-steps = 다음 단계
 ui-label-fix = 수정:
 ui-label-try = 시도:
 ui-provider-not-set = { $env_var }이(가) 설정되지 않음
-progress-fail = [FAIL]
+progress-fail = [실패]
 
 # Table headers / Shared labels
 label-header-name = 이름
@@ -1120,7 +1120,7 @@ model-header-context = 컨텍스트
 model-header-resolves-to = 확인 대상
 model-header-auth = 인증
 model-header-models = 모델
-model-header-base-url = BASE URL
+model-header-base-url = 기본 URL
 model-overrides-cleared = 모델 { $model }의 오버라이드가 초기화되었습니다.
 model-overrides-clear-failed = { $model }의 오버라이드 초기화 실패: { $status }
 model-overrides-header-field = 필드
@@ -1149,9 +1149,9 @@ auth-pool-cooldown-left = ({ $secs }초 남음)
 auth-pool-status-invalid = 유효하지 않음
 auth-pool-status-exhausted = 소진됨
 auth-pool-status-cooldown = 쿨다운
-auth-pool-status-env-missing = env-missing
+auth-pool-status-env-missing = 환경 변수 없음
 auth-pool-status-healthy = 정상
-auth-pool-key-requests = requests={ $count }
+auth-pool-key-requests = 요청={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = config.toml에 추가하십시오:
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
@@ -1289,7 +1289,7 @@ monitoring-no-webhooks = 구성된 웹훅이 없습니다.
 label-last-seen = 마지막 확인
 status-watch-header =   { $status } ({ $interval }초마다 새로고침, Ctrl+C로 종료)
 status-warning-config = 경고: { $error }; 상태 표시에 기본 구성 값을 사용합니다
-status-summary-up = librefang { $version } { $state } uptime={ $uptime } { $auth } ({ $base })
+status-summary-up = librefang { $version } { $state } 가동시간={ $uptime } { $auth } ({ $base })
 status-peers-connected = { $connected }개 연결됨 / { $total }개 알려짐
 status-agents-active = { $active }개 실행 중 / 총 { $total }개
 status-mb = { $mb } MB
@@ -1849,7 +1849,7 @@ tui-dashboard-hints =   [r] 새로고침  [a] 에이전트  [↑↓] 스크롤  
 tui-dashboard-dreams-title = DREAMS
 tui-dashboard-auto-dream-enabled = Auto-Dream 활성화됨
 tui-dashboard-auto-dream-disabled = Auto-Dream 비활성화됨
-tui-dashboard-dream-details = phase={ $phase }  tools={ $tools }  mems={ $mems }
+tui-dashboard-dream-details = 단계={ $phase }  도구={ $tools }  기억={ $mems }
 tui-dashboard-stat-agents = 에이전트
 tui-dashboard-stat-uptime = 가동 시간
 tui-dashboard-stat-provider = 공급자
@@ -2143,7 +2143,7 @@ tui-agents-hints-save =     [↑↓] 탐색  [Space] 전환  [Enter] 저장  [Es
 tui-agents-placeholder-name = my-agent
 tui-agents-placeholder-desc = 사용자 지정 에이전트
 tui-agents-placeholder-prompt = 당신은 유용한 에이전트입니다.
-tui-agents-label-placeholder =     placeholder: { $placeholder }
+tui-agents-label-placeholder = 자리 표시자: { $placeholder }
 
 tui-agents-detail-id =   ID:       
 tui-agents-detail-name =   이름:      
@@ -2230,7 +2230,7 @@ tui-triggers-label-pattern-picker =   패턴 유형을 선택하십시오:
 tui-triggers-prompt-param = { $type }의 패턴 매개변수:
 tui-triggers-placeholder-pattern-param = 예: .*error.*
 tui-triggers-label-prompt = 프롬프트 템플릿:
-tui-triggers-placeholder-prompt = Handle this: {"{"}event{"}"}
+tui-triggers-placeholder-prompt = 이 이벤트를 처리하세요: {"{"}event{"}"}
 tui-triggers-label-max-fires = 최대 발동 횟수 (0 = 무제한):
 tui-triggers-placeholder-max-fires = 0
 tui-triggers-review-agent =   에이전트:  
@@ -2435,14 +2435,14 @@ tui-goals-agent-hint = 목표를 수행할 에이전트의 이름 또는 UUID. �
 tui-goals-nav-next = [Enter] 다음  [Esc] 뒤로
 tui-goals-nav-submit = [Enter] 만들기  [Esc] 뒤로
 tui-goals-create-incomplete = 제목과 에이전트가 모두 필요합니다.
-tui-goals-phase-actv = ● ACTV
-tui-goals-phase-done = ○ DONE
-tui-goals-phase-canc = ○ CANC
-tui-goals-phase-fail = ● FAIL
-tui-goals-phase-pend = ○ PEND
-tui-goals-phase-paused = ⏸ PAUS
-tui-goals-phase-rate-limited = ⚡ RLIM
-tui-goals-phase-max-iterations = ⏱ MXIT
+tui-goals-phase-actv = ● 활성
+tui-goals-phase-done = ○ 완료
+tui-goals-phase-canc = ○ 취소
+tui-goals-phase-fail = ● 실패
+tui-goals-phase-pend = ○ 대기
+tui-goals-phase-paused = ⏸ 일시정지
+tui-goals-phase-rate-limited = ⚡ 속도제한
+tui-goals-phase-max-iterations = ⏱ 최대반복
 tui-goals-run-running = 실행 중
 tui-goals-run-paused = 일시 중지됨
 tui-goals-run-finished = 완료됨

@@ -380,12 +380,12 @@ format-bytes-kib = { $value } KiB
 format-bytes-b = { $value } B
 format-size-mb = ({ $value } MB)
 
-format-uptime-s = { $secs }s
-format-uptime-ms = { $mins }m { $secs }s
-format-uptime-hm = { $hours }h { $mins }m
-format-uptime-hms = { $hours }h { $mins }m { $secs }s
-format-uptime-dh = { $days }d { $hours }h
-format-uptime-dhm = { $days }d { $hours }h { $mins }m
+format-uptime-s = { $secs }秒
+format-uptime-ms = { $mins }分 { $secs }秒
+format-uptime-hm = { $hours }小时 { $mins }分
+format-uptime-hms = { $hours }小时 { $mins }分 { $secs }秒
+format-uptime-dh = { $days }天 { $hours }小时
+format-uptime-dhm = { $days }天 { $hours }小时 { $mins }分
 
 # --- Desktop install & Update errors ---
 desktop-install-unsupported-platform = 不支持的平台
@@ -1268,7 +1268,7 @@ tui-workflows-hints-run-result =   [Enter/Esc] 返回
 
 # --- Triggers screen ---
 tui-triggers-title-screen = 触发器
-tui-triggers-header-agent = Agent
+tui-triggers-header-agent = 智能体
 tui-triggers-header-pattern = 模式
 tui-triggers-header-fires = 触发次数
 tui-triggers-header-status = 状态
@@ -1280,7 +1280,7 @@ tui-triggers-create-new-option =   + 创建新触发器
 tui-triggers-hints-list =   [↑↓] 导航  [Enter] 创建  [d] 删除  [r] 刷新
 tui-triggers-title-create = 创建新触发器
 tui-triggers-create-step =   第 { $current } 步，共 { $total } 步
-tui-triggers-label-agent-id = Agent ID:
+tui-triggers-label-agent-id = 智能体 ID:
 tui-triggers-placeholder-agent-id = agent-uuid
 tui-triggers-label-pattern-picker =   选择模式类型:
 tui-triggers-prompt-param = { $type } 的模式参数:
@@ -1289,7 +1289,7 @@ tui-triggers-label-prompt = 提示词模板:
 tui-triggers-placeholder-prompt = 处理此项: {"{"}event{"}"}
 tui-triggers-label-max-fires = 最大触发次数 (0 = 无限制):
 tui-triggers-placeholder-max-fires = 0
-tui-triggers-review-agent =   Agent:   
+tui-triggers-review-agent = 智能体:   
 tui-triggers-review-pattern =   模式:   
 tui-triggers-review-prompt =   提示词: 
 tui-triggers-review-max =   最大:    
@@ -2199,7 +2199,7 @@ auth-pool-status-exhausted = 已耗尽
 auth-pool-status-cooldown = 冷却中
 auth-pool-status-env-missing = 缺少环境变量
 auth-pool-status-healthy = 健康
-auth-pool-key-requests = requests={ $count }
+auth-pool-key-requests = 请求数={ $count }
 auth-pool-key-item =     - [{ $label }] { $key_display }  priority={ $pri }{ $reqs_str }  status={ $status }
 auth-hash-add-config-hint = 添加到 config.toml：
 auth-hash-config-entry =   dashboard_pass_hash = "{ $hash }"
@@ -2333,12 +2333,12 @@ monitoring-no-webhooks = 未找到nowebhooks
 label-last-seen = 最后出现
 status-watch-header =   { $status }（每 { $interval } 秒刷新，Ctrl+C 退出）
 status-warning-config = 警告：{ $error }；状态显示将使用默认配置值
-status-summary-up = librefang { $version } { $state } uptime={ $uptime } { $auth } ({ $base })
+status-summary-up = librefang { $version } { $state } 运行时间={ $uptime } { $auth } ({ $base })
 status-peers-connected = { $connected } 已连接 / { $total } 已知
 status-agents-active = { $active } 运行中 / 共 { $total }
 status-mb = { $mb } MB
-status-summary-down = librefang down home={ $home } default={ $provider }/{ $model }
-status-uptime-format = { $hours }h { $mins }m
+status-summary-down = librefang 已停止 home={ $home } default={ $provider }/{ $model }
+status-uptime-format = { $hours }小时 { $mins }分
 # --- Brand/proper names ---
 
 # ── 用户组 (#7745) ──────────────────────────────────────────────────────────
