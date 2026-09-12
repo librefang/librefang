@@ -1287,6 +1287,34 @@ impl MemorySubstrate {
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
+    /// Count of `task_queue` rows per status, as `(status, count)` pairs.
+    ///
+    /// The summary endpoint used to derive these from [`Self::task_list`] with no filter, which materialises every row in the table and builds one `serde_json::Value` per row in order to answer with four integers.
+    /// `task_list` has no `LIMIT` and `task_prune_finished` only deletes terminal rows, so that cost grows with the table for the life of the install (#8219) — and `GET /api/tasks/status`, the endpoint that paid it, is what the dashboard polls.
+    ///
+    /// Returns the raw pairs rather than a struct with four named fields so a status the caller does not recognise still reaches it: the previous code logged a WARN naming the unknown status and the task it came from, and a fixed shape would have silently dropped that.
+    pub async fn task_status_counts(&self) -> LibreFangResult<Vec<(String, u64)>> {
+        let conn = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = conn.get().map_err(LibreFangError::memory)?;
+            let mut stmt = db
+                .prepare("SELECT status, COUNT(*) FROM task_queue GROUP BY status")
+                .map_err(LibreFangError::memory)?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+                })
+                .map_err(LibreFangError::memory)?;
+            let mut counts = Vec::new();
+            for row in rows {
+                counts.push(row.map_err(LibreFangError::memory)?);
+            }
+            Ok(counts)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
     /// List tasks, optionally filtered by status.
     pub async fn task_list(&self, status: Option<&str>) -> LibreFangResult<Vec<serde_json::Value>> {
         let conn = self.pool.clone();
@@ -1854,6 +1882,69 @@ impl Memory for MemorySubstrate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #8219: the aggregate must agree with what listing every row would have counted.
+    ///
+    /// The endpoint's four integers are the contract, not the query that produces
+    /// them, so this compares the new `GROUP BY` against the old list-and-tally on
+    /// the same store — including a status the summary handler does not recognise,
+    /// which has to survive as its own bucket rather than being folded away.
+    #[tokio::test]
+    async fn task_status_counts_agrees_with_listing_every_row() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+
+        for (title, assignee) in [("a", "agent-1"), ("b", "agent-1"), ("c", "agent-2")] {
+            substrate
+                .task_post(title, "body", Some(assignee), Some("boss"))
+                .await
+                .expect("post");
+        }
+        // Drive one row out of `pending` through the normal path, and put another
+        // into a status the handler has no arm for.
+        let claimed = substrate
+            .task_claim("agent-1", None)
+            .await
+            .expect("claim")
+            .expect("a pending task to claim");
+        substrate
+            .task_complete(claimed["id"].as_str().unwrap(), "done")
+            .await
+            .expect("complete");
+        {
+            let db = substrate.pool.get().unwrap();
+            db.execute(
+                "UPDATE task_queue SET status = 'wedged' WHERE title = 'c'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let mut from_aggregate = substrate.task_status_counts().await.expect("counts");
+        from_aggregate.sort();
+
+        let mut from_listing: Vec<(String, u64)> = {
+            let mut tally: std::collections::BTreeMap<String, u64> = Default::default();
+            for task in substrate.task_list(None).await.expect("list") {
+                *tally
+                    .entry(task["status"].as_str().unwrap_or("").to_string())
+                    .or_insert(0) += 1;
+            }
+            tally.into_iter().collect()
+        };
+        from_listing.sort();
+
+        assert_eq!(from_aggregate, from_listing);
+        assert_eq!(
+            from_aggregate,
+            vec![
+                ("completed".to_string(), 1),
+                ("pending".to_string(), 1),
+                ("wedged".to_string(), 1),
+            ],
+            "an unrecognised status must arrive as its own bucket — the handler warns on it, \
+             and a shape that dropped it would lose both the warning and the total"
+        );
+    }
 
     /// #7911: the cap the runtime reads and the cap an operator configures must be the same number.
     /// They live in different crates — the substrate's fallback exists for test stores and for any embedder that never calls the setter — so nothing but this assertion stops them drifting apart, and a drift would silently give the daemon a different budget than the one in `config.toml`'s documented default.

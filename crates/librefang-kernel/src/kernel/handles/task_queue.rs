@@ -168,6 +168,18 @@ impl kernel_handle::TaskQueue for LibreFangKernel {
             .map_err(|e| kernel_handle::KernelOpError::Internal(format!("Task list failed: {e}")))
     }
 
+    /// Overrides the trait's list-and-count default with a `GROUP BY`, so the
+    /// summary costs one row per distinct status instead of one per task.
+    async fn task_status_counts(&self) -> Result<Vec<(String, u64)>, kernel_handle::KernelOpError> {
+        self.memory
+            .substrate
+            .task_status_counts()
+            .await
+            .map_err(|e| {
+                kernel_handle::KernelOpError::Internal(format!("Task status counts failed: {e}"))
+            })
+    }
+
     async fn task_delete(&self, task_id: &str) -> Result<bool, kernel_handle::KernelOpError> {
         self.memory
             .substrate

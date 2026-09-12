@@ -88,22 +88,32 @@ pub async fn task_queue_status(
     State(state): State<Arc<AppState>>,
     _lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    match state.kernel.task_list(None).await {
-        Ok(tasks) => {
+    // Counted in SQL rather than by listing every task: `task_list` has no
+    // `LIMIT` and only terminal rows are ever pruned, so deriving four integers
+    // from it allocated one `serde_json::Value` per row in the table on every
+    // poll — and this is the endpoint the dashboard polls (#8219).
+    match state.kernel.task_status_counts().await {
+        Ok(counts) => {
             let mut pending = 0u64;
             let mut in_progress = 0u64;
             let mut completed = 0u64;
             let mut failed = 0u64;
-            for t in &tasks {
-                match t["status"].as_str().unwrap_or("") {
-                    "pending" => pending += 1,
-                    "in_progress" => in_progress += 1,
-                    "completed" => completed += 1,
-                    "failed" => failed += 1,
+            let mut total = 0u64;
+            for (status, count) in &counts {
+                total += count;
+                match status.as_str() {
+                    "pending" => pending += count,
+                    "in_progress" => in_progress += count,
+                    "completed" => completed += count,
+                    "failed" => failed += count,
                     unknown => {
+                        // Still reported, but once per status rather than once
+                        // per row — the old warning named the offending task id,
+                        // which a `GROUP BY` cannot carry. The count is the more
+                        // useful half: it says how far the drift has spread.
                         tracing::warn!(
                             status = unknown,
-                            task_id = t["id"].as_str().unwrap_or(""),
+                            count,
                             "task queue status summary encountered an unknown status"
                         );
                     }
@@ -112,7 +122,7 @@ pub async fn task_queue_status(
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "total": tasks.len(),
+                    "total": total,
                     "pending": pending,
                     "in_progress": in_progress,
                     "completed": completed,
