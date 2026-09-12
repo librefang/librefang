@@ -35,6 +35,7 @@ function Harness({
   initialState,
   invalidFields = new Set(),
   models = [{ provider: "openai", id: "gpt-4o" }],
+  nameField,
 }: {
   skillCatalog?: ManifestCatalogEntry[];
   toolCatalog?: ManifestCatalogEntry[];
@@ -42,6 +43,7 @@ function Harness({
   initialState?: ManifestFormState;
   invalidFields?: Set<string>;
   models?: HarnessModel[];
+  nameField?: "editable" | "readonly" | "hidden";
 }) {
   const [state, setState] = useState<ManifestFormState>(() => initialState ?? emptyManifestForm());
   return (
@@ -55,6 +57,7 @@ function Harness({
       skillCatalog={skillCatalog}
       toolCatalog={toolCatalog}
       mcpCatalog={mcpCatalog}
+      nameField={nameField}
     />
   );
 }
@@ -427,5 +430,30 @@ describe("AgentManifestForm — inference parameters", () => {
     const lengthField = screen.getByText("agents.form.max_tokens").closest("div") as HTMLElement;
     expect(within(lengthField).getByRole("button", { name: "16K" })).toBeInTheDocument();
     expect(within(lengthField).queryByRole("button", { name: "32K" })).not.toBeInTheDocument();
+  });
+});
+
+// #8028: the agent-type editor drives its own Name input (create) or pins
+// identity to a URL segment (edit), and either way this form's own Name
+// field must not offer a second, disagreeing way to set it.
+describe("AgentManifestForm — nameField", () => {
+  it("renders an editable Name field by default", () => {
+    render(<Harness />);
+    expect(screen.getByRole("textbox", { name: "agents.form.name" })).toBeEnabled();
+  });
+
+  it("hides the Name field entirely when nameField is 'hidden'", () => {
+    render(<Harness nameField="hidden" />);
+    expect(screen.queryByRole("textbox", { name: "agents.form.name" })).not.toBeInTheDocument();
+  });
+
+  it("renders the Name field disabled when nameField is 'readonly', pre-filled from the manifest", () => {
+    const state = emptyManifestForm();
+    state.name = "existing-type";
+    render(<Harness initialState={state} nameField="readonly" />);
+
+    const input = screen.getByRole("textbox", { name: "agents.form.name" });
+    expect(input).toBeDisabled();
+    expect(input).toHaveValue("existing-type");
   });
 });

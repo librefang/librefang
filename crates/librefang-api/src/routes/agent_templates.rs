@@ -8,6 +8,7 @@
 
 use super::AppState;
 use crate::middleware::RequestLanguage;
+use crate::routes::agents::lifecycle::MAX_MANIFEST_SIZE;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -34,7 +35,9 @@ pub fn router() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/templates/{name}/toml",
-            axum::routing::get(get_agent_template_toml),
+            axum::routing::get(get_agent_template_toml)
+                .put(put_agent_template_toml)
+                .post(post_agent_template_toml),
         )
         .route(
             "/templates/{name}/promote",
@@ -141,6 +144,48 @@ fn template_error_messages(lang: &str, name: &str) -> (String, String, String) {
         t.t("api-error-template-invalid-manifest"),
         t.t("api-error-template-read-failed"),
     )
+}
+/// Top-level keys the submitted TOML carries that `AgentManifest` does not recognize.
+///
+/// The write path re-serializes from the parsed struct, so any key that does not
+/// round-trip through `AgentManifest` is dropped on persist. Diffing against the
+/// re-serialized struct rather than a hand-kept key list means the check stays
+/// correct as the struct's serde attributes evolve; a key that deserializes but
+/// does not re-serialize is dropped too, so flagging it is the honest answer either way.
+///
+/// One case is not that: several manifest fields carry `skip_serializing_if` on an
+/// empty collection (`triggers`, for instance), so submitting the value that clears
+/// them on purpose — `triggers = []` — makes the round-tripped document omit the key
+/// too, and it would be reported as unrecognized even though `AgentManifest` understands
+/// it perfectly well. An empty array or table never has anything to lose by not
+/// persisting, so it is excluded here rather than misreported as an unknown key.
+fn unrecognized_manifest_keys(doc: &toml::Value, manifest: &AgentManifest) -> Vec<String> {
+    let Ok(round_tripped) = toml::Value::try_from(manifest) else {
+        return Vec::new();
+    };
+    let Some(doc_table) = doc.as_table() else {
+        return Vec::new();
+    };
+    let recognized: std::collections::HashSet<&String> = round_tripped
+        .as_table()
+        .map(|t| t.keys().collect())
+        .unwrap_or_default();
+    let mut unknown = Vec::new();
+    for (key, value) in doc_table {
+        if !recognized.contains(key) && !is_empty_array_or_table(value) {
+            unknown.push(key.clone());
+        }
+    }
+    unknown
+}
+
+/// True for `[]` and `{}` — the two shapes a cleared collection field submits as.
+fn is_empty_array_or_table(v: &toml::Value) -> bool {
+    match v {
+        toml::Value::Array(a) => a.is_empty(),
+        toml::Value::Table(t) => t.is_empty(),
+        _ => false,
+    }
 }
 
 /// Render the two promote messages that need no dynamic argument, and drop the translator.
@@ -532,6 +577,205 @@ pub async fn get_agent_template_toml(
     }
 }
 
+/// PUT /api/templates/:name/toml — Replace the template manifest with raw TOML.
+///
+/// Accepts the full manifest as `text/plain` TOML. Parses, validates, and persists it.
+/// This is the full-manifest counterpart of the flat-shape `PUT /templates/{name}`.
+///
+/// Three contracts worth stating before touching this handler:
+///
+/// - **Identity is pinned to the URL.** The document's `name` key is overwritten with the path segment, so an operator who edits `name = "…"` in the raw-TOML tab gets a 200 whose response carries the URL's name — the same deliberate pin the flat `PUT /templates/{name}` makes.
+///   It is asserted by `toml_put_pins_the_name_to_the_url_rather_than_the_body`.
+/// - **Keys the manifest does not recognize are reported, not dropped in silence.**
+///   `AgentManifest` is `#[serde(default)]` without `deny_unknown_fields` (forward compatibility with manifests written by a newer daemon), so a typo like `sesion_mode` would otherwise parse cleanly, persist, and vanish from the file.
+///   The handler round-trips the submitted document through `AgentManifest` and reports any top-level key that did not survive as `unknown_keys` in the 200 response, with a `WARN` log naming the template.
+/// - **Every save is snapshotted into the version history**, with the change source `"toml"`, the same way create and the flat `PUT` snapshot theirs.
+///   A write path that skips the snapshot makes `GET /api/templates/{name}/history` report the previous save as current while the file on disk is something else, and a history that is silently incomplete is worse than none because nothing distinguishes the two.
+#[utoipa::path(put, path = "/api/templates/{name}/toml", tag = "system", operation_id = "put_agent_template_toml", params(("name" = String, Path, description = "Template name")), request_body(content = String, content_type = "text/plain"), responses((status = 200, description = "Template updated", body = crate::types::JsonObject), (status = 400, description = "Invalid TOML"), (status = 404, description = "No such agent type"), (status = 409, description = "Name belongs to a live agent")))]
+pub async fn put_agent_template_toml(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    body: String,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    // `ErrorTranslator` is `!Send`, so every message this handler might need is rendered and the
+    // translator dropped before the first `.await` — see the note in the root `CLAUDE.md`.
+    let (not_found, invalid_manifest, ..) = template_error_messages(lang, &name);
+    let (invalid_name, managed_elsewhere, manifest_too_large) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t("api-error-template-invalid-name"),
+            t.t_args("api-error-agent-type-not-editable", &[("name", &name)]),
+            t.t("api-error-manifest-too-large"),
+        )
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple();
+    }
+
+    if !agent_type_path(&name).exists() {
+        return if workspace_agent_manifest_path(&name).exists() {
+            ApiErrorResponse::conflict(managed_elsewhere)
+                .with_code("template_not_editable")
+                .into_json_tuple()
+        } else {
+            ApiErrorResponse::not_found(not_found)
+                .with_code("template_not_found")
+                .into_json_tuple()
+        };
+    }
+
+    // Size guard — the same cap the agent spawn path enforces (routes/agents/lifecycle.rs).
+    // The global RequestBodyLimitLayer uses the operator-configurable max_request_body_bytes,
+    // which may be raised for file uploads and is explicitly not the manifest cap.
+    if body.len() > MAX_MANIFEST_SIZE {
+        return ApiErrorResponse::bad_request(manifest_too_large)
+            .with_code("template_manifest_too_large")
+            .into_json_tuple();
+    }
+
+    let (mut manifest, unknown_keys) = match parse_manifest_toml_body(&body, &invalid_manifest) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_json_tuple(),
+    };
+    manifest.name = name.clone();
+    if !unknown_keys.is_empty() {
+        tracing::warn!(
+            "agent type '{name}': submitted TOML carries keys AgentManifest does not recognize, which this save will drop: {unknown_keys:?}"
+        );
+    }
+
+    match persist_agent_type(&name, &manifest) {
+        Ok(rendered) => {
+            record_template_version(&state, &name, &rendered, "toml");
+            let mut detail =
+                agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
+            if !unknown_keys.is_empty() {
+                detail["unknown_keys"] = serde_json::json!(unknown_keys);
+            }
+            (StatusCode::OK, Json(detail))
+        }
+        Err(e) => {
+            tracing::error!("{e}");
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+        }
+    }
+}
+
+/// POST /api/templates/{name}/toml — Create a new agent type from raw TOML, in one write (#8028).
+///
+/// The dashboard's original create flow was `POST /api/templates` (name + description over a
+/// default manifest) followed immediately by `PUT /api/templates/{name}/toml` (the manifest the
+/// operator actually authored). That leaves a half-built stub on disk if the second call fails —
+/// with no way to retry it, since a repeated `POST /api/templates` now answers 409 — and records
+/// two version-history snapshots for the one document the operator meant to create.
+///
+/// This endpoint takes the full manifest up front and claims the name atomically, the same claim
+/// [`create_agent_type`] uses for the flat-shape create, so the type exists in exactly one form
+/// from the first successful write and history carries exactly one snapshot for it.
+#[utoipa::path(post, path = "/api/templates/{name}/toml", tag = "system", operation_id = "post_agent_template_toml", params(("name" = String, Path, description = "Template name")), request_body(content = String, content_type = "text/plain"), responses((status = 201, description = "Agent type created", body = crate::types::JsonObject), (status = 400, description = "Invalid TOML or name"), (status = 409, description = "Name already taken by an agent type or a live agent")))]
+pub async fn post_agent_template_toml(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    body: String,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
+    // `ErrorTranslator` is `!Send`, so every message this handler might need is rendered and the
+    // translator dropped before the first `.await` — see the note in the root `CLAUDE.md`.
+    let (_, invalid_manifest, ..) = template_error_messages(lang, &name);
+    let (invalid_name, exists, shadow, manifest_too_large) = {
+        let t = ErrorTranslator::new(lang);
+        (
+            t.t("api-error-template-invalid-name"),
+            t.t_args("api-error-agent-type-exists", &[("name", &name)]),
+            t.t_args("api-error-agent-type-name-taken", &[("name", &name)]),
+            t.t("api-error-manifest-too-large"),
+        )
+    };
+
+    if validate_template_name(&name).is_err() {
+        return ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple();
+    }
+
+    if body.len() > MAX_MANIFEST_SIZE {
+        return ApiErrorResponse::bad_request(manifest_too_large)
+            .with_code("template_manifest_too_large")
+            .into_json_tuple();
+    }
+
+    let (mut manifest, unknown_keys) = match parse_manifest_toml_body(&body, &invalid_manifest) {
+        Ok(v) => v,
+        Err(resp) => return resp.into_json_tuple(),
+    };
+    manifest.name = name.clone();
+    if !unknown_keys.is_empty() {
+        tracing::warn!(
+            "agent type '{name}': submitted TOML carries keys AgentManifest does not recognize, which this save will drop: {unknown_keys:?}"
+        );
+    }
+
+    match store_create_from_manifest(&name, &manifest) {
+        Ok(rendered) => {
+            record_template_version(&state, &name, &rendered, "create");
+            let mut detail =
+                agent_type_detail(&name, TemplateSource::AgentType, &manifest, &rendered);
+            if !unknown_keys.is_empty() {
+                detail["unknown_keys"] = serde_json::json!(unknown_keys);
+            }
+            (StatusCode::CREATED, Json(detail))
+        }
+        Err(CreateAgentTypeError::InvalidName) => ApiErrorResponse::bad_request(invalid_name)
+            .with_code("template_invalid_name")
+            .into_json_tuple(),
+        // A type that shadows a live agent's name would win every subsequent `GET /templates/{name}` and make the agent unreachable through this catalog.
+        Err(CreateAgentTypeError::ShadowsLiveAgent) => ApiErrorResponse::conflict(shadow)
+            .with_code("template_name_taken")
+            .into_json_tuple(),
+        Err(CreateAgentTypeError::NameTaken) => ApiErrorResponse::conflict(exists)
+            .with_code("template_exists")
+            .into_json_tuple(),
+        Err(CreateAgentTypeError::Io(e)) => {
+            tracing::error!("{e}");
+            ApiErrorResponse::internal_scrub(e).into_json_tuple()
+        }
+    }
+}
+
+/// Parse a raw-TOML request body into the generic document (for the unknown-key report) and into
+/// `AgentManifest` (for validation and persistence), shared by the raw-TOML create and update
+/// verbs so the two cannot drift apart on what counts as valid. `AgentManifest` is
+/// `#[serde(default)]` with no `deny_unknown_fields`, so a typo like `sesion_mode` parses cleanly
+/// and would otherwise be dropped from the file by the persist re-serialization without a word.
+//
+// `ApiErrorResponse` trips clippy's `result_large_err` lint (see the same suppression on
+// `consume_oauth_nonce` in `oauth.rs` and `parse_range` in `budget.rs`); both call sites here
+// immediately `return resp.into_json_tuple()`, not a hot loop, so the size is fine.
+#[allow(clippy::result_large_err)]
+fn parse_manifest_toml_body(
+    body: &str,
+    invalid_manifest: &str,
+) -> Result<(AgentManifest, Vec<String>), ApiErrorResponse> {
+    let doc: toml::Value = toml::from_str(body).map_err(|e| {
+        ApiErrorResponse::bad_request(invalid_manifest.to_string())
+            .with_code("template_invalid_toml")
+            .with_details(serde_json::json!({ "toml_error": e.to_string() }))
+    })?;
+    let manifest: AgentManifest = toml::from_str(body).map_err(|e| {
+        ApiErrorResponse::bad_request(invalid_manifest.to_string())
+            .with_details(serde_json::json!({ "toml_error": e.to_string() }))
+            .with_code("template_invalid_toml")
+    })?;
+    let unknown_keys = unrecognized_manifest_keys(&doc, &manifest);
+    Ok((manifest, unknown_keys))
+}
+
 // ---------------------------------------------------------------------------
 // Write endpoints (#7740)
 // ---------------------------------------------------------------------------
@@ -539,7 +783,9 @@ pub async fn get_agent_template_toml(
 // Serializing a manifest over an existing agent type, and creating a new one, both live in `librefang_types::agent_type_store`.
 // The `agent_type_create` tool (#7722) writes into the same directory, so the atomic rename, the `File::create_new` claim and the live-agent shadow check are shared rather than reimplemented per surface — which is the divergence that made the pre-#7740 design lose data on one path while the other was correct.
 use librefang_types::agent_type_store::{
-    create_agent_type as store_create, persist_agent_type, CreateAgentTypeError,
+    create_agent_type as store_create,
+    create_agent_type_from_manifest as store_create_from_manifest, persist_agent_type,
+    CreateAgentTypeError,
 };
 
 /// POST /api/templates — Create an operator-authored agent type.

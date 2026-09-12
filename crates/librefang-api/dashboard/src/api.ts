@@ -1371,6 +1371,30 @@ async function getText(path: string): Promise<string> {
   return response.text();
 }
 
+async function putText<T>(path: string, body: string): Promise<T> {
+  const response = await fetchWithTimeout(path, {
+    method: "PUT",
+    headers: buildHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
+    body,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
+async function postText<T>(path: string, body: string): Promise<T> {
+  const response = await fetchWithTimeout(path, {
+    method: "POST",
+    headers: buildHeaders({ "Content-Type": "text/plain; charset=utf-8" }),
+    body,
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  return (await response.json()) as T;
+}
+
 export async function postQuickInit(): Promise<{ status: string; provider?: string; model?: string; message?: string }> {
   return post("/api/init", {});
 }
@@ -1827,6 +1851,13 @@ export interface AgentTypeDetail {
   spec: AgentTypeSpec;
   promotion_preview?: PromotionPreview;
   manifest_toml: string;
+  /**
+   * Top-level keys the submitted TOML carried that `AgentManifest` does not
+   * recognize, and which this save therefore dropped (#8028). Present only
+   * when non-empty; a client that ignores it is a client whose operator
+   * never learns a key silently vanished from their file.
+   */
+  unknown_keys?: string[];
 }
 
 export async function listAgentTemplates(): Promise<AgentTemplate[]> {
@@ -1838,19 +1869,28 @@ export async function getAgentTemplateToml(name: string): Promise<string> {
   return getText(`/api/templates/${encodeURIComponent(name)}/toml`);
 }
 
+export async function putAgentTemplateToml(name: string, toml: string): Promise<AgentTypeDetail> {
+  return putText<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}/toml`, toml);
+}
+
+/**
+ * Create a new agent type from a full manifest in one write (#8028).
+ *
+ * Unlike `createAgentType` (the flat-shape `POST /api/templates`, which only
+ * ever produces a name+description stub), this claims `name` and writes the
+ * caller's complete manifest atomically — there is no intermediate stub and
+ * no follow-up `putAgentTemplateToml` call needed.
+ */
+export async function createAgentTypeFromToml(name: string, toml: string): Promise<AgentTypeDetail> {
+  return postText<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}/toml`, toml);
+}
+
 export async function getAgentType(name: string): Promise<AgentTypeDetail> {
   return get<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`);
 }
 
 export async function createAgentType(spec: AgentTypeSpec): Promise<AgentTypeDetail> {
   return post<AgentTypeDetail>("/api/templates", spec);
-}
-
-export async function updateAgentType(
-  name: string,
-  spec: AgentTypeSpec,
-): Promise<AgentTypeDetail> {
-  return put<AgentTypeDetail>(`/api/templates/${encodeURIComponent(name)}`, spec);
 }
 
 export async function deleteAgentType(name: string): Promise<ApiActionResponse> {

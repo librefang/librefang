@@ -69,6 +69,23 @@ interface AgentManifestFormProps {
    * users can reference servers the dashboard doesn't know about yet.
    */
   mcpCatalog?: ManifestCatalogEntry[];
+  /**
+   * How the "Name" field behaves for this caller (#8028).
+   *
+   * - `"editable"` (default): the field a caller spawning a brand-new agent
+   *   fills in themselves.
+   * - `"readonly"`: identity is decided elsewhere (a URL path segment, a
+   *   sibling field) and this form only displays it. Rendering it editable
+   *   here — as the agent-type editor did — invites an operator to "rename"
+   *   an existing type: the request goes through, a success toast appears,
+   *   and nothing changes, because the server pins the name to the URL
+   *   rather than trusting the body.
+   * - `"hidden"`: the caller collects the name through its own field (e.g.
+   *   the agent-type create dialog, which has always had exactly one Name
+   *   input) and would otherwise end up with two fields that disagree about
+   *   which one wins.
+   */
+  nameField?: "editable" | "readonly" | "hidden";
 }
 
 export function AgentManifestForm({
@@ -81,6 +98,7 @@ export function AgentManifestForm({
   skillCatalog,
   toolCatalog,
   mcpCatalog,
+  nameField = "editable",
 }: AgentManifestFormProps) {
   const { t } = useTranslation();
 
@@ -164,16 +182,28 @@ export function AgentManifestForm({
   return (
     <div className="space-y-4">
       <Section title={t("agents.form.basics")}>
-        <Field label={t("agents.form.name")} required invalid={invalidFields.has("name")}>
-          <input
-            type="text"
-            value={value.name}
-            onChange={(e) => update({ name: e.target.value })}
-            placeholder={t("agents.form.name_placeholder")}
-            className={inputClass}
-            autoFocus
-          />
-        </Field>
+        {nameField !== "hidden" && (
+          <Field
+            label={t("agents.form.name")}
+            required
+            invalid={invalidFields.has("name")}
+            hint={nameField === "readonly" ? t("agents.form.name_locked_hint") : undefined}
+          >
+            <input
+              type="text"
+              value={value.name}
+              onChange={(e) => update({ name: e.target.value })}
+              placeholder={t("agents.form.name_placeholder")}
+              className={`${inputClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+              autoFocus={nameField === "editable"}
+              disabled={nameField === "readonly"}
+              // `Field` wraps in a <div> rather than a <label> (#5246), so the
+              // visible label is not associated with the control. Without this
+              // the input has no accessible name.
+              aria-label={t("agents.form.name")}
+            />
+          </Field>
+        )}
         <Field label={t("agents.form.description")}>
           <input
             type="text"
