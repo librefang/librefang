@@ -97,6 +97,21 @@ pub struct FallbackChain {
     exhaustion_store: Option<ProviderExhaustionStore>,
 }
 
+/// Whether the provider has already decided about *this* request.
+///
+/// A 4xx says the request is wrong, and the retry loop re-sends it byte for
+/// byte, so the answer cannot change. The two exceptions are the statuses that
+/// describe timing rather than content: 408, where the request never finished
+/// arriving, and 429, which is handled as a rate limit and carries its own
+/// backoff.
+fn is_deterministic_client_error(e: &LlmError) -> bool {
+    matches!(
+        e,
+        LlmError::Api { status, .. }
+            if (400..500).contains(status) && *status != 408 && *status != 429
+    )
+}
+
 impl FallbackChain {
     /// Build a chain from an ordered list of entries.
     ///
@@ -174,12 +189,25 @@ impl FallbackChain {
                 Err(e) => {
                     let reason = e.failover_reason();
 
+                    // `HttpError` is the catch-all for statuses the classifier
+                    // calls ambiguous — 400, 403, 404, 500 — and its own comment
+                    // says to "skip to the next provider rather than guessing".
+                    // Retrying the same entry first contradicts that for the 4xx
+                    // half: a client error is the provider's verdict on *this*
+                    // request, and re-sending the identical bytes cannot change
+                    // it. It cost three attempts and two sleeps per provider on
+                    // every one, and turned a summarizer handed 17 914 tokens
+                    // against a 16 384-token context into a retry storm that
+                    // blocked the agent instead of failing once.
+                    //
+                    // 5xx stays retryable: that is the server's state, not the
+                    // request's, and it can differ a second later.
                     let retryable = matches!(
                         reason,
                         FailoverReason::RateLimit(_)
                             | FailoverReason::HttpError
                             | FailoverReason::Timeout
-                    );
+                    ) && !is_deterministic_client_error(&e);
 
                     if retryable && attempts < MAX_RATE_LIMIT_RETRIES {
                         let sleep_ms = match &e {
@@ -860,6 +888,88 @@ mod tests {
             calls_ref.calls.load(std::sync::atomic::Ordering::SeqCst),
             MAX_RATE_LIMIT_RETRIES + 1,
             "should attempt 1 + MAX_RATE_LIMIT_RETRIES times before skipping"
+        );
+    }
+
+    /// A counting driver that always answers with the given HTTP status.
+    struct StatusDriver {
+        status: u16,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmDriver for StatusDriver {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(LlmError::Api {
+                status: self.status,
+                message: "context length exceeded".to_string(),
+                code: None,
+            })
+        }
+    }
+
+    /// A 400 is the provider's verdict on this exact request, and the retry
+    /// loop re-sends it unchanged, so the answer cannot differ.
+    ///
+    /// This is what turned one over-long summarization payload into a retry
+    /// storm: 17 914 tokens against a 16 384-token context returned 400, and
+    /// every provider in the chain spent three attempts and two sleeps on it
+    /// before moving on, on every compaction attempt.
+    #[tokio::test]
+    async fn a_client_error_fails_over_without_retrying_the_same_provider() {
+        let driver = Arc::new(StatusDriver {
+            status: 400,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls_ref = Arc::clone(&driver);
+        let chain = FallbackChain::new(vec![
+            ChainEntry {
+                driver: driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p1".to_string(),
+            },
+            entry(Arc::new(OkDriver("fallback")), "p2"),
+        ])
+        .with_rate_limit_sleep_ms(0);
+
+        let r = chain.complete(test_request()).await.unwrap();
+        assert_eq!(r.text(), "fallback", "it must still fail over");
+        assert_eq!(
+            calls_ref.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a 400 must be asked exactly once, not MAX_RATE_LIMIT_RETRIES + 1 times"
+        );
+    }
+
+    /// The other half: a 5xx describes the server's state, not the request's,
+    /// and can differ a second later. It keeps its retries.
+    #[tokio::test]
+    async fn a_server_error_still_retries_the_same_provider() {
+        let driver = Arc::new(StatusDriver {
+            status: 500,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls_ref = Arc::clone(&driver);
+        let chain = FallbackChain::new(vec![
+            ChainEntry {
+                driver: driver as Arc<dyn LlmDriver>,
+                model_override: String::new(),
+                provider_name: "p1".to_string(),
+            },
+            entry(Arc::new(OkDriver("fallback")), "p2"),
+        ])
+        .with_rate_limit_sleep_ms(0);
+
+        let r = chain.complete(test_request()).await.unwrap();
+        assert_eq!(r.text(), "fallback");
+        assert_eq!(
+            calls_ref.calls.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_RATE_LIMIT_RETRIES + 1,
+            "a 5xx keeps its retries"
         );
     }
 
